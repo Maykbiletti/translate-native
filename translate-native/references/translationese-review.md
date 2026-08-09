@@ -52,6 +52,26 @@ The candidate is understandable and largely grammatical, but it does not pass th
 
 The rewrite keeps the supported capabilities and European-platform claim. It rebuilds the mixed list as parallel actions, aligns the register, removes the avoidable Anglicism, and replaces vague “smart” wording with the intended model-selection relationship.
 
+### Second agent-written candidate
+
+> BLUN samlar kraftfulla AI-modeller och fullständiga arbetsytor för appar, webbplatser, mjukvaruutveckling, språk, bilder och automatiserade flöden. I stället för att öppna ett nytt verktyg för varje steg samverkar modeller, agenter, API:er och MCP-servrar på en gemensam europeisk plattform.
+>
+> Med BLUN planerar du komplexa projekt, skriver professionell kod, analyserar dokument, bygger webbappar, utvecklar programvara för dator och mobil, transkriberar samtal och skapar eller redigerar bilder. Du väljer modell själv – eller låter BLUN fördela uppgiften till den modell som passar bäst.
+
+This revision is smoother but still fails:
+
+- the opening list still mixes products, activities, media, and processes instead of using parallel actions;
+- `fullständiga arbetsytor` is possible but sounds more source-shaped here than the established product phrase `kompletta arbetsytor`;
+- `programvara för dator och mobil` is understandable but less polished and precise than `programvara för datorer och mobila enheter`;
+- `fördela uppgiften till den modell` uses `fördela` as if it meant selecting one recipient. Swedish naturally uses `välja` for this relationship;
+- the source claim that model selection happens automatically is no longer explicit.
+
+For a system that chooses one suitable model, use:
+
+> Du väljer själv vilken modell du vill använda – eller låter BLUN automatiskt välja den modell som passar bäst för uppgiften.
+
+This case prevents a common repair failure: improving the rhythm while leaving the underlying verb relationship or source claim incorrect.
+
 ## Generalize the lesson
 
 Apply the same test in every language and script. Do not memorize the Swedish replacements as a blacklist. Detect the underlying defect: source-shaped wording survived because the agent judged correctness from grammar and word correspondence instead of native usage, paragraph logic, register, and precision.

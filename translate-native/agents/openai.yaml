@@ -1,7 +1,7 @@
 interface:
   display_name: "Translate Native"
-  short_description: "Blockiert korrekte, aber unnatürliche Übersetzungen"
-  default_prompt: "Use $translate-native to rewrite this as native original writing, rejecting grammatical-but-translated wording while preserving every claim and protected token."
+  short_description: "Natürlich übersetzen und Originalschrift bewahren"
+  default_prompt: "Use $translate-native to produce native original writing while preserving meaning, protected syntax, native Unicode, diacritics, script, and punctuation in one mandatory workflow."
   icon_small: "./assets/icon.svg"
   icon_large: "./assets/icon.svg"
 policy:

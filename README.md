@@ -16,7 +16,7 @@
 
 ### Meaning in. Native language out.
 
-One universal agent skill for translations that sound written—not translated.
+One universal agent skill for translations that sound written—not translated—and preserve every language's native script.
 
 <p>
   <img alt="Tests" src="https://github.com/Maykbiletti/translate-native/actions/workflows/test.yml/badge.svg">
@@ -59,8 +59,20 @@ For uncertain and low-resource varieties, the rule is honesty: verify with commu
 | Chooses dictionary equivalents | Chooses native collocations |
 | Produces generic “i18n language” | Writes for the real audience and medium |
 | Flattens locale and script choices | Resolves locale, script, dialect, and register |
+| Drops accents or romanizes native text | Preserves native spelling, diacritics, alphabets, scripts, and punctuation |
 | Silently changes emphasis | Preserves claims, modality, negation, and uncertainty |
 | Breaks variables during rewriting | Protects keys, placeholders, URLs, markup, and code |
+
+## Two jobs. One mandatory skill.
+
+Agents no longer need to activate a second orthography skill after translating. `translate-native` now owns both jobs in one self-contained release gate:
+
+1. rewrite the meaning as natural original target-language prose;
+2. enforce native spelling, diacritics, alphabets, scripts, punctuation, spacing, and Unicode.
+
+The separate `native-diacritics` skill can still protect ordinary writing outside translation tasks. Inside a translation, its activation is optional because the full orthography contract is built directly into `translate-native`.
+
+The root [`AGENTS.md`](AGENTS.md) tells repository-aware agents to load the combined workflow and treat every model-generated translation as an untrusted draft.
 
 ## Native examples
 
@@ -85,8 +97,9 @@ The Swedish BLUN regression case captures the difference:
 | --- | --- |
 | `desktop- och mobilprogramvara` | `programvara för datorer och mobila enheter` |
 | `fördela uppgiften på ett smart sätt` | `fördela arbetet mellan de modeller som passar bäst för uppgiften` |
+| `fördela uppgiften till den modell som passar bäst` | `automatiskt välja den modell som passar bäst för uppgiften` |
 
-The first version is understandable. It still fails because a native editor would recast it for publication. The complete candidate, defect analysis, native rewrite, and language-independent review procedure live in [`translationese-review.md`](translate-native/references/translationese-review.md).
+All three agent formulations are understandable. They still fail because a native editor would recast them for publication. The complete candidates, defect analyses, native rewrites, and language-independent review procedure live in [`translationese-review.md`](translate-native/references/translationese-review.md).
 
 ## The translation contract
 
@@ -146,6 +159,7 @@ The zero-dependency guard compares source and target files:
 python3 translate-native/scripts/translation_guard.py source.md target.md
 python3 translate-native/scripts/translation_guard.py source.json target.json --format json
 python3 translate-native/scripts/translation_guard.py source.html target.html --format html
+python3 translate-native/scripts/check_diacritics.py --language sv target.md
 ```
 
 It blocks delivery when it detects:
@@ -159,12 +173,17 @@ It blocks delivery when it detects:
 
 The guard protects structure. The agent's seven-pass review protects meaning and native quality.
 
+The diacritics linter additionally catches frequent ASCII substitutions such as `schoen`, `forstar`, `informacion`, and `cestina` while leaving code, URLs, and other protected technical spans alone. It is a deterministic warning system, not a finite definition of any language; the built-in orthography gate remains mandatory for every script worldwide.
+
 ## Evidence, not dataset worship
 
 | Source | Best use | Warning |
 | --- | --- | --- |
 | [Language communities and authorities](translate-native/references/native-translation-standard.md) | Orthography, terminology, accepted standard | Prefer the requested community's own convention |
 | [Unicode CLDR](https://cldr.unicode.org/) | Locale IDs, formats, plurals, exemplar characters | Locale data is not prose guidance |
+| [Unicode Normalization](https://unicode.org/reports/tr15/) | Canonical Unicode normalization | NFC does not prove correct spelling |
+| [W3C Language Enablement](https://www.w3.org/International/typography/gap-analysis/language-matrix.html) | Script layout and typography | Web support data is not a dictionary |
+| [IANA Language Subtag Registry](https://www.iana.org/assignments/language-subtag-registry) | Language, script, and region tags | Tags identify a target; they do not translate it |
 | [Leipzig Corpora Collection](https://cls.corpora.uni-leipzig.de/) | Native usage and collocations | Check domain and date |
 | [FLORES+](https://huggingface.co/datasets/openlanguagedata/flores_plus) | Multilingual evaluation | It is an evaluation set, not training data |
 | [OPUS](https://opus.nlpl.eu/) | Supporting parallel examples | Large corpora can contain literal or noisy translations |
@@ -182,14 +201,18 @@ translate-native/
 │   └── icon.svg
 ├── references/
 │   ├── native-translation-standard.md
+│   ├── native-orthography.md
 │   ├── evaluation-protocol.md
 │   ├── translationese-review.md
 │   └── structured-content.md
 └── scripts/
-    └── translation_guard.py
+    ├── translation_guard.py
+    └── check_diacritics.py
 ```
 
 Automated tests and the GitHub Actions workflow live at repository level.
+
+Machine-readable failure cases live in [`evals/regressions.jsonl`](evals/regressions.jsonl). They cover Swedish translationese and model selection, German umlauts, Spanish punctuation and accents, Czech and Catalan orthography, Vietnamese tone marks, Chinese and Arabic native scripts, and Ukrainian language identity. They are regression examples, never a language allowlist.
 
 ## Test
 
@@ -197,7 +220,7 @@ Automated tests and the GitHub Actions workflow live at repository level.
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers protected text, sentence punctuation after URLs, JSON structure and types, ICU plural/select syntax, safely translatable HTML attributes, HTML/code tampering, Unicode normalization, the mandatory anti-translationese contract, and the Swedish agent-copy regression case.
+The suite covers protected text, sentence punctuation after URLs, JSON structure and types, ICU plural/select syntax, safely translatable HTML attributes, HTML/code tampering, Unicode normalization, common missing diacritics in German, Spanish, and Czech, technical-span protection, the combined language-and-orthography contract, repository agent instructions, and both Swedish agent-copy regression cases.
 
 ## Design principle
 

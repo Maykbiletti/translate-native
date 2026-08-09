@@ -55,6 +55,22 @@ When another agent or qualified reviewer is available, provide only:
 
 Ask for a structured defect list with severity, target excerpt, reason, and minimal correction direction. Do not ask the reviewer to replace the whole translation, reveal an expected answer, or praise the draft. Revise centrally so terminology and voice remain coherent.
 
+Use this release decision contract:
+
+```text
+status: PASS | FAIL
+blocking_defects:
+  - excerpt: exact target fragment
+    class: meaning | completeness | precision | integrity | orthography
+    reason: concise evidence
+major_defects:
+  - excerpt: exact target fragment
+    class: nativeness | locale | register | terminology | parallelism
+    reason: concise evidence
+```
+
+Return `PASS` only when both defect lists are empty. Any blocking or major defect requires revision followed by a complete new native, fidelity, integrity, and orthography review. Never average defects into a passing numeric score.
+
 For legal, medical, safety-critical, contractual, or public high-impact content, an AI reviewer is an additional check, not a substitute for a qualified native professional.
 
 ## Route by confidence

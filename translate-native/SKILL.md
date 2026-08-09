@@ -1,11 +1,22 @@
 ---
 name: translate-native
-description: Translate, localize, transcreate, rewrite, or proofread human-language content so it reads as if originally written by a native speaker in any requested language, locale, dialect, register, or script. Use for prose, UI copy, websites, documentation, subtitles, emails, marketing, agent-generated target text, JSON/YAML/XML/PO/ARB resource files, and every other translation task—including Swedish, Chinese, Catalan, Basque, Czech, minority languages, and low-resource languages. Preserve meaning, protected syntax, native Unicode, and locale conventions while rejecting grammatical-but-unnatural wording, literal translation, calques, source-language syntax, unnecessary source-language borrowings, generic AI filler, and robotic i18n copy.
+description: Translate, localize, transcreate, rewrite, or proofread human-language content so it reads as if originally written by a native speaker in any requested language, locale, dialect, register, or script. Use for prose, UI copy, websites, documentation, subtitles, emails, marketing, agent-generated target text, JSON/YAML/XML/PO/ARB resource files, and every other translation task—including Swedish, Chinese, Catalan, Basque, Czech, minority languages, and low-resource languages. In one self-contained workflow, preserve meaning and protected syntax, reject grammatical-but-unnatural wording and translationese, and enforce native Unicode spelling, diacritics, alphabets, scripts, punctuation, and locale conventions.
 ---
 
 # Translate Native
 
 Translate meaning, not word order. Re-author the message so a native speaker would believe it was written in the target language from the beginning, while preserving every source claim and constraint.
+
+## Run one combined release gate
+
+Treat native wording and native orthography as one inseparable workflow. Do not rely on a second skill being installed, selected, or implicitly invoked. This skill itself must enforce both:
+
+1. **Native language:** syntax, collocations, information flow, terminology, register, rhythm, and idiom must read like original target-language writing.
+2. **Native orthography:** spelling, diacritics, alphabet, script, punctuation, casing, spacing, and Unicode normalization must follow the target language and locale.
+
+Treat every translation supplied by another agent as an untrusted draft. Do not release it merely because it is understandable or grammatical. Run the target-only native review, the source-aware fidelity review, and the native-orthography review before returning any finished text.
+
+Read [references/native-orthography.md](references/native-orthography.md) before finalizing a target. If `$native-diacritics` is available, it may provide an additional check, but never delegate the orthography requirement to it and never weaken this workflow when it is absent.
 
 ## Set the target precisely
 
@@ -67,7 +78,7 @@ Put the source sentence structure aside after understanding it. Express the same
 - Preserve intentional code-switching, names, trademarks, and established technical terms.
 - Avoid bland translationese, inflated marketing language, generic AI filler, and vague claims such as “in a smart way” when the intended operation can be stated precisely.
 - Use native script and Unicode characters. Never strip accents or transliterate unless asked or technically required.
-- Apply `$native-diacritics` as the final orthographic gate when available; otherwise perform the same Unicode, script, diacritic, and punctuation checks directly.
+- Run the built-in orthography gate from [native-orthography.md](references/native-orthography.md). Correct every confirmed spelling, diacritic, alphabet, script, punctuation, spacing, casing, or Unicode defect before delivery.
 
 Default to faithful native translation. Localize measurements, formats, examples, or cultural references only when the task or medium calls for it. Transcreate more freely only when asked or when preserving communicative effect clearly requires it; never change factual claims silently.
 
@@ -92,6 +103,14 @@ python3 scripts/translation_guard.py SOURCE TARGET
 Use `--format json` for JSON regardless of the file suffix. Treat a nonzero exit as a blocking structural or protected-token defect and fix it before delivery.
 
 Use `--format html` for HTML fragments or documents. It permits native translation of `alt`, `title`, `placeholder`, `aria-label`, and `aria-description` values while protecting tag structure, attribute names, technical attributes, scripts, styles, links, code, and placeholders.
+
+For every generated or edited UTF-8 target file, also run the bundled orthography linter:
+
+```bash
+python3 scripts/check_diacritics.py --language TARGET_LANGUAGE TARGET
+```
+
+Use a supported language code when known, `auto` for ordinary single-language prose, or `all` for deliberately mixed Latin-script samples. Inspect every finding and correct each real violation. A clean linter result is not proof of correct orthography; the mandatory language-aware gate still covers all languages and writing systems beyond the linter's heuristic patterns.
 
 ## Maintain long-document coherence
 
@@ -121,6 +140,8 @@ Before returning the result, silently perform every pass:
 7. **Orthography:** spelling, diacritics, casing, punctuation, spacing, and Unicode normalization are native and correct.
 
 Any meaning, completeness, precision, integrity, or major nativeness defect blocks delivery. “Understandable” and “grammatically correct” are never sufficient release arguments. If a pass fails, revise and repeat all affected passes. Do not expose internal scores or review notes unless the user asks.
+
+Do not output a raw first draft as the finished translation. Release only after both the native-language gate and native-orthography gate pass. A clean structural script result proves neither natural wording nor correct language-specific spelling.
 
 ## Return the result cleanly
 
