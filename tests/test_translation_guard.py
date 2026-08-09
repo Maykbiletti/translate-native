@@ -90,6 +90,44 @@ class IcuTests(unittest.TestCase):
         self.assertIn("ICU number sign '#'", message)
 
 
+class HtmlTests(unittest.TestCase):
+    SOURCE = """<!doctype html>
+<!-- component:v2 -->
+<main class="billing">
+  <a href="https://example.com/billing" title="Billing for {name}" aria-label="Open billing">Hello, <strong>{name}</strong></a>
+  <input name="query" placeholder="Search {{count}} invoices">
+  <script>window.route = "/billing";</script>
+</main>
+"""
+
+    def test_allows_visible_text_and_linguistic_attributes(self) -> None:
+        target = """<!doctype html>
+<!-- component:v2 -->
+<main class="billing">
+  <a href="https://example.com/billing" title="Facturación de {name}" aria-label="Abrir facturación">Hola, <strong>{name}</strong></a>
+  <input name="query" placeholder="Buscar {{count}} facturas">
+  <script>window.route = "/billing";</script>
+</main>
+"""
+        self.assertEqual([], GUARD.compare_html(self.SOURCE, target))
+
+    def test_rejects_structure_attributes_placeholders_and_code_changes(self) -> None:
+        target = """<!doctype html>
+<!-- translated comment -->
+<main class="payments">
+  <a href="https://example.com/pagos" title="Facturación" aria-label="Abrir facturación">Hola, <b>{name}</b></a>
+  <input name="query" placeholder="Buscar facturas">
+  <script>window.route = "/pagos";</script>
+</main>
+"""
+        message = "\n".join(GUARD.compare_html(self.SOURCE, target))
+        self.assertIn("comment", message)
+        self.assertIn("payments", message)
+        self.assertIn("https://example.com/pagos", message)
+        self.assertIn("template", message)
+        self.assertIn("window.route", message)
+
+
 class UnicodeTests(unittest.TestCase):
     def test_accepts_nfc(self) -> None:
         self.assertEqual([], GUARD.normalization_errors("Čeština — 中文", Path("target.txt")))
