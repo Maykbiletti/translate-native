@@ -83,6 +83,8 @@ Every result passes seven gates:
 6. **Integrity** — placeholders, keys, links, markup, code, and structure survive intact.
 7. **Orthography** — spelling, diacritics, punctuation, spacing, and Unicode are native.
 
+Version 2 deliberately separates judgment into two passes: a target-only native edit that cannot lean on the source wording, followed by a source-aware fidelity audit that accounts for every claim and constraint. Publication-grade, long-form, and uncertain work can be routed through an independent defect review before release.
+
 ## i18n without i18n language
 
 JSON, YAML, XML, PO, ARB, ICU MessageFormat, Android resources, Apple strings, Markdown, and HTML are containers. They do not excuse robotic prose.
@@ -126,6 +128,7 @@ The zero-dependency guard compares source and target files:
 ```bash
 python3 translate-native/scripts/translation_guard.py source.md target.md
 python3 translate-native/scripts/translation_guard.py source.json target.json --format json
+python3 translate-native/scripts/translation_guard.py source.html target.html --format html
 ```
 
 It blocks delivery when it detects:
@@ -134,6 +137,7 @@ It blocks delivery when it detects:
 - changed URLs, email addresses, code, HTML tags, escapes, or format tokens;
 - changed JSON keys, hierarchy, arrays, scalar types, or non-string values;
 - changed ICU argument names, formatters, selectors, or number signs;
+- changed HTML structure, technical attributes, comments, scripts, or styles while still allowing native translation of linguistic accessibility attributes;
 - target text that is not valid UTF-8 and Unicode NFC.
 
 The guard protects structure. The agent's seven-pass review protects meaning and native quality.
@@ -161,6 +165,7 @@ translate-native/
 │   └── icon.svg
 ├── references/
 │   ├── native-translation-standard.md
+│   ├── evaluation-protocol.md
 │   └── structured-content.md
 └── scripts/
     └── translation_guard.py
@@ -174,7 +179,7 @@ Automated tests and the GitHub Actions workflow live at repository level.
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers protected text, sentence punctuation after URLs, JSON structure and types, ICU plural/select syntax, Unicode normalization, and expected failure cases.
+The suite covers protected text, sentence punctuation after URLs, JSON structure and types, ICU plural/select syntax, safely translatable HTML attributes, HTML/code tampering, Unicode normalization, and expected failure cases.
 
 ## Design principle
 
