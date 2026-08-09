@@ -29,6 +29,18 @@ Read the entire source before drafting. Build an internal meaning map containing
 
 Resolve pronouns and terms from context. Preserve genuine ambiguity unless the context resolves it. Do not add explanations, promises, certainty, praise, warnings, or facts that the source does not contain.
 
+## Separate creation from judgment
+
+Use two deliberately different review perspectives. Do not collapse them into one vague reread.
+
+1. **Native pass:** Draft from the meaning map rather than translating sentence by sentence. Then read only the target as a native editor would, temporarily ignoring the source. Remove unnatural syntax, collocations, rhythm, repetition, discourse markers, politeness, and medium-inappropriate wording.
+2. **Fidelity pass:** Compare the revised target against the complete source. Restore anything omitted and remove anything added. Recheck negation, modality, quantities, causality, uncertainty, names, terminology, and calls to action.
+3. **Integrity pass:** Verify protected syntax and native orthography only after the wording is stable.
+
+For consequential, publication-grade, long-form, or linguistically uncertain work, use an independent reviewer when another agent or reviewer is available. Give it the source, candidate target, target specification, and the defect rubric—never the intended answer. Ask for defects rather than a replacement translation, revise the candidate, then rerun both passes.
+
+Read [references/evaluation-protocol.md](references/evaluation-protocol.md) for the blocking defect classes, independent-review contract, confidence routing, and long-document procedure.
+
 ## Re-author natively
 
 Put the source sentence structure aside after understanding it. Express the same meaning with native syntax, collocations, information flow, rhythm, idiom, punctuation, and level of directness.
@@ -63,6 +75,12 @@ python3 scripts/translation_guard.py SOURCE TARGET
 
 Use `--format json` for JSON regardless of the file suffix. Treat a nonzero exit as a blocking structural or protected-token defect and fix it before delivery.
 
+Use `--format html` for HTML fragments or documents. It permits native translation of `alt`, `title`, `placeholder`, `aria-label`, and `aria-description` values while protecting tag structure, attribute names, technical attributes, scripts, styles, links, code, and placeholders.
+
+## Maintain long-document coherence
+
+Before translating a long document, establish a compact translation brief containing the exact locale and script, audience, form of address, voice, tense policy, glossary, names, product terms, units, and formatting rules. Translate in context-aware sections with enough neighboring material to resolve references. After all sections are complete, run a document-level pass for terminology drift, pronouns, headings, cross-references, narrative voice, repeated phrases, and contradictions. Never judge a long translation only one chunk at a time.
+
 ## Verify when fluency is uncertain
 
 Never bluff native competence. For an unfamiliar, endangered, disputed, historical, or low-resource language variety:
@@ -86,7 +104,7 @@ Before returning the result, silently perform every pass:
 6. **Integrity:** placeholders, keys, links, markup, code, escapes, and file structure are intact.
 7. **Orthography:** spelling, diacritics, casing, punctuation, spacing, and Unicode normalization are native and correct.
 
-If a pass fails, revise and repeat all affected passes.
+Any meaning, completeness, precision, or integrity defect blocks delivery. Any clearly unnatural target-language wording also blocks delivery. If a pass fails, revise and repeat all affected passes. Do not expose internal scores or review notes unless the user asks.
 
 ## Return the result cleanly
 
