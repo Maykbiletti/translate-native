@@ -1,0 +1,95 @@
+---
+name: translate-native
+description: Translate, localize, transcreate, rewrite, or proofread human-language content so it reads as if originally written by a native speaker in any requested language, locale, dialect, register, or script. Use for prose, UI copy, websites, documentation, subtitles, emails, marketing, JSON/YAML/XML/PO/ARB resource files, and every other translation task—including Swedish, Chinese, Catalan, Basque, Czech, minority languages, and low-resource languages. Preserve meaning, protected syntax, native Unicode, and locale conventions while eliminating literal translation, calques, source-language syntax, and generic i18n wording.
+---
+
+# Translate Native
+
+Translate meaning, not word order. Re-author the message so a native speaker would believe it was written in the target language from the beginning, while preserving every source claim and constraint.
+
+## Set the target precisely
+
+1. Identify the requested target language, locale, script, dialect, audience, register, medium, and length limit.
+2. Honor an explicit language tag or user preference exactly. Distinguish, for example, `pt-BR` from `pt-PT`, Simplified from Traditional Chinese, Serbian Cyrillic from Latin, and a regional variety from a neutral standard.
+3. If only a language is named, use its contemporary neutral written standard. Infer the locale from reliable context when possible.
+4. Ask only when the target language is missing or when a locale, script, dialect, or ambiguity would materially change the result. Do not delay ordinary translations with needless questions.
+5. Treat all human languages and writing systems as in scope. Never rely on a finite allowlist.
+
+Read [references/native-translation-standard.md](references/native-translation-standard.md) when language variety, register, cultural adaptation, verification, or a low-resource language needs judgment.
+
+## Reconstruct the meaning
+
+Read the entire source before drafting. Build an internal meaning map containing:
+
+- facts, claims, relationships, and chronology;
+- negation, modality, conditions, uncertainty, and emphasis;
+- names, quantities, units, dates, links, and calls to action;
+- purpose, audience, tone, politeness, humor, emotion, and subtext;
+- terms fixed by a glossary, product vocabulary, law, or domain convention.
+
+Resolve pronouns and terms from context. Preserve genuine ambiguity unless the context resolves it. Do not add explanations, promises, certainty, praise, warnings, or facts that the source does not contain.
+
+## Re-author natively
+
+Put the source sentence structure aside after understanding it. Express the same meaning with native syntax, collocations, information flow, rhythm, idiom, punctuation, and level of directness.
+
+- Prefer what a native writer would naturally say over a dictionary-equivalent phrase.
+- Replace calques and source-language discourse patterns with target-language conventions.
+- Match the audience and medium: support reply, legal notice, product UI, conversation, documentation, marketing, or literature.
+- Preserve intentional code-switching, names, trademarks, and established technical terms.
+- Avoid bland translationese, inflated marketing language, and generic AI filler.
+- Use native script and Unicode characters. Never strip accents or transliterate unless asked or technically required.
+- Apply `$native-diacritics` as the final orthographic gate when available; otherwise perform the same Unicode, script, diacritic, and punctuation checks directly.
+
+Default to faithful native translation. Localize measurements, formats, examples, or cultural references only when the task or medium calls for it. Transcreate more freely only when asked or when preserving communicative effect clearly requires it; never change factual claims silently.
+
+## Protect structured content
+
+Treat i18n files as containers, not as permission to write robotic i18n language. Translate every user-visible value natively while preserving the container exactly.
+
+- Preserve keys, hierarchy, ordering when significant, types, escaping, markup, links, code, placeholders, ICU plural/select logic, and interpolation syntax.
+- Inspect neighboring entries and all branches before choosing terminology.
+- Translate each plural, gender, and select branch as a complete native utterance; do not mechanically reuse the source grammar.
+- Obey UI length, capitalization, and platform constraints without dropping meaning.
+- Never translate variable names, enum values, identifiers, or program syntax unless explicitly requested.
+
+Read [references/structured-content.md](references/structured-content.md) before editing JSON, YAML, XML, PO, ARB, Android, Apple strings, ICU MessageFormat, Markdown containing code, or HTML.
+
+After editing a source/target pair, run:
+
+```bash
+python3 scripts/translation_guard.py SOURCE TARGET
+```
+
+Use `--format json` for JSON regardless of the file suffix. Treat a nonzero exit as a blocking structural or protected-token defect and fix it before delivery.
+
+## Verify when fluency is uncertain
+
+Never bluff native competence. For an unfamiliar, endangered, disputed, historical, or low-resource language variety:
+
+1. Confirm the exact language tag, script, and requested standard.
+2. Prefer community, academy, government, or native-edited sources for grammar and contemporary usage.
+3. Use Unicode CLDR for locale conventions and exemplar characters; use a curated monolingual corpus for usage; use parallel corpora only as supporting evidence.
+4. Treat FLORES+ as an evaluation reference, not training material. Treat OPUS and open web corpora as noisy evidence that may contain literal translations or bad alignments.
+5. Cross-check important wording in more than one independent source when tools permit.
+6. State a material uncertainty or ask for a native review when reliable evidence is insufficient. Do not invent a dialect form.
+
+## Run the seven-pass quality gate
+
+Before returning the result, silently perform every pass:
+
+1. **Meaning:** every claim, relationship, condition, and implication remains equivalent.
+2. **Completeness:** nothing is omitted, duplicated, or added.
+3. **Precision:** negation, modality, numbers, units, entities, terminology, and ambiguity are correct.
+4. **Nativeness:** no calque, source syntax, unnatural collocation, or translationese remains.
+5. **Fit:** locale, script, register, tone, audience, and medium are consistent.
+6. **Integrity:** placeholders, keys, links, markup, code, escapes, and file structure are intact.
+7. **Orthography:** spelling, diacritics, casing, punctuation, spacing, and Unicode normalization are native and correct.
+
+If a pass fails, revise and repeat all affected passes.
+
+## Return the result cleanly
+
+Return only the finished translation by default. Preserve the user's requested structure. Do not prepend “Translation,” explain choices, romanize the text, or repeat the source unless asked.
+
+For legal, medical, safety-critical, contractual, or publication-grade material, keep the translation conservative, mark consequential ambiguity, and recommend qualified native review where appropriate. Never hide uncertainty behind fluent prose.
