@@ -23,7 +23,7 @@ Before editing, identify:
 | Android XML | Text nodes intended for users | Resource names, tags, escapes, `%` placeholders, quantity items |
 | Apple strings | Values | Keys unless product rules say otherwise, format specifiers, escapes |
 | ICU MessageFormat | Text within every branch | Argument names, selector keys, braces, plural/select structure |
-| HTML / JSX | Rendered text and approved attributes | Elements, attributes, URLs, expressions, component names |
+| HTML / JSX | Rendered text and approved linguistic attributes | Tag structure, attribute names, technical values, URLs, expressions, component names |
 | Markdown | Prose, headings, link labels | Link destinations, code fences, inline code, directives |
 
 Do not assume every string value is translatable. IDs, paths, enum values, SQL, CSS, commands, hashes, telemetry names, and machine prompts may need to remain exact.
@@ -62,8 +62,11 @@ Run the bundled guard on source and target files:
 ```bash
 python3 scripts/translation_guard.py source.json target.json --format json
 python3 scripts/translation_guard.py source.md target.md --format text
+python3 scripts/translation_guard.py source.html target.html --format html
 ```
 
 The guard checks structure, normalization, and protected tokens; it cannot judge meaning or naturalness. Follow it with the seven-pass quality gate in `SKILL.md`.
+
+In HTML mode, the guard allows native translation of `alt`, `title`, `placeholder`, `aria-label`, and `aria-description`. It requires tag order, attribute names, technical attribute values, comments, declarations, scripts, and styles to remain intact. Placeholders, links, code, and other protected tokens inside translatable attributes must still match.
 
 For formats not parsed by the guard, use the native parser or project test suite when available. Never rely only on visual inspection for machine-readable output.
