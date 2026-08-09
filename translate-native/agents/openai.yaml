@@ -1,14 +1,13 @@
 interface:
-  display_name: Translate Native
-  short_description: Übersetzt Bedeutung in echte native Sprache
-  default_prompt: Use $translate-native to translate this content as natural original
-    writing in the target language.
-  icon_small: assets/icon.svg
-  icon_large: assets/icon.svg
+  display_name: "Translate Native"
+  short_description: "Blockiert korrekte, aber unnatürliche Übersetzungen"
+  default_prompt: "Use $translate-native to rewrite this as native original writing, rejecting grammatical-but-translated wording while preserving every claim and protected token."
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
 policy:
   products:
-  - chatgpt
-  - codex
-  - api
-  - atlas
+  - "chatgpt"
+  - "codex"
+  - "api"
+  - "atlas"
   allow_implicit_invocation: true

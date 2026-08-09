@@ -75,6 +75,19 @@ For uncertain and low-resource varieties, the rule is honesty: verify with commu
 
 These are examples, not the boundary of the skill.
 
+## Grammatical is not native
+
+The skill now explicitly rejects agent-written copy that is grammatically correct but still sounds translated. Agents must inspect collocations, parallel structure, paragraph flow, register, unnecessary source-language borrowings, and vague AI filler—not just spelling and syntax.
+
+The Swedish BLUN regression case captures the difference:
+
+| Agent wording | Native review |
+| --- | --- |
+| `desktop- och mobilprogramvara` | `programvara för datorer och mobila enheter` |
+| `fördela uppgiften på ett smart sätt` | `fördela arbetet mellan de modeller som passar bäst för uppgiften` |
+
+The first version is understandable. It still fails because a native editor would recast it for publication. The complete candidate, defect analysis, native rewrite, and language-independent review procedure live in [`translationese-review.md`](translate-native/references/translationese-review.md).
+
 ## The translation contract
 
 Every result passes seven gates:
@@ -170,6 +183,7 @@ translate-native/
 ├── references/
 │   ├── native-translation-standard.md
 │   ├── evaluation-protocol.md
+│   ├── translationese-review.md
 │   └── structured-content.md
 └── scripts/
     └── translation_guard.py
@@ -183,7 +197,7 @@ Automated tests and the GitHub Actions workflow live at repository level.
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers protected text, sentence punctuation after URLs, JSON structure and types, ICU plural/select syntax, safely translatable HTML attributes, HTML/code tampering, Unicode normalization, and expected failure cases.
+The suite covers protected text, sentence punctuation after URLs, JSON structure and types, ICU plural/select syntax, safely translatable HTML attributes, HTML/code tampering, Unicode normalization, the mandatory anti-translationese contract, and the Swedish agent-copy regression case.
 
 ## Design principle
 

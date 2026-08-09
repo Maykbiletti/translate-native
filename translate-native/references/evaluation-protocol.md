@@ -9,10 +9,12 @@ Release a translation only when it has zero blocking defects and reads naturally
 | Severity | Definition | Examples | Action |
 | --- | --- | --- | --- |
 | Blocking | Meaning, safety, structure, or identity is damaged | Reversed negation, missing caveat, wrong number, broken placeholder, invented claim, wrong script | Fix before delivery |
-| Major | A native editor would rewrite it or the locale/register is materially wrong | Calque, unnatural syntax, wrong honorific, inconsistent terminology, regional mismatch | Fix before delivery |
+| Major | A native editor would rewrite it or the locale/register is materially wrong | Calque, unnatural syntax, grammatical-but-non-native collocation, broken parallelism, unnecessary borrowing, generic AI filler, wrong honorific, inconsistent terminology, regional mismatch | Fix before delivery |
 | Minor | Meaning and nativeness survive but polish is imperfect | Slight repetition, optional punctuation refinement | Fix when feasible |
 
 Do not average blocking defects into a numeric score. One blocking defect fails the translation.
+
+Grammar is not a release category. A target with zero grammar errors still fails when it contains a major nativeness defect. Use [translationese-review.md](translationese-review.md) for the target-only procedure and worked regression case.
 
 ## Run a target-only native review
 
@@ -24,6 +26,8 @@ Temporarily hide the source and judge the target as original writing. Inspect:
 - politeness, honorifics, directness, and social relationship;
 - locale, script, punctuation, typography, and medium conventions;
 - whether a native writer would choose the same headline, button, instruction, or transition.
+
+Also inspect whether coordinated items belong to the same grammatical and semantic category, whether source-language technical vocabulary displaced an established native term, and whether polished-sounding AI filler hides a vague relationship.
 
 Rewrite any passage that is merely understandable but not naturally chosen. Preserve protected tokens while moving them to the grammatically natural position.
 

@@ -1,6 +1,6 @@
 ---
 name: translate-native
-description: Translate, localize, transcreate, rewrite, or proofread human-language content so it reads as if originally written by a native speaker in any requested language, locale, dialect, register, or script. Use for prose, UI copy, websites, documentation, subtitles, emails, marketing, JSON/YAML/XML/PO/ARB resource files, and every other translation task—including Swedish, Chinese, Catalan, Basque, Czech, minority languages, and low-resource languages. Preserve meaning, protected syntax, native Unicode, and locale conventions while eliminating literal translation, calques, source-language syntax, and generic i18n wording.
+description: Translate, localize, transcreate, rewrite, or proofread human-language content so it reads as if originally written by a native speaker in any requested language, locale, dialect, register, or script. Use for prose, UI copy, websites, documentation, subtitles, emails, marketing, agent-generated target text, JSON/YAML/XML/PO/ARB resource files, and every other translation task—including Swedish, Chinese, Catalan, Basque, Czech, minority languages, and low-resource languages. Preserve meaning, protected syntax, native Unicode, and locale conventions while rejecting grammatical-but-unnatural wording, literal translation, calques, source-language syntax, unnecessary source-language borrowings, generic AI filler, and robotic i18n copy.
 ---
 
 # Translate Native
@@ -29,11 +29,27 @@ Read the entire source before drafting. Build an internal meaning map containing
 
 Resolve pronouns and terms from context. Preserve genuine ambiguity unless the context resolves it. Do not add explanations, promises, certainty, praise, warnings, or facts that the source does not contain.
 
+## Reject grammatical translationese
+
+Treat grammatical correctness as the entry requirement, not the release standard. An agent-generated target can contain no spelling or grammar errors and still fail because a native writer would not choose its wording.
+
+Before release, inspect the target for:
+
+- unnatural collocations or dictionary-equivalent wording;
+- lists and coordinated phrases that mix incompatible grammatical or semantic categories;
+- source-language clause order, emphasis, metaphors, discourse markers, or unnecessary borrowings;
+- generic AI phrases that sound fluent but remain vague, padded, or less precise than the intended meaning;
+- inconsistent register, terminology, directness, or product voice across the paragraph.
+
+Classify a phrase as a major defect when a native editor would recast it for ordinary publication even though readers can understand it. Do not repair such defects with isolated synonym swaps. Recover the intended meaning, rewrite the complete clause or paragraph in the target language, and then rerun the fidelity pass.
+
+Read [references/translationese-review.md](references/translationese-review.md) when reviewing an existing translation, agent-written copy, product or marketing prose, or any target that is grammatical but still feels translated.
+
 ## Separate creation from judgment
 
 Use two deliberately different review perspectives. Do not collapse them into one vague reread.
 
-1. **Native pass:** Draft from the meaning map rather than translating sentence by sentence. Then read only the target as a native editor would, temporarily ignoring the source. Remove unnatural syntax, collocations, rhythm, repetition, discourse markers, politeness, and medium-inappropriate wording.
+1. **Native pass:** Draft from the meaning map rather than translating sentence by sentence. Then hide the source and read only the target as original writing. Remove unnatural syntax, collocations, category mixing, unnecessary borrowings, vague AI filler, rhythm, repetition, discourse markers, politeness, and medium-inappropriate wording. If the target passes only because the source wording is still visible, it fails.
 2. **Fidelity pass:** Compare the revised target against the complete source. Restore anything omitted and remove anything added. Recheck negation, modality, quantities, causality, uncertainty, names, terminology, and calls to action.
 3. **Integrity pass:** Verify protected syntax and native orthography only after the wording is stable.
 
@@ -49,7 +65,7 @@ Put the source sentence structure aside after understanding it. Express the same
 - Replace calques and source-language discourse patterns with target-language conventions.
 - Match the audience and medium: support reply, legal notice, product UI, conversation, documentation, marketing, or literature.
 - Preserve intentional code-switching, names, trademarks, and established technical terms.
-- Avoid bland translationese, inflated marketing language, and generic AI filler.
+- Avoid bland translationese, inflated marketing language, generic AI filler, and vague claims such as “in a smart way” when the intended operation can be stated precisely.
 - Use native script and Unicode characters. Never strip accents or transliterate unless asked or technically required.
 - Apply `$native-diacritics` as the final orthographic gate when available; otherwise perform the same Unicode, script, diacritic, and punctuation checks directly.
 
@@ -99,12 +115,12 @@ Before returning the result, silently perform every pass:
 1. **Meaning:** every claim, relationship, condition, and implication remains equivalent.
 2. **Completeness:** nothing is omitted, duplicated, or added.
 3. **Precision:** negation, modality, numbers, units, entities, terminology, and ambiguity are correct.
-4. **Nativeness:** no calque, source syntax, unnatural collocation, or translationese remains.
+4. **Nativeness:** no calque, source syntax, unnatural collocation, category mixing, unnecessary borrowing, generic AI filler, or grammatical-but-translated wording remains.
 5. **Fit:** locale, script, register, tone, audience, and medium are consistent.
 6. **Integrity:** placeholders, keys, links, markup, code, escapes, and file structure are intact.
 7. **Orthography:** spelling, diacritics, casing, punctuation, spacing, and Unicode normalization are native and correct.
 
-Any meaning, completeness, precision, or integrity defect blocks delivery. Any clearly unnatural target-language wording also blocks delivery. If a pass fails, revise and repeat all affected passes. Do not expose internal scores or review notes unless the user asks.
+Any meaning, completeness, precision, integrity, or major nativeness defect blocks delivery. “Understandable” and “grammatically correct” are never sufficient release arguments. If a pass fails, revise and repeat all affected passes. Do not expose internal scores or review notes unless the user asks.
 
 ## Return the result cleanly
 
