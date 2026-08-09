@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" fill="#F8F7F5"/>
+  <rect x="0" y="0" width="14" height="640" fill="#6D35C5"/>
+
+  <g font-family="DejaVu Sans, sans-serif">
+    <rect x="70" y="62" width="44" height="44" rx="10" fill="#171719"/>
+    <text x="92" y="93" text-anchor="middle" font-size="25" font-weight="700" fill="#FFFFFF">B</text>
+    <text x="132" y="81" font-size="17" font-weight="700" fill="#171719" letter-spacing="2">BLUN</text>
+    <text x="132" y="103" font-size="13" font-weight="700" fill="#6D35C5" letter-spacing="1.7">OPEN AGENT SKILL</text>
+
+    <text x="70" y="224" font-size="70" font-weight="700" fill="#171719">Translate</text>
+    <text x="70" y="304" font-size="70" font-weight="700" fill="#171719">Native</text>
+    <text x="72" y="354" font-size="27" fill="#4A484C">Meaning in. Native language out.</text>
+
+    <g font-size="20" font-weight="700">
+      <rect x="70" y="402" width="102" height="44" rx="22" fill="#EFE9FF"/>
+      <text x="121" y="431" text-anchor="middle" fill="#5B21B6">Hej</text>
+      <rect x="184" y="402" width="108" height="44" rx="22" fill="#FFE8EC"/>
+      <text x="238" y="431" text-anchor="middle" fill="#A71F34">Hola</text>
+      <rect x="304" y="402" width="118" height="44" rx="22" fill="#EFE9FF"/>
+      <text x="363" y="431" text-anchor="middle" fill="#5B21B6">Kaixo</text>
+      <rect x="434" y="402" width="106" height="44" rx="22" fill="#FFE8EC"/>
+      <text x="487" y="431" text-anchor="middle" fill="#A71F34">Ahoj</text>
+      <rect x="552" y="402" width="96" height="44" rx="22" fill="#EFE9FF"/>
+      <text x="600" y="431" text-anchor="middle" fill="#5B21B6">Olá</text>
+    </g>
+
+    <text x="72" y="527" font-size="18" font-weight="700" fill="#171719">Native phrasing · exact meaning · protected structure</text>
+    <text x="72" y="568" font-size="16" fill="#68666B">Get it done with BLUN.</text>
+  </g>
+
+  <g transform="translate(716 102)" font-family="DejaVu Sans, sans-serif">
+    <rect x="0" y="0" width="480" height="432" rx="30" fill="#FFFFFF" stroke="#DEDADF" stroke-width="3"/>
+
+    <rect x="34" y="74" width="128" height="284" rx="24" fill="#FBFAF9" stroke="#DCD7DE" stroke-width="2"/>
+    <text x="98" y="111" text-anchor="middle" font-size="14" font-weight="700" fill="#77737B">SOURCE</text>
+    <rect x="58" y="143" width="80" height="9" rx="4" fill="#CFCAD2"/>
+    <rect x="58" y="168" width="64" height="9" rx="4" fill="#CFCAD2"/>
+    <rect x="58" y="193" width="76" height="9" rx="4" fill="#CFCAD2"/>
+    <rect x="58" y="218" width="52" height="9" rx="4" fill="#CFCAD2"/>
+    <rect x="58" y="262" width="80" height="44" rx="12" fill="#171719"/>
+    <text x="98" y="290" text-anchor="middle" font-size="16" font-weight="700" fill="#FFFFFF">Meaning</text>
+
+    <path d="M178 216H220" stroke="#E43B4F" stroke-width="5" stroke-linecap="round"/>
+    <path d="M209 202L224 216L209 230" fill="none" stroke="#E43B4F" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="224" y="150" width="104" height="132" rx="28" fill="#171719"/>
+    <circle cx="276" cy="201" r="25" fill="#6D35C5"/>
+    <path d="M264 202L273 211L290 191" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="276" y="251" text-anchor="middle" font-size="13" font-weight="700" fill="#FFFFFF">NATIVE</text>
+
+    <path d="M340 216H374" stroke="#6D35C5" stroke-width="5" stroke-linecap="round"/>
+    <path d="M363 202L378 216L363 230" fill="none" stroke="#6D35C5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="380" y="56" width="72" height="66" rx="18" fill="#FFE8EC"/>
+    <text x="416" y="96" text-anchor="middle" font-size="21" font-weight="700" fill="#A71F34">Hej</text>
+    <rect x="380" y="134" width="72" height="66" rx="18" fill="#EFE9FF"/>
+    <text x="416" y="174" text-anchor="middle" font-size="20" font-weight="700" fill="#5B21B6">Hola</text>
+    <rect x="380" y="212" width="72" height="66" rx="18" fill="#FFE8EC"/>
+    <text x="416" y="252" text-anchor="middle" font-size="20" font-weight="700" fill="#A71F34">Ahoj</text>
+    <rect x="380" y="290" width="72" height="66" rx="18" fill="#EFE9FF"/>
+    <text x="416" y="330" text-anchor="middle" font-size="19" font-weight="700" fill="#5B21B6">Olá</text>
+
+    <circle cx="276" cy="80" r="8" fill="#E43B4F"/>
+    <circle cx="276" cy="352" r="8" fill="#6D35C5"/>
+    <path d="M276 96V132M276 300V336" stroke="#D7D2D9" stroke-width="3" stroke-dasharray="3 9"/>
+  </g>
+
+  <rect x="14" y="622" width="492" height="18" fill="#6D35C5"/>
+  <rect x="506" y="622" width="774" height="18" fill="#E43B4F"/>
+</svg>

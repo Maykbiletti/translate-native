@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/social-preview.png" alt="Translate Native — Meaning in. Native language out." width="100%">
+</p>
+
 <div align="center">
 
 <pre>
