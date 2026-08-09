@@ -9,6 +9,7 @@ import re
 import sys
 import unicodedata
 from collections import Counter
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +34,14 @@ ICU_HEADER = re.compile(
     re.IGNORECASE,
 )
 ICU_SELECTOR_AT_POSITION = re.compile(r"\s*([=\w.-]+)\s*(?=\{)")
+TRANSLATABLE_HTML_ATTRIBUTES = {
+    "alt",
+    "aria-description",
+    "aria-label",
+    "placeholder",
+    "title",
+}
+HTML_CODE_ELEMENTS = {"script", "style"}
 
 
 def icu_selectors(text: str, start: int) -> list[tuple[str, tuple[int, int]]]:
@@ -141,6 +150,99 @@ def compare_json(source: Any, target: Any, path: str = "$") -> list[str]:
     return errors
 
 
+def token_signature(text: str) -> tuple[tuple[tuple[str, str], int], ...]:
+    return tuple(sorted(protected_tokens(text).items()))
+
+
+class TranslationHTMLParser(HTMLParser):
+    """Reduce HTML to the parts a translation must preserve."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.events: list[tuple[Any, ...]] = []
+        self.open_elements: list[str] = []
+
+    @staticmethod
+    def attribute_signature(attrs: list[tuple[str, str | None]]) -> tuple[Any, ...]:
+        signature: list[tuple[Any, ...]] = []
+        for name, value in attrs:
+            if name in TRANSLATABLE_HTML_ATTRIBUTES:
+                signature.append((name, "translatable", token_signature(value or "")))
+            else:
+                signature.append((name, "fixed", value))
+        return tuple(signature)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.events.append(("start", tag, self.attribute_signature(attrs)))
+        self.open_elements.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.events.append(("empty", tag, self.attribute_signature(attrs)))
+
+    def handle_endtag(self, tag: str) -> None:
+        self.events.append(("end", tag))
+        for index in range(len(self.open_elements) - 1, -1, -1):
+            if self.open_elements[index] == tag:
+                del self.open_elements[index:]
+                break
+
+    def handle_data(self, data: str) -> None:
+        current_element = self.open_elements[-1] if self.open_elements else None
+        if current_element in HTML_CODE_ELEMENTS:
+            self.events.append(("code", current_element, data))
+            return
+        signature = token_signature(data)
+        if signature:
+            self.events.append(("text tokens", signature))
+
+    def handle_comment(self, data: str) -> None:
+        self.events.append(("comment", data))
+
+    def handle_decl(self, decl: str) -> None:
+        self.events.append(("declaration", decl))
+
+    def handle_entityref(self, name: str) -> None:
+        self.events.append(("entity", name))
+
+    def handle_charref(self, name: str) -> None:
+        self.events.append(("character reference", name))
+
+    def handle_pi(self, data: str) -> None:
+        self.events.append(("processing instruction", data))
+
+
+def parse_html(text: str, location: str) -> tuple[list[tuple[Any, ...]], list[str]]:
+    parser = TranslationHTMLParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception as exc:  # HTMLParser can surface malformed declarations.
+        return [], [f"{location}: invalid HTML ({exc})"]
+    return parser.events, []
+
+
+def compare_html(source: str, target: str) -> list[str]:
+    source_events, source_errors = parse_html(source, "source")
+    target_events, target_errors = parse_html(target, "target")
+    errors = source_errors + target_errors
+    if errors:
+        return errors
+
+    if len(source_events) != len(target_events):
+        errors.append(
+            f"$: HTML event count changed from {len(source_events)} to {len(target_events)}"
+        )
+    for index, (source_event, target_event) in enumerate(zip(source_events, target_events)):
+        if source_event != target_event:
+            errors.append(
+                f"$: HTML event {index} changed from {source_event!r} to {target_event!r}"
+            )
+            if len(errors) >= 20:
+                errors.append("$: additional HTML differences omitted")
+                break
+    return errors
+
+
 def read_utf8(path: Path) -> tuple[str | None, list[str]]:
     try:
         return path.read_text(encoding="utf-8"), []
@@ -174,7 +276,7 @@ def main() -> int:
     )
     parser.add_argument("source", type=Path)
     parser.add_argument("target", type=Path)
-    parser.add_argument("--format", choices=("auto", "text", "json"), default="auto")
+    parser.add_argument("--format", choices=("auto", "text", "json", "html"), default="auto")
     args = parser.parse_args()
 
     source_text, source_errors = read_utf8(args.source)
@@ -188,7 +290,13 @@ def main() -> int:
     errors.extend(normalization_errors(target_text, args.target))
     selected_format = args.format
     if selected_format == "auto":
-        selected_format = "json" if args.source.suffix.lower() == ".json" else "text"
+        suffix = args.source.suffix.lower()
+        if suffix == ".json":
+            selected_format = "json"
+        elif suffix in {".html", ".htm"}:
+            selected_format = "html"
+        else:
+            selected_format = "text"
 
     if selected_format == "json":
         source_data, parse_source_errors = parse_json(source_text, args.source)
@@ -197,6 +305,8 @@ def main() -> int:
         errors.extend(parse_target_errors)
         if not parse_source_errors and not parse_target_errors:
             errors.extend(compare_json(source_data, target_data))
+    elif selected_format == "html":
+        errors.extend(compare_html(source_text, target_text))
     else:
         errors.extend(compare_tokens(source_text, target_text, "$"))
 
