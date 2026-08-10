@@ -27,7 +27,7 @@ def gate(request: dict) -> dict:
     if request.get("translation_task") is False:
         return {"status": "PASS", "release_allowed": True, "reason": "explicitly-not-a-translation"}
     result = GUARD.release_translation(request)
-    result["gateway"] = "blun-language-gateway/5"
+    result["gateway"] = "blun-language-gateway/5.1"
     return result
 
 
@@ -37,7 +37,7 @@ def main() -> int:
     parser.add_argument("--receipt-only", action="store_true", help="Print only a valid release receipt")
     args = parser.parse_args()
     try:
-        request = json.loads(args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read())
+        request = json.loads(args.input.read_text(encoding="utf-8-sig") if args.input else sys.stdin.read().lstrip("\ufeff"))
         result = gate(request)
     except (OSError, json.JSONDecodeError) as error:
         result = {"status": "BLOCK", "release_allowed": False, "reason": "invalid-input", "error": str(error)}
