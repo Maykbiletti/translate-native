@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "blun-language-guard": {
+      "command": "python3",
+      "args": [
+        "/absolute/path/to/translate-native/translate-native/scripts/blun_language_guard.py",
+        "serve"
+      ]
+    }
+  }
+}
