@@ -68,6 +68,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn('value: "blun-language-guard"', metadata)
         self.assertIn("release_allowed: true", rules)
         self.assertTrue(MCP_SERVER.is_file())
+        self.assertIn("verify_release_token", skill)
+        self.assertTrue((ROOT / "docs" / "PREMORTEM.md").is_file())
 
     def test_swedish_agent_copy_is_a_documented_regression_case(self) -> None:
         content = TRANSLATIONESE_REVIEW.read_text(encoding="utf-8")
