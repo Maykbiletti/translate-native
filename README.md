@@ -74,7 +74,51 @@ The separate `native-diacritics` skill can still protect ordinary writing outsid
 
 The root [`AGENTS.md`](AGENTS.md) tells repository-aware agents to load the combined workflow and treat every model-generated translation as an untrusted draft.
 
-## Version 4: BLUN Language Guard
+## Version 5: BLUN Language Gateway
+
+Version 5 makes the host—not the agent—the final authority. Skills and MCP tools can be forgotten or skipped. A mandatory gateway intercepts the candidate output and releases it only after validation produces a signed receipt for the exact source, target, and locale.
+
+```text
+User → Agent → intercepted candidate → BLUN Language Gateway
+                                      ├── PASS + receipt → release
+                                      └── BLOCK          → revise or stop
+```
+
+Use the portable gateway with JSON on stdin:
+
+```bash
+python3 integrations/language_gateway.py < release-request.json
+```
+
+Strong enforcement requires the gateway and signing key to run outside the agent's writable sandbox, ideally as a separate OS user, container, or remote service. If the agent can replace the gateway or read its key, the installation is advisory—not non-bypassable. CLI adapters must capture final output before it is printed; API gateways must withhold the HTTP response; CI must require the check before merge and deployment.
+
+### Automatic safe updates
+
+Enable the operating-system scheduler once:
+
+```bash
+python3 installer/blun_language_guard.py auto-update enable --interval-hours 24
+python3 installer/blun_language_guard.py auto-update status
+```
+
+Linux uses a user-level systemd timer, macOS a LaunchAgent, and Windows Task Scheduler. Each scheduled wake-up checks whether the configured interval is due. A candidate checkout is tested before installation, the update is fast-forward-only, post-update tests run again, and the previous revision is retained for rollback. Security-sensitive deployments can require trusted Git commit signatures:
+
+```bash
+python3 installer/blun_language_guard.py auto-update enable --require-signed-commits
+```
+
+Automatic updating does not magically update every marketplace-managed ChatGPT plugin. It updates this Git checkout, its symlinked skills, MCP server, gateway, and adapters. Platform-native plugin stores remain controlled by their host platform.
+
+BLUN Code is supported explicitly. Installation creates the BLUN skill symlink and safely merges `blun-language-guard` into `~/.blun/mcp.json`, preserving the other MCP servers and writing `mcp.json.bak` before a change. BLUN Code must be restarted once after initial installation; subsequent repository updates are visible through the symlink automatically.
+
+### Production regressions fixed in Version 5
+
+- Page-sized releases are covered by a regression test above 7,000 characters with a one-second local execution budget.
+- MCP JSON input accepts the UTF-8 BOM frequently emitted by Windows tooling.
+- Long Swedish, German, Spanish, Czech, and Catalan targets receive a language-character profile check that catches wholesale ASCII folding even when no word appears in a small substitution list.
+- The Swedish BLUN ASCII-folding regression was found by **Angel** and is retained under her name in the permanent evaluation corpus.
+
+## Version 4 foundation: signed release receipts
 
 Version 4 turns the executable MCP gate into a signed, independently verifiable release system. The skill remains responsible for meaning, native rewriting, locale fit, and orthography. The server blocks deterministic defects and issues a cryptographic receipt bound to the exact source, target, locale, version, issue time, and expiry.
 

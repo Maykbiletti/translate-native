@@ -43,6 +43,21 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.repository_root = original
 
+    def test_auto_update_policy_can_be_enabled_without_scheduler(self) -> None:
+        original_config = INSTALLER.UPDATE_CONFIG
+        original_state = INSTALLER.UPDATE_STATE
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.UPDATE_CONFIG = Path(directory) / "updater.json"
+            INSTALLER.UPDATE_STATE = Path(directory) / "state.json"
+            try:
+                self.assertEqual(0, INSTALLER.auto_update("enable", 12, True, scheduler=False))
+                policy = INSTALLER.json.loads(INSTALLER.UPDATE_CONFIG.read_text(encoding="utf-8"))
+                self.assertEqual(policy["interval_hours"], 12)
+                self.assertTrue(policy["require_signed_commits"])
+            finally:
+                INSTALLER.UPDATE_CONFIG = original_config
+                INSTALLER.UPDATE_STATE = original_state
+
 
 if __name__ == "__main__":
     unittest.main()

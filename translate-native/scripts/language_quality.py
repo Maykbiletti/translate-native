@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "4.0.0"
+VERSION = "5.0.0"
 DANGEROUS_BIDI = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e"}
 ISOLATE_OPENERS = {"\u2066", "\u2067", "\u2068"}
 ISOLATE_CLOSER = "\u2069"
@@ -76,14 +76,14 @@ def issue_receipt(source: str, target: str, language: str, key: bytes, ttl: int 
     }
     encoded = _b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
     signature = _b64encode(hmac.new(key, encoded.encode(), hashlib.sha256).digest())
-    return f"blg4.{encoded}.{signature}"
+    return f"blg5.{encoded}.{signature}"
 
 
 def verify_receipt(token: str, source: str, target: str, language: str, key: bytes) -> dict[str, Any]:
     try:
         prefix, encoded, signature = token.split(".")
         expected = _b64encode(hmac.new(key, encoded.encode(), hashlib.sha256).digest())
-        if prefix != "blg4" or not hmac.compare_digest(signature, expected):
+        if prefix != "blg5" or not hmac.compare_digest(signature, expected):
             raise ValueError("invalid signature")
         payload = json.loads(_b64decode(encoded))
         checks = {

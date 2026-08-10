@@ -4,6 +4,9 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+import json
+import subprocess
+import time
 from pathlib import Path
 
 
@@ -25,9 +28,45 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.assertEqual(report["status"], "PASS")
 
     def test_ascii_swedish_is_blocked(self) -> None:
-        report = MODULE.validate_text("Jag forstar och behover borja.", "sv-SE")
+        # Angel regression: real BLUN product copy, wholesale ASCII-folded,
+        # deliberately avoiding the checker's tiny Swedish substitution list.
+        report = MODULE.validate_text(
+            ("BLUN samlar kraftfulla AI-modeller med kompletta arbetsytor for appar, "
+             "webbplatser, mjukvaruutveckling, sprak, bilder och automatiserade floden. "
+             "I stallet for att oppna ett nytt verktyg for varje steg samverkar modeller, "
+             "agenter, API:er och MCP-servrar pa en gemensam europeisk plattform. ") * 2,
+            "sv-SE",
+        )
         self.assertEqual(report["status"], "BLOCK")
-        self.assertTrue(report["findings"])
+        self.assertIn("missing-language-character-profile", {finding["code"] for finding in report["findings"]})
+
+    def test_long_page_release_completes_within_one_second(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
+        target = ("BLUN samlar kraftfulla AI-modeller med kompletta arbetsytor för appar, "
+                  "webbplatser, språk, bilder och automatiserade flöden. ") * 60
+        started = time.perf_counter()
+        report = MODULE.release_translation({
+            "source_text": "BLUN combines powerful AI models and complete workspaces. " * 120,
+            "target_text": target,
+            "language": "sv-SE",
+            "attestations": {name: True for name in (
+                "meaning", "completeness", "precision", "nativeness",
+                "locale_fit", "integrity", "orthography",
+            )},
+        })
+        self.assertLess(time.perf_counter() - started, 1.0)
+        self.assertTrue(report["release_allowed"])
+
+    def test_mcp_accepts_utf8_bom(self) -> None:
+        request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"
+        result = subprocess.run(
+            [sys.executable, str(SERVER), "serve"], input="\ufeff" + request,
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("release_translation", result.stdout)
 
     def test_non_nfc_text_is_blocked(self) -> None:
         report = MODULE.validate_text("Cafe\u0301", "fr-FR")
@@ -67,7 +106,7 @@ class LanguageGuardMCPTests(unittest.TestCase):
             }
         )
         self.assertTrue(report["release_allowed"])
-        self.assertRegex(report["release_token"], r"^blg4\.")
+        self.assertRegex(report["release_token"], r"^blg5\.")
 
     def test_mcp_lists_mandatory_release_tool(self) -> None:
         response = MODULE.handle_message(
