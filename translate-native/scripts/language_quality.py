@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "5.0.0"
+VERSION = "5.1.0"
 DANGEROUS_BIDI = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e"}
 ISOLATE_OPENERS = {"\u2066", "\u2067", "\u2068"}
 ISOLATE_CLOSER = "\u2069"
@@ -36,8 +36,13 @@ LANGUAGE_SCRIPTS = {
 }
 
 
+def canonical_text(text: str) -> str:
+    """Normalize transport-only differences without hiding character corruption."""
+    return unicodedata.normalize("NFC", text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n"))
+
+
 def canonical_hash(text: str) -> str:
-    return hashlib.sha256(unicodedata.normalize("NFC", text).encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_text(text).encode("utf-8")).hexdigest()
 
 
 def _b64encode(data: bytes) -> str:
@@ -63,13 +68,18 @@ def load_or_create_key(path: Path) -> bytes:
     return key
 
 
-def issue_receipt(source: str, target: str, language: str, key: bytes, ttl: int = 86400) -> str:
+def issue_receipt(
+    source: str, target: str, language: str, key: bytes, ttl: int = 86400,
+    content_type: str = "prose", short_text_reviewed: bool = False,
+) -> str:
     now = int(time.time())
     payload = {
         "v": VERSION,
         "source_sha256": canonical_hash(source),
         "target_sha256": canonical_hash(target),
         "language": language,
+        "content_type": content_type,
+        "short_text_reviewed": short_text_reviewed,
         "iat": now,
         "exp": now + max(60, min(ttl, 604800)),
         "nonce": _b64encode(os.urandom(12)),
@@ -79,7 +89,10 @@ def issue_receipt(source: str, target: str, language: str, key: bytes, ttl: int 
     return f"blg5.{encoded}.{signature}"
 
 
-def verify_receipt(token: str, source: str, target: str, language: str, key: bytes) -> dict[str, Any]:
+def verify_receipt(
+    token: str, source: str, target: str, language: str, key: bytes,
+    content_type: str = "prose", short_text_reviewed: bool = False,
+) -> dict[str, Any]:
     try:
         prefix, encoded, signature = token.split(".")
         expected = _b64encode(hmac.new(key, encoded.encode(), hashlib.sha256).digest())
@@ -90,6 +103,8 @@ def verify_receipt(token: str, source: str, target: str, language: str, key: byt
             "source": payload.get("source_sha256") == canonical_hash(source),
             "target": payload.get("target_sha256") == canonical_hash(target),
             "language": payload.get("language") == language,
+            "content_type": payload.get("content_type") == content_type,
+            "short_text_reviewed": payload.get("short_text_reviewed") is short_text_reviewed,
             "version": payload.get("v") == VERSION,
             "not_expired": int(payload.get("exp", 0)) >= int(time.time()),
         }
