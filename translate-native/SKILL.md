@@ -120,7 +120,7 @@ After editing a source/target pair, run:
 python3 scripts/translation_guard.py SOURCE TARGET
 ```
 
-The guard also measures linguistic volume and segment coverage. Treat a volume or segment-count failure as a blocking omission. The mandatory MCP `release_translation` path repeats an unconditional, auto-detected volume check; caller attestations cannot suppress it. Never describe exit code `0` as proof that a translation is complete, faithful, or native: it proves only the deterministic structure, protected-token, volume, and Unicode checks that actually ran.
+The guard also measures linguistic volume and segment coverage and blocks substantial targets that are still identical to the complete source. Treat a volume, segment-count, or long source-identity failure as blocking. The mandatory MCP `release_translation` path repeats the unconditional identity and auto-detected volume checks; caller attestations cannot suppress them. Never describe exit code `0` as proof that a translation is complete, faithful, or native: it proves only the deterministic structure, protected-token, identity, volume, and Unicode checks that actually ran.
 
 Use `--format json` for JSON regardless of the file suffix. Treat a nonzero exit as a blocking structural or protected-token defect and fix it before delivery.
 
