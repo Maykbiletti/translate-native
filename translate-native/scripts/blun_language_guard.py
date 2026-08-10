@@ -105,10 +105,10 @@ def validate_text(
             language=language,
         ))
     short_sensitive = content_type in {"title", "meta_description", "ui"} and len(profile_prose.strip()) < 200
-    if profile and short_sensitive and not any(character in profile for character in profile_prose) and not short_text_reviewed:
+    if short_sensitive and not short_text_reviewed:
         findings.append(Finding(
             "short-text-native-review-required",
-            f"Short {content_type} text cannot be cleared by character-profile heuristics; independent native review is required.",
+            f"Short {content_type} text is never auto-cleared by character profiles or substitution lists; independent native review is required.",
             language=language,
         ))
     for glossary_finding in QUALITY.glossary_findings(text, glossary or {}):
