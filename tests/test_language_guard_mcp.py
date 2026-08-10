@@ -216,6 +216,36 @@ class LanguageGuardMCPTests(unittest.TestCase):
             {finding["code"] for finding in report["findings"]},
         )
 
+    def test_release_blocks_unchanged_source_despite_all_attestations(self) -> None:
+        source = (
+            "BLUN verbindet leistungsstarke KI-Modelle mit vollständigen Arbeitsbereichen für Apps, "
+            "Websites, Softwareentwicklung, Sprachen, Bilder und automatisierte Abläufe. Statt für "
+            "jeden Arbeitsschritt ein neues Werkzeug zu öffnen, arbeiten alle Komponenten zusammen."
+        )
+        report = MODULE.release_translation({
+            "source_text": source,
+            "target_text": source,
+            "language": "de-DE",
+            "attestations": self._attestations(),
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertIn(
+            "source-target-identical",
+            {finding["code"] for finding in report["findings"]},
+        )
+
+    def test_release_allows_short_shared_term_identity(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
+        report = MODULE.release_translation({
+            "source_text": "BLUN King",
+            "target_text": "BLUN King",
+            "language": "de-DE",
+            "attestations": self._attestations(),
+        })
+        self.assertTrue(report["release_allowed"], report)
+
     def test_release_auto_detects_html_and_ignores_preserved_script_bulk(self) -> None:
         source_copy = (
             "Vollständiger Inhalt für eine wichtige Produktseite mit Funktionen, Vorteilen und "
