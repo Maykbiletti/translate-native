@@ -42,6 +42,20 @@ TRANSLATABLE_HTML_ATTRIBUTES = {
     "title",
 }
 HTML_CODE_ELEMENTS = {"script", "style"}
+TRANSLATABLE_META_NAMES = {
+    "application-name",
+    "description",
+    "keywords",
+    "twitter:description",
+    "twitter:title",
+}
+TRANSLATABLE_META_PROPERTIES = {
+    "og:description",
+    "og:site_name",
+    "og:title",
+    "twitter:description",
+    "twitter:title",
+}
 
 
 def icu_selectors(text: str, start: int) -> list[tuple[str, tuple[int, int]]]:
@@ -163,21 +177,33 @@ class TranslationHTMLParser(HTMLParser):
         self.open_elements: list[str] = []
 
     @staticmethod
-    def attribute_signature(attrs: list[tuple[str, str | None]]) -> tuple[Any, ...]:
+    def attribute_signature(
+        tag: str, attrs: list[tuple[str, str | None]]
+    ) -> tuple[Any, ...]:
         signature: list[tuple[Any, ...]] = []
+        attribute_map = {name.casefold(): value for name, value in attrs}
+        meta_name = (attribute_map.get("name") or "").casefold()
+        meta_property = (attribute_map.get("property") or "").casefold()
+        content_is_linguistic = tag.casefold() == "meta" and (
+            meta_name in TRANSLATABLE_META_NAMES
+            or meta_property in TRANSLATABLE_META_PROPERTIES
+        )
         for name, value in attrs:
-            if name in TRANSLATABLE_HTML_ATTRIBUTES:
+            normalized_name = name.casefold()
+            if normalized_name in TRANSLATABLE_HTML_ATTRIBUTES or (
+                normalized_name == "content" and content_is_linguistic
+            ):
                 signature.append((name, "translatable", token_signature(value or "")))
             else:
                 signature.append((name, "fixed", value))
         return tuple(signature)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.events.append(("start", tag, self.attribute_signature(attrs)))
+        self.events.append(("start", tag, self.attribute_signature(tag, attrs)))
         self.open_elements.append(tag)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.events.append(("empty", tag, self.attribute_signature(attrs)))
+        self.events.append(("empty", tag, self.attribute_signature(tag, attrs)))
 
     def handle_endtag(self, tag: str) -> None:
         self.events.append(("end", tag))
