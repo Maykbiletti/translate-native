@@ -153,6 +153,13 @@ class HtmlTests(unittest.TestCase):
         message = "\n".join(GUARD.compare_html(source, target))
         self.assertIn("ICU argument", message)
 
+    def test_jsonld_linguistic_fields_translate_but_urls_and_structure_do_not(self) -> None:
+        source = '<script type="application/ld+json">{"@type":"Article","headline":"Hello {name}","url":"https://example.com/a"}</script>'
+        target = '<script type="application/ld+json">{"@type":"Article","headline":"Hallo {name}","url":"https://example.com/a"}</script>'
+        self.assertEqual([], GUARD.compare_html(source, target))
+        broken = target.replace("https://example.com/a", "https://example.com/b")
+        self.assertTrue(GUARD.compare_html(source, broken))
+
 
 class UnicodeTests(unittest.TestCase):
     def test_accepts_nfc(self) -> None:
@@ -163,6 +170,34 @@ class UnicodeTests(unittest.TestCase):
         errors = GUARD.normalization_errors(decomposed, Path("target.txt"))
         self.assertEqual(1, len(errors))
         self.assertIn("not Unicode NFC-normalized", errors[0])
+
+
+class AdditionalFormatTests(unittest.TestCase):
+    def test_xml_allows_text_but_preserves_structure_attributes_and_tokens(self) -> None:
+        source = '<resources><string name="welcome">Hello {name}</string></resources>'
+        target = '<resources><string name="welcome">Hallo {name}</string></resources>'
+        self.assertEqual([], GUARD.compare_xml(source, target))
+        broken = '<resources><string name="other">Hallo</string></resources>'
+        self.assertTrue(GUARD.compare_xml(source, broken))
+
+    def test_po_preserves_msgids_and_placeholders(self) -> None:
+        source = 'msgid "Hello {name}"\nmsgstr "Hello {name}"\n'
+        target = 'msgid "Hello {name}"\nmsgstr "Hallo {name}"\n'
+        self.assertEqual([], GUARD.compare_po(source, target))
+        self.assertTrue(GUARD.compare_po(source, 'msgid "Changed"\nmsgstr "Hallo"\n'))
+
+    def test_apple_strings_preserves_keys_and_tokens(self) -> None:
+        source = '"welcome" = "Hello %@";\n'
+        target = '"welcome" = "Hallo %@";\n'
+        self.assertEqual([], GUARD.compare_apple_strings(source, target))
+        self.assertTrue(GUARD.compare_apple_strings(source, '"other" = "Hallo";\n'))
+        self.assertTrue(GUARD.compare_apple_strings(source, '"welcome" = "Hallo";\n'))
+
+    def test_subtitles_preserve_timestamps(self) -> None:
+        source = '1\n00:00:01,000 --> 00:00:03,000\nHello\n'
+        target = '1\n00:00:01,000 --> 00:00:03,000\nHallo\n'
+        self.assertEqual([], GUARD.compare_subtitles(source, target))
+        self.assertTrue(GUARD.compare_subtitles(source, target.replace("03,000", "04,000")))
 
 
 if __name__ == "__main__":
