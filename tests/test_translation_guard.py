@@ -127,6 +127,32 @@ class HtmlTests(unittest.TestCase):
         self.assertIn("template", message)
         self.assertIn("window.route", message)
 
+    def test_allows_translated_meta_descriptions_and_social_copy(self) -> None:
+        source = """<head>
+<meta name="description" content="Manage invoices for {name}">
+<meta property="og:title" content="Billing made simple">
+<meta name="twitter:description" content="Review {{count}} invoices">
+</head>"""
+        target = """<head>
+<meta name="description" content="Verwalte Rechnungen für {name}">
+<meta property="og:title" content="Einfache Rechnungsverwaltung">
+<meta name="twitter:description" content="Prüfe {{count}} Rechnungen">
+</head>"""
+        self.assertEqual([], GUARD.compare_html(source, target))
+
+    def test_rejects_changed_technical_meta_content(self) -> None:
+        source = '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        target = '<meta name="viewport" content="width=900, initial-scale=2">'
+        message = "\n".join(GUARD.compare_html(source, target))
+        self.assertIn("viewport", message)
+        self.assertIn("width=900", message)
+
+    def test_meta_translation_must_preserve_placeholders(self) -> None:
+        source = '<meta name="description" content="Billing for {name}">'
+        target = '<meta name="description" content="Rechnungsverwaltung">'
+        message = "\n".join(GUARD.compare_html(source, target))
+        self.assertIn("ICU argument", message)
+
 
 class UnicodeTests(unittest.TestCase):
     def test_accepts_nfc(self) -> None:
