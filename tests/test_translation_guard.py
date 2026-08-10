@@ -219,6 +219,13 @@ class VolumeIntegrityTests(unittest.TestCase):
         errors = GUARD.volume_errors(GUARD.html_segments(source), GUARD.html_segments(target))
         self.assertTrue(errors)
 
+    def test_format_detection_is_measured_not_caller_declared(self) -> None:
+        self.assertEqual("json", GUARD.detect_content_format('{"copy":"Hello"}'))
+        self.assertEqual("html", GUARD.detect_content_format("<main><p>Hello</p></main>"))
+        self.assertEqual("xml", GUARD.detect_content_format("<resources><string>Hello</string></resources>"))
+        self.assertEqual("po", GUARD.detect_content_format('msgid "Hello"\nmsgstr "Hallo"\n'))
+        self.assertEqual("subtitle", GUARD.detect_content_format("00:00:01,000 --> 00:00:03,000\nHello"))
+
     def test_cli_returns_nonzero_for_seventy_percent_omission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.txt"
