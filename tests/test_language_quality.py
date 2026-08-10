@@ -29,6 +29,28 @@ class ReceiptTests(unittest.TestCase):
         forged = token[:-1] + ("A" if token[-1] != "A" else "B")
         self.assertFalse(QUALITY.verify_receipt(forged, "Hello", "Hej", "sv-SE", self.KEY)["valid"])
 
+    def test_transport_normalization_ignores_bom_and_line_endings(self) -> None:
+        token = QUALITY.issue_receipt("First\nSecond", "Första\nAndra", "sv-SE", self.KEY)
+        self.assertTrue(QUALITY.verify_receipt(token, "\ufeffFirst\r\nSecond", "Första\r\nAndra", "sv-SE", self.KEY)["valid"])
+
+    def test_mojibake_is_not_normalized_away(self) -> None:
+        token = QUALITY.issue_receipt("Hello", "Förstå", "sv-SE", self.KEY)
+        self.assertFalse(QUALITY.verify_receipt(token, "Hello", "FÃ¶rstÃ¥", "sv-SE", self.KEY)["valid"])
+
+    def test_receipt_is_bound_to_short_text_review_policy(self) -> None:
+        token = QUALITY.issue_receipt(
+            "Build faster", "Bygg snabbare", "sv-SE", self.KEY,
+            content_type="title", short_text_reviewed=True,
+        )
+        self.assertTrue(QUALITY.verify_receipt(
+            token, "Build faster", "Bygg snabbare", "sv-SE", self.KEY,
+            "title", True,
+        )["valid"])
+        self.assertFalse(QUALITY.verify_receipt(
+            token, "Build faster", "Bygg snabbare", "sv-SE", self.KEY,
+            "prose", False,
+        )["valid"])
+
 
 class LanguageSafetyTests(unittest.TestCase):
     def test_balanced_isolates_pass_but_overrides_and_unpaired_fail(self) -> None:

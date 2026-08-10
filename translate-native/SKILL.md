@@ -11,6 +11,8 @@ When a host exposes the BLUN Language Gateway, every translation or localization
 
 The skill and MCP instructions improve agent behavior but are not themselves non-bypassable. Production hosts must intercept candidate output outside the agent and invoke `integrations/language_gateway.py`, or an equivalent trusted adapter, in fail-closed mode. The signing key and gateway process must run outside the agent's writable sandbox for strong isolation. If the agent can read the key or replace the gateway, cryptographic receipts prove no meaningful separation.
 
+For titles, meta descriptions, and UI strings, pass the exact `content_type`. A short result with insufficient deterministic evidence returns `REVIEW_REQUIRED`, not `PASS`. Release it only after a genuinely independent native review, then pass `short_text_reviewed: true`. Never use that flag as a self-attestation or to silence an orthographic finding. The receipt binds the review flag and content type. Transport-only BOM and CRLF/LF differences are canonicalized; mojibake and character changes are never canonicalized away.
+
 Translate meaning, not word order. Re-author the message so a native speaker would believe it was written in the target language from the beginning, while preserving every source claim and constraint.
 
 ## Enforce the release gate

@@ -118,6 +118,19 @@ BLUN Code is supported explicitly. Installation creates the BLUN skill symlink a
 - Long Swedish, German, Spanish, Czech, and Catalan targets receive a language-character profile check that catches wholesale ASCII folding even when no word appears in a small substitution list.
 - The Swedish BLUN ASCII-folding regression was found by **Angel** and is retained under her name in the permanent evaluation corpus.
 
+### Version 5.1: short copy and transport-safe identity
+
+Titles, meta descriptions, and UI strings below 200 characters never receive a deterministic `PASS` from character profiles or substitution lists. The gate always returns `REVIEW_REQUIRED` until an independent native review sets `short_text_reviewed: true`; that decision, together with `content_type`, is cryptographically bound into the receipt. This remains true even when the short text still contains some native characters, preventing one surviving `å`, `ä`, or `ö` from hiding another destroyed word.
+
+Text identity now distinguishes transport differences from corruption. Canonical hashes remove a leading UTF-8 BOM, normalize CRLF and lone CR to LF, and normalize Unicode to NFC. Mojibake and actual character changes remain different and invalidate the receipt.
+
+Both portable commands are now present inside the installable skill as well as the repository integration layer:
+
+- `translate-native/scripts/language_gateway.py`
+- `translate-native/scripts/pre_output_guard.py`
+
+Symlink installations receive these files with the next automatic update; no manual copying is required.
+
 ## Version 4 foundation: signed release receipts
 
 Version 4 turns the executable MCP gate into a signed, independently verifiable release system. The skill remains responsible for meaning, native rewriting, locale fit, and orthography. The server blocks deterministic defects and issues a cryptographic receipt bound to the exact source, target, locale, version, issue time, and expiry.

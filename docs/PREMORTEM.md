@@ -19,5 +19,7 @@ Assume the Version 5 gateway and automatic updater shipped and failed in product
 | Auto-updater becomes a supply-chain path | An unreviewed remote commit installs silently | Test candidate before merge, permit trusted commit-signature enforcement, use fast-forward only, run post-install tests, retain rollback revision | Rejected unsigned and broken-update fixtures |
 | Scheduler claims success but never runs | Update state timestamp stops advancing | `doctor` checks scheduler and update state age; operational alert on stale state | Forced scheduled run updates timestamp |
 | Bad update passes tests but breaks hosts | Unit tests pass while CLI adapter fails | Canary rollout, post-update doctor, automatic rollback, phased release channel | Canary failure prevents stable rollout |
+| Short SEO copy bypasses the 200-character profile | Titles pass despite folded spelling | Classify title/meta/UI content, return `REVIEW_REQUIRED`, and bind independent review to receipt | Real short-copy regressions cannot pass without review |
+| CRLF is mistaken for changed content | Windows files differ only in size and raw hash | Maintain canonical text identity alongside byte identity; normalize BOM/newlines/NFC only | CRLF/BOM match while mojibake still fails |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
