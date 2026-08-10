@@ -15,8 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[2]
-DIACRITICS_PATH = ROOT / "translate-native" / "scripts" / "check_diacritics.py"
+DIACRITICS_PATH = Path(__file__).with_name("check_diacritics.py")
 VERSION = "3.0.0"
 PROTOCOL_VERSION = "2025-06-18"
 
