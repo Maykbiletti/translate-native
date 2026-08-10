@@ -20,6 +20,12 @@ SPEC.loader.exec_module(MODULE)
 
 
 class LanguageGuardMCPTests(unittest.TestCase):
+    @staticmethod
+    def _attestations() -> dict[str, bool]:
+        return {name: True for name in (
+            "meaning", "completeness", "precision", "nativeness",
+            "locale_fit", "integrity", "orthography",
+        )}
     def test_valid_swedish_passes_deterministic_gate(self) -> None:
         report = MODULE.validate_text(
             "Du väljer modell själv – eller låter BLUN automatiskt välja den modell som passar bäst för uppgiften.",
@@ -91,6 +97,46 @@ class LanguageGuardMCPTests(unittest.TestCase):
     def test_short_title_with_native_character_still_requires_review(self) -> None:
         report = MODULE.validate_text("Bygg bättre appar", "sv-SE", content_type="title")
         self.assertEqual(report["status"], "REVIEW_REQUIRED")
+
+    def test_self_attestation_cannot_bypass_ascii_folding_pressure(self) -> None:
+        damaged = (
+            "Haendler pruefen taeglich die Qualitaet im Buero. "
+            "Jeder Kaeufer erhaelt Zugang zum Gebaeude."
+        )
+        cases = (
+            {"content_type": "title", "short_text_reviewed": False},
+            {"content_type": "title", "short_text_reviewed": True},
+            {"content_type": "prose"},
+        )
+        for policy in cases:
+            with self.subTest(policy=policy):
+                report = MODULE.release_translation({
+                    "source_text": "Dealers check quality every day.",
+                    "target_text": damaged,
+                    "language": "de-DE",
+                    "attestations": self._attestations(),
+                    **policy,
+                })
+                self.assertEqual(report["status"], "BLOCK")
+                self.assertFalse(report["release_allowed"])
+                self.assertIn("ascii-folding-pressure", {finding["code"] for finding in report["findings"]})
+
+    def test_clean_reviewed_german_control_can_pass(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
+        report = MODULE.release_translation({
+            "source_text": "Dealers check quality every day.",
+            "target_text": (
+                "Händler prüfen täglich die Qualität im Büro. "
+                "Jeder Käufer erhält Zugang zum Gebäude."
+            ),
+            "language": "de-DE",
+            "content_type": "title",
+            "short_text_reviewed": True,
+            "attestations": self._attestations(),
+        })
+        self.assertTrue(report["release_allowed"], report)
 
     def test_independently_reviewed_short_title_can_pass(self) -> None:
         report = MODULE.validate_text(
