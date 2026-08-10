@@ -12,3 +12,10 @@ Apply these rules as always-on instructions in `AGENTS.md`, `CLAUDE.md`, or the 
 8. If the MCP server is unavailable, fail closed for publication-grade or structured translation work. For ordinary chat translation, run the skill's bundled guards directly and disclose that the enforced MCP gate was unavailable.
 
 The gate supplements native judgment; deterministic checks alone cannot prove fidelity or fluency.
+# Mandatory BLUN Language Gateway
+
+- Route every translation, localization, transcreation, target-language rewrite, and user-visible i18n change through the host's BLUN Language Gateway.
+- Do not print, save, commit, publish, or deploy a candidate until the gateway returns `release_allowed: true` for the exact source, target, and locale.
+- Treat an unavailable gateway as `BLOCK` whenever mandatory mode is enabled.
+- Never read, request, log, or handle the gateway signing key.
+- Never fabricate attestations. The host—not the agent—controls final release.
