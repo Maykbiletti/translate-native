@@ -18,6 +18,8 @@ NATIVE_ORTHOGRAPHY = (
 REGRESSIONS = ROOT / "evals" / "regressions.jsonl"
 OPENAI_METADATA = ROOT / "translate-native" / "agents" / "openai.yaml"
 MCP_SERVER = ROOT / "translate-native" / "scripts" / "blun_language_guard.py"
+INSTALLED_GATEWAY = ROOT / "translate-native" / "scripts" / "language_gateway.py"
+INSTALLED_PRE_OUTPUT = ROOT / "translate-native" / "scripts" / "pre_output_guard.py"
 AGENT_RULES = ROOT / "integrations" / "AGENT_RULES.md"
 
 
@@ -70,6 +72,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertTrue(MCP_SERVER.is_file())
         self.assertIn("verify_release_token", skill)
         self.assertTrue((ROOT / "docs" / "PREMORTEM.md").is_file())
+        self.assertTrue(INSTALLED_GATEWAY.is_file())
+        self.assertTrue(INSTALLED_PRE_OUTPUT.is_file())
 
     def test_swedish_agent_copy_is_a_documented_regression_case(self) -> None:
         content = TRANSLATIONESE_REVIEW.read_text(encoding="utf-8")
