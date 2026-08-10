@@ -22,5 +22,6 @@ Assume the Version 5 gateway and automatic updater shipped and failed in product
 | Short SEO copy bypasses the 200-character profile | Titles pass despite folded spelling | Classify title/meta/UI content, return `REVIEW_REQUIRED`, and bind independent review to receipt | Real short-copy regressions cannot pass without review |
 | CRLF is mistaken for changed content | Windows files differ only in size and raw hash | Maintain canonical text identity alongside byte identity; normalize BOM/newlines/NFC only | CRLF/BOM match while mojibake still fails |
 | Caller approves its own review | `short_text_reviewed=true` releases damaged spelling | Treat caller fields as metadata only; measurable findings are unconditional; external reviewer owns real approval | Damaged text stays blocked with `reviewed=true` and `content_type=prose` |
+| Correct German `ss` is mistaken for `ß` folding | `wissen`, `dass`, or `interessiert` blocks | Exclude `ss` from density heuristics; require lexical and locale context | Correct `ss` corpus passes while `ae/oe/ue` attack still blocks |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
