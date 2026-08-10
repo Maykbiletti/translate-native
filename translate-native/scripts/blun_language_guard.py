@@ -72,7 +72,13 @@ def _languages_for(text: str, language: str) -> tuple[str, ...]:
     return (base,) if base in DIACRITICS.RULES else ()
 
 
-def validate_text(text: str, language: str = "auto", glossary: dict[str, Any] | None = None) -> dict[str, Any]:
+def validate_text(
+    text: str,
+    language: str = "auto",
+    glossary: dict[str, Any] | None = None,
+    content_type: str = "prose",
+    short_text_reviewed: bool = False,
+) -> dict[str, Any]:
     findings: list[Finding] = []
     if not text.strip():
         findings.append(Finding("empty-target", "Target text is empty."))
@@ -98,6 +104,13 @@ def validate_text(text: str, language: str = "auto", glossary: dict[str, Any] | 
             f"Long {base_language} text contains none of the language's characteristic native characters; possible wholesale ASCII folding.",
             language=language,
         ))
+    short_sensitive = content_type in {"title", "meta_description", "ui"} and len(profile_prose.strip()) < 200
+    if profile and short_sensitive and not any(character in profile for character in profile_prose) and not short_text_reviewed:
+        findings.append(Finding(
+            "short-text-native-review-required",
+            f"Short {content_type} text cannot be cleared by character-profile heuristics; independent native review is required.",
+            language=language,
+        ))
     for glossary_finding in QUALITY.glossary_findings(text, glossary or {}):
         findings.append(Finding(glossary_finding["code"], json.dumps(glossary_finding, ensure_ascii=False), language=language))
 
@@ -115,7 +128,11 @@ def validate_text(text: str, language: str = "auto", glossary: dict[str, Any] | 
         )
 
     return {
-        "status": "BLOCK" if findings else "PASS",
+        "status": (
+            "REVIEW_REQUIRED"
+            if findings and all(finding.code == "short-text-native-review-required" for finding in findings)
+            else "BLOCK" if findings else "PASS"
+        ),
         "release_allowed": not findings,
         "language": language,
         "checks": [
@@ -147,7 +164,13 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
         "integrity",
         "orthography",
     )
-    report = validate_text(target, language, arguments.get("glossary"))
+    report = validate_text(
+        target,
+        language,
+        arguments.get("glossary"),
+        arguments.get("content_type", "prose"),
+        arguments.get("short_text_reviewed") is True,
+    )
     missing = [name for name in required if attestations.get(name) is not True]
     if not source.strip():
         report["findings"].append(
@@ -163,12 +186,19 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
                 )
             )
         )
-    report["status"] = "BLOCK" if report["findings"] else "PASS"
+    review_only = report["findings"] and all(
+        finding.get("code") == "short-text-native-review-required" for finding in report["findings"]
+    )
+    report["status"] = "REVIEW_REQUIRED" if review_only else "BLOCK" if report["findings"] else "PASS"
     report["release_allowed"] = not report["findings"]
     report["required_attestations"] = list(required)
     if report["release_allowed"]:
         key = QUALITY.load_or_create_key(KEY_PATH)
-        report["release_token"] = QUALITY.issue_receipt(source, target, language, key)
+        report["release_token"] = QUALITY.issue_receipt(
+            source, target, language, key,
+            content_type=arguments.get("content_type", "prose"),
+            short_text_reviewed=arguments.get("short_text_reviewed") is True,
+        )
     return report
 
 
@@ -183,6 +213,8 @@ TOOLS = [
                 "source_text": {"type": "string"},
                 "target_text": {"type": "string"},
                 "language": {"type": "string"},
+                "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
+                "short_text_reviewed": {"type": "boolean", "default": False},
             },
             "required": ["release_token", "source_text", "target_text", "language"],
             "additionalProperties": False,
@@ -197,6 +229,8 @@ TOOLS = [
                 "text": {"type": "string"},
                 "language": {"type": "string", "default": "auto"},
                 "glossary": {"type": "object", "description": "Optional source-term to required target-term or regex-rule map."},
+                "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
+                "short_text_reviewed": {"type": "boolean", "default": False},
             },
             "required": ["text"],
             "additionalProperties": False,
@@ -211,6 +245,8 @@ TOOLS = [
                 "source_text": {"type": "string"},
                 "target_text": {"type": "string"},
                 "language": {"type": "string"},
+                "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
+                "short_text_reviewed": {"type": "boolean", "description": "True only after an independent native review of a short title, description, or UI string."},
                 "attestations": {
                     "type": "object",
                     "properties": {
@@ -248,7 +284,7 @@ def _tool_result(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
         "structuredContent": payload,
-        "isError": payload.get("status") == "BLOCK",
+        "isError": payload.get("status") != "PASS",
     }
 
 
@@ -276,7 +312,10 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
         name = params.get("name")
         arguments = params.get("arguments") or {}
         if name == "validate_text":
-            payload = validate_text(arguments.get("text", ""), arguments.get("language", "auto"), arguments.get("glossary"))
+            payload = validate_text(
+                arguments.get("text", ""), arguments.get("language", "auto"), arguments.get("glossary"),
+                arguments.get("content_type", "prose"), arguments.get("short_text_reviewed") is True,
+            )
         elif name == "release_translation":
             payload = release_translation(arguments)
         elif name == "verify_release_token":
@@ -286,6 +325,8 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
                 arguments.get("target_text", ""),
                 arguments.get("language", ""),
                 QUALITY.load_or_create_key(KEY_PATH),
+                arguments.get("content_type", "prose"),
+                arguments.get("short_text_reviewed") is True,
             )
             payload["status"] = "PASS" if payload.get("valid") else "BLOCK"
         else:
