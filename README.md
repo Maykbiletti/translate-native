@@ -147,6 +147,8 @@ A successful deterministic guard now says exactly what it proves: measurable str
 
 Version 5.3.1 also makes the volume check unconditional inside the mandatory MCP `release_translation` path. Format detection is derived from the source syntax rather than a caller-supplied checkbox, so truthful-looking attestations cannot release a measurably truncated target. Structured CLI validation remains required for exact tag, key, placeholder, and technical-value integrity.
 
+Version 5.3.2 makes every MCP dependency resolve relative to the installed script itself. The server no longer assumes the repository's `translate-native/scripts` directory layout, and an isolated-install regression test starts the copied server from the exact flat `scripts/` layout used by installed skills.
+
 Other scripts cannot always be reconstructed from stripped ASCII without a dictionary or native model. The guard reports only what it can measure and never claims that this heuristic proves correct spelling. Strong independence still requires the external Language Gateway and reviewer to run outside the releasing agent's authority.
 
 ## Version 4 foundation: signed release receipts
