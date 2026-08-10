@@ -203,12 +203,17 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
         arguments.get("content_type", "prose"),
         arguments.get("short_text_reviewed") is True,
     )
+    report["checks"].extend(["source-target-identity", "translation-volume-integrity"])
     missing = [name for name in required if attestations.get(name) is not True]
     if not source.strip():
         report["findings"].append(
             asdict(Finding("empty-source", "Source text is required for the fidelity gate."))
         )
     else:
+        for error in TRANSLATION.identity_errors(source, target):
+            report["findings"].append(
+                asdict(Finding("source-target-identical", error))
+            )
         for error in TRANSLATION.translation_volume_errors(source, target):
             report["findings"].append(
                 asdict(Finding("translation-volume-integrity", error))
@@ -275,7 +280,7 @@ TOOLS = [
     },
     {
         "name": "release_translation",
-        "description": "Mandatory final gate. Returns a release token only after deterministic validation, auto-detected translation-volume integrity, and all seven quality attestations pass.",
+        "description": "Mandatory final gate. Returns a release token only after deterministic validation, substantial source-target non-identity, auto-detected translation-volume integrity, and all seven quality attestations pass.",
         "inputSchema": {
             "type": "object",
             "properties": {
