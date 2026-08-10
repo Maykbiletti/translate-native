@@ -79,6 +79,12 @@ COPYRIGHT_PREFIX = re.compile(
 LOWERCASE_OWNER_CONNECTORS = {
     "and", "da", "de", "del", "do", "e", "et", "of", "the", "und", "y",
 }
+LEGAL_OWNER_SUFFIXES = {
+    "ab", "ag", "aps", "as", "association", "bv", "co", "company", "corp",
+    "corporation", "foundation", "gmbh", "inc", "incorporated", "kg", "limited",
+    "llc", "ltd", "nv", "oy", "oyj", "plc", "pte", "pty", "sa", "sarl", "sas",
+    "se", "spa", "srl",
+}
 
 
 def linguistic_units(text: str) -> int:
@@ -123,15 +129,22 @@ def _fixed_identity_segment(text: str) -> bool:
     elif "©" not in prefix.group(0) and "(c)" not in prefix.group(0).casefold():
         return False
 
-    # A legal owner is a compact name, not a sentence with its own punctuation.
-    if not body or re.search(r"[.!?:;]", body):
+    # A legal owner is a compact proper name, not a title-cased sentence. Names
+    # longer than three words must end in an explicit legal-entity designator.
+    # This deliberately prefers a false block that can be reviewed over letting
+    # unchanged prose through merely because every word begins with a capital.
+    if not body or re.search(r"[!?:;]", body):
         return False
-    owner_words = re.findall(r"[^\W_]+", body, re.UNICODE)
+    owner_words = re.findall(r"[^\W_]+", body.replace(".", ""), re.UNICODE)
+    if not owner_words:
+        return False
     owner_shape = all(
         not word.islower() or word.casefold() in LOWERCASE_OWNER_CONNECTORS
         for word in owner_words
     )
-    return 1 <= len(owner_words) <= 6 and owner_shape
+    has_legal_suffix = owner_words[-1].casefold() in LEGAL_OWNER_SUFFIXES
+    maximum_words = 8 if has_legal_suffix else 3
+    return 1 <= len(owner_words) <= maximum_words and owner_shape
 
 
 def _actionable_unchanged_segment(source: str, target: str) -> tuple[str, int] | None:

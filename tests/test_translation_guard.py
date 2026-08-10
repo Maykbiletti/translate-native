@@ -248,6 +248,17 @@ class VolumeIntegrityTests(unittest.TestCase):
         self.assertEqual(1, len(errors))
         self.assertIn("unchanged from the source", errors[0])
 
+    def test_short_title_case_copyright_prose_is_not_a_fixed_legal_line(self) -> None:
+        prose = "Copyright © 2026 BLUN Product Updates Announce Changes"
+        self.assertEqual(54, len(prose))
+        errors = GUARD.identity_errors([prose], [prose], "$segments")
+        self.assertEqual(1, len(errors))
+        self.assertIn("unchanged from the source", errors[0])
+
+    def test_multiword_legal_owner_remains_valid_fixed_content(self) -> None:
+        notice = "Copyright © 2026 The Walt Disney Company. All rights reserved."
+        self.assertEqual([], GUARD.identity_errors([notice], [notice], "$segments"))
+
     def test_one_unchanged_structured_segment_is_blocked(self) -> None:
         source = {
             "title": "Wichtige Informationen für Ihren Projektantrag",
@@ -340,6 +351,29 @@ class VolumeIntegrityTests(unittest.TestCase):
             )
         self.assertEqual(1, result.returncode)
         self.assertIn("$.hinweis", result.stderr)
+        self.assertIn("linguistic segment is unchanged", result.stderr)
+
+    def test_cli_blocks_short_title_case_copyright_prose(self) -> None:
+        prose = "Copyright © 2026 BLUN Product Updates Announce Changes"
+        source_data = {
+            "title": "Important information about product updates",
+            "notice": prose,
+        }
+        target_data = {
+            "title": "Viktig information om produktuppdateringar",
+            "notice": prose,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.json"
+            target = Path(directory) / "target.json"
+            source.write_text(json.dumps(source_data, ensure_ascii=False), encoding="utf-8")
+            target.write_text(json.dumps(target_data, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), source, target],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(1, result.returncode)
+        self.assertIn("$.notice", result.stderr)
         self.assertIn("linguistic segment is unchanged", result.stderr)
 
     def test_cli_missing_paths_are_not_misreported_as_identity_failure(self) -> None:

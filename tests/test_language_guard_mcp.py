@@ -327,6 +327,28 @@ class LanguageGuardMCPTests(unittest.TestCase):
             {finding["code"] for finding in report["findings"]},
         )
 
+    def test_release_blocks_short_title_case_copyright_prose(self) -> None:
+        prose = "Copyright © 2026 BLUN Product Updates Announce Changes"
+        source = json.dumps({
+            "title": "Important information about product updates",
+            "notice": prose,
+        })
+        target = json.dumps({
+            "title": "Viktig information om produktuppdateringar",
+            "notice": prose,
+        }, ensure_ascii=False)
+        report = MODULE.release_translation({
+            "source_text": source,
+            "target_text": target,
+            "language": "sv-SE",
+            "attestations": self._attestations(),
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertIn(
+            "unchanged-linguistic-segment",
+            {finding["code"] for finding in report["findings"]},
+        )
+
     def test_release_auto_detects_html_and_ignores_preserved_script_bulk(self) -> None:
         source_copy = (
             "Vollständiger Inhalt für eine wichtige Produktseite mit Funktionen, Vorteilen und "
