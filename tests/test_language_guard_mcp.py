@@ -267,7 +267,7 @@ class LanguageGuardMCPTests(unittest.TestCase):
             {finding["code"] for finding in report["findings"]},
         )
 
-    def test_release_allows_translated_json_and_shared_fixed_segments(self) -> None:
+    def test_release_allows_translated_json_and_short_product_name(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
@@ -277,7 +277,7 @@ class LanguageGuardMCPTests(unittest.TestCase):
             "copyright": "Copyright © 2026 BLUN. All rights reserved.",
         }, ensure_ascii=False)
         target = json.dumps({
-            "copyright": "Copyright © 2026 BLUN. All rights reserved.",
+            "copyright": "Upphovsrätt © 2026 BLUN. Alla rättigheter förbehållna.",
             "notice": "Observera alla tidsfrister för varje projektansökan.",
             "product": "BLUN King",
         }, ensure_ascii=False)
@@ -328,24 +328,16 @@ class LanguageGuardMCPTests(unittest.TestCase):
         )
 
     def test_release_blocks_short_title_case_copyright_prose(self) -> None:
-        prose = "Copyright © 2026 BLUN Product Updates Announce Changes"
-        source = json.dumps({
-            "title": "Important information about product updates",
-            "notice": prose,
-        })
-        target = json.dumps({
-            "title": "Viktig information om produktuppdateringar",
-            "notice": prose,
-        }, ensure_ascii=False)
+        prose = "Copyright © 2026 Important Notice"
         report = MODULE.release_translation({
-            "source_text": source,
-            "target_text": target,
-            "language": "sv-SE",
+            "source_text": prose,
+            "target_text": prose,
+            "language": "en",
             "attestations": self._attestations(),
         })
         self.assertFalse(report["release_allowed"])
         self.assertIn(
-            "unchanged-linguistic-segment",
+            "source-target-identical",
             {finding["code"] for finding in report["findings"]},
         )
 

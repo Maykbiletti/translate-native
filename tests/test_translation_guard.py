@@ -238,9 +238,15 @@ class VolumeIntegrityTests(unittest.TestCase):
             with self.subTest(term=term):
                 self.assertEqual([], GUARD.identity_errors(term, term))
 
-    def test_short_brand_and_copyright_segments_can_remain_unchanged(self) -> None:
-        shared = ["BLUN King", "Copyright © 2026 BLUN. All rights reserved."]
-        self.assertEqual([], GUARD.identity_errors(shared, shared, "$segments"))
+    def test_short_brand_can_remain_unchanged_but_copyright_cannot(self) -> None:
+        self.assertEqual([], GUARD.identity_errors(["BLUN King"], ["BLUN King"], "$segments"))
+        for notice in (
+            "Copyright © 2026 BLUN. All rights reserved.",
+            "Upphovsrätt © BLUN",
+            "版权所有 © BLUN",
+        ):
+            with self.subTest(notice=notice):
+                self.assertEqual(1, len(GUARD.identity_errors([notice], [notice], "$segments")))
 
     def test_prose_mentioning_copyright_is_not_a_fixed_legal_line(self) -> None:
         prose = "Copyright © 2026 BLUN provides software for every customer"
@@ -249,15 +255,15 @@ class VolumeIntegrityTests(unittest.TestCase):
         self.assertIn("unchanged from the source", errors[0])
 
     def test_short_title_case_copyright_prose_is_not_a_fixed_legal_line(self) -> None:
-        prose = "Copyright © 2026 BLUN Product Updates Announce Changes"
-        self.assertEqual(54, len(prose))
+        prose = "Copyright © 2026 Important Notice"
+        self.assertEqual(33, len(prose))
         errors = GUARD.identity_errors([prose], [prose], "$segments")
         self.assertEqual(1, len(errors))
         self.assertIn("unchanged from the source", errors[0])
 
-    def test_multiword_legal_owner_remains_valid_fixed_content(self) -> None:
+    def test_multiword_legal_owner_is_not_automatically_exempt(self) -> None:
         notice = "Copyright © 2026 The Walt Disney Company. All rights reserved."
-        self.assertEqual([], GUARD.identity_errors([notice], [notice], "$segments"))
+        self.assertEqual(1, len(GUARD.identity_errors([notice], [notice], "$segments")))
 
     def test_copyright_notice_without_year_is_not_fixed_content(self) -> None:
         notice = "Copyright © BLUN International Software Company"
@@ -359,28 +365,32 @@ class VolumeIntegrityTests(unittest.TestCase):
         self.assertIn("$.hinweis", result.stderr)
         self.assertIn("linguistic segment is unchanged", result.stderr)
 
-    def test_cli_blocks_short_title_case_copyright_prose(self) -> None:
-        prose = "Copyright © 2026 BLUN Product Updates Announce Changes"
-        source_data = {
-            "title": "Important information about product updates",
-            "notice": prose,
-        }
-        target_data = {
-            "title": "Viktig information om produktuppdateringar",
-            "notice": prose,
-        }
+    def test_cli_blocks_short_copyright_identity_in_json_html_and_text(self) -> None:
+        prose = "Copyright © 2026 Important Notice"
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.json"
-            target = Path(directory) / "target.json"
-            source.write_text(json.dumps(source_data, ensure_ascii=False), encoding="utf-8")
-            target.write_text(json.dumps(target_data, ensure_ascii=False), encoding="utf-8")
-            result = subprocess.run(
-                [sys.executable, str(SCRIPT), source, target],
-                capture_output=True, text=True, check=False,
-            )
-        self.assertEqual(1, result.returncode)
-        self.assertIn("$.notice", result.stderr)
-        self.assertIn("linguistic segment is unchanged", result.stderr)
+            fixtures = {
+                "json": (
+                    json.dumps({"title": "Product updates", "notice": prose}),
+                    json.dumps({"title": "Produktuppdateringar", "notice": prose}, ensure_ascii=False),
+                ),
+                "html": (
+                    f"<main><h1>Product updates</h1><p>{prose}</p></main>",
+                    f"<main><h1>Produktuppdateringar</h1><p>{prose}</p></main>",
+                ),
+                "text": (prose, prose),
+            }
+            for suffix, (source_text, target_text) in fixtures.items():
+                with self.subTest(format=suffix):
+                    source = Path(directory) / f"source.{suffix}"
+                    target = Path(directory) / f"target.{suffix}"
+                    source.write_text(source_text, encoding="utf-8")
+                    target.write_text(target_text, encoding="utf-8")
+                    result = subprocess.run(
+                        [sys.executable, str(SCRIPT), source, target],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(1, result.returncode, result.stderr)
+                    self.assertIn("unchanged from the source", result.stderr)
 
     def test_cli_missing_paths_are_not_misreported_as_identity_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

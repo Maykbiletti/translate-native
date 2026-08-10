@@ -65,26 +65,10 @@ MIN_TOTAL_SOURCE_UNITS = 80
 MIN_SEGMENT_SOURCE_UNITS = 24
 MIN_IDENTITY_SOURCE_CHARACTERS = 200
 MIN_SEGMENT_IDENTITY_UNITS = 24
-MAX_FIXED_IDENTITY_CHARACTERS = 96
-RIGHTS_RESERVED_LINE = re.compile(
-    r"(?:all rights reserved|alle rechte vorbehalten|tous droits réservés|"
-    r"todos los derechos reservados|todos os direitos reservados|"
-    r"her hakkı saklıdır|všechna práva vyhrazena)",
+COPYRIGHT_MARKER = re.compile(
+    r"^(?:copyright\b|[^\n]{0,32}(?:©|\(c\)))",
     re.IGNORECASE,
 )
-COPYRIGHT_PREFIX = re.compile(
-    r"^(?:(?:copyright\s*)?(?:©|\(c\))|copyright)\s*",
-    re.IGNORECASE,
-)
-LOWERCASE_OWNER_CONNECTORS = {
-    "and", "da", "de", "del", "do", "e", "et", "of", "the", "und", "y",
-}
-LEGAL_OWNER_SUFFIXES = {
-    "ab", "ag", "aps", "as", "association", "bv", "co", "company", "corp",
-    "corporation", "foundation", "gmbh", "inc", "incorporated", "kg", "limited",
-    "llc", "ltd", "nv", "oy", "oyj", "plc", "pte", "pty", "sa", "sarl", "sas",
-    "se", "spa", "srl",
-}
 
 
 def linguistic_units(text: str) -> int:
@@ -103,57 +87,16 @@ def canonical_identity_text(text: str) -> str:
     ).strip()
 
 
-def _fixed_identity_segment(text: str) -> bool:
-    """Recognize a complete short legal notice, never prose mentioning copyright."""
-    normalized = " ".join(text.split())
-    if not normalized or len(normalized) > MAX_FIXED_IDENTITY_CHARACTERS:
-        return False
-    if RIGHTS_RESERVED_LINE.fullmatch(normalized.rstrip(". ")):
-        return True
-
-    prefix = COPYRIGHT_PREFIX.match(normalized)
-    if prefix is None:
-        return False
-    body = normalized[prefix.end():]
-    rights = re.search(
-        rf"(?:\.\s*)?{RIGHTS_RESERVED_LINE.pattern}\.?$",
-        body,
-        re.IGNORECASE,
-    )
-    if rights:
-        body = body[:rights.start()]
-    body = body.strip(" .")
-    year = re.match(r"^(?:19|20)\d{2}(?:\s*[-–]\s*(?:19|20)\d{2})?\s+", body)
-    if year is None:
-        return False
-    body = body[year.end():]
-
-    # A legal owner is a compact proper name, not a title-cased sentence. Names
-    # longer than three words must end in an explicit legal-entity designator.
-    # This deliberately prefers a false block that can be reviewed over letting
-    # unchanged prose through merely because every word begins with a capital.
-    if not body or re.search(r"[!?:;]", body):
-        return False
-    owner_words = re.findall(r"[^\W_]+", body.replace(".", ""), re.UNICODE)
-    if not owner_words:
-        return False
-    owner_shape = all(
-        not word.islower() or word.casefold() in LOWERCASE_OWNER_CONNECTORS
-        for word in owner_words
-    )
-    has_legal_suffix = owner_words[-1].casefold() in LEGAL_OWNER_SUFFIXES
-    maximum_words = 8 if has_legal_suffix else 3
-    return 1 <= len(owner_words) <= maximum_words and owner_shape
-
-
 def _actionable_unchanged_segment(source: str, target: str) -> tuple[str, int] | None:
     canonical_source = canonical_identity_text(source)
     canonical_target = canonical_identity_text(target)
     source_units = linguistic_units(canonical_source)
     if (
-        source_units >= MIN_SEGMENT_IDENTITY_UNITS
-        and canonical_source == canonical_target
-        and not _fixed_identity_segment(canonical_source)
+        canonical_source == canonical_target
+        and (
+            source_units >= MIN_SEGMENT_IDENTITY_UNITS
+            or COPYRIGHT_MARKER.match(canonical_source) is not None
+        )
     ):
         return canonical_source, source_units
     return None
@@ -191,13 +134,17 @@ def identity_errors(
         return []
     canonical_source = canonical_identity_text(source)
     canonical_target = canonical_identity_text(target)
-    if (
-        len(canonical_source) >= MIN_IDENTITY_SOURCE_CHARACTERS
-        and canonical_source == canonical_target
-    ):
+    unchanged = _actionable_unchanged_segment(canonical_source, canonical_target)
+    if unchanged is not None:
+        _, source_units = unchanged
+        measured = (
+            f"{len(canonical_source)} characters"
+            if len(canonical_source) >= MIN_IDENTITY_SOURCE_CHARACTERS
+            else f"{source_units} linguistic units"
+        )
         return [
             f"{location}: target is unchanged from the source across "
-            f"{len(canonical_source)} characters; translation identity is blocked"
+            f"{measured}; translation identity is blocked"
         ]
     return []
 
