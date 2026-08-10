@@ -528,6 +528,68 @@ def subtitle_segments(text: str) -> list[str]:
     return segments
 
 
+def detect_content_format(text: str) -> str:
+    """Infer a structured format from measurable syntax, without caller trust."""
+    stripped = text.lstrip("\ufeff\n\r\t ")
+    if not stripped:
+        return "text"
+    if stripped[:1] in {"{", "["}:
+        try:
+            json.loads(stripped)
+            return "json"
+        except json.JSONDecodeError:
+            pass
+    if re.search(
+        r"<(?:!doctype\s+html|html|head|body|main|section|article|nav|header|footer|div|p|h[1-6])\b",
+        stripped,
+        re.IGNORECASE,
+    ):
+        return "html"
+    if stripped.startswith("<"):
+        try:
+            ET.fromstring(stripped)
+            return "xml"
+        except ET.ParseError:
+            pass
+    if re.search(r"^msg(?:id|str|ctxt)\b", text, re.MULTILINE):
+        return "po"
+    if APPLE_STRING.search(text):
+        return "strings"
+    if TIMESTAMP.search(text) or re.search(r"^Dialogue:", text, re.MULTILINE):
+        return "subtitle"
+    return "text"
+
+
+def linguistic_segments(text: str, selected_format: str) -> list[str]:
+    """Extract human-language segments for volume checks in one known format."""
+    if selected_format == "json":
+        try:
+            return json_segments(json.loads(text.lstrip("\ufeff")))
+        except json.JSONDecodeError:
+            return [text]
+    if selected_format == "html":
+        return html_segments(text)
+    if selected_format == "xml":
+        return xml_segments(text)
+    if selected_format == "po":
+        return po_segments(text)
+    if selected_format == "strings":
+        return apple_segments(text)
+    if selected_format == "subtitle":
+        return subtitle_segments(text)
+    return [text]
+
+
+def translation_volume_errors(source: str, target: str) -> list[str]:
+    """Run the unconditional, auto-detected volume gate used by MCP release."""
+    selected_format = detect_content_format(source)
+    return volume_errors(
+        linguistic_segments(source, selected_format),
+        linguistic_segments(target, selected_format),
+        "$",
+    )
+
+
 def read_utf8(path: Path) -> tuple[str | None, list[str]]:
     try:
         return path.read_text(encoding="utf-8"), []
