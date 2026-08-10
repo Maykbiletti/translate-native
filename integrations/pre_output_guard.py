@@ -25,6 +25,7 @@ def main() -> int:
         result = QUALITY.verify_receipt(
             request["release_token"], request["source_text"], request["target_text"],
             request["language"], QUALITY.load_or_create_key(key_path),
+            request.get("content_type", "prose"), request.get("short_text_reviewed") is True,
         )
     except (KeyError, json.JSONDecodeError, OSError) as error:
         print(json.dumps({"allow": False, "error": str(error)}))
