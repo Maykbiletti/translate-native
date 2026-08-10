@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -71,6 +72,22 @@ class LanguageGuardMCPTests(unittest.TestCase):
             [sys.executable, str(SERVER), "serve"], input="\ufeff" + request,
             text=True, capture_output=True, check=False, timeout=5,
         )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("release_translation", result.stdout)
+
+    def test_mcp_starts_from_isolated_installed_scripts_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            installed_scripts = Path(directory) / "scripts"
+            shutil.copytree(SERVER.parent, installed_scripts)
+            request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"
+            result = subprocess.run(
+                [sys.executable, str(installed_scripts / "blun_language_guard.py"), "serve"],
+                input=request,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("release_translation", result.stdout)
 
