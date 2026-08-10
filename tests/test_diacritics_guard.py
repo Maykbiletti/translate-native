@@ -56,6 +56,17 @@ class DiacriticsCheckerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_language_without_diacritics_rules_is_explained_and_passes(self) -> None:
+        result = run_checker("Plain English text without special marks.", "en")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no deterministic diacritics rules", result.stdout)
+        self.assertIn("native-orthography review is still required", result.stdout)
+
+    def test_unknown_bcp47_tag_still_runs_unicode_check(self) -> None:
+        result = run_checker("Clean text.", "x-test")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("x-test", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
