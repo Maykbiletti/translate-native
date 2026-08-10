@@ -63,6 +63,7 @@ TRANSLATABLE_META_PROPERTIES = {
 }
 MIN_TOTAL_SOURCE_UNITS = 80
 MIN_SEGMENT_SOURCE_UNITS = 24
+MIN_IDENTITY_SOURCE_CHARACTERS = 200
 
 
 def linguistic_units(text: str) -> int:
@@ -71,6 +72,29 @@ def linguistic_units(text: str) -> int:
     for _, pattern in TOKEN_PATTERNS:
         masked = pattern.sub("", masked)
     return sum(unicodedata.category(character)[0] in {"L", "N"} for character in masked)
+
+
+def canonical_identity_text(text: str) -> str:
+    """Normalize transport-only differences without hiding changed characters."""
+    return unicodedata.normalize(
+        "NFC",
+        text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n"),
+    ).strip()
+
+
+def identity_errors(source: str, target: str, location: str = "$") -> list[str]:
+    """Block a substantial target that is still the unchanged source."""
+    canonical_source = canonical_identity_text(source)
+    canonical_target = canonical_identity_text(target)
+    if (
+        len(canonical_source) >= MIN_IDENTITY_SOURCE_CHARACTERS
+        and canonical_source == canonical_target
+    ):
+        return [
+            f"{location}: target is unchanged from the source across "
+            f"{len(canonical_source)} characters; translation identity is blocked"
+        ]
+    return []
 
 
 def _cjk_dominant(text: str) -> bool:
@@ -619,7 +643,7 @@ def print_errors(errors: Iterable[str]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify Unicode normalization, structure, and protected tokens in a translation."
+        description="Verify source-target non-identity, Unicode normalization, structure, volume, and protected tokens in a translation."
     )
     parser.add_argument("source", type=Path)
     parser.add_argument("target", type=Path)
@@ -635,6 +659,7 @@ def main() -> int:
     assert source_text is not None and target_text is not None
 
     errors.extend(normalization_errors(target_text, args.target))
+    errors.extend(identity_errors(source_text, target_text, "$"))
     selected_format = args.format
     if selected_format == "auto":
         suffix = args.source.suffix.lower()
@@ -684,7 +709,7 @@ def main() -> int:
         print_errors(errors)
         return 1
     print(
-        "OK: measurable structure, protected tokens, linguistic volume, and Unicode NFC are intact. "
+        "OK: source-target identity threshold, measurable structure, protected tokens, linguistic volume, and Unicode NFC are intact. "
         "This does not prove semantic fidelity, completeness, or native quality."
     )
     return 0
