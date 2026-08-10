@@ -13,6 +13,8 @@ The skill and MCP instructions improve agent behavior but are not themselves non
 
 For titles, meta descriptions, and UI strings, pass the exact `content_type`. A short result with insufficient deterministic evidence returns `REVIEW_REQUIRED`, not `PASS`. `short_text_reviewed` is compatibility metadata, not proof: the caller must never use it to override a finding, and the guard does not allow it to suppress measurable ASCII-folding pressure. Genuine independence requires a host-controlled gateway or reviewer outside the releasing agent's authority. The receipt binds the review flag and content type. Transport-only BOM and CRLF/LF differences are canonicalized; mojibake and character changes are never canonicalized away.
 
+Do not treat German `ss` as deterministic evidence of ASCII folding. It is native spelling in many words and requires lexical plus locale context to distinguish it from `ß`. The measurable German folding-pressure rule therefore covers `ae`, `oe`, and `ue`; leave `ss`/`ß` ambiguity to a locale-aware dictionary or native reviewer.
+
 Translate meaning, not word order. Re-author the message so a native speaker would believe it was written in the target language from the beginning, while preserving every source claim and constraint.
 
 ## Enforce the release gate

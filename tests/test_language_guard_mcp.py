@@ -138,6 +138,31 @@ class LanguageGuardMCPTests(unittest.TestCase):
         })
         self.assertTrue(report["release_allowed"], report)
 
+    def test_correct_german_double_s_never_counts_as_ascii_folding(self) -> None:
+        correct_ui_copy = (
+            "Ihre Adresse wurde gespeichert.",
+            "Das Passwort muss mindestens acht Zeichen haben.",
+            "Sie müssen angemeldet sein, um fortzufahren.",
+            "Der Prozess läuft, bitte schließen Sie das Fenster nicht.",
+            "Wir wissen, dass Sie interessiert sind.",
+            "Grösse und Gewicht eingeben",
+            "Passwort zurücksetzen",
+            "Datei erfolgreich hochgeladen",
+        )
+        for candidate in correct_ui_copy:
+            with self.subTest(candidate=candidate):
+                report = MODULE.validate_text(candidate, "de-DE", content_type="prose")
+                codes = {finding["code"] for finding in report["findings"]}
+                self.assertNotIn("ascii-folding-pressure", codes)
+
+    def test_german_attack_still_blocks_without_double_s_counter(self) -> None:
+        report = MODULE.validate_text(
+            "Haendler pruefen taeglich die Qualitaet im Buero. Jeder Kaeufer erhaelt Zugang zum Gebaeude.",
+            "de-DE",
+            content_type="prose",
+        )
+        self.assertIn("ascii-folding-pressure", {finding["code"] for finding in report["findings"]})
+
     def test_independently_reviewed_short_title_can_pass(self) -> None:
         report = MODULE.validate_text(
             "Bygg appar snabbare", "sv-SE", content_type="title", short_text_reviewed=True,
