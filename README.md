@@ -139,6 +139,12 @@ Version 5.2 measures conventional ASCII-folding pressure for German, Swedish, Da
 
 Version 5.2.1 removes German `ss` from that measurement. Unlike `ae`, `oe`, and `ue`, `ss` is frequently correct native spelling (`wissen`, `dass`, `interessiert`) and cannot be classified as a `ß` replacement without lexical and locale context. The guard deliberately leaves cases such as `Grösse` to a future `de-DE`/`de-AT`/`de-CH` dictionary-aware check instead of creating a broad false positive.
 
+### Version 5.3: quantity is part of integrity
+
+`translation_guard.py` now measures linguistic volume in addition to tags and protected tokens. It compares total Unicode letter/number volume, non-empty linguistic segment counts, and aligned segment coverage for text, JSON/ARB, HTML, XML/XLIFF/Android resources, PO, Apple strings, and subtitles. Script-aware thresholds allow naturally compact CJK translations while blocking major omissions such as a 64-unit target derived from a 224-unit source.
+
+A successful deterministic guard now says exactly what it proves: measurable structure, protected tokens, linguistic volume, and Unicode integrity. It explicitly does **not** prove semantic fidelity, true completeness, or native quality. A literal translation can have the right length and still fail the native-language gate.
+
 Other scripts cannot always be reconstructed from stripped ASCII without a dictionary or native model. The guard reports only what it can measure and never claims that this heuristic proves correct spelling. Strong independence still requires the external Language Gateway and reviewer to run outside the releasing agent's authority.
 
 ## Version 4 foundation: signed release receipts
