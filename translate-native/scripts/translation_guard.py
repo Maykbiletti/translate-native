@@ -64,6 +64,11 @@ TRANSLATABLE_META_PROPERTIES = {
 MIN_TOTAL_SOURCE_UNITS = 80
 MIN_SEGMENT_SOURCE_UNITS = 24
 MIN_IDENTITY_SOURCE_CHARACTERS = 200
+MIN_SEGMENT_IDENTITY_UNITS = 24
+COPYRIGHT_MARKER = re.compile(
+    r"^(?:copyright\b|[^\n]{0,32}(?:©|\(c\)))",
+    re.IGNORECASE,
+)
 
 
 def linguistic_units(text: str) -> int:
@@ -82,19 +87,96 @@ def canonical_identity_text(text: str) -> str:
     ).strip()
 
 
-def identity_errors(source: str, target: str, location: str = "$") -> list[str]:
-    """Block a substantial target that is still the unchanged source."""
+def _actionable_unchanged_segment(source: str, target: str) -> tuple[str, int] | None:
     canonical_source = canonical_identity_text(source)
     canonical_target = canonical_identity_text(target)
+    source_units = linguistic_units(canonical_source)
     if (
-        len(canonical_source) >= MIN_IDENTITY_SOURCE_CHARACTERS
-        and canonical_source == canonical_target
+        canonical_source == canonical_target
+        and (
+            source_units >= MIN_SEGMENT_IDENTITY_UNITS
+            or COPYRIGHT_MARKER.match(canonical_source) is not None
+        )
     ):
+        return canonical_source, source_units
+    return None
+
+
+def identity_errors(
+    source: str | list[str],
+    target: str | list[str],
+    location: str = "$",
+    segment_locations: list[str] | None = None,
+) -> list[str]:
+    """Block unchanged complete inputs or aligned linguistic segments."""
+    if isinstance(source, list) and isinstance(target, list):
+        if len(source) != len(target):
+            # Structure and volume checks own count mismatches. Pairing shifted
+            # lists here could blame an unrelated segment for being unchanged.
+            return []
+        errors: list[str] = []
+        for index, (source_segment, target_segment) in enumerate(zip(source, target)):
+            segment_location = (
+                segment_locations[index]
+                if segment_locations is not None and index < len(segment_locations)
+                else f"{location}[{index}]"
+            )
+            unchanged = _actionable_unchanged_segment(source_segment, target_segment)
+            if unchanged is not None:
+                _, source_units = unchanged
+                errors.append(
+                    f"{segment_location}: linguistic segment is unchanged from the source "
+                    f"across {source_units} units; untranslated segment is blocked"
+                )
+        return errors
+
+    if not isinstance(source, str) or not isinstance(target, str):
+        return []
+    canonical_source = canonical_identity_text(source)
+    canonical_target = canonical_identity_text(target)
+    unchanged = _actionable_unchanged_segment(canonical_source, canonical_target)
+    if unchanged is not None:
+        _, source_units = unchanged
+        measured = (
+            f"{len(canonical_source)} characters"
+            if len(canonical_source) >= MIN_IDENTITY_SOURCE_CHARACTERS
+            else f"{source_units} linguistic units"
+        )
         return [
             f"{location}: target is unchanged from the source across "
-            f"{len(canonical_source)} characters; translation identity is blocked"
+            f"{measured}; translation identity is blocked"
         ]
     return []
+
+
+def unordered_identity_errors(
+    source_segments: list[str],
+    target_segments: list[str],
+    location: str = "$segments",
+    source_locations: list[str] | None = None,
+) -> list[str]:
+    """Find unchanged linguistic segments even when target order changes."""
+    target_counts = Counter(canonical_identity_text(segment) for segment in target_segments)
+    errors: list[str] = []
+    for index, source_segment in enumerate(source_segments):
+        canonical_source = canonical_identity_text(source_segment)
+        if not target_counts[canonical_source]:
+            continue
+        unchanged = _actionable_unchanged_segment(source_segment, canonical_source)
+        if unchanged is None:
+            continue
+        target_counts[canonical_source] -= 1
+        _, source_units = unchanged
+        segment_location = (
+            source_locations[index]
+            if source_locations is not None and index < len(source_locations)
+            else f"{location}[{index}]"
+        )
+        errors.append(
+            f"{segment_location}: linguistic segment is unchanged from the source "
+            f"across {source_units} units; untranslated segment is blocked"
+        )
+    return errors
 
 
 def _cjk_dominant(text: str) -> bool:
@@ -155,10 +237,33 @@ def volume_errors(source_segments: list[str], target_segments: list[str], locati
 
 def json_segments(value: Any) -> list[str]:
     if isinstance(value, dict):
-        return [segment for child in value.values() for segment in json_segments(child)]
+        # JSON object order is not semantic. Sort keys so source and target
+        # segments stay aligned even when a formatter reorders properties.
+        return [
+            segment
+            for key in sorted(value)
+            for segment in json_segments(value[key])
+        ]
     if isinstance(value, list):
         return [segment for child in value for segment in json_segments(child)]
     return [value] if isinstance(value, str) else []
+
+
+def json_located_segments(value: Any, path: str = "$") -> list[tuple[str, str]]:
+    """Return JSON string values with stable semantic paths."""
+    if isinstance(value, dict):
+        return [
+            segment
+            for key in sorted(value)
+            for segment in json_located_segments(value[key], f"{path}.{key}")
+        ]
+    if isinstance(value, list):
+        return [
+            segment
+            for index, child in enumerate(value)
+            for segment in json_located_segments(child, f"{path}[{index}]")
+        ]
+    return [(path, value)] if isinstance(value, str) else []
 
 
 def jsonld_segments(value: Any, key: str | None = None) -> list[str]:
@@ -188,11 +293,33 @@ class LinguisticHTMLParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.segments: list[str] = []
-        self.stack: list[tuple[str, str]] = []
+        self.locations: list[str] = []
+        self.stack: list[dict[str, Any]] = []
+        self.root_children: dict[str, int] = {}
+        self.root_text_count = 0
+
+    def _append_segment(self, value: str, location: str) -> None:
+        self.segments.append(value)
+        self.locations.append(location)
+
+    def _next_element_path(self, tag: str) -> str:
+        counts = self.stack[-1]["children"] if self.stack else self.root_children
+        index = counts.get(tag, 0)
+        counts[tag] = index + 1
+        parent = self.stack[-1]["path"] if self.stack else "$html"
+        return f"{parent}/{tag}[{index}]"
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.casefold()
         attribute_map = {name.casefold(): value or "" for name, value in attrs}
-        self.stack.append((tag.casefold(), attribute_map.get("type", "").casefold()))
+        element_path = self._next_element_path(normalized_tag)
+        self.stack.append({
+            "tag": normalized_tag,
+            "type": attribute_map.get("type", "").casefold(),
+            "path": element_path,
+            "children": {},
+            "text_count": 0,
+        })
         meta_name = attribute_map.get("name", "").casefold()
         meta_property = attribute_map.get("property", "").casefold()
         for name, value in attrs:
@@ -201,7 +328,7 @@ class LinguisticHTMLParser(HTMLParser):
                 meta_name in TRANSLATABLE_META_NAMES or meta_property in TRANSLATABLE_META_PROPERTIES
             )
             if value and (normalized in TRANSLATABLE_HTML_ATTRIBUTES or linguistic_meta):
-                self.segments.append(value)
+                self._append_segment(value, f"{element_path}/@{normalized}")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
@@ -209,31 +336,46 @@ class LinguisticHTMLParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         for index in range(len(self.stack) - 1, -1, -1):
-            if self.stack[index][0] == tag.casefold():
+            if self.stack[index]["tag"] == tag.casefold():
                 del self.stack[index:]
                 break
 
     def handle_data(self, data: str) -> None:
-        current = self.stack[-1] if self.stack else ("", "")
-        if current[0] in HTML_CODE_ELEMENTS:
-            if current == ("script", "application/ld+json"):
+        current = self.stack[-1] if self.stack else None
+        current_tag = current["tag"] if current else ""
+        current_type = current["type"] if current else ""
+        if current_tag in HTML_CODE_ELEMENTS:
+            if current_tag == "script" and current_type == "application/ld+json":
                 try:
-                    self.segments.extend(jsonld_segments(json.loads(data)))
+                    for index, segment in enumerate(jsonld_segments(json.loads(data))):
+                        self._append_segment(segment, f"{current['path']}/jsonld[{index}]")
                 except json.JSONDecodeError:
                     pass
             return
         if data.strip():
-            self.segments.append(data)
+            if current:
+                text_index = current["text_count"]
+                current["text_count"] = text_index + 1
+                location = f"{current['path']}/text()[{text_index}]"
+            else:
+                text_index = self.root_text_count
+                self.root_text_count += 1
+                location = f"$html/text()[{text_index}]"
+            self._append_segment(data, location)
 
 
 def html_segments(text: str) -> list[str]:
+    return [segment for _, segment in html_located_segments(text)]
+
+
+def html_located_segments(text: str) -> list[tuple[str, str]]:
     parser = LinguisticHTMLParser()
     try:
         parser.feed(text)
         parser.close()
     except Exception:
         return []
-    return parser.segments
+    return list(zip(parser.locations, parser.segments))
 
 
 def icu_selectors(text: str, start: int) -> list[tuple[str, tuple[int, int]]]:
@@ -614,6 +756,57 @@ def translation_volume_errors(source: str, target: str) -> list[str]:
     )
 
 
+def structured_identity_errors(
+    source: str,
+    target: str,
+    selected_format: str,
+) -> list[str]:
+    """Compare aligned user-visible segments after whole-input identity passes."""
+    if selected_format == "text":
+        return []
+    if selected_format == "json":
+        try:
+            source_data = json.loads(source.lstrip("\ufeff"))
+            target_data = json.loads(target.lstrip("\ufeff"))
+        except json.JSONDecodeError:
+            return []
+        source_located = json_located_segments(source_data)
+        target_by_path = dict(json_located_segments(target_data))
+        common = [
+            (path, value, target_by_path[path])
+            for path, value in source_located
+            if path in target_by_path
+        ]
+        return identity_errors(
+            [source_value for _, source_value, _ in common],
+            [target_value for _, _, target_value in common],
+            "$segments",
+            [path for path, _, _ in common],
+        )
+    if selected_format == "html":
+        source_located = html_located_segments(source)
+        return unordered_identity_errors(
+            [segment for _, segment in source_located],
+            html_segments(target),
+            "$segments",
+            [path for path, _ in source_located],
+        )
+    return unordered_identity_errors(
+        linguistic_segments(source, selected_format),
+        linguistic_segments(target, selected_format),
+        "$segments",
+    )
+
+
+def translation_identity_errors(source: str, target: str) -> list[str]:
+    """Run the mandatory whole-input and auto-detected segment identity gate."""
+    whole_input_errors = identity_errors(source, target, "$")
+    if whole_input_errors:
+        return whole_input_errors
+    selected_format = detect_content_format(source)
+    return structured_identity_errors(source, target, selected_format)
+
+
 def read_utf8(path: Path) -> tuple[str | None, list[str]]:
     try:
         return path.read_text(encoding="utf-8"), []
@@ -655,11 +848,12 @@ def main() -> int:
     errors = source_errors + target_errors
     if errors:
         print_errors(errors)
-        return 1
+        return 2
     assert source_text is not None and target_text is not None
 
     errors.extend(normalization_errors(target_text, args.target))
-    errors.extend(identity_errors(source_text, target_text, "$"))
+    whole_identity_errors = identity_errors(source_text, target_text, "$")
+    errors.extend(whole_identity_errors)
     selected_format = args.format
     if selected_format == "auto":
         suffix = args.source.suffix.lower()
@@ -677,6 +871,9 @@ def main() -> int:
             selected_format = "subtitle"
         else:
             selected_format = "text"
+
+    if not whole_identity_errors:
+        errors.extend(structured_identity_errors(source_text, target_text, selected_format))
 
     if selected_format == "json":
         source_data, parse_source_errors = parse_json(source_text, args.source)
@@ -709,7 +906,7 @@ def main() -> int:
         print_errors(errors)
         return 1
     print(
-        "OK: source-target identity threshold, measurable structure, protected tokens, linguistic volume, and Unicode NFC are intact. "
+        "OK: source-target and structured-segment identity thresholds, measurable structure, protected tokens, linguistic volume, and Unicode NFC are intact. "
         "This does not prove semantic fidelity, completeness, or native quality."
     )
     return 0
