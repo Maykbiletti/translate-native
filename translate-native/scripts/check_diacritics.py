@@ -286,12 +286,19 @@ def check_file(path: Path, language: str) -> int:
         status = 1
 
     prose = mask_technical_text(text)
+    normalized_language = language.casefold().split("-", 1)[0].split("_", 1)[0]
     if language == "auto":
         languages = detect_languages(prose)
     elif language == "all":
         languages = tuple(RULES)
+    elif normalized_language not in RULES:
+        languages = ()
+        print(
+            f"{path}: no deterministic diacritics rules for {language!r}; "
+            "Unicode NFC passed, but the native-orthography review is still required."
+        )
     else:
-        languages = (language,)
+        languages = (normalized_language,)
     for line, code, found, suggestion in iter_findings(prose, languages):
         print(f"{path}:{line}: [{code}] {found!r} -> check {suggestion!r}")
         status = 1
@@ -305,9 +312,11 @@ def main() -> int:
     parser.add_argument("files", nargs="+", type=Path)
     parser.add_argument(
         "--language",
-        choices=("auto", "all", *RULES.keys()),
         default="auto",
-        help="target language; default: auto",
+        help=(
+            "target language or BCP 47 tag; unsupported languages still receive "
+            "Unicode checks and exit successfully when clean; default: auto"
+        ),
     )
     args = parser.parse_args()
 
