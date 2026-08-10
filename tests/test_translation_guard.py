@@ -198,6 +198,19 @@ class VolumeIntegrityTests(unittest.TestCase):
         self.assertTrue(errors)
         self.assertIn("target linguistic volume", "\n".join(errors))
 
+    def test_substantial_unchanged_source_is_blocked(self) -> None:
+        self.assertTrue(GUARD.identity_errors(self.SOURCE, self.SOURCE))
+
+    def test_transport_normalization_cannot_bypass_identity(self) -> None:
+        source = (self.SOURCE + "\r\n") * 2
+        target = "\ufeff" + source.replace("\r\n", "\n")
+        self.assertTrue(GUARD.identity_errors(source, target))
+
+    def test_short_shared_terms_do_not_trigger_identity(self) -> None:
+        for term in ("BLUN King", "E-Mail"):
+            with self.subTest(term=term):
+                self.assertEqual([], GUARD.identity_errors(term, term))
+
     def test_equal_volume_literal_text_is_not_misrepresented_as_semantic_proof(self) -> None:
         literal = (
             "BLUN connects powerful AI models with complete workspaces for apps, websites, "
@@ -238,6 +251,19 @@ class VolumeIntegrityTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 1)
         self.assertIn("linguistic volume", result.stderr)
+
+    def test_cli_returns_nonzero_for_unchanged_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.txt"
+            target = Path(directory) / "target.txt"
+            source.write_text(self.SOURCE, encoding="utf-8")
+            target.write_text(self.SOURCE, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), source, target],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("target is unchanged from the source", result.stderr)
 
 
 class AdditionalFormatTests(unittest.TestCase):
