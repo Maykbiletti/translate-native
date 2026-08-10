@@ -16,6 +16,9 @@ NATIVE_ORTHOGRAPHY = (
     ROOT / "translate-native" / "references" / "native-orthography.md"
 )
 REGRESSIONS = ROOT / "evals" / "regressions.jsonl"
+OPENAI_METADATA = ROOT / "translate-native" / "agents" / "openai.yaml"
+MCP_SERVER = ROOT / "translate-native" / "scripts" / "blun_language_guard.py"
+AGENT_RULES = ROOT / "integrations" / "AGENT_RULES.md"
 
 
 class SkillContractTests(unittest.TestCase):
@@ -56,6 +59,15 @@ class SkillContractTests(unittest.TestCase):
         ):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, content)
+
+    def test_enforced_release_gate_is_declared_everywhere(self) -> None:
+        skill = SKILL.read_text(encoding="utf-8")
+        metadata = OPENAI_METADATA.read_text(encoding="utf-8")
+        rules = AGENT_RULES.read_text(encoding="utf-8")
+        self.assertIn("release_translation", skill)
+        self.assertIn('value: "blun-language-guard"', metadata)
+        self.assertIn("release_allowed: true", rules)
+        self.assertTrue(MCP_SERVER.is_file())
 
     def test_swedish_agent_copy_is_a_documented_regression_case(self) -> None:
         content = TRANSLATIONESE_REVIEW.read_text(encoding="utf-8")

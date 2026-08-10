@@ -11,3 +11,8 @@ policy:
   - "api"
   - "atlas"
   allow_implicit_invocation: true
+dependencies:
+  tools:
+  - type: "mcp"
+    value: "blun-language-guard"
+    description: "Mandatory Unicode, orthography, and translation release gate"
