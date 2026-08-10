@@ -78,6 +78,20 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.assertEqual(report["status"], "REVIEW_REQUIRED")
         self.assertFalse(report["release_allowed"])
 
+    def test_real_ascii_folded_blun_seo_copy_never_auto_passes(self) -> None:
+        for candidate, content_type in (
+            ("BLUN Imagine – bildgenerering och bildbearbetning", "title"),
+            ("Skapa bilder, redigera material och bygg visuella arbetsfloden med BLUN Imagine.", "meta_description"),
+        ):
+            with self.subTest(candidate=candidate):
+                report = MODULE.validate_text(candidate, "sv-SE", content_type=content_type)
+                self.assertEqual(report["status"], "REVIEW_REQUIRED")
+                self.assertFalse(report["release_allowed"])
+
+    def test_short_title_with_native_character_still_requires_review(self) -> None:
+        report = MODULE.validate_text("Bygg bättre appar", "sv-SE", content_type="title")
+        self.assertEqual(report["status"], "REVIEW_REQUIRED")
+
     def test_independently_reviewed_short_title_can_pass(self) -> None:
         report = MODULE.validate_text(
             "Bygg appar snabbare", "sv-SE", content_type="title", short_text_reviewed=True,
