@@ -246,6 +246,87 @@ class LanguageGuardMCPTests(unittest.TestCase):
         })
         self.assertTrue(report["release_allowed"], report)
 
+    def test_release_blocks_one_unchanged_json_segment(self) -> None:
+        source = json.dumps({
+            "title": "Important information for your project application",
+            "notice": "Please observe all deadlines for every project submission.",
+        })
+        target = json.dumps({
+            "title": "Viktig information för din projektansökan",
+            "notice": "Please observe all deadlines for every project submission.",
+        }, ensure_ascii=False)
+        report = MODULE.release_translation({
+            "source_text": source,
+            "target_text": target,
+            "language": "sv-SE",
+            "attestations": self._attestations(),
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertIn(
+            "unchanged-linguistic-segment",
+            {finding["code"] for finding in report["findings"]},
+        )
+
+    def test_release_allows_translated_json_and_shared_fixed_segments(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
+        source = json.dumps({
+            "product": "BLUN King",
+            "notice": "Please observe all deadlines for every project submission.",
+            "copyright": "Copyright © 2026 BLUN. All rights reserved.",
+        }, ensure_ascii=False)
+        target = json.dumps({
+            "copyright": "Copyright © 2026 BLUN. All rights reserved.",
+            "notice": "Observera alla tidsfrister för varje projektansökan.",
+            "product": "BLUN King",
+        }, ensure_ascii=False)
+        report = MODULE.release_translation({
+            "source_text": source,
+            "target_text": target,
+            "language": "sv-SE",
+            "attestations": self._attestations(),
+        })
+        self.assertTrue(report["release_allowed"], report)
+
+    def test_release_blocks_reordered_unchanged_html_segments(self) -> None:
+        first = "Please observe every deadline before submitting your complete application."
+        second = "Contact the project office if you need additional information or assistance."
+        source = f"<main><p>{first}</p><p>{second}</p></main>"
+        target = f"<main><p>{second}</p><p>{first}</p></main>"
+        report = MODULE.release_translation({
+            "source_text": source,
+            "target_text": target,
+            "language": "en",
+            "attestations": self._attestations(),
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertIn(
+            "unchanged-linguistic-segment",
+            {finding["code"] for finding in report["findings"]},
+        )
+
+    def test_release_blocks_prose_that_merely_mentions_copyright(self) -> None:
+        source = json.dumps({
+            "title": "Important information about usage and licensing",
+            "notice": "Copyright © 2026 BLUN provides software for every customer",
+        })
+        target = json.dumps({
+            "title": "Viktig information om användning och licensiering",
+            "notice": "Copyright © 2026 BLUN provides software for every customer",
+        }, ensure_ascii=False)
+        report = MODULE.release_translation({
+            "source_text": source,
+            "target_text": target,
+            "language": "sv-SE",
+            "attestations": self._attestations(),
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertIn(
+            "unchanged-linguistic-segment",
+            {finding["code"] for finding in report["findings"]},
+        )
+
     def test_release_auto_detects_html_and_ignores_preserved_script_bulk(self) -> None:
         source_copy = (
             "Vollständiger Inhalt für eine wichtige Produktseite mit Funktionen, Vorteilen und "

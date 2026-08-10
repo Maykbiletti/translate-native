@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -73,6 +74,23 @@ class JsonTests(unittest.TestCase):
         self.assertIn("array length changed", message)
         self.assertIn("non-string value changed", message)
         self.assertIn("type changed", message)
+
+    def test_reordered_json_keys_keep_segment_identity_alignment(self) -> None:
+        source = {
+            "title": "Wichtige Informationen für Ihren Projektantrag",
+            "hinweis": "Bitte beachten Sie die Fristen …",
+        }
+        target = {
+            "hinweis": "Bitte beachten Sie die Fristen …",
+            "title": "Viktig information för din projektansökan",
+        }
+        errors = GUARD.identity_errors(
+            GUARD.json_segments(source),
+            GUARD.json_segments(target),
+            "$segments",
+        )
+        self.assertEqual(1, len(errors))
+        self.assertIn("linguistic segment is unchanged", errors[0])
 
 
 class IcuTests(unittest.TestCase):
@@ -173,6 +191,15 @@ class HtmlTests(unittest.TestCase):
             GUARD.jsonld_segments(document),
         )
 
+    def test_reordered_unchanged_html_segments_are_blocked(self) -> None:
+        first = "Please observe every deadline before submitting your complete application."
+        second = "Contact the project office if you need additional information or assistance."
+        source = f"<main><p>{first}</p><p>{second}</p></main>"
+        target = f"<main><p>{second}</p><p>{first}</p></main>"
+        errors = GUARD.structured_identity_errors(source, target, "html")
+        self.assertEqual(2, len(errors))
+        self.assertTrue(all("$html/main[0]/p" in error for error in errors))
+
 
 class UnicodeTests(unittest.TestCase):
     def test_accepts_nfc(self) -> None:
@@ -210,6 +237,34 @@ class VolumeIntegrityTests(unittest.TestCase):
         for term in ("BLUN King", "E-Mail"):
             with self.subTest(term=term):
                 self.assertEqual([], GUARD.identity_errors(term, term))
+
+    def test_short_brand_and_copyright_segments_can_remain_unchanged(self) -> None:
+        shared = ["BLUN King", "Copyright © 2026 BLUN. All rights reserved."]
+        self.assertEqual([], GUARD.identity_errors(shared, shared, "$segments"))
+
+    def test_prose_mentioning_copyright_is_not_a_fixed_legal_line(self) -> None:
+        prose = "Copyright © 2026 BLUN provides software for every customer"
+        errors = GUARD.identity_errors([prose], [prose], "$segments")
+        self.assertEqual(1, len(errors))
+        self.assertIn("unchanged from the source", errors[0])
+
+    def test_one_unchanged_structured_segment_is_blocked(self) -> None:
+        source = {
+            "title": "Wichtige Informationen für Ihren Projektantrag",
+            "hinweis": "Bitte beachten Sie die Fristen …",
+        }
+        target = {
+            "title": "Viktig information för din projektansökan",
+            "hinweis": "Bitte beachten Sie die Fristen …",
+        }
+        errors = GUARD.structured_identity_errors(
+            json.dumps(source, ensure_ascii=False),
+            json.dumps(target, ensure_ascii=False),
+            "json",
+        )
+        self.assertEqual(1, len(errors))
+        self.assertIn("$.hinweis", errors[0])
+        self.assertIn("untranslated segment is blocked", errors[0])
 
     def test_equal_volume_literal_text_is_not_misrepresented_as_semantic_proof(self) -> None:
         literal = (
@@ -264,6 +319,40 @@ class VolumeIntegrityTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 1)
         self.assertIn("target is unchanged from the source", result.stderr)
+
+    def test_cli_blocks_one_unchanged_json_value(self) -> None:
+        source_data = {
+            "title": "Wichtige Informationen für Ihren Projektantrag",
+            "hinweis": "Bitte beachten Sie die Fristen …",
+        }
+        target_data = {
+            "title": "Viktig information för din projektansökan",
+            "hinweis": "Bitte beachten Sie die Fristen …",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "i_q.json"
+            target = Path(directory) / "i_z.json"
+            source.write_text(json.dumps(source_data, ensure_ascii=False), encoding="utf-8")
+            target.write_text(json.dumps(target_data, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), source, target],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(1, result.returncode)
+        self.assertIn("$.hinweis", result.stderr)
+        self.assertIn("linguistic segment is unchanged", result.stderr)
+
+    def test_cli_missing_paths_are_not_misreported_as_identity_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "missing-source.txt"
+            target = Path(directory) / "missing-target.txt"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), source, target],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("cannot read file", result.stderr)
+        self.assertNotIn("unchanged from the source", result.stderr)
 
 
 class AdditionalFormatTests(unittest.TestCase):
