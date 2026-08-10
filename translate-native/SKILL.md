@@ -7,6 +7,14 @@ description: Translate, localize, transcreate, rewrite, or proofread human-langu
 
 Translate meaning, not word order. Re-author the message so a native speaker would believe it was written in the target language from the beginning, while preserving every source claim and constraint.
 
+## Enforce the release gate
+
+When the `blun-language-guard` MCP server is available, call `release_translation` after the seven-pass quality gate and before delivering any translation. Supply the complete source, complete target, exact language tag, and seven truthful pass attestations. Delivery is allowed only when the server returns `release_allowed: true` and a release token for that exact source-target pair.
+
+Never invent, reuse, alter, or expose a release token. If the gate returns `BLOCK`, correct the target and run it again. If the MCP server is unavailable, run the bundled structural and orthography guards directly. Fail closed for publication-grade or structured work; for ordinary conversational translation, disclose that the enforced MCP validation was unavailable.
+
+The MCP gate enforces execution discipline and deterministic checks. It does not replace native judgment and cannot independently prove meaning or fluency.
+
 ## Run one combined release gate
 
 Treat native wording and native orthography as one inseparable workflow. Do not rely on a second skill being installed, selected, or implicitly invoked. This skill itself must enforce both:
