@@ -45,6 +45,13 @@ def _load_quality_module():
 QUALITY = _load_quality_module()
 VERSION = QUALITY.VERSION
 KEY_PATH = Path(os.environ.get("BLUN_LANGUAGE_GUARD_KEY_FILE", Path.home() / ".config" / "blun-language-guard" / "signing.key"))
+LANGUAGE_CHARACTER_PROFILES = {
+    "sv": set("åäöÅÄÖ"),
+    "de": set("äöüßÄÖÜẞ"),
+    "es": set("áéíóúüñ¿¡ÁÉÍÓÚÜÑ"),
+    "cs": set("áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"),
+    "ca": set("àçèéíïòóúü·ÀÇÈÉÍÏÒÓÚÜ"),
+}
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,15 @@ def validate_text(text: str, language: str = "auto", glossary: dict[str, Any] | 
     script = QUALITY.script_report(text, language)
     if script.get("status") == "fail":
         findings.append(Finding("script-mismatch", json.dumps(script, ensure_ascii=False), language=language))
+    base_language = language.casefold().replace("_", "-").split("-", 1)[0]
+    profile = LANGUAGE_CHARACTER_PROFILES.get(base_language)
+    profile_prose = DIACRITICS.mask_technical_text(text)
+    if profile and len(profile_prose) >= 200 and not any(character in profile for character in profile_prose):
+        findings.append(Finding(
+            "missing-language-character-profile",
+            f"Long {base_language} text contains none of the language's characteristic native characters; possible wholesale ASCII folding.",
+            language=language,
+        ))
     for glossary_finding in QUALITY.glossary_findings(text, glossary or {}):
         findings.append(Finding(glossary_finding["code"], json.dumps(glossary_finding, ensure_ascii=False), language=language))
 
@@ -291,7 +307,7 @@ def serve() -> int:
         if not line.strip():
             continue
         try:
-            response = handle_message(json.loads(line))
+            response = handle_message(json.loads(line.lstrip("\ufeff")))
         except Exception as error:  # Keep the MCP process alive after malformed input.
             response = {
                 "jsonrpc": "2.0",
