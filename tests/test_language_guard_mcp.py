@@ -73,6 +73,17 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.assertEqual(report["status"], "BLOCK")
         self.assertEqual(report["findings"][0]["code"], "unicode-not-nfc")
 
+    def test_short_swedish_title_requires_native_review(self) -> None:
+        report = MODULE.validate_text("Bygg appar snabbare", "sv-SE", content_type="title")
+        self.assertEqual(report["status"], "REVIEW_REQUIRED")
+        self.assertFalse(report["release_allowed"])
+
+    def test_independently_reviewed_short_title_can_pass(self) -> None:
+        report = MODULE.validate_text(
+            "Bygg appar snabbare", "sv-SE", content_type="title", short_text_reviewed=True,
+        )
+        self.assertEqual(report["status"], "PASS")
+
     def test_release_requires_every_attestation(self) -> None:
         report = MODULE.release_translation(
             {
