@@ -26,5 +26,6 @@ Assume the Version 5 gateway and automatic updater shipped and failed in product
 | A translation preserves tags but loses most text | Truncated target reports `structure intact` | Measure total linguistic units, segment count, and aligned segment coverage with script-aware thresholds | 71% omission exits nonzero while full and CJK controls pass |
 | The CLI catches an omission but mandatory MCP release does not | A fully attested truncated target receives a token | Load the same auto-detected volume primitive inside `release_translation`; never trust a caller format switch | 71% omission stays blocked with all seven attestations set to true |
 | Repo tests pass but the installed MCP cannot import a dependency | Server path resolves to a nonexistent repository subdirectory | Resolve bundled modules relative to `__file__`; start a copied isolated installation in tests | `tools/list` succeeds from a temporary flat `scripts/` directory |
+| An untranslated source is copied unchanged into the target | Volume is 100%, so quantity checks pass | Compare the complete canonicalized source and target before parsing subtrees; block identity from 200 characters | Full unchanged page blocks in CLI and MCP while short shared names pass |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
