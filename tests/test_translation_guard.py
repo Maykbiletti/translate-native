@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import tempfile
 import unicodedata
@@ -160,6 +161,18 @@ class HtmlTests(unittest.TestCase):
         broken = target.replace("https://example.com/a", "https://example.com/b")
         self.assertTrue(GUARD.compare_html(source, broken))
 
+    def test_jsonld_volume_counts_copy_but_not_urls_or_schema_types(self) -> None:
+        document = {
+            "@type": "Article",
+            "headline": "A complete human-language headline",
+            "url": "https://example.com/a",
+            "publisher": {"@type": "Organization", "name": "BLUN"},
+        }
+        self.assertEqual(
+            ["A complete human-language headline", "BLUN"],
+            GUARD.jsonld_segments(document),
+        )
+
 
 class UnicodeTests(unittest.TestCase):
     def test_accepts_nfc(self) -> None:
@@ -170,6 +183,54 @@ class UnicodeTests(unittest.TestCase):
         errors = GUARD.normalization_errors(decomposed, Path("target.txt"))
         self.assertEqual(1, len(errors))
         self.assertIn("not Unicode NFC-normalized", errors[0])
+
+
+class VolumeIntegrityTests(unittest.TestCase):
+    SOURCE = (
+        "BLUN verbindet leistungsstarke KI-Modelle mit vollständigen Arbeitsbereichen für Apps, "
+        "Websites, Softwareentwicklung, Sprachen, Bilder und automatisierte Abläufe. Statt für "
+        "jeden Arbeitsschritt ein neues Werkzeug zu öffnen, arbeiten alle Komponenten zusammen."
+    )
+
+    def test_major_plain_text_truncation_is_blocked(self) -> None:
+        truncated = self.SOURCE[:64]
+        errors = GUARD.volume_errors([self.SOURCE], [truncated])
+        self.assertTrue(errors)
+        self.assertIn("target linguistic volume", "\n".join(errors))
+
+    def test_equal_volume_literal_text_is_not_misrepresented_as_semantic_proof(self) -> None:
+        literal = (
+            "BLUN connects powerful AI models with complete workspaces for apps, websites, "
+            "software development, languages, images, and automated workflows. Instead of "
+            "opening a new tool for each work step, all components work together."
+        )
+        self.assertEqual([], GUARD.volume_errors([self.SOURCE], [literal]))
+
+    def test_compact_cjk_translation_is_not_rejected_by_latin_ratio(self) -> None:
+        chinese = (
+            "BLUN将强大的人工智能模型与完整工作空间整合到一个欧洲平台。"
+            "模型、智能代理、接口和服务器可以共同处理应用、网站、代码、语言、图像与自动化流程。"
+        )
+        self.assertEqual([], GUARD.volume_errors([self.SOURCE], [chinese]))
+
+    def test_html_segment_and_volume_loss_is_blocked(self) -> None:
+        source = "<main><h1>Vollständige Überschrift für das Produkt</h1><p>" + self.SOURCE + "</p></main>"
+        target = "<main><h1>Complete product headline</h1><p>Short fragment.</p></main>"
+        errors = GUARD.volume_errors(GUARD.html_segments(source), GUARD.html_segments(target))
+        self.assertTrue(errors)
+
+    def test_cli_returns_nonzero_for_seventy_percent_omission(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.txt"
+            target = Path(directory) / "target.txt"
+            source.write_text(self.SOURCE, encoding="utf-8")
+            target.write_text(self.SOURCE[:64], encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), source, target],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linguistic volume", result.stderr)
 
 
 class AdditionalFormatTests(unittest.TestCase):
@@ -198,6 +259,16 @@ class AdditionalFormatTests(unittest.TestCase):
         target = '1\n00:00:01,000 --> 00:00:03,000\nHallo\n'
         self.assertEqual([], GUARD.compare_subtitles(source, target))
         self.assertTrue(GUARD.compare_subtitles(source, target.replace("03,000", "04,000")))
+
+    def test_ass_dialogue_text_is_included_in_volume_check(self) -> None:
+        source = (
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            "Dialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,This complete subtitle must be measured.\n"
+        )
+        self.assertEqual(
+            ["This complete subtitle must be measured."],
+            GUARD.subtitle_segments(source),
+        )
 
 
 if __name__ == "__main__":
