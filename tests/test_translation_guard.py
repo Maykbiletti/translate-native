@@ -259,6 +259,12 @@ class VolumeIntegrityTests(unittest.TestCase):
         notice = "Copyright © 2026 The Walt Disney Company. All rights reserved."
         self.assertEqual([], GUARD.identity_errors([notice], [notice], "$segments"))
 
+    def test_copyright_notice_without_year_is_not_fixed_content(self) -> None:
+        notice = "Copyright © BLUN International Software Company"
+        errors = GUARD.identity_errors([notice], [notice], "$segments")
+        self.assertEqual(1, len(errors))
+        self.assertIn("unchanged from the source", errors[0])
+
     def test_one_unchanged_structured_segment_is_blocked(self) -> None:
         source = {
             "title": "Wichtige Informationen für Ihren Projektantrag",

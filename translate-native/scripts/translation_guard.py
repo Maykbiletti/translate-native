@@ -124,10 +124,9 @@ def _fixed_identity_segment(text: str) -> bool:
         body = body[:rights.start()]
     body = body.strip(" .")
     year = re.match(r"^(?:19|20)\d{2}(?:\s*[-–]\s*(?:19|20)\d{2})?\s+", body)
-    if year:
-        body = body[year.end():]
-    elif "©" not in prefix.group(0) and "(c)" not in prefix.group(0).casefold():
+    if year is None:
         return False
+    body = body[year.end():]
 
     # A legal owner is a compact proper name, not a title-cased sentence. Names
     # longer than three words must end in an explicit legal-entity designator.
