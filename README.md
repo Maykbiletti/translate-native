@@ -120,7 +120,7 @@ BLUN Code is supported explicitly. Installation creates the BLUN skill symlink a
 
 ### Version 5.1: short copy and transport-safe identity
 
-Titles, meta descriptions, and UI strings below 200 characters no longer receive a false deterministic `PASS` merely because no known substitution-list word appears. When a short target contains none of its language profile characters, the gate returns `REVIEW_REQUIRED`. An independent native review may then set `short_text_reviewed: true`; that decision, together with `content_type`, is cryptographically bound into the receipt.
+Titles, meta descriptions, and UI strings below 200 characters never receive a deterministic `PASS` from character profiles or substitution lists. The gate always returns `REVIEW_REQUIRED` until an independent native review sets `short_text_reviewed: true`; that decision, together with `content_type`, is cryptographically bound into the receipt. This remains true even when the short text still contains some native characters, preventing one surviving `å`, `ä`, or `ö` from hiding another destroyed word.
 
 Text identity now distinguishes transport differences from corruption. Canonical hashes remove a leading UTF-8 BOM, normalize CRLF and lone CR to LF, and normalize Unicode to NFC. Mojibake and actual character changes remain different and invalidate the receipt.
 
