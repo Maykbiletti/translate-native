@@ -14,7 +14,7 @@
 
 # Translate Native
 
-### Meaning in. Native language out.
+### Meaning in. Native language out. Release only after proof.
 
 One universal agent skill for translations that sound written—not translated—and preserve every language's native script.
 
@@ -26,7 +26,7 @@ One universal agent skill for translations that sound written—not translated�
   <img alt="Languages" src="https://img.shields.io/badge/languages-all-E11D48?style=flat-square">
 </p>
 
-**Built by BLUN · Get it done with BLUN.**
+**Built by BLUN · Skill + MCP + enforced release gate.**
 
 </div>
 
@@ -73,6 +73,55 @@ Agents no longer need to activate a second orthography skill after translating. 
 The separate `native-diacritics` skill can still protect ordinary writing outside translation tasks. Inside a translation, its activation is optional because the full orthography contract is built directly into `translate-native`.
 
 The root [`AGENTS.md`](AGENTS.md) tells repository-aware agents to load the combined workflow and treat every model-generated translation as an untrusted draft.
+
+## Version 3: BLUN Language Guard
+
+Version 3 adds an executable MCP release gate. The skill remains responsible for meaning, native rewriting, locale fit, and orthography. The MCP server makes the release procedure inspectable and blocks deterministic defects before an agent may deliver the result.
+
+```text
+Translation request
+        ↓
+translate-native skill
+        ↓
+Native pass → fidelity pass → integrity pass
+        ↓
+release_translation MCP tool
+        ↓
+BLOCK → revise and repeat
+PASS  → one-time release token → deliver
+```
+
+The gate checks UTF-8/Unicode integrity, NFC normalization, suspicious bidirectional controls, frequent ASCII substitutions, and all seven mandatory attestations. A token is bound to the exact source, target, and language tag. Agents are forbidden to fabricate, reuse, or expose it.
+
+No deterministic linter can prove that prose is genuinely native. That is why the MCP server supplements the skill's native-language judgment instead of pretending to replace it.
+
+### Start the MCP server
+
+The server has no third-party Python dependencies:
+
+```bash
+python3 translate-native/scripts/blun_language_guard.py serve
+```
+
+Copy [`mcp-config.example.json`](mcp-server/mcp-config.example.json), replace the absolute path, and merge the `blun-language-guard` entry into the MCP configuration used by your agent CLI.
+
+Then copy the rules in [`AGENT_RULES.md`](integrations/AGENT_RULES.md) into the host's always-on instruction file:
+
+- Codex: repository or global `AGENTS.md`;
+- Claude Code: `CLAUDE.md`;
+- another MCP-compatible agent: its equivalent persistent instruction file.
+
+This combination matters. A skill can fail to trigger, and an MCP tool can remain unused. The persistent rule requires both the skill and the `release_translation` call.
+
+### Validate from the terminal
+
+The same engine can be used in hooks, CI, wrappers, or pre-publication scripts:
+
+```bash
+python3 translate-native/scripts/blun_language_guard.py validate --language sv-SE target.txt
+```
+
+Exit code `0` means the deterministic checks passed. Exit code `1` means delivery must stop. Semantic and native-quality review remains mandatory even after exit code `0`.
 
 ## Native examples
 
@@ -207,10 +256,11 @@ translate-native/
 │   └── structured-content.md
 └── scripts/
     ├── translation_guard.py
-    └── check_diacritics.py
+    ├── check_diacritics.py
+    └── blun_language_guard.py
 ```
 
-Automated tests and the GitHub Actions workflow live at repository level.
+The MCP configuration example, persistent CLI rules, automated tests, and GitHub Actions workflow live at repository level.
 
 Machine-readable failure cases live in [`evals/regressions.jsonl`](evals/regressions.jsonl). They cover Swedish translationese and model selection, German umlauts, Spanish punctuation and accents, Czech and Catalan orthography, Vietnamese tone marks, Chinese and Arabic native scripts, and Ukrainian language identity. They are regression examples, never a language allowlist.
 
