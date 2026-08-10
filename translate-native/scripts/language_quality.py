@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "5.2.1"
+VERSION = "5.3.0"
 DANGEROUS_BIDI = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e"}
 ISOLATE_OPENERS = {"\u2066", "\u2067", "\u2068"}
 ISOLATE_CLOSER = "\u2069"

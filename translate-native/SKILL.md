@@ -120,6 +120,8 @@ After editing a source/target pair, run:
 python3 scripts/translation_guard.py SOURCE TARGET
 ```
 
+The guard also measures linguistic volume and segment coverage. Treat a volume or segment-count failure as a blocking omission. Never describe exit code `0` as proof that a translation is complete, faithful, or native: it proves only the deterministic structure, protected-token, volume, and Unicode checks that actually ran.
+
 Use `--format json` for JSON regardless of the file suffix. Treat a nonzero exit as a blocking structural or protected-token defect and fix it before delivery.
 
 Use `--format html` for HTML fragments or documents. It permits native translation of linguistic attributes and recognized linguistic metadata while protecting technical metadata, structure, scripts, styles, links, code, and placeholders. The guard also supports `xml`, `po`, `strings`, and `subtitle`; auto-detection covers XML/XLIFF/Android, PO/POT, Apple strings, SRT, VTT, and ASS. ARB uses the JSON guard.

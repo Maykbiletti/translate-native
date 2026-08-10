@@ -61,6 +61,155 @@ TRANSLATABLE_META_PROPERTIES = {
     "twitter:description",
     "twitter:title",
 }
+MIN_TOTAL_SOURCE_UNITS = 80
+MIN_SEGMENT_SOURCE_UNITS = 24
+
+
+def linguistic_units(text: str) -> int:
+    """Count Unicode letters and numbers after excluding protected syntax."""
+    masked = FENCED_CODE.sub("", text)
+    for _, pattern in TOKEN_PATTERNS:
+        masked = pattern.sub("", masked)
+    return sum(unicodedata.category(character)[0] in {"L", "N"} for character in masked)
+
+
+def _cjk_dominant(text: str) -> bool:
+    letters = [character for character in text if unicodedata.category(character).startswith("L")]
+    if not letters:
+        return False
+    cjk = sum(
+        "\u3040" <= character <= "\u30ff"
+        or "\u3400" <= character <= "\u9fff"
+        or "\uac00" <= character <= "\ud7af"
+        for character in letters
+    )
+    return cjk / len(letters) >= 0.4
+
+
+def volume_errors(source_segments: list[str], target_segments: list[str], location: str = "$") -> list[str]:
+    """Detect major omissions/additions without claiming semantic equivalence."""
+    errors: list[str] = []
+    source_nonempty = [segment for segment in source_segments if linguistic_units(segment)]
+    target_nonempty = [segment for segment in target_segments if linguistic_units(segment)]
+    source_total = sum(linguistic_units(segment) for segment in source_nonempty)
+    target_total = sum(linguistic_units(segment) for segment in target_nonempty)
+
+    if source_total >= MIN_TOTAL_SOURCE_UNITS:
+        minimum_ratio = 0.18 if _cjk_dominant(" ".join(target_nonempty)) else 0.45
+        ratio = target_total / source_total if source_total else 1.0
+        if ratio < minimum_ratio:
+            errors.append(
+                f"{location}: target linguistic volume is {target_total}/{source_total} "
+                f"units ({ratio:.1%}); minimum for this script is {minimum_ratio:.0%}"
+            )
+        if ratio > 3.0:
+            errors.append(
+                f"{location}: target linguistic volume is {target_total}/{source_total} "
+                f"units ({ratio:.1%}); possible unsupported addition"
+            )
+
+    if len(source_nonempty) != len(target_nonempty):
+        errors.append(
+            f"{location}: linguistic segment count changed from {len(source_nonempty)} to {len(target_nonempty)}"
+        )
+        return errors
+
+    for index, (source_segment, target_segment) in enumerate(zip(source_nonempty, target_nonempty)):
+        source_units = linguistic_units(source_segment)
+        target_units = linguistic_units(target_segment)
+        if source_units < MIN_SEGMENT_SOURCE_UNITS:
+            continue
+        minimum_ratio = 0.12 if _cjk_dominant(target_segment) else 0.25
+        ratio = target_units / source_units
+        if ratio < minimum_ratio:
+            errors.append(
+                f"{location}[{index}]: target segment volume is {target_units}/{source_units} "
+                f"units ({ratio:.1%}); possible truncation"
+            )
+    return errors
+
+
+def json_segments(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [segment for child in value.values() for segment in json_segments(child)]
+    if isinstance(value, list):
+        return [segment for child in value for segment in json_segments(child)]
+    return [value] if isinstance(value, str) else []
+
+
+def jsonld_segments(value: Any, key: str | None = None) -> list[str]:
+    """Extract only Schema.org fields whose values are human-language copy."""
+    if isinstance(value, dict):
+        return [
+            segment
+            for child_key, child_value in value.items()
+            for segment in jsonld_segments(child_value, child_key)
+        ]
+    if isinstance(value, list):
+        return [segment for child in value for segment in jsonld_segments(child, key)]
+    if isinstance(value, str) and key in JSONLD_LINGUISTIC_KEYS:
+        return [value]
+    return []
+
+
+def xml_segments(text: str) -> list[str]:
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return []
+    return [segment for segment in root.itertext() if segment.strip()]
+
+
+class LinguisticHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.segments: list[str] = []
+        self.stack: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attribute_map = {name.casefold(): value or "" for name, value in attrs}
+        self.stack.append((tag.casefold(), attribute_map.get("type", "").casefold()))
+        meta_name = attribute_map.get("name", "").casefold()
+        meta_property = attribute_map.get("property", "").casefold()
+        for name, value in attrs:
+            normalized = name.casefold()
+            linguistic_meta = normalized == "content" and (
+                meta_name in TRANSLATABLE_META_NAMES or meta_property in TRANSLATABLE_META_PROPERTIES
+            )
+            if value and (normalized in TRANSLATABLE_HTML_ATTRIBUTES or linguistic_meta):
+                self.segments.append(value)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag.casefold():
+                del self.stack[index:]
+                break
+
+    def handle_data(self, data: str) -> None:
+        current = self.stack[-1] if self.stack else ("", "")
+        if current[0] in HTML_CODE_ELEMENTS:
+            if current == ("script", "application/ld+json"):
+                try:
+                    self.segments.extend(jsonld_segments(json.loads(data)))
+                except json.JSONDecodeError:
+                    pass
+            return
+        if data.strip():
+            self.segments.append(data)
+
+
+def html_segments(text: str) -> list[str]:
+    parser = LinguisticHTMLParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception:
+        return []
+    return parser.segments
 
 
 def icu_selectors(text: str, start: int) -> list[tuple[str, tuple[int, int]]]:
@@ -349,6 +498,36 @@ def compare_subtitles(source: str, target: str) -> list[str]:
     return [] if left == right else ["$: subtitle timestamps or cue settings changed"]
 
 
+def po_segments(text: str) -> list[str]:
+    entries = PO_ENTRY.findall(text)
+    translated = [value for kind, value in entries if kind.startswith("msgstr") and value]
+    return translated or [value for kind, value in entries if kind in {"msgid", "msgid_plural"} and value]
+
+
+def apple_segments(text: str) -> list[str]:
+    return [value for _, value in APPLE_STRING.findall(text)]
+
+
+def subtitle_segments(text: str) -> list[str]:
+    segments: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.isdigit() or TIMESTAMP.fullmatch(line):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            continue
+        if stripped.startswith("Dialogue:"):
+            # ASS dialogue has nine fixed comma-separated fields before Text.
+            fields = line.split(",", 9)
+            if len(fields) == 10 and fields[-1].strip():
+                segments.append(fields[-1])
+            continue
+        if stripped.startswith(("WEBVTT", "NOTE", "STYLE", "REGION", "Format:")):
+            continue
+        segments.append(line)
+    return segments
+
+
 def read_utf8(path: Path) -> tuple[str | None, list[str]]:
     try:
         return path.read_text(encoding="utf-8"), []
@@ -419,23 +598,33 @@ def main() -> int:
         errors.extend(parse_target_errors)
         if not parse_source_errors and not parse_target_errors:
             errors.extend(compare_json(source_data, target_data))
+            errors.extend(volume_errors(json_segments(source_data), json_segments(target_data), "$"))
     elif selected_format == "html":
         errors.extend(compare_html(source_text, target_text))
+        errors.extend(volume_errors(html_segments(source_text), html_segments(target_text), "$"))
     elif selected_format == "xml":
         errors.extend(compare_xml(source_text, target_text))
+        errors.extend(volume_errors(xml_segments(source_text), xml_segments(target_text), "$"))
     elif selected_format == "po":
         errors.extend(compare_po(source_text, target_text))
+        errors.extend(volume_errors(po_segments(source_text), po_segments(target_text), "$"))
     elif selected_format == "strings":
         errors.extend(compare_apple_strings(source_text, target_text))
+        errors.extend(volume_errors(apple_segments(source_text), apple_segments(target_text), "$"))
     elif selected_format == "subtitle":
         errors.extend(compare_subtitles(source_text, target_text))
+        errors.extend(volume_errors(subtitle_segments(source_text), subtitle_segments(target_text), "$"))
     else:
         errors.extend(compare_tokens(source_text, target_text, "$"))
+        errors.extend(volume_errors([source_text], [target_text], "$"))
 
     if errors:
         print_errors(errors)
         return 1
-    print("OK: structure, protected tokens, and Unicode NFC are intact.")
+    print(
+        "OK: measurable structure, protected tokens, linguistic volume, and Unicode NFC are intact. "
+        "This does not prove semantic fidelity, completeness, or native quality."
+    )
     return 0
 
 

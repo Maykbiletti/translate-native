@@ -23,5 +23,6 @@ Assume the Version 5 gateway and automatic updater shipped and failed in product
 | CRLF is mistaken for changed content | Windows files differ only in size and raw hash | Maintain canonical text identity alongside byte identity; normalize BOM/newlines/NFC only | CRLF/BOM match while mojibake still fails |
 | Caller approves its own review | `short_text_reviewed=true` releases damaged spelling | Treat caller fields as metadata only; measurable findings are unconditional; external reviewer owns real approval | Damaged text stays blocked with `reviewed=true` and `content_type=prose` |
 | Correct German `ss` is mistaken for `ß` folding | `wissen`, `dass`, or `interessiert` blocks | Exclude `ss` from density heuristics; require lexical and locale context | Correct `ss` corpus passes while `ae/oe/ue` attack still blocks |
+| A translation preserves tags but loses most text | Truncated target reports `structure intact` | Measure total linguistic units, segment count, and aligned segment coverage with script-aware thresholds | 71% omission exits nonzero while full and CJK controls pass |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
