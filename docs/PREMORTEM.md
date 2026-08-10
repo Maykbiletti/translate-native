@@ -24,5 +24,6 @@ Assume the Version 5 gateway and automatic updater shipped and failed in product
 | Caller approves its own review | `short_text_reviewed=true` releases damaged spelling | Treat caller fields as metadata only; measurable findings are unconditional; external reviewer owns real approval | Damaged text stays blocked with `reviewed=true` and `content_type=prose` |
 | Correct German `ss` is mistaken for `ß` folding | `wissen`, `dass`, or `interessiert` blocks | Exclude `ss` from density heuristics; require lexical and locale context | Correct `ss` corpus passes while `ae/oe/ue` attack still blocks |
 | A translation preserves tags but loses most text | Truncated target reports `structure intact` | Measure total linguistic units, segment count, and aligned segment coverage with script-aware thresholds | 71% omission exits nonzero while full and CJK controls pass |
+| The CLI catches an omission but mandatory MCP release does not | A fully attested truncated target receives a token | Load the same auto-detected volume primitive inside `release_translation`; never trust a caller format switch | 71% omission stays blocked with all seven attestations set to true |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.

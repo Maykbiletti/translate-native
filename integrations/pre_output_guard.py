@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable fail-closed hook: verify a receipt supplied as JSON on stdin."""
+"""Portable fail-closed hook: verify a current V5 receipt supplied as JSON on stdin."""
 
 from __future__ import annotations
 

@@ -41,6 +41,7 @@ class LanguageGatewayTests(unittest.TestCase):
         })
         self.assertTrue(result["release_allowed"])
         self.assertTrue(result["release_token"].startswith("blg5."))
+        self.assertEqual(result["gateway"], f"blun-language-gateway/{GATEWAY.GUARD.VERSION}")
 
 
 if __name__ == "__main__":

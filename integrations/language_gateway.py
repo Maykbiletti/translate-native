@@ -27,7 +27,7 @@ def gate(request: dict) -> dict:
     if request.get("translation_task") is False:
         return {"status": "PASS", "release_allowed": True, "reason": "explicitly-not-a-translation"}
     result = GUARD.release_translation(request)
-    result["gateway"] = "blun-language-gateway/5.1"
+    result["gateway"] = f"blun-language-gateway/{GUARD.VERSION}"
     return result
 
 

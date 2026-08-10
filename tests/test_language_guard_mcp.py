@@ -181,6 +181,44 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.assertFalse(report["release_allowed"])
         self.assertNotIn("release_token", report)
 
+    def test_release_blocks_major_omission_despite_all_attestations(self) -> None:
+        source = (
+            "BLUN verbindet leistungsstarke KI-Modelle mit vollständigen Arbeitsbereichen für Apps, "
+            "Websites, Softwareentwicklung, Sprachen, Bilder und automatisierte Abläufe. Statt für "
+            "jeden Arbeitsschritt ein neues Werkzeug zu öffnen, arbeiten alle Komponenten zusammen."
+        )
+        report = MODULE.release_translation({
+            "source_text": source,
+            "target_text": source[:64],
+            "language": "de-DE",
+            "attestations": self._attestations(),
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertIn(
+            "translation-volume-integrity",
+            {finding["code"] for finding in report["findings"]},
+        )
+
+    def test_release_auto_detects_html_and_ignores_preserved_script_bulk(self) -> None:
+        source_copy = (
+            "Vollständiger Inhalt für eine wichtige Produktseite mit Funktionen, Vorteilen und "
+            "klaren nächsten Schritten für interessierte Kundinnen und Kunden."
+        )
+        script = "window.catalog = '" + ("technical payload " * 80) + "';"
+        source = f"<main><p>{source_copy}</p><script>{script}</script></main>"
+        target = f"<main><p>Kurz.</p><script>{script}</script></main>"
+        report = MODULE.release_translation({
+            "source_text": source,
+            "target_text": target,
+            "language": "de-DE",
+            "attestations": self._attestations(),
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertIn(
+            "translation-volume-integrity",
+            {finding["code"] for finding in report["findings"]},
+        )
+
     def test_release_token_is_issued_after_all_gates_pass(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

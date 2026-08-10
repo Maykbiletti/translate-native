@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Installed-skill hook that verifies an exact V5.1 release receipt."""
+"""Installed-skill hook that verifies an exact current V5 release receipt."""
 
 from __future__ import annotations
 

@@ -27,7 +27,7 @@ def main() -> int:
         missing = [key for key in ("source_text", "target_text", "language") if not request.get(key)]
         result = ({"status": "BLOCK", "release_allowed": False, "reason": "missing-fields", "fields": missing}
                   if missing else GUARD.release_translation(request))
-        result["gateway"] = "blun-language-gateway/5.1"
+        result["gateway"] = f"blun-language-gateway/{GUARD.VERSION}"
     except (OSError, json.JSONDecodeError) as error:
         result = {"status": "BLOCK", "release_allowed": False, "reason": "invalid-input", "error": str(error)}
     print(json.dumps(result, ensure_ascii=False, indent=2))
