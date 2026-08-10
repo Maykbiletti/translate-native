@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -46,6 +47,9 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.assertNotIn("release_token", report)
 
     def test_release_token_is_issued_after_all_gates_pass(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
         report = MODULE.release_translation(
             {
                 "source_text": "If you have already paid, no further action is required.",
@@ -63,14 +67,14 @@ class LanguageGuardMCPTests(unittest.TestCase):
             }
         )
         self.assertTrue(report["release_allowed"])
-        self.assertRegex(report["release_token"], r"^blun-lg-3\.0\.0-")
+        self.assertRegex(report["release_token"], r"^blg4\.")
 
     def test_mcp_lists_mandatory_release_tool(self) -> None:
         response = MODULE.handle_message(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
         )
         names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(names, {"validate_text", "release_translation"})
+        self.assertEqual(names, {"validate_text", "release_translation", "verify_release_token"})
 
 
 if __name__ == "__main__":

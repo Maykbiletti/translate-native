@@ -74,9 +74,9 @@ The separate `native-diacritics` skill can still protect ordinary writing outsid
 
 The root [`AGENTS.md`](AGENTS.md) tells repository-aware agents to load the combined workflow and treat every model-generated translation as an untrusted draft.
 
-## Version 3: BLUN Language Guard
+## Version 4: BLUN Language Guard
 
-Version 3 adds an executable MCP release gate. The skill remains responsible for meaning, native rewriting, locale fit, and orthography. The MCP server makes the release procedure inspectable and blocks deterministic defects before an agent may deliver the result.
+Version 4 turns the executable MCP gate into a signed, independently verifiable release system. The skill remains responsible for meaning, native rewriting, locale fit, and orthography. The server blocks deterministic defects and issues a cryptographic receipt bound to the exact source, target, locale, version, issue time, and expiry.
 
 ```text
 Translation request
@@ -88,10 +88,34 @@ Native pass → fidelity pass → integrity pass
 release_translation MCP tool
         ↓
 BLOCK → revise and repeat
-PASS  → one-time release token → deliver
+PASS  → signed receipt → verify receipt → deliver
 ```
 
-The gate checks UTF-8/Unicode integrity, NFC normalization, suspicious bidirectional controls, frequent ASCII substitutions, and all seven mandatory attestations. A token is bound to the exact source, target, and language tag. Agents are forbidden to fabricate, reuse, or expose it.
+The gate checks UTF-8/Unicode integrity, NFC normalization, script identity, balanced bidirectional isolates, dangerous overrides, frequent ASCII substitutions, optional terminology glossaries, and all seven mandatory attestations. Edited, expired, forged, wrong-locale, or wrong-version receipts fail verification.
+
+### Install, update, and diagnose
+
+```bash
+python3 installer/blun_language_guard.py install
+python3 installer/blun_language_guard.py doctor
+python3 installer/blun_language_guard.py update
+```
+
+Installation uses atomic symlinks for Codex and Claude Code and refuses to overwrite existing non-symlink skill folders. It writes a mergeable MCP snippet but never overwrites a host configuration. Updates are cloned and tested before the active checkout is fast-forwarded. `doctor` runs the test suite and probes the live MCP tool list.
+
+The portable fail-closed hook is [`pre_output_guard.py`](integrations/pre_output_guard.py). It accepts source, target, locale, and receipt as JSON on stdin and exits nonzero when verification fails. Host-specific adapters must pass the candidate output into this contract; a host hook that exposes no candidate text cannot enforce output validation.
+
+### Supported structured formats
+
+- JSON and ARB;
+- HTML including linguistic metadata and JSON-LD linguistic fields while protecting schema, URLs, types, code, and placeholders;
+- XML, Android resources, and structurally equivalent XLIFF documents;
+- PO/POT catalogs;
+- Apple `.strings`;
+- SRT, VTT, and ASS subtitle timing;
+- ICU placeholders and plural/select contracts inside supported containers.
+
+See [`PREMORTEM.md`](docs/PREMORTEM.md) for the failure modes, mitigations, and proof required before calling this system production-ready.
 
 No deterministic linter can prove that prose is genuinely native. That is why the MCP server supplements the skill's native-language judgment instead of pretending to replace it.
 

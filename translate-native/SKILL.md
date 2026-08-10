@@ -13,7 +13,9 @@ When the `blun-language-guard` MCP server is available, call `release_translatio
 
 Never invent, reuse, alter, or expose a release token. If the gate returns `BLOCK`, correct the target and run it again. If the MCP server is unavailable, run the bundled structural and orthography guards directly. Fail closed for publication-grade or structured work; for ordinary conversational translation, disclose that the enforced MCP validation was unavailable.
 
-The MCP gate enforces execution discipline and deterministic checks. It does not replace native judgment and cannot independently prove meaning or fluency.
+The MCP gate enforces execution discipline and deterministic checks. Version 4 issues a cryptographically signed receipt bound to the exact source, target, locale, guard version, issue time, and expiry. Verify it with `verify_release_token` or the portable pre-output hook; never trust a token based on its prefix or appearance. The receipt proves process integrity, not native fluency.
+
+When a project glossary is provided, pass it to the gate and resolve every confirmed terminology finding. For publication-grade work, use separate review perspectives: a target-only native reviewer first, then a source-aware fidelity reviewer. A creator must not silently certify its own first draft.
 
 ## Run one combined release gate
 
@@ -110,7 +112,7 @@ python3 scripts/translation_guard.py SOURCE TARGET
 
 Use `--format json` for JSON regardless of the file suffix. Treat a nonzero exit as a blocking structural or protected-token defect and fix it before delivery.
 
-Use `--format html` for HTML fragments or documents. It permits native translation of `alt`, `title`, `placeholder`, `aria-label`, and `aria-description` values while protecting tag structure, attribute names, technical attributes, scripts, styles, links, code, and placeholders.
+Use `--format html` for HTML fragments or documents. It permits native translation of linguistic attributes and recognized linguistic metadata while protecting technical metadata, structure, scripts, styles, links, code, and placeholders. The guard also supports `xml`, `po`, `strings`, and `subtitle`; auto-detection covers XML/XLIFF/Android, PO/POT, Apple strings, SRT, VTT, and ASS. ARB uses the JSON guard.
 
 For every generated or edited UTF-8 target file, also run the bundled orthography linter:
 
