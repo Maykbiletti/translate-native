@@ -131,6 +131,14 @@ Both portable commands are now present inside the installable skill as well as t
 
 Symlink installations receive these files with the next automatic update; no manual copying is required.
 
+### Version 5.2: measurable evidence beats self-attestation
+
+Version 5.1 correctly raised a short-copy gate but incorrectly allowed the same caller to declare both `content_type` and `short_text_reviewed`. Those values are not independent evidence and are no longer a security boundary.
+
+Version 5.2 measures conventional ASCII-folding pressure for German, Swedish, Danish, and Norwegian on every target, regardless of length or declared content type. For German, `ae`, `oe`, `ue`, and `ss` candidates are compared with actual `ä`, `ö`, `ü`, and `ß`; a minimum prevents one ordinary sequence from becoming proof. Measurable folding findings cannot be overridden by `short_text_reviewed: true` or `content_type: prose`.
+
+Other scripts cannot always be reconstructed from stripped ASCII without a dictionary or native model. The guard reports only what it can measure and never claims that this heuristic proves correct spelling. Strong independence still requires the external Language Gateway and reviewer to run outside the releasing agent's authority.
+
 ## Version 4 foundation: signed release receipts
 
 Version 4 turns the executable MCP gate into a signed, independently verifiable release system. The skill remains responsible for meaning, native rewriting, locale fit, and orthography. The server blocks deterministic defects and issues a cryptographic receipt bound to the exact source, target, locale, version, issue time, and expiry.
