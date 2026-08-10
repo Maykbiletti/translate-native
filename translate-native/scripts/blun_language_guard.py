@@ -56,7 +56,7 @@ LANGUAGE_CHARACTER_PROFILES = {
 ASCII_FOLDING_PROFILES = {
     # Conventional transliterations whose density is measurable without a dictionary.
     # Thresholds deliberately avoid treating one ordinary letter sequence as proof.
-    "de": {"patterns": (r"ae", r"oe", r"ue", r"ss"), "native": "äöüßÄÖÜẞ", "minimum": 3},
+    "de": {"patterns": (r"ae", r"oe", r"ue"), "native": "äöüÄÖÜ", "minimum": 3},
     "sv": {"patterns": (r"aa", r"ae", r"oe"), "native": "åäöÅÄÖ", "minimum": 1},
     "da": {"patterns": (r"aa", r"ae", r"oe"), "native": "åæøÅÆØ", "minimum": 1},
     "no": {"patterns": (r"aa", r"ae", r"oe"), "native": "åæøÅÆØ", "minimum": 1},
