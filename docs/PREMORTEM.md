@@ -1,6 +1,6 @@
-# Version 4 premortem
+# Version 5 premortem
 
-Assume BLUN Language Guard v4 shipped and failed in production.
+Assume the Version 5 gateway and automatic updater shipped and failed in production.
 
 | Failure | Early warning | Mitigation | Proof required |
 | --- | --- | --- | --- |
@@ -14,5 +14,10 @@ Assume BLUN Language Guard v4 shipped and failed in production.
 | Auto-update installs a broken release | Update stops after replacing only part of the installation | Fetch, test, and validate before atomic symlink switch; preserve previous revision | Failed-update rollback test |
 | Doctor reports false green | Files exist but MCP cannot initialize or issue/verify a receipt | Run live MCP initialize, tools/list, issue, verify, and tamper probes | Doctor integration test |
 | Reviewer rubber-stamps its own output | Creation and judgment share the same context | Require target-only native review before source-aware fidelity review; record separate attestations | Contract test in SKILL.md |
+| Agent simply skips the skill or MCP tool | Unreceipted text reaches a user | Intercept candidate output outside the agent and fail closed in the host adapter | End-to-end test proves raw output cannot escape |
+| Agent steals the signing key | Agent and signer share one writable user or container | Run signer/gateway under a separate OS identity or remote service; deny agent filesystem and socket administration | Sandbox escape test cannot read key or replace executable |
+| Auto-updater becomes a supply-chain path | An unreviewed remote commit installs silently | Test candidate before merge, permit trusted commit-signature enforcement, use fast-forward only, run post-install tests, retain rollback revision | Rejected unsigned and broken-update fixtures |
+| Scheduler claims success but never runs | Update state timestamp stops advancing | `doctor` checks scheduler and update state age; operational alert on stale state | Forced scheduled run updates timestamp |
+| Bad update passes tests but breaks hosts | Unit tests pass while CLI adapter fails | Canary rollout, post-update doctor, automatic rollback, phased release channel | Canary failure prevents stable rollout |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
