@@ -44,6 +44,19 @@ def _load_quality_module():
 
 
 QUALITY = _load_quality_module()
+
+
+def _load_translation_module():
+    path = Path(__file__).with_name("translation_guard.py")
+    spec = importlib.util.spec_from_file_location("blun_translation_guard", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Cannot load translation integrity primitives")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+TRANSLATION = _load_translation_module()
 VERSION = QUALITY.VERSION
 KEY_PATH = Path(os.environ.get("BLUN_LANGUAGE_GUARD_KEY_FILE", Path.home() / ".config" / "blun-language-guard" / "signing.key"))
 LANGUAGE_CHARACTER_PROFILES = {
@@ -196,6 +209,11 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
         report["findings"].append(
             asdict(Finding("empty-source", "Source text is required for the fidelity gate."))
         )
+    else:
+        for error in TRANSLATION.translation_volume_errors(source, target):
+            report["findings"].append(
+                asdict(Finding("translation-volume-integrity", error))
+            )
     if missing:
         report["findings"].append(
             asdict(
@@ -258,7 +276,7 @@ TOOLS = [
     },
     {
         "name": "release_translation",
-        "description": "Mandatory final gate. Returns a release token only after deterministic validation and all seven quality attestations pass.",
+        "description": "Mandatory final gate. Returns a release token only after deterministic validation, auto-detected translation-volume integrity, and all seven quality attestations pass.",
         "inputSchema": {
             "type": "object",
             "properties": {
