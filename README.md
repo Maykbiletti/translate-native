@@ -135,7 +135,9 @@ Symlink installations receive these files with the next automatic update; no man
 
 Version 5.1 correctly raised a short-copy gate but incorrectly allowed the same caller to declare both `content_type` and `short_text_reviewed`. Those values are not independent evidence and are no longer a security boundary.
 
-Version 5.2 measures conventional ASCII-folding pressure for German, Swedish, Danish, and Norwegian on every target, regardless of length or declared content type. For German, `ae`, `oe`, `ue`, and `ss` candidates are compared with actual `ä`, `ö`, `ü`, and `ß`; a minimum prevents one ordinary sequence from becoming proof. Measurable folding findings cannot be overridden by `short_text_reviewed: true` or `content_type: prose`.
+Version 5.2 measures conventional ASCII-folding pressure for German, Swedish, Danish, and Norwegian on every target, regardless of length or declared content type. Measurable folding findings cannot be overridden by `short_text_reviewed: true` or `content_type: prose`.
+
+Version 5.2.1 removes German `ss` from that measurement. Unlike `ae`, `oe`, and `ue`, `ss` is frequently correct native spelling (`wissen`, `dass`, `interessiert`) and cannot be classified as a `ß` replacement without lexical and locale context. The guard deliberately leaves cases such as `Grösse` to a future `de-DE`/`de-AT`/`de-CH` dictionary-aware check instead of creating a broad false positive.
 
 Other scripts cannot always be reconstructed from stripped ASCII without a dictionary or native model. The guard reports only what it can measure and never claims that this heuristic proves correct spelling. Strong independence still requires the external Language Gateway and reviewer to run outside the releasing agent's authority.
 
