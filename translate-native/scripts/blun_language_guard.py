@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 import unicodedata
 from dataclasses import asdict, dataclass
@@ -51,6 +52,14 @@ LANGUAGE_CHARACTER_PROFILES = {
     "es": set("áéíóúüñ¿¡ÁÉÍÓÚÜÑ"),
     "cs": set("áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"),
     "ca": set("àçèéíïòóúü·ÀÇÈÉÍÏÒÓÚÜ"),
+}
+ASCII_FOLDING_PROFILES = {
+    # Conventional transliterations whose density is measurable without a dictionary.
+    # Thresholds deliberately avoid treating one ordinary letter sequence as proof.
+    "de": {"patterns": (r"ae", r"oe", r"ue", r"ss"), "native": "äöüßÄÖÜẞ", "minimum": 3},
+    "sv": {"patterns": (r"aa", r"ae", r"oe"), "native": "åäöÅÄÖ", "minimum": 1},
+    "da": {"patterns": (r"aa", r"ae", r"oe"), "native": "åæøÅÆØ", "minimum": 1},
+    "no": {"patterns": (r"aa", r"ae", r"oe"), "native": "åæøÅÆØ", "minimum": 1},
 }
 
 
@@ -104,11 +113,22 @@ def validate_text(
             f"Long {base_language} text contains none of the language's characteristic native characters; possible wholesale ASCII folding.",
             language=language,
         ))
+    folding_profile = ASCII_FOLDING_PROFILES.get(base_language)
+    if folding_profile:
+        folded = sum(len(re.findall(pattern, profile_prose, re.IGNORECASE)) for pattern in folding_profile["patterns"])
+        native = sum(profile_prose.count(character) for character in folding_profile["native"])
+        if folded >= folding_profile["minimum"] and folded > native:
+            findings.append(Finding(
+                "ascii-folding-pressure",
+                f"Measured ASCII-folding candidates ({folded}) exceed native characters ({native}); review the exact spelling.",
+                language=language,
+            ))
+    # Kept as compatibility metadata only. It never suppresses a measurable finding.
     short_sensitive = content_type in {"title", "meta_description", "ui"} and len(profile_prose.strip()) < 200
-    if short_sensitive and not short_text_reviewed:
+    if short_sensitive and not short_text_reviewed and not findings:
         findings.append(Finding(
             "short-text-native-review-required",
-            f"Short {content_type} text is never auto-cleared by character profiles or substitution lists; independent native review is required.",
+            f"Short {content_type} text needs host-enforced review; an MCP Boolean is not independent proof.",
             language=language,
         ))
     for glossary_finding in QUALITY.glossary_findings(text, glossary or {}):
@@ -246,7 +266,7 @@ TOOLS = [
                 "target_text": {"type": "string"},
                 "language": {"type": "string"},
                 "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
-                "short_text_reviewed": {"type": "boolean", "description": "True only after an independent native review of a short title, description, or UI string."},
+                "short_text_reviewed": {"type": "boolean", "description": "Compatibility metadata only. Never suppresses measurable findings and is not independent proof."},
                 "attestations": {
                     "type": "object",
                     "properties": {
