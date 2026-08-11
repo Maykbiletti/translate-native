@@ -58,6 +58,42 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.UPDATE_CONFIG = original_config
                 INSTALLER.UPDATE_STATE = original_state
 
+    def test_signing_key_is_created_once_with_owner_only_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "guard" / "signing.key"
+            INSTALLER.ensure_signing_key(key)
+            first = key.read_bytes()
+            INSTALLER.ensure_signing_key(key)
+            self.assertEqual(key.read_bytes(), first)
+            self.assertEqual(len(first), 32)
+            if INSTALLER.os.name != "nt":
+                self.assertEqual(key.stat().st_mode & 0o077, 0)
+
+    def test_install_delivery_boundary_creates_command_policy_and_key(self) -> None:
+        originals = (
+            INSTALLER.DELIVERY_COMMAND,
+            INSTALLER.DELIVERY_POLICY,
+            INSTALLER.SIGNING_KEY,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            INSTALLER.DELIVERY_COMMAND = temporary / "bin" / "blun-language-deliver"
+            INSTALLER.DELIVERY_POLICY = temporary / "config" / "delivery-policy.json"
+            INSTALLER.SIGNING_KEY = temporary / "config" / "signing.key"
+            try:
+                INSTALLER.install_delivery_boundary(ROOT)
+                self.assertTrue(INSTALLER.DELIVERY_COMMAND.is_symlink())
+                self.assertTrue(INSTALLER.SIGNING_KEY.is_file())
+                policy = INSTALLER.json.loads(INSTALLER.DELIVERY_POLICY.read_text(encoding="utf-8"))
+                self.assertTrue(policy["mandatory"])
+                self.assertFalse(policy["direct_delivery_allowed"])
+            finally:
+                (
+                    INSTALLER.DELIVERY_COMMAND,
+                    INSTALLER.DELIVERY_POLICY,
+                    INSTALLER.SIGNING_KEY,
+                ) = originals
+
 
 if __name__ == "__main__":
     unittest.main()

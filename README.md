@@ -111,6 +111,42 @@ This covers every human language and writing system, not only German umlauts. Th
 
 An MCP server cannot physically stop an agent that is still allowed to print directly to its terminal, Telegram bridge, API response, or file. Non-bypassable enforcement requires the host to capture the complete candidate output, assign `task_kind` and the expected locale outside the agent's control, call the gateway, verify the purpose-bound receipt, and withhold delivery on every failure. If the agent controls the wrapper, signing key, task classification, source, or delivery channel, the installation is advisory.
 
+Version 6.1 therefore installs [`enforced_delivery.py`](integrations/enforced_delivery.py) as `blun-language-deliver`. In mandatory mode the untrusted agent may emit only this envelope:
+
+```json
+{
+  "target_text": "Natürlich können wir das zuverlässig prüfen.",
+  "release_token": "blg6.…"
+}
+```
+
+The host—not the envelope—supplies `task_kind`, `language`, `source_text`, and content policy. Any attempt by the agent to include or override those fields blocks delivery. Raw text, invalid JSON, a missing token, an edited target, a wrong locale, an expired token, a response token used for translation, an unavailable guard, or a missing key all produce an empty stdout and a nonzero exit.
+
+The wrapper exposes its trusted classification to the child as read-only process context through `BLUN_LANGUAGE_GUARD_MANDATORY`, `BLUN_LANGUAGE_GUARD_TASK_KIND`, `BLUN_LANGUAGE_GUARD_LANGUAGE`, and `BLUN_LANGUAGE_GUARD_CONTENT_TYPE`. This lets the agent call the correct MCP release tool with the expected locale. Changing those variables inside the child cannot change the host policy used for final verification.
+
+Wrap a non-interactive, JSON-only agent command like this:
+
+```bash
+blun-language-deliver \
+  --task-kind response \
+  --language de-AT \
+  -- your-agent-command --json-only
+```
+
+For translation the trusted host captures the complete source independently and chooses the stricter route:
+
+```bash
+blun-language-deliver \
+  --task-kind translation \
+  --language sv-SE \
+  --source-file /trusted/job/source.txt \
+  -- your-agent-command --json-only
+```
+
+The same module exposes `guarded_send` and `guarded_send_async` for API, Telegram, queue, and web-response adapters. These functions verify before invoking the supplied sender and never invoke it on failure. The host must remove every alternate sender: an agent with direct Telegram/API credentials or an unwrapped stdout path can still bypass any guard.
+
+For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
+
 ## Version 5: BLUN Language Gateway
 
 Version 5 makes the host—not the agent—the final authority. Skills and MCP tools can be forgotten or skipped. A mandatory gateway intercepts the candidate output and releases it only after validation produces a signed receipt for the exact source, target, and locale.
@@ -221,7 +257,7 @@ python3 installer/blun_language_guard.py doctor
 python3 installer/blun_language_guard.py update
 ```
 
-Installation uses atomic symlinks for Codex and Claude Code and refuses to overwrite existing non-symlink skill folders. It writes a mergeable MCP snippet but never overwrites a host configuration. Updates are cloned and tested before the active checkout is fast-forwarded. `doctor` runs the test suite and probes the live MCP tool list.
+Installation uses atomic symlinks for Codex and Claude Code and refuses to overwrite existing non-symlink skill folders. It installs `~/.local/bin/blun-language-deliver`, an owner-only signing key, and a fail-closed policy file; writes a mergeable MCP snippet without overwriting unrelated host configuration; and merges the BLUN MCP entry safely. Updates are cloned and tested before the active checkout is fast-forwarded. `doctor` checks the delivery command, key permissions, mandatory policy, test suite, live MCP tools, signed receipts, and updater heartbeat.
 
 The portable fail-closed hook is [`pre_output_guard.py`](integrations/pre_output_guard.py). It accepts `task_kind`, target, locale, receipt, and the complete source for translations as JSON on stdin and exits nonzero when verification fails. Host-specific adapters must pass the candidate output into this contract; a host hook that exposes no candidate text cannot enforce output validation.
 

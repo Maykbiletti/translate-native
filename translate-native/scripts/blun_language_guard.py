@@ -25,7 +25,9 @@ MCP_INSTRUCTIONS = (
     "For every translation, localization, transcreation, or target-language rewrite, first apply "
     "the installed translate-native skill/plugin and then call release_translation with the complete "
     "source-target pair and truthful seven-pass attestations. Never use release_response to bypass "
-    "the translation gate. Release only after the exact current text receives a valid token."
+    "the translation gate. Release only after the exact current text receives a valid token. "
+    "When BLUN_LANGUAGE_GUARD_MANDATORY=1, final stdout must be exactly one JSON object containing "
+    "only target_text and release_token; never call a delivery channel directly or include host-owned policy fields."
 )
 
 

@@ -24,6 +24,9 @@ TARGETS = {
 }
 UPDATE_CONFIG = Path.home() / ".config" / "blun-language-guard" / "updater.json"
 UPDATE_STATE = Path.home() / ".config" / "blun-language-guard" / "update-state.json"
+DELIVERY_COMMAND = Path.home() / ".local" / "bin" / "blun-language-deliver"
+DELIVERY_POLICY = Path.home() / ".config" / "blun-language-guard" / "delivery-policy.json"
+SIGNING_KEY = Path.home() / ".config" / "blun-language-guard" / "signing.key"
 
 
 def repository_root() -> Path:
@@ -36,8 +39,38 @@ def atomic_symlink(source: Path, destination: Path) -> None:
         raise RuntimeError(f"Refusing to overwrite existing non-symlink: {destination}")
     temporary = destination.with_name(destination.name + ".new")
     temporary.unlink(missing_ok=True)
-    temporary.symlink_to(source, target_is_directory=True)
+    temporary.symlink_to(source, target_is_directory=source.is_dir())
     temporary.replace(destination)
+
+
+def ensure_signing_key(path: Path | None = None) -> None:
+    """Create the local trust key once and never replace an existing key."""
+    path = path or SIGNING_KEY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not path.is_file():
+            raise RuntimeError(f"Signing-key path is not a file: {path}")
+        if os.name != "nt" and path.stat().st_mode & 0o077:
+            raise RuntimeError(f"Signing-key permissions must be owner-only: {path}")
+        return
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(os.urandom(32))
+    if os.name != "nt":
+        os.chmod(temporary, 0o600)
+    temporary.replace(path)
+
+
+def install_delivery_boundary(root: Path) -> None:
+    source = root / "integrations" / "enforced_delivery.py"
+    if not source.is_file():
+        raise RuntimeError(f"Missing delivery boundary: {source}")
+    source.chmod(source.stat().st_mode | 0o111)
+    atomic_symlink(source, DELIVERY_COMMAND)
+    ensure_signing_key()
+    policy = json.loads((root / "integrations" / "delivery-policy.example.json").read_text(encoding="utf-8"))
+    _atomic_json(DELIVERY_POLICY, policy)
+    print(f"Mandatory delivery command: {DELIVERY_COMMAND}")
+    print(f"Fail-closed delivery policy: {DELIVERY_POLICY}")
 
 
 def install(targets: list[str]) -> int:
@@ -46,6 +79,7 @@ def install(targets: list[str]) -> int:
     for target in targets:
         atomic_symlink(skill, TARGETS[target])
         print(f"OK {target}: {TARGETS[target]} -> {skill}")
+    install_delivery_boundary(root)
     config = {
         "mcpServers": {
             "blun-language-guard": {
@@ -81,6 +115,22 @@ def doctor() -> int:
     checks: list[tuple[str, bool, str]] = []
     for name, target in TARGETS.items():
         checks.append((f"{name} skill", target.is_symlink() and target.resolve() == (root / "translate-native").resolve(), str(target)))
+    delivery_source = root / "integrations" / "enforced_delivery.py"
+    checks.append((
+        "mandatory delivery command",
+        DELIVERY_COMMAND.is_symlink() and DELIVERY_COMMAND.resolve() == delivery_source.resolve(),
+        str(DELIVERY_COMMAND),
+    ))
+    key_secure = SIGNING_KEY.is_file() and (os.name == "nt" or SIGNING_KEY.stat().st_mode & 0o077 == 0)
+    checks.append(("signing key", key_secure, str(SIGNING_KEY)))
+    policy_ok = False
+    if DELIVERY_POLICY.is_file():
+        try:
+            policy = json.loads(DELIVERY_POLICY.read_text(encoding="utf-8-sig"))
+            policy_ok = policy.get("mandatory") is True and policy.get("direct_delivery_allowed") is False
+        except (OSError, json.JSONDecodeError):
+            policy_ok = False
+    checks.append(("fail-closed delivery policy", policy_ok, str(DELIVERY_POLICY)))
     tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
     checks.append(("test suite", tests.returncode == 0, tests.stderr.strip() or tests.stdout.strip()))
     server = root / "translate-native" / "scripts" / "blun_language_guard.py"
