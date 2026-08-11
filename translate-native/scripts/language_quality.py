@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "5.3.4"
+VERSION = "6.0.0"
 DANGEROUS_BIDI = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e"}
 ISOLATE_OPENERS = {"\u2066", "\u2067", "\u2068"}
 ISOLATE_CLOSER = "\u2069"
@@ -71,6 +71,7 @@ def load_or_create_key(path: Path) -> bytes:
 def issue_receipt(
     source: str, target: str, language: str, key: bytes, ttl: int = 86400,
     content_type: str = "prose", short_text_reviewed: bool = False,
+    purpose: str = "translation",
 ) -> str:
     now = int(time.time())
     payload = {
@@ -78,6 +79,7 @@ def issue_receipt(
         "source_sha256": canonical_hash(source),
         "target_sha256": canonical_hash(target),
         "language": language,
+        "purpose": purpose,
         "content_type": content_type,
         "short_text_reviewed": short_text_reviewed,
         "iat": now,
@@ -86,23 +88,25 @@ def issue_receipt(
     }
     encoded = _b64encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
     signature = _b64encode(hmac.new(key, encoded.encode(), hashlib.sha256).digest())
-    return f"blg5.{encoded}.{signature}"
+    return f"blg6.{encoded}.{signature}"
 
 
 def verify_receipt(
     token: str, source: str, target: str, language: str, key: bytes,
     content_type: str = "prose", short_text_reviewed: bool = False,
+    purpose: str = "translation",
 ) -> dict[str, Any]:
     try:
         prefix, encoded, signature = token.split(".")
         expected = _b64encode(hmac.new(key, encoded.encode(), hashlib.sha256).digest())
-        if prefix != "blg5" or not hmac.compare_digest(signature, expected):
+        if prefix != "blg6" or not hmac.compare_digest(signature, expected):
             raise ValueError("invalid signature")
         payload = json.loads(_b64decode(encoded))
         checks = {
             "source": payload.get("source_sha256") == canonical_hash(source),
             "target": payload.get("target_sha256") == canonical_hash(target),
             "language": payload.get("language") == language,
+            "purpose": payload.get("purpose") == purpose,
             "content_type": payload.get("content_type") == content_type,
             "short_text_reviewed": payload.get("short_text_reviewed") is short_text_reviewed,
             "version": payload.get("v") == VERSION,

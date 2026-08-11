@@ -1,6 +1,6 @@
-# Version 5 premortem
+# Version 6 premortem
 
-Assume the Version 5 gateway and automatic updater shipped and failed in production.
+Assume the Version 6 response-and-translation gateway and automatic updater shipped and failed in production.
 
 | Failure | Early warning | Mitigation | Proof required |
 | --- | --- | --- | --- |
@@ -31,5 +31,10 @@ Assume the Version 5 gateway and automatic updater shipped and failed in product
 | A regression appears to block for the intended rule but its input path is wrong | Exit code is nonzero, but stderr says `cannot read file` | Assert the diagnostic code or message as well as the return code; return `2` for unreadable input and `1` for evaluated content findings | Missing-file fixture cannot satisfy an identity assertion |
 | Unchanged HTML values are swapped to defeat positional comparison | Every aligned pair differs even though no value was translated | Match substantial canonical source segments against the complete target segment multiset; retain source DOM paths for diagnostics | Swapped `<p>` values block in CLI and mandatory MCP release |
 | Any automatic copyright exception mistakes prose for a fixed legal line | Real names and title-cased prose overlap at every practical length and word count | Remove the exemption; block every unchanged copyright-marked segment and require explicit human handling for legitimate fixed lines | `Copyright © 2026 Important Notice` blocks in JSON, HTML, plain text, and mandatory MCP release |
+| Agents use native spelling in translations but strip it from ordinary replies | Only `release_translation` is wired into the host | Route every final answer through `release_response`; keep translation on its stricter path | Damaged German and Swedish chat replies block while clean controls receive response receipts |
+| A translation is mislabeled as a normal response | The caller chooses task kind or omits the source | Make task classification and source capture host-owned; block response requests carrying a source and translation requests without one | Mode-confusion tests fail closed in both directions |
+| A response token authorizes a translation | Receipts bind only text and locale | Bind `purpose` into the signed receipt and verify it in the final output hook | Cross-purpose verification fails even for identical target text |
+| Agents ignore the translation skill/plugin | The MCP connection exposes tools but no persistent policy | Inject mandatory instructions at MCP initialization, expose the `translate-native` prompt, install persistent agent rules, and still require the external gateway | MCP initialize, prompt discovery, and host interception tests all pass |
+| Agents choose `auto`, `all`, or a false locale to evade spelling checks | Language is self-reported in the tool call | Require an exact host-supplied language tag for response release | `auto` and `all` block; wrong-locale attacks are covered at the trusted adapter boundary |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.

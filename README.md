@@ -74,6 +74,43 @@ The separate `native-diacritics` skill can still protect ordinary writing outsid
 
 The root [`AGENTS.md`](AGENTS.md) tells repository-aware agents to load the combined workflow and treat every model-generated translation as an untrusted draft.
 
+## Version 6: mandatory native output for every agent answer
+
+Version 6 extends the gateway beyond translations. Every user-visible natural-language answer now has a release path:
+
+```text
+Agent candidate
+      ↓ trusted host classifies the task and supplies the expected locale
+      ├── response    → release_response
+      └── translation → translate-native skill/plugin → release_translation
+      ↓
+PASS + purpose-bound receipt → deliver
+BLOCK                        → revise or stop
+```
+
+`release_response` validates the agent's own answer for Unicode integrity, expected script, native spelling and measurable ASCII folding. It rejects `auto` and `all`: the trusted host must supply the exact language or locale rather than letting the agent choose a convenient label. A German answer such as `Haendler pruefen taeglich die Qualitaet im Buero` blocks; the correctly written `Händler prüfen täglich die Qualität im Büro` can pass.
+
+Translations always take the separate, stricter path. The MCP initialization response tells compatible agents to load the installed `translate-native` skill/plugin before drafting, exposes the same workflow as the MCP prompt `translate-native`, and requires `release_translation` for the complete source-target pair. Translation and response receipts are purpose-bound, so a response receipt cannot authorize a translation.
+
+The portable gateway requires a host-owned `task_kind`:
+
+```json
+{
+  "task_kind": "response",
+  "target_text": "Natürlich können wir das zuverlässig prüfen.",
+  "language": "de-DE",
+  "attestations": {"nativeness": true, "orthography": true}
+}
+```
+
+For a translation, use `"task_kind": "translation"`, include the complete `source_text`, and supply all seven translation attestations. The gateway blocks ambiguous task kinds, a translation without source, and any attempt to carry a source through the response route.
+
+This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
+
+### What “mandatory” really means
+
+An MCP server cannot physically stop an agent that is still allowed to print directly to its terminal, Telegram bridge, API response, or file. Non-bypassable enforcement requires the host to capture the complete candidate output, assign `task_kind` and the expected locale outside the agent's control, call the gateway, verify the purpose-bound receipt, and withhold delivery on every failure. If the agent controls the wrapper, signing key, task classification, source, or delivery channel, the installation is advisory.
+
 ## Version 5: BLUN Language Gateway
 
 Version 5 makes the host—not the agent—the final authority. Skills and MCP tools can be forgotten or skipped. A mandatory gateway intercepts the candidate output and releases it only after validation produces a signed receipt for the exact source, target, and locale.
@@ -186,7 +223,7 @@ python3 installer/blun_language_guard.py update
 
 Installation uses atomic symlinks for Codex and Claude Code and refuses to overwrite existing non-symlink skill folders. It writes a mergeable MCP snippet but never overwrites a host configuration. Updates are cloned and tested before the active checkout is fast-forwarded. `doctor` runs the test suite and probes the live MCP tool list.
 
-The portable fail-closed hook is [`pre_output_guard.py`](integrations/pre_output_guard.py). It accepts source, target, locale, and receipt as JSON on stdin and exits nonzero when verification fails. Host-specific adapters must pass the candidate output into this contract; a host hook that exposes no candidate text cannot enforce output validation.
+The portable fail-closed hook is [`pre_output_guard.py`](integrations/pre_output_guard.py). It accepts `task_kind`, target, locale, receipt, and the complete source for translations as JSON on stdin and exits nonzero when verification fails. Host-specific adapters must pass the candidate output into this contract; a host hook that exposes no candidate text cannot enforce output validation.
 
 ### Supported structured formats
 
@@ -218,7 +255,7 @@ Then copy the rules in [`AGENT_RULES.md`](integrations/AGENT_RULES.md) into the 
 - Claude Code: `CLAUDE.md`;
 - another MCP-compatible agent: its equivalent persistent instruction file.
 
-This combination matters. A skill can fail to trigger, and an MCP tool can remain unused. The persistent rule requires both the skill and the `release_translation` call.
+This combination matters. A skill can fail to trigger, and an MCP tool can remain unused. The persistent rule requires `release_response` for ordinary answers and both the `translate-native` workflow and `release_translation` for translations. The trusted host gateway remains the final enforcement boundary.
 
 ### Validate from the terminal
 

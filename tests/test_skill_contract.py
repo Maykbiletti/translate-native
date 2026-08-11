@@ -75,6 +75,18 @@ class SkillContractTests(unittest.TestCase):
         self.assertTrue(INSTALLED_GATEWAY.is_file())
         self.assertTrue(INSTALLED_PRE_OUTPUT.is_file())
 
+    def test_version_six_separates_responses_from_translations(self) -> None:
+        skill = SKILL.read_text(encoding="utf-8")
+        agents = AGENTS.read_text(encoding="utf-8")
+        rules = AGENT_RULES.read_text(encoding="utf-8")
+        for content in (skill, agents, rules):
+            with self.subTest(document=content[:40]):
+                self.assertIn("release_response", content)
+                self.assertIn("release_translation", content)
+        self.assertIn("task_kind: translation", skill)
+        self.assertIn("host", skill.casefold())
+        self.assertIn("translate-native", rules)
+
     def test_swedish_agent_copy_is_a_documented_regression_case(self) -> None:
         content = TRANSLATIONESE_REVIEW.read_text(encoding="utf-8")
         candidate_markers = (

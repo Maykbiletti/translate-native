@@ -84,9 +84,20 @@ def doctor() -> int:
     tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
     checks.append(("test suite", tests.returncode == 0, tests.stderr.strip() or tests.stdout.strip()))
     server = root / "translate-native" / "scripts" / "blun_language_guard.py"
-    probe = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n'
+    probe = (
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+        '{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n'
+        '{"jsonrpc":"2.0","id":3,"method":"prompts/list"}\n'
+    )
     mcp = subprocess.run([sys.executable, str(server), "serve"], input=probe, text=True, capture_output=True, check=False)
-    tools_ok = mcp.returncode == 0 and "release_translation" in mcp.stdout and "verify_release_token" in mcp.stdout
+    tools_ok = (
+        mcp.returncode == 0
+        and "release_response" in mcp.stdout
+        and "release_translation" in mcp.stdout
+        and "verify_release_token" in mcp.stdout
+        and "translate-native" in mcp.stdout
+        and "Never use release_response to bypass" in mcp.stdout
+    )
     checks.append(("live MCP tools", tools_ok, mcp.stderr.strip() or mcp.stdout[:240]))
     quality_path = root / "translate-native" / "scripts" / "language_quality.py"
     spec = importlib.util.spec_from_file_location("blun_doctor_quality", quality_path)
@@ -98,7 +109,14 @@ def doctor() -> int:
         receipt = quality.issue_receipt("Hello", "Hej", "sv-SE", key)
         valid = quality.verify_receipt(receipt, "Hello", "Hej", "sv-SE", key)["valid"]
         tamper_blocked = not quality.verify_receipt(receipt, "Hello", "Hallå", "sv-SE", key)["valid"]
-    checks.append(("signed receipt round-trip", valid and tamper_blocked, "valid receipt accepted; edited target rejected"))
+        purpose_blocked = not quality.verify_receipt(
+            receipt, "Hello", "Hej", "sv-SE", key, purpose="response"
+        )["valid"]
+    checks.append((
+        "signed receipt round-trip",
+        valid and tamper_blocked and purpose_blocked,
+        "valid receipt accepted; edited target and wrong purpose rejected",
+    ))
     if UPDATE_CONFIG.exists():
         config = json.loads(UPDATE_CONFIG.read_text(encoding="utf-8"))
         state = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
