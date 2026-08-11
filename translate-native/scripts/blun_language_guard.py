@@ -18,6 +18,15 @@ from typing import Any
 DIACRITICS_PATH = Path(__file__).with_name("check_diacritics.py")
 VERSION = "3.0.0"
 PROTOCOL_VERSION = "2025-06-18"
+EXACT_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$")
+MCP_INSTRUCTIONS = (
+    "Treat every user-visible natural-language answer as an untrusted candidate. "
+    "Before delivery, call release_response with the complete answer and exact language tag. "
+    "For every translation, localization, transcreation, or target-language rewrite, first apply "
+    "the installed translate-native skill/plugin and then call release_translation with the complete "
+    "source-target pair and truthful seven-pass attestations. Never use release_response to bypass "
+    "the translation gate. Release only after the exact current text receives a valid token."
+)
 
 
 def _load_diacritics_module():
@@ -143,7 +152,9 @@ def validate_text(
             f"Short {content_type} text needs host-enforced review; an MCP Boolean is not independent proof.",
             language=language,
         ))
-    for glossary_finding in QUALITY.glossary_findings(text, glossary or {}):
+    for glossary_finding in QUALITY.glossary_findings(
+        text, glossary if isinstance(glossary, dict) else {}
+    ):
         findings.append(Finding(glossary_finding["code"], json.dumps(glossary_finding, ensure_ascii=False), language=language))
 
     prose = DIACRITICS.mask_technical_text(text)
@@ -186,7 +197,19 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
     source = arguments.get("source_text", "")
     target = arguments.get("target_text", "")
     language = arguments.get("language", "auto")
+    source_is_text = isinstance(source, str)
+    target_is_text = isinstance(target, str)
+    language_is_exact = (
+        isinstance(language, str)
+        and language.casefold() not in {"auto", "all"}
+        and EXACT_LANGUAGE_TAG.fullmatch(language) is not None
+    )
+    source = source if source_is_text else ""
+    target = target if target_is_text else ""
+    language = language if isinstance(language, str) else ""
     attestations = arguments.get("attestations") or {}
+    if not isinstance(attestations, dict):
+        attestations = {}
     required = (
         "meaning",
         "completeness",
@@ -208,6 +231,21 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
         "structured-segment-identity",
         "translation-volume-integrity",
     ])
+    if not source_is_text:
+        report["findings"].append(
+            asdict(Finding("invalid-source-type", "source_text must be a string."))
+        )
+    if not target_is_text:
+        report["findings"].append(
+            asdict(Finding("invalid-target-type", "target_text must be a string."))
+        )
+    if not language_is_exact:
+        report["findings"].append(
+            asdict(Finding(
+                "exact-language-required",
+                "A host-supplied exact language or locale tag is required for translation release.",
+            ))
+        )
     missing = [name for name in required if attestations.get(name) is not True]
     if not source.strip():
         report["findings"].append(
@@ -253,6 +291,65 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
             source, target, language, key,
             content_type=arguments.get("content_type", "prose"),
             short_text_reviewed=arguments.get("short_text_reviewed") is True,
+            purpose="translation",
+        )
+    return report
+
+
+def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Validate an agent's own final answer and bind a receipt to the exact text."""
+    target = arguments.get("target_text", "")
+    language = arguments.get("language", "")
+    attestations = arguments.get("attestations") or {}
+    if not isinstance(attestations, dict):
+        attestations = {}
+    target_is_text = isinstance(target, str)
+    language_is_exact = (
+        isinstance(language, str)
+        and language.casefold() not in {"auto", "all"}
+        and EXACT_LANGUAGE_TAG.fullmatch(language) is not None
+    )
+    report = validate_text(
+        target if target_is_text else "",
+        language if isinstance(language, str) else "",
+        arguments.get("glossary"),
+        arguments.get("content_type", "prose"),
+        arguments.get("short_text_reviewed") is True,
+    )
+    report["checks"].append("agent-response-native-orthography")
+    if not target_is_text:
+        report["findings"].append(
+            asdict(Finding("invalid-target-type", "target_text must be a string."))
+        )
+    if not language_is_exact:
+        report["findings"].append(
+            asdict(Finding(
+                "exact-language-required",
+                "A host-supplied exact language or locale tag is required for response release.",
+            ))
+        )
+    missing = [name for name in ("nativeness", "orthography") if attestations.get(name) is not True]
+    if missing:
+        report["findings"].append(
+            asdict(Finding(
+                "missing-response-attestations",
+                "The following response checks were not explicitly passed: " + ", ".join(missing),
+            ))
+        )
+    report["status"] = "BLOCK" if report["findings"] else "PASS"
+    report["release_allowed"] = not report["findings"]
+    report["required_attestations"] = ["nativeness", "orthography"]
+    report["limitations"] = (
+        "Deterministic checks cannot prove that every word is native or correctly accented. "
+        "Response release also requires nativeness and orthography review plus a trusted host interceptor."
+    )
+    if report["release_allowed"]:
+        key = QUALITY.load_or_create_key(KEY_PATH)
+        report["release_token"] = QUALITY.issue_receipt(
+            "", target, language, key,
+            content_type=arguments.get("content_type", "prose"),
+            short_text_reviewed=arguments.get("short_text_reviewed") is True,
+            purpose="response",
         )
     return report
 
@@ -260,7 +357,7 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
 TOOLS = [
     {
         "name": "verify_release_token",
-        "description": "Cryptographically verify that a BLUN release receipt is authentic, unexpired, and bound to the exact source, target, locale, and guard version. Never accept a receipt based on its appearance.",
+        "description": "Cryptographically verify that a BLUN release receipt is authentic, unexpired, and bound to the exact purpose, source when applicable, target, locale, and guard version. Never accept a receipt based on its appearance.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -268,10 +365,36 @@ TOOLS = [
                 "source_text": {"type": "string"},
                 "target_text": {"type": "string"},
                 "language": {"type": "string"},
+                "purpose": {"type": "string", "enum": ["translation", "response"], "default": "translation"},
                 "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
                 "short_text_reviewed": {"type": "boolean", "default": False},
             },
             "required": ["release_token", "source_text", "target_text", "language"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "release_response",
+        "description": "Mandatory final gate for an agent's own user-visible natural-language answer. Returns a purpose-bound token only after deterministic Unicode, script, native-diacritics, and explicit nativeness/orthography checks pass. Never use this tool for a translation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_text": {"type": "string"},
+                "language": {"type": "string", "description": "Exact BCP 47 language or locale tag supplied by the host; auto and all are rejected."},
+                "glossary": {"type": "object"},
+                "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
+                "short_text_reviewed": {"type": "boolean", "description": "Compatibility metadata only; never suppresses measurable findings."},
+                "attestations": {
+                    "type": "object",
+                    "properties": {
+                        "nativeness": {"type": "boolean"},
+                        "orthography": {"type": "boolean"},
+                    },
+                    "required": ["nativeness", "orthography"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["target_text", "language", "attestations"],
             "additionalProperties": False,
         },
     },
@@ -354,14 +477,48 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
             "id": request_id,
             "result": {
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                    "prompts": {"listChanged": False},
+                },
                 "serverInfo": {"name": "blun-language-guard", "version": VERSION},
+                "instructions": MCP_INSTRUCTIONS,
             },
         }
     if method == "ping":
         return {"jsonrpc": "2.0", "id": request_id, "result": {}}
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": TOOLS}}
+    if method == "prompts/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"prompts": [{
+                "name": "translate-native",
+                "title": "Translate Native mandatory workflow",
+                "description": "Load the native translation workflow before drafting any translation.",
+                "arguments": [],
+            }]},
+        }
+    if method == "prompts/get":
+        params = message.get("params") or {}
+        if params.get("name") != "translate-native":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32602, "message": "Unknown prompt"},
+            }
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "description": "Mandatory native translation and orthography workflow.",
+                "messages": [{
+                    "role": "user",
+                    "content": {"type": "text", "text": MCP_INSTRUCTIONS},
+                }],
+            },
+        }
     if method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")
@@ -373,6 +530,8 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
             )
         elif name == "release_translation":
             payload = release_translation(arguments)
+        elif name == "release_response":
+            payload = release_response(arguments)
         elif name == "verify_release_token":
             payload = QUALITY.verify_receipt(
                 arguments.get("release_token", ""),
@@ -382,6 +541,7 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
                 QUALITY.load_or_create_key(KEY_PATH),
                 arguments.get("content_type", "prose"),
                 arguments.get("short_text_reviewed") is True,
+                arguments.get("purpose", "translation"),
             )
             payload["status"] = "PASS" if payload.get("valid") else "BLOCK"
         else:

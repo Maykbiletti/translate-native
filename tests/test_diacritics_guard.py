@@ -36,6 +36,21 @@ class DiacriticsCheckerTests(unittest.TestCase):
         self.assertIn("schoen", result.stdout.casefold())
         self.assertIn("vollstaendig", result.stdout.casefold())
 
+    def test_short_german_response_folding_fails(self) -> None:
+        result = run_checker("Das waere richtig und zuverlaessig.", "de-DE")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("waere", result.stdout.casefold())
+
+    def test_short_swedish_response_folding_fails(self) -> None:
+        result = run_checker("Det ar bra for dig pa en vanlig dag.", "sv-SE")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("det ar", result.stdout.casefold())
+        self.assertIn("for dig", result.stdout.casefold())
+
+    def test_legitimate_swedish_flod_is_not_mistaken_for_flode(self) -> None:
+        result = run_checker("Nilen är en flod.", "sv-SE")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_spanish_transliterations_fail(self) -> None:
         result = run_checker("Informacion para el senor en esta pagina.", "es")
         self.assertEqual(result.returncode, 1)

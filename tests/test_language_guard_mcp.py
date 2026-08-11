@@ -34,6 +34,85 @@ class LanguageGuardMCPTests(unittest.TestCase):
         )
         self.assertEqual(report["status"], "PASS")
 
+    def test_initialize_injects_mandatory_output_and_translation_instructions(self) -> None:
+        response = MODULE.handle_message({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        assert response is not None
+        instructions = response["result"]["instructions"]
+        self.assertIn("release_response", instructions)
+        self.assertIn("translate-native skill/plugin", instructions)
+        self.assertIn("release_translation", instructions)
+
+    def test_mcp_advertises_translate_native_prompt(self) -> None:
+        listed = MODULE.handle_message({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"})
+        assert listed is not None
+        self.assertEqual(listed["result"]["prompts"][0]["name"], "translate-native")
+        fetched = MODULE.handle_message({
+            "jsonrpc": "2.0", "id": 2, "method": "prompts/get",
+            "params": {"name": "translate-native"},
+        })
+        assert fetched is not None
+        self.assertIn("release_translation", fetched["result"]["messages"][0]["content"]["text"])
+
+    def test_release_response_blocks_damaged_german_answer(self) -> None:
+        report = MODULE.release_response({
+            "target_text": "Haendler pruefen taeglich die Qualitaet im Buero.",
+            "language": "de-DE",
+            "attestations": {"nativeness": True, "orthography": True},
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertIn("ascii-folding-pressure", {finding["code"] for finding in report["findings"]})
+
+    def test_release_response_blocks_short_folded_german_and_swedish(self) -> None:
+        cases = (
+            ("Das waere richtig.", "de-DE"),
+            ("Det ar bra for dig.", "sv-SE"),
+        )
+        for target, language in cases:
+            with self.subTest(language=language):
+                report = MODULE.release_response({
+                    "target_text": target,
+                    "language": language,
+                    "attestations": {"nativeness": True, "orthography": True},
+                })
+                self.assertFalse(report["release_allowed"])
+                self.assertIn(
+                    "suspected-ascii-substitution",
+                    {finding["code"] for finding in report["findings"]},
+                )
+
+    def test_release_response_requires_exact_language_and_attestations(self) -> None:
+        report = MODULE.release_response({
+            "target_text": "Natürlich ist das möglich.",
+            "language": "auto",
+            "attestations": {"orthography": True},
+        })
+        self.assertFalse(report["release_allowed"])
+        self.assertEqual(
+            {"exact-language-required", "missing-response-attestations"},
+            {finding["code"] for finding in report["findings"]},
+        )
+
+    def test_response_receipt_is_purpose_bound(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
+        target = "Natürlich ist das möglich."
+        report = MODULE.release_response({
+            "target_text": target,
+            "language": "de-DE",
+            "attestations": {"nativeness": True, "orthography": True},
+        })
+        self.assertTrue(report["release_allowed"], report)
+        key = MODULE.QUALITY.load_or_create_key(MODULE.KEY_PATH)
+        response_check = MODULE.QUALITY.verify_receipt(
+            report["release_token"], "", target, "de-DE", key, purpose="response",
+        )
+        translation_check = MODULE.QUALITY.verify_receipt(
+            report["release_token"], "", target, "de-DE", key, purpose="translation",
+        )
+        self.assertTrue(response_check["valid"])
+        self.assertFalse(translation_check["valid"])
+
     def test_ascii_swedish_is_blocked(self) -> None:
         # Angel regression: real BLUN product copy, wholesale ASCII-folded,
         # deliberately avoiding the checker's tiny Swedish substitution list.
@@ -382,14 +461,17 @@ class LanguageGuardMCPTests(unittest.TestCase):
             }
         )
         self.assertTrue(report["release_allowed"])
-        self.assertRegex(report["release_token"], r"^blg5\.")
+        self.assertRegex(report["release_token"], r"^blg6\.")
 
     def test_mcp_lists_mandatory_release_tool(self) -> None:
         response = MODULE.handle_message(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
         )
         names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(names, {"validate_text", "release_translation", "verify_release_token"})
+        self.assertEqual(
+            names,
+            {"validate_text", "release_response", "release_translation", "verify_release_token"},
+        )
 
 
 if __name__ == "__main__":

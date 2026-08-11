@@ -20,14 +20,29 @@ SPEC.loader.exec_module(GUARD)
 
 
 def gate(request: dict) -> dict:
-    required = ("source_text", "target_text", "language")
-    missing = [key for key in required if not request.get(key)]
+    required = ("task_kind", "target_text", "language")
+    missing = [
+        key for key in required
+        if not isinstance(request.get(key), str) or not request[key].strip()
+    ]
     if missing:
         return {"status": "BLOCK", "release_allowed": False, "reason": "missing-fields", "fields": missing}
-    if request.get("translation_task") is False:
-        return {"status": "PASS", "release_allowed": True, "reason": "explicitly-not-a-translation"}
-    result = GUARD.release_translation(request)
+    task_kind = request["task_kind"]
+    source = request.get("source_text", "")
+    if not isinstance(source, str):
+        return {"status": "BLOCK", "release_allowed": False, "reason": "invalid-source-type"}
+    if task_kind == "translation":
+        if not source.strip():
+            return {"status": "BLOCK", "release_allowed": False, "reason": "translation-source-required"}
+        result = GUARD.release_translation(request)
+    elif task_kind == "response":
+        if source.strip():
+            return {"status": "BLOCK", "release_allowed": False, "reason": "response-cannot-carry-source"}
+        result = GUARD.release_response(request)
+    else:
+        return {"status": "BLOCK", "release_allowed": False, "reason": "invalid-task-kind"}
     result["gateway"] = f"blun-language-gateway/{GUARD.VERSION}"
+    result["task_kind"] = task_kind
     return result
 
 

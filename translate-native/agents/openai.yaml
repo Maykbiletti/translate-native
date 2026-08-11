@@ -1,7 +1,7 @@
 interface:
   display_name: "Translate Native"
-  short_description: "Natürlich übersetzen und Originalschrift bewahren"
-  default_prompt: "Use $translate-native to produce native original writing while preserving meaning, protected syntax, native Unicode, diacritics, script, and punctuation in one mandatory workflow."
+  short_description: "Native Übersetzungen mit verpflichtendem Gate"
+  default_prompt: "Use $translate-native to create a native, meaning-faithful translation with correct Unicode and release it only through the mandatory translation gate."
   icon_small: "./assets/icon.svg"
   icon_large: "./assets/icon.svg"
 policy:
@@ -15,4 +15,4 @@ dependencies:
   tools:
   - type: "mcp"
     value: "blun-language-guard"
-    description: "Mandatory Unicode, orthography, and translation release gate"
+    description: "Mandatory native-orthography gate for agent responses and translations"
