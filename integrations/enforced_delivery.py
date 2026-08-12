@@ -29,12 +29,19 @@ from typing import Any, Awaitable, Callable, Sequence, TypeVar
 
 ROOT = Path(__file__).resolve().parents[1]
 QUALITY_PATH = ROOT / "translate-native" / "scripts" / "language_quality.py"
+CLIENT_PATH = ROOT / "translate-native" / "scripts" / "guard_service_client.py"
 SPEC = importlib.util.spec_from_file_location("blun_delivery_quality", QUALITY_PATH)
 assert SPEC and SPEC.loader
 QUALITY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(QUALITY)
 
+CLIENT_SPEC = importlib.util.spec_from_file_location("blun_delivery_service_client", CLIENT_PATH)
+assert CLIENT_SPEC and CLIENT_SPEC.loader
+SERVICE_CLIENT = importlib.util.module_from_spec(CLIENT_SPEC)
+CLIENT_SPEC.loader.exec_module(SERVICE_CLIENT)
+
 DEFAULT_KEY_PATH = Path.home() / ".config" / "blun-language-guard" / "signing.key"
+DEFAULT_POLICY_PATH = Path.home() / ".config" / "blun-language-guard" / "delivery-policy.json"
 DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 FORBIDDEN_AGENT_FIELDS = {
     "task_kind", "language", "source_text", "content_type",
@@ -118,6 +125,38 @@ def verify_envelope(envelope: dict[str, Any], policy: HostPolicy, key: bytes) ->
     return target
 
 
+def verify_envelope_with_service(
+    envelope: dict[str, Any],
+    policy: HostPolicy,
+    endpoint: str,
+    *,
+    service_token: str = "",
+    timeout: float = 10.0,
+) -> str:
+    validate_policy(policy)
+    target = envelope["target_text"]
+    result = SERVICE_CLIENT.call_guard_service(
+        endpoint,
+        {
+            "operation": "verify",
+            "task_kind": policy.task_kind,
+            "source_text": policy.source_text,
+            "target_text": target,
+            "language": policy.language,
+            "release_token": envelope["release_token"],
+            "content_type": policy.content_type,
+            "short_text_reviewed": policy.short_text_reviewed,
+        },
+        auth_token=service_token,
+        timeout=timeout,
+    )
+    if not result.get("valid"):
+        failed = [name for name, passed in result.get("checks", {}).items() if not passed]
+        detail = ", ".join(failed) if failed else "invalid receipt"
+        raise DeliveryBlocked("isolated guard rejected the receipt: " + detail)
+    return target
+
+
 def load_verification_key(path: Path) -> bytes:
     """Load an existing verifier key without silently creating a new trust root."""
     environment_key = os.environ.get("BLUN_LANGUAGE_GUARD_KEY")
@@ -135,6 +174,19 @@ def load_verification_key(path: Path) -> bytes:
     if len(key) < 32:
         raise DeliveryBlocked("signing key is invalid")
     return key
+
+
+def load_installed_service_policy(path: Path = DEFAULT_POLICY_PATH) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DeliveryBlocked("installed delivery policy is unreadable") from error
+    isolated = policy.get("isolated_service")
+    if policy.get("mandatory") is not True or not isinstance(isolated, dict):
+        raise DeliveryBlocked("installed delivery policy is invalid")
+    return isolated
 
 
 ResultT = TypeVar("ResultT")
@@ -181,6 +233,8 @@ def _untrusted_environment(policy: HostPolicy) -> dict[str, str]:
     environment = dict(os.environ)
     environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
     environment.pop("BLUN_LANGUAGE_GUARD_KEY_FILE", None)
+    environment.pop("BLUN_LANGUAGE_GUARD_SERVICE_TOKEN", None)
+    environment.pop("BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE", None)
     environment["BLUN_LANGUAGE_GUARD_MANDATORY"] = "1"
     environment["BLUN_LANGUAGE_GUARD_TASK_KIND"] = policy.task_kind
     environment["BLUN_LANGUAGE_GUARD_LANGUAGE"] = policy.language
@@ -224,6 +278,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--content-type", default="prose")
     parser.add_argument("--short-text-reviewed", action="store_true")
     parser.add_argument("--key-file", type=Path, default=DEFAULT_KEY_PATH)
+    parser.add_argument("--service-endpoint", default=os.environ.get("BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT", ""))
+    parser.add_argument("--service-token-file", type=Path)
+    parser.add_argument("--require-service", action="store_true", help="Disable same-user key verification")
+    parser.add_argument("--policy-file", type=Path, default=DEFAULT_POLICY_PATH)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -246,9 +304,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         validate_policy(policy)
         raw = _run_agent(args.command, args.timeout, args.max_bytes, policy)
         envelope = parse_envelope(raw, args.max_bytes)
-        key = load_verification_key(args.key_file)
-        target = verify_envelope(envelope, policy, key)
-    except (DeliveryBlocked, OSError) as error:
+        installed_service = load_installed_service_policy(args.policy_file)
+        service_endpoint = args.service_endpoint or str(installed_service.get("endpoint", ""))
+        token_file = args.service_token_file
+        if token_file is None and installed_service.get("token_file"):
+            token_file = Path(str(installed_service["token_file"]))
+        require_service = args.require_service or installed_service.get("required") is True
+        if service_endpoint:
+            service_token = ""
+            if token_file:
+                service_token = token_file.read_text(encoding="utf-8-sig").strip()
+                if len(service_token) < 32:
+                    raise DeliveryBlocked("service token is invalid")
+            target = verify_envelope_with_service(
+                envelope,
+                policy,
+                service_endpoint,
+                service_token=service_token,
+                timeout=min(args.timeout, 30.0),
+            )
+        else:
+            if require_service:
+                raise DeliveryBlocked("isolated guard service is required")
+            key = load_verification_key(args.key_file)
+            target = verify_envelope(envelope, policy, key)
+    except (DeliveryBlocked, SERVICE_CLIENT.GuardServiceError, OSError) as error:
         print(f"BLOCK: {error}", file=sys.stderr)
         return 1
     sys.stdout.write(target)

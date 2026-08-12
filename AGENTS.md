@@ -8,6 +8,8 @@
 - Never use `auto`, `all`, another language tag, or the response path to hide missing native characters. The host owns `task_kind` and the expected language; the agent must not choose them to obtain a pass.
 - A strong installation must intercept output outside the agent and fail closed. MCP instructions alone are behavioral guidance, not a non-bypassable security boundary.
 - When `BLUN_LANGUAGE_GUARD_MANDATORY=1`, return exactly one JSON envelope containing only `target_text` and the purpose-bound `release_token`; never call a delivery channel directly or place host-owned task, locale, source, or policy fields in the envelope.
+- Treat streaming deltas, logs, progress text, and alternate senders as delivery channels. In mandatory mode, candidate prose belongs only inside the final signed envelope.
+- Never read the isolated guard token or signing key. If the required service is unavailable, stop instead of falling back to local verification.
 
 ## Translation and localization
 

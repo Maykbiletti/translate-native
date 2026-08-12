@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -118,6 +119,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         )
         environment = dict(os.environ)
         environment["BLUN_LANGUAGE_GUARD_KEY"] = "secret-value"
+        environment["BLUN_LANGUAGE_GUARD_SERVICE_TOKEN"] = "service-secret-value"
         result = subprocess.run(
             [
                 sys.executable, str(PATH), "--key-file", str(self.key_path),
@@ -131,6 +133,79 @@ class EnforcedDeliveryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("secret-value", result.stdout + result.stderr)
+
+    def test_isolated_service_verifies_without_exposing_local_key(self) -> None:
+        target = "Natürlich ist das möglich."
+        envelope = json.loads(self.envelope(target))
+        policy = MODULE.HostPolicy("response", "de-DE")
+        with mock.patch.object(
+            MODULE.SERVICE_CLIENT,
+            "call_guard_service",
+            return_value={"valid": True, "checks": {"target": True}},
+        ) as service_call:
+            result = MODULE.verify_envelope_with_service(
+                envelope,
+                policy,
+                "unix:/guard.sock",
+                service_token="service-token-with-at-least-32-characters",
+            )
+        self.assertEqual(result, target)
+        request = service_call.call_args.args[1]
+        self.assertEqual(request["task_kind"], "response")
+        self.assertEqual(request["target_text"], target)
+
+    def test_require_service_blocks_local_key_fallback(self) -> None:
+        target = "Natürlich ist das möglich."
+        result = self.run_delivery(
+            self.envelope(target),
+            "--task-kind", "response", "--language", "de-DE", "--require-service",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("isolated guard service is required", result.stderr)
+
+    def test_installed_policy_requires_isolated_service(self) -> None:
+        policy_path = Path(self.temporary.name) / "delivery-policy.json"
+        policy_path.write_text(json.dumps({
+            "mandatory": True,
+            "isolated_service": {
+                "required": True,
+                "endpoint": "tcp:127.0.0.1:47631",
+                "token_file": str(Path(self.temporary.name) / "service.token"),
+            },
+        }), encoding="utf-8")
+        isolated = MODULE.load_installed_service_policy(policy_path)
+        self.assertTrue(isolated["required"])
+        self.assertEqual(isolated["endpoint"], "tcp:127.0.0.1:47631")
+
+    def test_invalid_installed_policy_blocks(self) -> None:
+        policy_path = Path(self.temporary.name) / "delivery-policy.json"
+        policy_path.write_text("{}", encoding="utf-8")
+        with self.assertRaises(MODULE.DeliveryBlocked):
+            MODULE.load_installed_service_policy(policy_path)
+
+    def test_installed_service_policy_prevents_local_key_fallback(self) -> None:
+        token_path = Path(self.temporary.name) / "service.token"
+        token_path.write_text("service-token-with-at-least-32-characters\n", encoding="ascii")
+        policy_path = Path(self.temporary.name) / "delivery-policy.json"
+        policy_path.write_text(json.dumps({
+            "mandatory": True,
+            "isolated_service": {
+                "required": True,
+                "endpoint": "tcp:127.0.0.1:1",
+                "token_file": str(token_path),
+            },
+        }), encoding="utf-8")
+        target = "Natürlich ist das möglich."
+        result = self.run_delivery(
+            self.envelope(target),
+            "--policy-file", str(policy_path),
+            "--task-kind", "response",
+            "--language", "de-DE",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn(target, result.stderr)
 
     def test_missing_key_fails_closed_instead_of_creating_one(self) -> None:
         missing = Path(self.temporary.name) / "missing.key"

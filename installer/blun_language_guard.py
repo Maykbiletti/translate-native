@@ -7,12 +7,13 @@ import argparse
 import importlib.util
 import json
 import os
+import platform
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-import platform
 from pathlib import Path
 
 
@@ -27,6 +28,14 @@ UPDATE_STATE = Path.home() / ".config" / "blun-language-guard" / "update-state.j
 DELIVERY_COMMAND = Path.home() / ".local" / "bin" / "blun-language-deliver"
 DELIVERY_POLICY = Path.home() / ".config" / "blun-language-guard" / "delivery-policy.json"
 SIGNING_KEY = Path.home() / ".config" / "blun-language-guard" / "signing.key"
+SERVICE_COMMAND = Path.home() / ".local" / "bin" / "blun-language-guard-service"
+SERVICE_TOKEN = Path.home() / ".config" / "blun-language-guard" / "service.token"
+AUDIT_LOG = Path.home() / ".config" / "blun-language-guard" / "audit.jsonl"
+SERVICE_ENDPOINT = (
+    "tcp:127.0.0.1:47631"
+    if os.name == "nt"
+    else f"unix:{Path.home() / '.config' / 'blun-language-guard' / 'guard.sock'}"
+)
 
 
 def repository_root() -> Path:
@@ -60,6 +69,26 @@ def ensure_signing_key(path: Path | None = None) -> None:
     temporary.replace(path)
 
 
+def ensure_service_token(path: Path | None = None) -> None:
+    """Create a stable text token used only by host adapters and the MCP process."""
+    path = path or SERVICE_TOKEN
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not path.is_file():
+            raise RuntimeError(f"Service-token path is not a file: {path}")
+        token = path.read_text(encoding="utf-8-sig").strip()
+        if len(token) < 32:
+            raise RuntimeError(f"Service token is invalid: {path}")
+        if os.name != "nt" and path.stat().st_mode & 0o077:
+            raise RuntimeError(f"Service-token permissions must be owner-only: {path}")
+        return
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
+    if os.name != "nt":
+        os.chmod(temporary, 0o600)
+    temporary.replace(path)
+
+
 def install_delivery_boundary(root: Path) -> None:
     source = root / "integrations" / "enforced_delivery.py"
     if not source.is_file():
@@ -68,23 +97,170 @@ def install_delivery_boundary(root: Path) -> None:
     atomic_symlink(source, DELIVERY_COMMAND)
     ensure_signing_key()
     policy = json.loads((root / "integrations" / "delivery-policy.example.json").read_text(encoding="utf-8"))
+    policy["isolated_service"] = {
+        "required": True,
+        "endpoint": SERVICE_ENDPOINT,
+        "token_file": str(SERVICE_TOKEN),
+        "audit_file": str(AUDIT_LOG),
+    }
     _atomic_json(DELIVERY_POLICY, policy)
     print(f"Mandatory delivery command: {DELIVERY_COMMAND}")
     print(f"Fail-closed delivery policy: {DELIVERY_POLICY}")
 
 
-def install(targets: list[str]) -> int:
+def install_guard_runtime(root: Path) -> None:
+    source = root / "integrations" / "guard_service.py"
+    if not source.is_file():
+        raise RuntimeError(f"Missing isolated guard service: {source}")
+    source.chmod(source.stat().st_mode | 0o111)
+    atomic_symlink(source, SERVICE_COMMAND)
+    ensure_signing_key()
+    ensure_service_token()
+    print(f"Isolated guard service command: {SERVICE_COMMAND}")
+    print(f"Content-free audit log: {AUDIT_LOG}")
+
+
+def _service_arguments(root: Path) -> list[str]:
+    return [
+        sys.executable,
+        str(root / "integrations" / "guard_service.py"),
+        "--endpoint", SERVICE_ENDPOINT,
+        "--key-file", str(SIGNING_KEY),
+        "--token-file", str(SERVICE_TOKEN),
+        "--audit-file", str(AUDIT_LOG),
+    ]
+
+
+def _shell_command(arguments: list[str]) -> str:
+    if platform.system() == "Windows":
+        return subprocess.list2cmdline(arguments)
+    return " ".join(shlex.quote(value) for value in arguments)
+
+
+def install_guard_autostart(root: Path) -> tuple[bool, str]:
+    """Install and start a per-user service. Separate-user deployment stays an admin task."""
+    arguments = _service_arguments(root)
+    system = platform.system()
+    if system == "Linux":
+        units = Path.home() / ".config" / "systemd" / "user"
+        units.mkdir(parents=True, exist_ok=True)
+        service = units / "blun-language-guard.service"
+        service.write_text(
+            "[Unit]\nDescription=BLUN isolated language release guard\n\n"
+            "[Service]\nType=simple\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
+            f"ExecStart={_shell_command(arguments)}\nRestart=on-failure\nRestartSec=2\n\n"
+            "[Install]\nWantedBy=default.target\n",
+            encoding="utf-8",
+        )
+        reload_result = _run(["systemctl", "--user", "daemon-reload"])
+        enable_result = _run(["systemctl", "--user", "enable", "--now", service.name])
+        return reload_result.returncode == 0 and enable_result.returncode == 0, str(service)
+    if system == "Darwin":
+        agents = Path.home() / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        plist = agents / "ai.blun.language-guard.plist"
+        program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
+        plist.write_text(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\"><dict><key>Label</key><string>ai.blun.language-guard</string>"
+            f"<key>ProgramArguments</key><array>{program_arguments}</array>"
+            "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n",
+            encoding="utf-8",
+        )
+        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+        result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
+        return result.returncode == 0, str(plist)
+    if system == "Windows":
+        result = _run([
+            "schtasks", "/Create", "/F", "/SC", "ONLOGON",
+            "/TN", "BLUN Language Guard", "/TR", _shell_command(arguments),
+        ])
+        started = _run(["schtasks", "/Run", "/TN", "BLUN Language Guard"])
+        return result.returncode == 0 and started.returncode == 0, "Windows Task Scheduler: BLUN Language Guard"
+    return False, f"No guard-service adapter for {system}"
+
+
+def restart_guard_runtime() -> tuple[bool, str]:
+    system = platform.system()
+    if system == "Linux":
+        result = _run(["systemctl", "--user", "restart", "blun-language-guard.service"])
+        return result.returncode == 0, "systemd user service"
+    if system == "Darwin":
+        result = _run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/ai.blun.language-guard"])
+        return result.returncode == 0, "LaunchAgent"
+    if system == "Windows":
+        _run(["schtasks", "/End", "/TN", "BLUN Language Guard"])
+        result = _run(["schtasks", "/Run", "/TN", "BLUN Language Guard"])
+        return result.returncode == 0, "Windows Task Scheduler"
+    return False, f"No guard-service adapter for {system}"
+
+
+def _xml_escape(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def probe_guard_service() -> dict:
+    root = repository_root()
+    client_path = root / "translate-native" / "scripts" / "guard_service_client.py"
+    spec = importlib.util.spec_from_file_location("blun_installer_guard_client", client_path)
+    assert spec and spec.loader
+    client = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(client)
+    token = SERVICE_TOKEN.read_text(encoding="utf-8-sig").strip()
+    return client.call_guard_service(
+        SERVICE_ENDPOINT,
+        {"operation": "health"},
+        auth_token=token,
+        timeout=3.0,
+    )
+
+
+def guard_service(action: str) -> int:
+    root = repository_root()
+    if action in {"install", "start"}:
+        install_guard_runtime(root)
+        ok, detail = install_guard_autostart(root)
+        print(f"{'Guard service installed and started' if ok else 'Guard service installation failed'}: {detail}")
+        return 0 if ok else 1
+    if action == "stop":
+        system = platform.system()
+        if system == "Linux":
+            result = _run(["systemctl", "--user", "stop", "blun-language-guard.service"])
+        elif system == "Darwin":
+            result = _run(["launchctl", "bootout", f"gui/{os.getuid()}/ai.blun.language-guard"])
+        elif system == "Windows":
+            result = _run(["schtasks", "/End", "/TN", "BLUN Language Guard"])
+        else:
+            return 2
+        return int(result.returncode != 0)
+    try:
+        result = probe_guard_service()
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"BLOCK guard service unavailable: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result.get("status") == "ok" and result.get("isolated_key") is True else 1
+
+
+def install(targets: list[str], *, autostart_service: bool = True) -> int:
     root = repository_root()
     skill = root / "translate-native"
     for target in targets:
         atomic_symlink(skill, TARGETS[target])
         print(f"OK {target}: {TARGETS[target]} -> {skill}")
     install_delivery_boundary(root)
+    install_guard_runtime(root)
     config = {
         "mcpServers": {
             "blun-language-guard": {
                 "command": sys.executable,
                 "args": [str(skill / "scripts" / "blun_language_guard.py"), "serve"],
+                "env": {
+                    "BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT": SERVICE_ENDPOINT,
+                    "BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE": str(SERVICE_TOKEN),
+                },
             }
         }
     }
@@ -103,6 +279,11 @@ def install(targets: list[str]) -> int:
             print(f"BLUN MCP backup: {backup}")
         _atomic_json(blun_config, current)
         print(f"BLUN MCP configuration merged: {blun_config}")
+    if autostart_service:
+        ok, detail = install_guard_autostart(root)
+        print(f"{'Guard service installed and started' if ok else 'Guard service installation failed'}: {detail}")
+        if not ok:
+            return 1
     return 0
 
 
@@ -123,14 +304,29 @@ def doctor() -> int:
     ))
     key_secure = SIGNING_KEY.is_file() and (os.name == "nt" or SIGNING_KEY.stat().st_mode & 0o077 == 0)
     checks.append(("signing key", key_secure, str(SIGNING_KEY)))
+    service_source = root / "integrations" / "guard_service.py"
+    checks.append((
+        "isolated guard command",
+        SERVICE_COMMAND.is_symlink() and SERVICE_COMMAND.resolve() == service_source.resolve(),
+        str(SERVICE_COMMAND),
+    ))
+    token_secure = SERVICE_TOKEN.is_file() and (os.name == "nt" or SERVICE_TOKEN.stat().st_mode & 0o077 == 0)
+    checks.append(("service authentication token", token_secure, str(SERVICE_TOKEN)))
     policy_ok = False
     if DELIVERY_POLICY.is_file():
         try:
             policy = json.loads(DELIVERY_POLICY.read_text(encoding="utf-8-sig"))
-            policy_ok = policy.get("mandatory") is True and policy.get("direct_delivery_allowed") is False
+            policy_ok = (
+                policy.get("mandatory") is True
+                and policy.get("direct_delivery_allowed") is False
+                and policy.get("raw_streaming_allowed") is False
+                and policy.get("isolated_service", {}).get("required") is True
+            )
         except (OSError, json.JSONDecodeError):
             policy_ok = False
     checks.append(("fail-closed delivery policy", policy_ok, str(DELIVERY_POLICY)))
+    service_live = guard_service("status") == 0
+    checks.append(("isolated guard health", service_live, SERVICE_ENDPOINT))
     tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
     checks.append(("test suite", tests.returncode == 0, tests.stderr.strip() or tests.stdout.strip()))
     server = root / "translate-native" / "scripts" / "blun_language_guard.py"
@@ -222,6 +418,29 @@ def update(require_signed_commits: bool = False) -> int:
         rollback = _run(["git", "reset", "--keep", previous], root)
         print("Installed revision failed its post-update check; rollback " + ("succeeded." if rollback.returncode == 0 else "FAILED."), file=sys.stderr)
         return 1
+    if SERVICE_COMMAND.is_symlink() or SERVICE_COMMAND.exists():
+        restarted, runtime = restart_guard_runtime()
+        healthy = False
+        if restarted:
+            for _attempt in range(10):
+                try:
+                    health = probe_guard_service()
+                    healthy = health.get("status") == "ok" and health.get("isolated_key") is True
+                    if healthy:
+                        break
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                time.sleep(0.2)
+        if not restarted or not healthy:
+            rollback = _run(["git", "reset", "--keep", previous], root)
+            restart_guard_runtime()
+            print(
+                "Updated guard could not restart; rollback "
+                + ("succeeded." if rollback.returncode == 0 else "FAILED."),
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Restarted isolated guard through {runtime}.")
     _atomic_json(UPDATE_STATE, {"status": "ok", "revision": revision, "previous": previous, "checked_at": int(time.time())})
     print(f"Updated to tested revision {revision}; rollback revision is {previous}")
     return 0
@@ -313,6 +532,9 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     install_parser = sub.add_parser("install")
     install_parser.add_argument("--target", action="append", choices=tuple(TARGETS), dest="targets")
+    install_parser.add_argument("--no-service-autostart", action="store_true")
+    service_parser = sub.add_parser("service")
+    service_parser.add_argument("action", choices=("install", "start", "stop", "status"))
     sub.add_parser("doctor")
     update_parser = sub.add_parser("update")
     update_parser.add_argument("--require-signed-commits", action="store_true")
@@ -323,7 +545,9 @@ def main() -> int:
     auto.add_argument("--no-scheduler", action="store_true", help="Write policy only; do not install an OS scheduler")
     args = parser.parse_args()
     if args.command == "install":
-        return install(args.targets or list(TARGETS))
+        return install(args.targets or list(TARGETS), autostart_service=not args.no_service_autostart)
+    if args.command == "service":
+        return guard_service(args.action)
     if args.command == "doctor":
         return doctor()
     if args.command == "update":

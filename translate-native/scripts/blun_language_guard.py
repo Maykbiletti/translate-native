@@ -16,7 +16,7 @@ from typing import Any
 
 
 DIACRITICS_PATH = Path(__file__).with_name("check_diacritics.py")
-VERSION = "3.0.0"
+VERSION = "6.2.0"
 PROTOCOL_VERSION = "2025-06-18"
 EXACT_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$")
 MCP_INSTRUCTIONS = (
@@ -67,8 +67,23 @@ def _load_translation_module():
 
 
 TRANSLATION = _load_translation_module()
+
+
+def _load_service_client():
+    path = Path(__file__).with_name("guard_service_client.py")
+    spec = importlib.util.spec_from_file_location("blun_guard_service_client", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Cannot load guard service client")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+SERVICE_CLIENT = _load_service_client()
 VERSION = QUALITY.VERSION
 KEY_PATH = Path(os.environ.get("BLUN_LANGUAGE_GUARD_KEY_FILE", Path.home() / ".config" / "blun-language-guard" / "signing.key"))
+SERVICE_ENDPOINT = os.environ.get("BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT", "").strip()
+SERVICE_TOKEN_FILE = os.environ.get("BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE", "").strip()
 LANGUAGE_CHARACTER_PROFILES = {
     "sv": set("åäöÅÄÖ"),
     "de": set("äöüßÄÖÜẞ"),
@@ -93,6 +108,45 @@ class Finding:
     blocking: bool = True
     line: int | None = None
     language: str | None = None
+
+
+def _service_token() -> str:
+    direct = os.environ.get("BLUN_LANGUAGE_GUARD_SERVICE_TOKEN", "").strip()
+    if direct:
+        return direct
+    if not SERVICE_TOKEN_FILE:
+        return ""
+    token = Path(SERVICE_TOKEN_FILE).read_text(encoding="utf-8-sig").strip()
+    if len(token) < 32:
+        raise SERVICE_CLIENT.GuardServiceError("guard service token is invalid")
+    return token
+
+
+def _isolated_release(task_kind: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    if not SERVICE_ENDPOINT:
+        return None
+    request = dict(arguments)
+    request.update({
+        "operation": "release",
+        "task_kind": task_kind,
+        "agent_id": os.environ.get("BLUN_LANGUAGE_GUARD_AGENT_ID", ""),
+        "channel": os.environ.get("BLUN_LANGUAGE_GUARD_CHANNEL", "mcp"),
+    })
+    if task_kind == "response":
+        request["source_text"] = ""
+    try:
+        return SERVICE_CLIENT.call_guard_service(
+            SERVICE_ENDPOINT,
+            request,
+            auth_token=_service_token(),
+        )
+    except (OSError, SERVICE_CLIENT.GuardServiceError) as error:
+        return {
+            "status": "BLOCK",
+            "release_allowed": False,
+            "reason": "isolated-guard-unavailable",
+            "error": str(error),
+        }
 
 
 def _languages_for(text: str, language: str) -> tuple[str, ...]:
@@ -196,6 +250,9 @@ def validate_text(
 
 
 def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
+    isolated = _isolated_release("translation", arguments)
+    if isolated is not None:
+        return isolated
     source = arguments.get("source_text", "")
     target = arguments.get("target_text", "")
     language = arguments.get("language", "auto")
@@ -300,6 +357,9 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
     """Validate an agent's own final answer and bind a receipt to the exact text."""
+    isolated = _isolated_release("response", arguments)
+    if isolated is not None:
+        return isolated
     target = arguments.get("target_text", "")
     language = arguments.get("language", "")
     attestations = arguments.get("attestations") or {}
@@ -535,16 +595,37 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
         elif name == "release_response":
             payload = release_response(arguments)
         elif name == "verify_release_token":
-            payload = QUALITY.verify_receipt(
-                arguments.get("release_token", ""),
-                arguments.get("source_text", ""),
-                arguments.get("target_text", ""),
-                arguments.get("language", ""),
-                QUALITY.load_or_create_key(KEY_PATH),
-                arguments.get("content_type", "prose"),
-                arguments.get("short_text_reviewed") is True,
-                arguments.get("purpose", "translation"),
-            )
+            if SERVICE_ENDPOINT:
+                try:
+                    payload = SERVICE_CLIENT.call_guard_service(
+                        SERVICE_ENDPOINT,
+                        {
+                            "operation": "verify",
+                            "task_kind": arguments.get("purpose", "translation"),
+                            "source_text": arguments.get("source_text", ""),
+                            "target_text": arguments.get("target_text", ""),
+                            "language": arguments.get("language", ""),
+                            "release_token": arguments.get("release_token", ""),
+                            "content_type": arguments.get("content_type", "prose"),
+                            "short_text_reviewed": arguments.get("short_text_reviewed") is True,
+                            "agent_id": os.environ.get("BLUN_LANGUAGE_GUARD_AGENT_ID", ""),
+                            "channel": os.environ.get("BLUN_LANGUAGE_GUARD_CHANNEL", "mcp"),
+                        },
+                        auth_token=_service_token(),
+                    )
+                except (OSError, SERVICE_CLIENT.GuardServiceError) as error:
+                    payload = {"valid": False, "status": "BLOCK", "error": str(error)}
+            else:
+                payload = QUALITY.verify_receipt(
+                    arguments.get("release_token", ""),
+                    arguments.get("source_text", ""),
+                    arguments.get("target_text", ""),
+                    arguments.get("language", ""),
+                    QUALITY.load_or_create_key(KEY_PATH),
+                    arguments.get("content_type", "prose"),
+                    arguments.get("short_text_reviewed") is True,
+                    arguments.get("purpose", "translation"),
+                )
             payload["status"] = "PASS" if payload.get("valid") else "BLOCK"
         else:
             return {

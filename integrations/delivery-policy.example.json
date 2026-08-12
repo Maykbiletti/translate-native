@@ -12,10 +12,17 @@
     "target_text",
     "release_token"
   ],
+  "isolated_service": {
+    "required": true,
+    "endpoint": "platform installer supplies a loopback socket",
+    "token_file": "owner-only host path",
+    "audit_file": "content-free JSONL"
+  },
   "routes": {
     "response": "release_response",
     "translation": "translate-native + release_translation"
   },
   "direct_delivery_allowed": false,
+  "raw_streaming_allowed": false,
   "on_guard_error": "block"
 }

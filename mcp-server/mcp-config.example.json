@@ -5,7 +5,11 @@
       "args": [
         "/absolute/path/to/translate-native/translate-native/scripts/blun_language_guard.py",
         "serve"
-      ]
+      ],
+      "env": {
+        "BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT": "unix:/absolute/path/to/guard.sock",
+        "BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE": "/absolute/path/to/service.token"
+      }
     }
   }
 }

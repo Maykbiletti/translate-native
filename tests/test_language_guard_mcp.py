@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import json
 import shutil
 import subprocess
@@ -33,6 +34,47 @@ class LanguageGuardMCPTests(unittest.TestCase):
             "sv-SE",
         )
         self.assertEqual(report["status"], "PASS")
+
+    def test_release_delegates_to_isolated_service_when_configured(self) -> None:
+        previous = MODULE.SERVICE_ENDPOINT
+        MODULE.SERVICE_ENDPOINT = "unix:/guard.sock"
+        try:
+            with mock.patch.object(
+                MODULE.SERVICE_CLIENT,
+                "call_guard_service",
+                return_value={"status": "PASS", "release_allowed": True, "release_token": "blg6.test"},
+            ) as service_call:
+                report = MODULE.release_response({
+                    "target_text": "Natürlich ist das möglich.",
+                    "language": "de-DE",
+                    "attestations": {"nativeness": True, "orthography": True},
+                })
+            self.assertTrue(report["release_allowed"])
+            request = service_call.call_args.args[1]
+            self.assertEqual(request["operation"], "release")
+            self.assertEqual(request["task_kind"], "response")
+            self.assertEqual(request["source_text"], "")
+        finally:
+            MODULE.SERVICE_ENDPOINT = previous
+
+    def test_isolated_service_failure_never_falls_back_to_local_signing(self) -> None:
+        previous = MODULE.SERVICE_ENDPOINT
+        MODULE.SERVICE_ENDPOINT = "unix:/guard.sock"
+        try:
+            with mock.patch.object(
+                MODULE.SERVICE_CLIENT,
+                "call_guard_service",
+                side_effect=MODULE.SERVICE_CLIENT.GuardServiceError("offline"),
+            ):
+                report = MODULE.release_response({
+                    "target_text": "Natürlich ist das möglich.",
+                    "language": "de-DE",
+                    "attestations": {"nativeness": True, "orthography": True},
+                })
+            self.assertFalse(report["release_allowed"])
+            self.assertEqual(report["reason"], "isolated-guard-unavailable")
+        finally:
+            MODULE.SERVICE_ENDPOINT = previous
 
     def test_initialize_injects_mandatory_output_and_translation_instructions(self) -> None:
         response = MODULE.handle_message({"jsonrpc": "2.0", "id": 1, "method": "initialize"})

@@ -87,11 +87,40 @@ class InstallerTests(unittest.TestCase):
                 policy = INSTALLER.json.loads(INSTALLER.DELIVERY_POLICY.read_text(encoding="utf-8"))
                 self.assertTrue(policy["mandatory"])
                 self.assertFalse(policy["direct_delivery_allowed"])
+                self.assertTrue(policy["isolated_service"]["required"])
             finally:
                 (
                     INSTALLER.DELIVERY_COMMAND,
                     INSTALLER.DELIVERY_POLICY,
                     INSTALLER.SIGNING_KEY,
+                ) = originals
+
+    def test_guard_runtime_installs_command_and_owner_only_token(self) -> None:
+        originals = (
+            INSTALLER.SERVICE_COMMAND,
+            INSTALLER.SERVICE_TOKEN,
+            INSTALLER.SIGNING_KEY,
+            INSTALLER.AUDIT_LOG,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            INSTALLER.SERVICE_COMMAND = temporary / "bin" / "blun-language-guard-service"
+            INSTALLER.SERVICE_TOKEN = temporary / "config" / "service.token"
+            INSTALLER.SIGNING_KEY = temporary / "config" / "signing.key"
+            INSTALLER.AUDIT_LOG = temporary / "config" / "audit.jsonl"
+            try:
+                INSTALLER.install_guard_runtime(ROOT)
+                token = INSTALLER.SERVICE_TOKEN.read_text(encoding="ascii").strip()
+                self.assertTrue(INSTALLER.SERVICE_COMMAND.is_symlink())
+                self.assertGreaterEqual(len(token), 32)
+                if INSTALLER.os.name != "nt":
+                    self.assertEqual(INSTALLER.SERVICE_TOKEN.stat().st_mode & 0o077, 0)
+            finally:
+                (
+                    INSTALLER.SERVICE_COMMAND,
+                    INSTALLER.SERVICE_TOKEN,
+                    INSTALLER.SIGNING_KEY,
+                    INSTALLER.AUDIT_LOG,
                 ) = originals
 
 

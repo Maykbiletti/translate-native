@@ -147,6 +147,29 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.2: isolated runtime enforcement
+
+Version 6.2 moves signing and final verification into [`guard_service.py`](integrations/guard_service.py), a dedicated loopback service. The MCP process and host adapters receive only a service endpoint and an authentication token; the untrusted agent child receives neither the signing key nor the service token. The service accepts UTF-8 with or without a BOM, signs releases, verifies the exact envelope at delivery time, and appends a content-free audit record containing only hashes, route metadata, guard version, and finding codes.
+
+The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:
+
+```bash
+python3 installer/blun_language_guard.py install
+python3 installer/blun_language_guard.py service status
+python3 installer/blun_language_guard.py doctor
+```
+
+Use `service start` or `service stop` for explicit lifecycle control. `install --no-service-autostart` exists for packaging and tests, but a production host must not deliver model output in that state. A per-user service prevents accidental key exposure to child processes; resisting a hostile same-user agent still requires a separate service account, container, or remote signer with filesystem and channel credentials denied to the agent.
+
+Two host adapters are included:
+
+- [`node-language-guard.js`](integrations/adapters/node-language-guard.js) provides strict routing, envelope parsing, isolated verification, and verify-before-send Telegram delivery for Node.js hosts.
+- [`blun-code-language-guard.js`](integrations/adapters/blun-code-language-guard.js) migrates the installed BLUN MCP entry into BLUN Code's encrypted MCP store, buffers model text so an unsigned draft cannot leak through streaming, and releases only the verified target.
+
+The trusted router uses structured job metadata, never the agent's claim. A source-bearing or explicitly translated job takes `release_translation`; an ordinary reply takes `release_response`. Contradictory metadata, `auto`, `all`, missing translation source, raw prose, unknown envelope fields, an invalid receipt, an unavailable service, or a sender invocation before verification all block.
+
+Free-form text alone cannot provide non-bypassable task classification. A host that offers translation through chat must set `languageGuardTaskKind: translation`, capture the complete source independently as `languageGuardSourceText`, and set the exact target language. If that metadata is absent, the BLUN adapter instructs the agent not to perform a translation through the response route. See [`BLUN_CODE_INTEGRATION.md`](docs/BLUN_CODE_INTEGRATION.md) for the runtime contract and residual limits.
+
 ## Version 5: BLUN Language Gateway
 
 Version 5 makes the host—not the agent—the final authority. Skills and MCP tools can be forgotten or skipped. A mandatory gateway intercepts the candidate output and releases it only after validation produces a signed receipt for the exact source, target, and locale.
@@ -257,7 +280,7 @@ python3 installer/blun_language_guard.py doctor
 python3 installer/blun_language_guard.py update
 ```
 
-Installation uses atomic symlinks for Codex and Claude Code and refuses to overwrite existing non-symlink skill folders. It installs `~/.local/bin/blun-language-deliver`, an owner-only signing key, and a fail-closed policy file; writes a mergeable MCP snippet without overwriting unrelated host configuration; and merges the BLUN MCP entry safely. Updates are cloned and tested before the active checkout is fast-forwarded. `doctor` checks the delivery command, key permissions, mandatory policy, test suite, live MCP tools, signed receipts, and updater heartbeat.
+Installation uses atomic symlinks for Codex and Claude Code and refuses to overwrite existing non-symlink skill folders. It installs `~/.local/bin/blun-language-deliver`, the isolated service command, owner-only key and service-token files, autostart configuration, a content-free audit path, and a fail-closed policy; writes a mergeable MCP snippet without overwriting unrelated host configuration; and merges the BLUN MCP entry safely. Updates are cloned and tested before the active checkout is fast-forwarded, then the service is restarted and health-checked; a failed restart rolls the checkout back. `doctor` checks the delivery command, service health, secret permissions, mandatory policy, test suite, live MCP tools, signed receipts, and updater heartbeat.
 
 The portable fail-closed hook is [`pre_output_guard.py`](integrations/pre_output_guard.py). It accepts `task_kind`, target, locale, receipt, and the complete source for translations as JSON on stdin and exits nonzero when verification fails. Host-specific adapters must pass the candidate output into this contract; a host hook that exposes no candidate text cannot enforce output validation.
 
