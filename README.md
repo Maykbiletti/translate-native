@@ -147,6 +147,32 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.4: Claude plugin and mandatory final-response hooks
+
+The repository is now both a Claude Code plugin and a Claude plugin marketplace. The plugin bundles the `translate-native` skill, connects to the persistent HTTP MCP, injects mandatory policy at session start, observes successful release-tool calls, and applies `Stop` plus `SubagentStop` hooks to the actual final response.
+
+The `PostToolUse` hook does not trust the MCP result by appearance. It sends the receipt, exact target, complete source for translations, purpose, locale, and content policy to the isolated verifier. Only a valid result creates a short-lived, owner-only release record containing a target hash rather than customer prose. The stop hook consumes that record exactly once. A missing, stale, replayed, wrong-purpose, or post-release-edited result prevents Claude from stopping and tells it to run the proper release path again.
+
+Install the persistent runtime first, then the marketplace plugin:
+
+```bash
+python3 installer/blun_language_guard.py install --target claude
+claude plugin marketplace add Maykbiletti/translate-native --scope user
+claude plugin install translate-native@blun-language-tools --scope user
+```
+
+In Claude's `/plugin` interface, open **Marketplaces → blun-language-tools → Enable auto-update**. Claude then refreshes the marketplace and installed plugin at startup. A changed plugin is activated by `/reload-plugins` or the next session; the independently installed HTTP service continues running during that change.
+
+The plugin's checked-in components are:
+
+- [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json): versioned plugin manifest;
+- [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json): GitHub marketplace catalog;
+- [`.mcp.json`](.mcp.json): plugin-scoped persistent MCP connection;
+- [`hooks/hooks.json`](hooks/hooks.json): session, release-tool, main-agent, and subagent hooks;
+- [`claude_language_hook.js`](integrations/claude_language_hook.js): cross-platform, zero-package verification state machine.
+
+This closes accidental omission and catches an agent that validates one draft but returns another. It is still not a hostile-process boundary: Claude currently caps repeated stop-hook continuations, and same-user code can modify hook state or disable an unmanaged plugin. For organization-wide enforcement, force-enable the plugin and managed hooks, remove direct delivery credentials from the agent, or place a buffering BLUN host in front of rendered output.
+
 ### Version 6.3: persistent Claude MCP
 
 Claude Code no longer needs to keep this guard alive as a child `stdio` process. The installer registers an authenticated, user-scoped Streamable HTTP server at `http://127.0.0.1:47632/mcp`. The endpoint is stateless: every tool call is a separate request, so a disconnected client pipe cannot kill the server or erase its tools. The operating system keeps the process alive and restarts it after a failure. This follows Claude Code's documented [user-scoped HTTP MCP configuration](https://code.claude.com/docs/en/mcp) and the MCP specification's [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
@@ -221,7 +247,7 @@ Linux uses a user-level systemd timer, macOS a LaunchAgent, and Windows Task Sch
 python3 installer/blun_language_guard.py auto-update enable --require-signed-commits
 ```
 
-Automatic updating does not magically update every marketplace-managed ChatGPT plugin. It updates this Git checkout, its symlinked skills, MCP server, gateway, and adapters. Platform-native plugin stores remain controlled by their host platform.
+The operating-system updater refreshes this Git checkout, its symlinked skills, MCP server, gateway, and adapters. Claude's Version 6.4 marketplace entry separately updates the plugin cache at Claude startup when marketplace auto-update is enabled. Other platform-native plugin stores remain controlled by their host platform.
 
 BLUN Code is supported explicitly. Installation creates the BLUN skill symlink and safely merges `blun-language-guard` into `~/.blun/mcp.json`, preserving the other MCP servers and writing `mcp.json.bak` before a change. BLUN Code must be restarted once after initial installation; subsequent repository updates are visible through the symlink automatically.
 
@@ -318,7 +344,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent installation shown in Version 6.3. It uses the officially supported HTTP MCP transport and is available in every project through user scope. Check it at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the Version 6.4 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

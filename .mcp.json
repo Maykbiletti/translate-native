@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "guard": {
+      "type": "http",
+      "url": "http://127.0.0.1:47632/mcp",
+      "headersHelper": "${CLAUDE_PLUGIN_ROOT}/integrations/mcp_auth_headers.py"
+    }
+  }
+}

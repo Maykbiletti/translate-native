@@ -1,0 +1,67 @@
+{
+  "description": "Bind Claude's actual final response to a verified BLUN Language Guard receipt.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "session-start"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__.*__(release_response|release_translation)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "post-tool"
+            ],
+            "timeout": 12
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "stop"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "stop"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ]
+  }
+}

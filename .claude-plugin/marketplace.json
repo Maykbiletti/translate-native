@@ -1,0 +1,14 @@
+{
+  "name": "blun-language-tools",
+  "owner": {
+    "name": "BLUN"
+  },
+  "plugins": [
+    {
+      "name": "translate-native",
+      "source": ".",
+      "description": "Native translation, Unicode orthography, persistent MCP, and mandatory Claude response hooks.",
+      "version": "6.4.0"
+    }
+  ]
+}
