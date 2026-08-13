@@ -21,6 +21,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertEqual(plugin["version"], (ROOT / "VERSION").read_text(encoding="utf-8").strip())
         self.assertIn("./translate-native/SKILL.md", plugin["skills"])
         self.assertEqual(marketplace["plugins"][0]["source"], ".")
+        self.assertNotIn("version", marketplace["plugins"][0])
         self.assertIn("guard", mcp["mcpServers"])
         self.assertEqual(mcp["mcpServers"]["guard"]["type"], "http")
         self.assertIn("SessionStart", hooks)

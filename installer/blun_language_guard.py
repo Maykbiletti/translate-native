@@ -39,6 +39,7 @@ MCP_HTTP_TOKEN = Path.home() / ".config" / "blun-language-guard" / "mcp-http.tok
 MCP_HTTP_URL = "http://127.0.0.1:47632/mcp"
 CLAUDE_CONFIG = Path.home() / ".claude.json"
 MCP_SERVER_NAME = "blun-language-guard"
+CLAUDE_PLUGIN_NAME = "translate-native@blun-language-tools"
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -621,8 +622,84 @@ def _run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedPro
     return subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
 
 
+def _find_claude_plugin(value: object) -> dict | None:
+    """Accept Claude's documented JSON list while tolerating a wrapped list."""
+    if isinstance(value, list):
+        plugins = value
+    elif isinstance(value, dict):
+        plugins = next(
+            (value[name] for name in ("plugins", "installedPlugins", "installed") if isinstance(value.get(name), list)),
+            [],
+        )
+    else:
+        plugins = []
+    for plugin in plugins:
+        if not isinstance(plugin, dict):
+            continue
+        name = str(plugin.get("name") or plugin.get("id") or plugin.get("plugin") or "")
+        marketplace = str(plugin.get("marketplace") or plugin.get("sourceMarketplace") or "")
+        if name == CLAUDE_PLUGIN_NAME or (
+            name == "translate-native" and marketplace in {"", "blun-language-tools"}
+        ):
+            return plugin
+    return None
+
+
+def claude_plugin_status(expected_version: str, executable: str | None = None) -> dict:
+    """Inspect the cached user plugin without reading Claude's private cache format."""
+    command = executable or shutil.which("claude")
+    if not command:
+        return {"installed": False, "healthy": False, "reason": "claude-command-unavailable"}
+    try:
+        result = _run([command, "plugin", "list", "--json"])
+    except OSError:
+        return {"installed": False, "healthy": False, "reason": "claude-command-unavailable"}
+    if result.returncode:
+        return {"installed": False, "healthy": False, "reason": "plugin-list-failed"}
+    try:
+        plugin = _find_claude_plugin(json.loads(result.stdout))
+    except json.JSONDecodeError:
+        return {"installed": False, "healthy": False, "reason": "plugin-list-invalid-json"}
+    if plugin is None:
+        return {"installed": False, "healthy": False, "reason": "plugin-not-installed"}
+    version = str(plugin.get("version") or plugin.get("installedVersion") or "")
+    enabled = plugin.get("enabled") is not False
+    errors = plugin.get("errors")
+    errors = errors if isinstance(errors, list) else ([] if not errors else [errors])
+    return {
+        "installed": True,
+        "healthy": enabled and not errors and version == expected_version,
+        "enabled": enabled,
+        "errors": errors,
+        "version": version,
+        "expected_version": expected_version,
+    }
+
+
+def update_claude_plugin(expected_version: str, executable: str | None = None) -> dict:
+    """Update an already-installed user plugin and verify the cached version."""
+    before = claude_plugin_status(expected_version, executable)
+    if not before.get("installed"):
+        return {"attempted": False, "updated": False, "status": before}
+    if before.get("healthy") is True:
+        return {"attempted": False, "updated": True, "status": before, "reload_required": False}
+    command = executable or shutil.which("claude")
+    assert command
+    result = _run([command, "plugin", "update", CLAUDE_PLUGIN_NAME, "--scope", "user"])
+    after = claude_plugin_status(expected_version, command)
+    updated = result.returncode == 0 and after.get("healthy") is True
+    return {
+        "attempted": True,
+        "updated": updated,
+        "returncode": result.returncode,
+        "status": after,
+        "reload_required": updated and before.get("version") != expected_version,
+    }
+
+
 def doctor() -> int:
     root = repository_root()
+    expected_version = (root / "VERSION").read_text(encoding="utf-8-sig").strip()
     checks: list[tuple[str, bool, str]] = []
     for name, target in TARGETS.items():
         checks.append((f"{name} skill", target.is_symlink() and target.resolve() == (root / "translate-native").resolve(), str(target)))
@@ -702,6 +779,13 @@ def doctor() -> int:
         persistent_live = False
         persistent_detail = str(error)
     checks.append(("persistent Claude HTTP MCP", persistent_live, persistent_detail))
+    plugin = claude_plugin_status(expected_version)
+    if plugin.get("reason") != "claude-command-unavailable":
+        checks.append((
+            "Claude plugin cache",
+            plugin.get("healthy") is True,
+            json.dumps(plugin, ensure_ascii=False, sort_keys=True),
+        ))
     tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
     checks.append(("test suite", tests.returncode == 0, tests.stderr.strip() or tests.stdout.strip()))
     server = root / "translate-native" / "scripts" / "blun_language_guard.py"
@@ -758,7 +842,7 @@ def _atomic_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
-def update(require_signed_commits: bool = False) -> int:
+def update(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     if not (root / ".git").exists():
         print("Update requires a Git checkout; reinstall from the latest release.", file=sys.stderr)
@@ -881,8 +965,41 @@ def update(require_signed_commits: bool = False) -> int:
             )
             return 1
         print(f"Restarted persistent MCP through {runtime}.")
-    _atomic_json(UPDATE_STATE, {"status": "ok", "revision": revision, "previous": previous, "checked_at": int(time.time())})
+    expected_version = (root / "VERSION").read_text(encoding="utf-8-sig").strip()
+    plugin_update = update_claude_plugin(expected_version, claude_command) if claude_installed else {
+        "attempted": False,
+        "updated": False,
+        "status": {"reason": "claude-skill-not-installed"},
+    }
+    plugin_reason = plugin_update.get("status", {}).get("reason")
+    plugin_failed = claude_installed and not plugin_update.get("updated") and plugin_reason != "plugin-not-installed"
+    if plugin_failed:
+        print(
+            "Repository, guard service, and MCP updated successfully, but the installed Claude plugin "
+            "did not reach the same tested version. The guard remains fail-closed; rerun the updater "
+            "after repairing Claude plugin access.",
+            file=sys.stderr,
+        )
+        _atomic_json(UPDATE_STATE, {
+            "status": "degraded",
+            "revision": revision,
+            "previous": previous,
+            "checked_at": int(time.time()),
+            "runtime_version": expected_version,
+            "claude_plugin": plugin_update,
+        })
+        return 1
+    _atomic_json(UPDATE_STATE, {
+        "status": "ok",
+        "revision": revision,
+        "previous": previous,
+        "checked_at": int(time.time()),
+        "runtime_version": expected_version,
+        "claude_plugin": plugin_update,
+    })
     print(f"Updated to tested revision {revision}; rollback revision is {previous}")
+    if plugin_update.get("reload_required"):
+        print("Claude plugin cache updated. Existing sessions still use their loaded hooks; run /reload-plugins or start a new session.")
     return 0
 
 
@@ -938,6 +1055,7 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
             "interval_hours": max(1, interval_hours),
             "require_signed_commits": require_signed_commits,
             "repository": REPO_URL,
+            "claude_command": shutil.which("claude") or "",
         })
         print(f"Automatic updates enabled every {max(1, interval_hours)} hour(s).")
         if scheduler:
@@ -960,11 +1078,14 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
         return 2
     config = json.loads(UPDATE_CONFIG.read_text(encoding="utf-8"))
     last = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
-    due = int(time.time()) - int(last.get("checked_at", 0)) >= int(config["interval_hours"]) * 3600
+    due = (
+        last.get("status") != "ok"
+        or int(time.time()) - int(last.get("checked_at", 0)) >= int(config["interval_hours"]) * 3600
+    )
     if not due:
         print("Update check is not due yet.")
         return 0
-    return update(bool(config.get("require_signed_commits")))
+    return update(bool(config.get("require_signed_commits")), config.get("claude_command") or None)
 
 
 def main() -> int:

@@ -16,7 +16,7 @@ from typing import Any
 
 
 DIACRITICS_PATH = Path(__file__).with_name("check_diacritics.py")
-VERSION = "6.5.0"
+VERSION = "6.6.0"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", PROTOCOL_VERSION}
 EXACT_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$")

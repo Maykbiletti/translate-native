@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import os
+import stat
 from pathlib import Path
 from unittest import mock
 
@@ -21,6 +22,27 @@ SPEC.loader.exec_module(INSTALLER)
 
 
 class InstallerTests(unittest.TestCase):
+    def _fake_claude(self, root: Path, *, old_version: str = "6.5.0", new_version: str = "6.6.0", fail_update: bool = False) -> tuple[Path, Path]:
+        state = root / "plugin-version.txt"
+        state.write_text(old_version, encoding="utf-8")
+        executable = root / "claude"
+        executable.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            f"state = pathlib.Path({str(state)!r})\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['plugin', 'list', '--json']:\n"
+            "    print(json.dumps([{'name': 'translate-native', 'marketplace': 'blun-language-tools', "
+            "'version': state.read_text().strip(), 'enabled': True, 'errors': []}]))\n"
+            "    raise SystemExit(0)\n"
+            "if args == ['plugin', 'update', 'translate-native@blun-language-tools', '--scope', 'user']:\n"
+            + ("    raise SystemExit(1)\n" if fail_update else f"    state.write_text({new_version!r})\n    raise SystemExit(0)\n")
+            + "raise SystemExit(2)\n",
+            encoding="utf-8",
+        )
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        return executable, state
+
     def test_atomic_symlink_is_idempotent_and_refuses_real_folder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -56,9 +78,78 @@ class InstallerTests(unittest.TestCase):
                 policy = INSTALLER.json.loads(INSTALLER.UPDATE_CONFIG.read_text(encoding="utf-8"))
                 self.assertEqual(policy["interval_hours"], 12)
                 self.assertTrue(policy["require_signed_commits"])
+                self.assertIn("claude_command", policy)
             finally:
                 INSTALLER.UPDATE_CONFIG = original_config
                 INSTALLER.UPDATE_STATE = original_state
+
+    def test_claude_plugin_update_reaches_exact_runtime_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable, state = self._fake_claude(Path(directory), old_version="6.5.0", new_version="6.6.0")
+            result = INSTALLER.update_claude_plugin("6.6.0", str(executable))
+            self.assertTrue(result["attempted"])
+            self.assertTrue(result["updated"], result)
+            self.assertTrue(result["reload_required"])
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.6.0")
+            self.assertEqual(result["status"]["version"], "6.6.0")
+
+    def test_claude_plugin_update_failure_is_reported_without_claiming_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable, state = self._fake_claude(
+                Path(directory), old_version="6.5.0", new_version="6.6.0", fail_update=True
+            )
+            result = INSTALLER.update_claude_plugin("6.6.0", str(executable))
+            self.assertTrue(result["attempted"])
+            self.assertFalse(result["updated"])
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.5.0")
+            self.assertFalse(result["status"]["healthy"])
+
+    def test_current_claude_plugin_is_not_updated_again(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable, state = self._fake_claude(Path(directory), old_version="6.6.0", new_version="broken")
+            result = INSTALLER.update_claude_plugin("6.6.0", str(executable))
+            self.assertFalse(result["attempted"])
+            self.assertTrue(result["updated"])
+            self.assertFalse(result["reload_required"])
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.6.0")
+
+    def test_degraded_updater_state_is_due_immediately(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_STATE = root / "state.json"
+            INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                "enabled": True,
+                "interval_hours": 24,
+                "require_signed_commits": False,
+                "repository": INSTALLER.REPO_URL,
+            })
+            INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, {
+                "status": "degraded",
+                "checked_at": int(INSTALLER.time.time()),
+            })
+            try:
+                with mock.patch.object(INSTALLER, "update", return_value=7) as updater:
+                    self.assertEqual(INSTALLER.auto_update("run"), 7)
+                    updater.assert_called_once_with(False, None)
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE = originals
+
+    def test_missing_or_uninstalled_claude_plugin_is_not_modified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unavailable = INSTALLER.claude_plugin_status("6.6.0", str(root / "missing-claude"))
+            self.assertEqual(unavailable["reason"], "claude-command-unavailable")
+            executable = root / "claude"
+            executable.write_text(
+                "#!/usr/bin/env python3\nimport json\nprint(json.dumps([]))\n",
+                encoding="utf-8",
+            )
+            executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+            result = INSTALLER.update_claude_plugin("6.6.0", str(executable))
+            self.assertFalse(result["attempted"])
+            self.assertEqual(result["status"]["reason"], "plugin-not-installed")
 
     def test_signing_key_is_created_once_with_owner_only_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

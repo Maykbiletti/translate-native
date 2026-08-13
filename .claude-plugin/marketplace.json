@@ -7,8 +7,7 @@
     {
       "name": "translate-native",
       "source": ".",
-      "description": "Native translation, Unicode orthography, persistent MCP, and mandatory Claude response hooks.",
-      "version": "6.5.0"
+      "description": "Native translation, Unicode orthography, persistent MCP, and mandatory Claude response hooks."
     }
   ]
 }

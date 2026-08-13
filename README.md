@@ -249,13 +249,17 @@ python3 installer/blun_language_guard.py auto-update enable --interval-hours 24
 python3 installer/blun_language_guard.py auto-update status
 ```
 
-Linux uses a user-level systemd timer, macOS a LaunchAgent, and Windows Task Scheduler. Each scheduled wake-up checks whether the configured interval is due. A candidate checkout is tested before installation, the update is fast-forward-only, post-update tests run again, and the previous revision is retained for rollback. When Claude is installed, an update also installs or refreshes the persistent HTTP MCP, its dynamic-header helper, its autostart service, and the user-scoped Claude entry before marking the update successful. Security-sensitive deployments can require trusted Git commit signatures:
+Linux uses a user-level systemd timer, macOS a LaunchAgent, and Windows Task Scheduler. Each scheduled wake-up checks whether the configured interval is due. A candidate checkout is tested before installation, the update is fast-forward-only, post-update tests run again, and the previous revision is retained for rollback. When Claude is installed, an update also installs or refreshes the persistent HTTP MCP, its dynamic-header helper, its autostart service, and the user-scoped Claude entry before marking the runtime update successful. Security-sensitive deployments can require trusted Git commit signatures:
 
 ```bash
 python3 installer/blun_language_guard.py auto-update enable --require-signed-commits
 ```
 
-The operating-system updater refreshes this Git checkout, its symlinked skills, MCP server, gateway, and adapters. Claude's Version 6.4 marketplace entry separately updates the plugin cache at Claude startup when marketplace auto-update is enabled. Other platform-native plugin stores remain controlled by their host platform.
+Version 6.6 also coordinates Claude's plugin cache. When automatic updates are enabled, the owner-visible Claude executable path is recorded so an OS scheduler with a smaller `PATH` invokes the same CLI. If `translate-native@blun-language-tools` is already installed at user scope, the updater runs Claude's official non-interactive `plugin update` command and then verifies the exact installed version through `plugin list --json`. A missing plugin is never installed without consent. A plugin failure leaves the already-tested runtime and fail-closed MCP active, records a `degraded` updater state, returns nonzero, and retries on the next scheduled wake-up instead of waiting for the normal interval. A successful cache update still requires `/reload-plugins` or a new Claude session because active sessions retain their previously loaded hook paths.
+
+The authoritative plugin version lives only in `.claude-plugin/plugin.json`; the marketplace entry deliberately omits a duplicate version field. Claude uses the manifest version as its cache key, avoiding two version declarations that can drift apart.
+
+Third-party marketplace auto-update is disabled by default in Claude. Users may enable it in the marketplace UI as an additional startup check; the operating-system updater no longer depends on that optional setting. Other platform-native plugin stores remain controlled by their host platform.
 
 BLUN Code is supported explicitly. Installation creates the BLUN skill symlink and safely merges `blun-language-guard` into `~/.blun/mcp.json`, preserving the other MCP servers and writing `mcp.json.bak` before a change. BLUN Code must be restarted once after initial installation; subsequent repository updates are visible through the symlink automatically.
 
@@ -352,7 +356,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the Version 6.4 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.6 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
