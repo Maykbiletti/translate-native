@@ -27,6 +27,9 @@ TARGETS = {
 }
 UPDATE_CONFIG = Path.home() / ".config" / "blun-language-guard" / "updater.json"
 UPDATE_STATE = Path.home() / ".config" / "blun-language-guard" / "update-state.json"
+HEALTH_STATE = Path.home() / ".config" / "blun-language-guard" / "health-state.json"
+HEALTH_CONFIG = Path.home() / ".config" / "blun-language-guard" / "health-monitor.json"
+OPERATION_LOCK = Path.home() / ".config" / "blun-language-guard" / "operation.lock"
 DELIVERY_COMMAND = Path.home() / ".local" / "bin" / "blun-language-deliver"
 DELIVERY_POLICY = Path.home() / ".config" / "blun-language-guard" / "delivery-policy.json"
 SIGNING_KEY = Path.home() / ".config" / "blun-language-guard" / "signing.key"
@@ -40,6 +43,8 @@ MCP_HTTP_URL = "http://127.0.0.1:47632/mcp"
 CLAUDE_CONFIG = Path.home() / ".claude.json"
 MCP_SERVER_NAME = "blun-language-guard"
 CLAUDE_PLUGIN_NAME = "translate-native@blun-language-tools"
+OPERATION_LOCK_STALE_SECONDS = 30 * 60
+HEALTH_REPAIR_COOLDOWN_SECONDS = 45
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -348,7 +353,7 @@ def _xml_escape(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def probe_guard_service() -> dict:
+def probe_guard_service(timeout: float = 3.0) -> dict:
     root = repository_root()
     client_path = root / "translate-native" / "scripts" / "guard_service_client.py"
     spec = importlib.util.spec_from_file_location("blun_installer_guard_client", client_path)
@@ -360,7 +365,7 @@ def probe_guard_service() -> dict:
         SERVICE_ENDPOINT,
         {"operation": "health"},
         auth_token=token,
-        timeout=3.0,
+        timeout=timeout,
     )
 
 
@@ -456,7 +461,7 @@ def project_mcp_shadows(start: Path | None = None) -> list[Path]:
     return shadows
 
 
-def _mcp_http_request(path: str, payload: dict | None = None) -> tuple[int, dict]:
+def _mcp_http_request(path: str, payload: dict | None = None, *, timeout: float = 4.0) -> tuple[int, dict]:
     token = MCP_HTTP_TOKEN.read_text(encoding="utf-8-sig").strip()
     url = MCP_HTTP_URL.removesuffix("/mcp") + path
     headers = {"Authorization": f"Bearer {token}"}
@@ -472,7 +477,7 @@ def _mcp_http_request(path: str, payload: dict | None = None) -> tuple[int, dict
         })
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=4) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
             return response.status, json.loads(raw.decode("utf-8")) if raw else {}
     except urllib.error.HTTPError as error:
@@ -481,8 +486,8 @@ def _mcp_http_request(path: str, payload: dict | None = None) -> tuple[int, dict
         return error.code, detail
 
 
-def probe_mcp_http() -> dict:
-    health_status, health = _mcp_http_request("/healthz")
+def probe_mcp_http(timeout: float = 4.0) -> dict:
+    health_status, health = _mcp_http_request("/healthz", timeout=timeout)
     if health_status != 200 or health.get("status") != "ok" or health.get("isolated_key") is not True:
         raise RuntimeError(f"persistent MCP health failed with HTTP {health_status}")
     initialize_status, initialized = _mcp_http_request("/mcp", {
@@ -494,10 +499,10 @@ def probe_mcp_http() -> dict:
             "capabilities": {},
             "clientInfo": {"name": "blun-language-guard-doctor", "version": "1"},
         },
-    })
+    }, timeout=timeout)
     tools_status, tools = _mcp_http_request("/mcp", {
         "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
-    })
+    }, timeout=timeout)
     names = {
         tool.get("name")
         for tool in tools.get("result", {}).get("tools", [])
@@ -615,6 +620,8 @@ def install(targets: list[str], *, autostart_service: bool = True) -> int:
             print(f"Claude configuration backup: {backup}")
         if removed_shadows:
             print(f"Removed {removed_shadows} stale project-local Claude MCP shadow(s).")
+        if autostart_service and health_monitor("install") != 0:
+            return 1
     return 0
 
 
@@ -828,6 +835,14 @@ def doctor() -> int:
         maximum_age = int(config.get("interval_hours", 24)) * 7200
         fresh = int(time.time()) - int(state.get("checked_at", 0)) <= maximum_age
         checks.append(("automatic updater heartbeat", fresh, str(UPDATE_STATE)))
+    if TARGETS["claude"].is_symlink() and health_monitor_enabled():
+        try:
+            health_state = json.loads(HEALTH_STATE.read_text(encoding="utf-8"))
+            health_fresh = int(time.time()) - int(health_state.get("checked_at", 0)) <= 180
+            monitor_ok = health_fresh and health_state.get("status") in {"ok", "recovered"}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            monitor_ok = False
+        checks.append(("automatic health monitor", monitor_ok, str(HEALTH_STATE)))
     failed = False
     for name, passed, detail in checks:
         print(f"{'PASS' if passed else 'FAIL'} {name}: {detail}")
@@ -842,11 +857,60 @@ def _atomic_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | None:
+    """Take a same-user cross-platform lock without waiting or trusting its contents."""
+    timestamp = int(time.time()) if now is None else now
+    token = os.urandom(16).hex()
+    OPERATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(2):
+        try:
+            descriptor = os.open(OPERATION_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                stale = timestamp - int(OPERATION_LOCK.stat().st_mtime) > OPERATION_LOCK_STALE_SECONDS
+            except OSError:
+                stale = False
+            if not stale or attempt:
+                return None
+            try:
+                OPERATION_LOCK.unlink()
+            except OSError:
+                return None
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"operation": operation, "pid": os.getpid(), "started_at": timestamp, "token": token}, handle)
+            handle.write("\n")
+        return token
+    return None
+
+
+def _release_operation_lock(token: str) -> None:
+    """Release only the lock instance acquired by this process."""
+    try:
+        value = json.loads(OPERATION_LOCK.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if value.get("token") == token:
+        OPERATION_LOCK.unlink(missing_ok=True)
+
+
 def update(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     if not (root / ".git").exists():
         print("Update requires a Git checkout; reinstall from the latest release.", file=sys.stderr)
         return 2
+    token = _acquire_operation_lock("update")
+    if token is None:
+        print("Another guard maintenance operation is active; update skipped safely.", file=sys.stderr)
+        return 3
+    try:
+        return _update_unlocked(require_signed_commits, claude_command)
+    finally:
+        _release_operation_lock(token)
+
+
+def _update_unlocked(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
+    root = repository_root()
     with tempfile.TemporaryDirectory(prefix="blun-language-guard-") as directory:
         candidate = Path(directory) / "repo"
         clone = _run(["git", "clone", "--depth", "1", REPO_URL, str(candidate)])
@@ -965,6 +1029,28 @@ def update(require_signed_commits: bool = False, claude_command: str | None = No
             )
             return 1
         print(f"Restarted persistent MCP through {runtime}.")
+    monitor_expected = claude_installed and health_monitor_enabled()
+    monitor_install = {
+        "attempted": False,
+        "installed": not monitor_expected,
+        "detail": "explicitly-disabled" if claude_installed else "claude-skill-not-installed",
+    }
+    if monitor_expected:
+        monitor_ok, monitor_detail = install_health_monitor()
+        guard_now, mcp_now = _guard_stack_status(timeout=4.0)
+        monitor_ok = monitor_ok and guard_now and mcp_now
+        if monitor_ok:
+            _atomic_json(HEALTH_CONFIG, {"enabled": True, "interval_seconds": 60})
+            _atomic_json(HEALTH_STATE, {
+                "status": "ok",
+                "checked_at": int(time.time()),
+                "guard_healthy": True,
+                "mcp_healthy": True,
+                "consecutive_failures": 0,
+                "last_repair_at": 0,
+                "repairs": [],
+            })
+        monitor_install = {"attempted": True, "installed": monitor_ok, "detail": monitor_detail}
     expected_version = (root / "VERSION").read_text(encoding="utf-8-sig").strip()
     plugin_update = update_claude_plugin(expected_version, claude_command) if claude_installed else {
         "attempted": False,
@@ -973,11 +1059,12 @@ def update(require_signed_commits: bool = False, claude_command: str | None = No
     }
     plugin_reason = plugin_update.get("status", {}).get("reason")
     plugin_failed = claude_installed and not plugin_update.get("updated") and plugin_reason != "plugin-not-installed"
-    if plugin_failed:
+    monitor_failed = monitor_expected and not monitor_install["installed"]
+    if plugin_failed or monitor_failed:
         print(
-            "Repository, guard service, and MCP updated successfully, but the installed Claude plugin "
-            "did not reach the same tested version. The guard remains fail-closed; rerun the updater "
-            "after repairing Claude plugin access.",
+            "Repository, guard service, and MCP updated successfully, but Claude maintenance did not "
+            "reach a healthy synchronized state. The guard remains fail-closed; rerun the updater after "
+            "repairing the reported plugin or health-monitor adapter.",
             file=sys.stderr,
         )
         _atomic_json(UPDATE_STATE, {
@@ -987,6 +1074,7 @@ def update(require_signed_commits: bool = False, claude_command: str | None = No
             "checked_at": int(time.time()),
             "runtime_version": expected_version,
             "claude_plugin": plugin_update,
+            "health_monitor": monitor_install,
         })
         return 1
     _atomic_json(UPDATE_STATE, {
@@ -996,6 +1084,7 @@ def update(require_signed_commits: bool = False, claude_command: str | None = No
         "checked_at": int(time.time()),
         "runtime_version": expected_version,
         "claude_plugin": plugin_update,
+        "health_monitor": monitor_install,
     })
     print(f"Updated to tested revision {revision}; rollback revision is {previous}")
     if plugin_update.get("reload_required"):
@@ -1048,6 +1137,228 @@ def remove_scheduler() -> None:
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard Updater"])
 
 
+def _install_windows_health_task(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    executable = arguments[0]
+    argument_line = subprocess.list2cmdline(arguments[1:])
+    script = (
+        "$ErrorActionPreference='Stop';"
+        f"$action=New-ScheduledTaskAction -Execute {_powershell_literal(executable)} "
+        f"-Argument {_powershell_literal(argument_line)};"
+        "$trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) "
+        "-RepetitionInterval (New-TimeSpan -Minutes 1);"
+        "$settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew "
+        "-ExecutionTimeLimit (New-TimeSpan -Minutes 2);"
+        "Register-ScheduledTask -TaskName 'BLUN Language Guard Health' -Action $action "
+        "-Trigger $trigger -Settings $settings -Force | Out-Null"
+    )
+    return _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script])
+
+
+def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
+    """Install a one-minute dependency-aware health check without embedding secrets."""
+    home = home or Path.home()
+    arguments = [sys.executable, str(Path(__file__).resolve()), "health-monitor", "run"]
+    system = platform.system()
+    if system == "Linux":
+        units = home / ".config" / "systemd" / "user"
+        units.mkdir(parents=True, exist_ok=True)
+        service = units / "blun-language-guard-health.service"
+        timer = units / "blun-language-guard-health.timer"
+        service.write_text(
+            "[Unit]\nDescription=Verify and repair BLUN Language Guard\n"
+            "After=blun-language-guard.service blun-language-guard-mcp.service\n\n"
+            "[Service]\nType=oneshot\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
+            f"ExecStart={_shell_command(arguments)}\n",
+            encoding="utf-8",
+        )
+        timer.write_text(
+            "[Unit]\nDescription=Monitor BLUN Language Guard every minute\n\n"
+            "[Timer]\nOnBootSec=1m\nOnUnitActiveSec=1m\nAccuracySec=10s\nPersistent=true\n\n"
+            "[Install]\nWantedBy=timers.target\n",
+            encoding="utf-8",
+        )
+        reload_result = _run(["systemctl", "--user", "daemon-reload"])
+        enable_result = _run(["systemctl", "--user", "enable", "--now", timer.name])
+        return reload_result.returncode == 0 and enable_result.returncode == 0, str(timer)
+    if system == "Darwin":
+        agents = home / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        plist = agents / "ai.blun.language-guard-health.plist"
+        program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
+        plist.write_text(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\"><dict><key>Label</key>"
+            "<string>ai.blun.language-guard-health</string>"
+            f"<key>ProgramArguments</key><array>{program_arguments}</array>"
+            "<key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer>"
+            "<key>ThrottleInterval</key><integer>10</integer></dict></plist>\n",
+            encoding="utf-8",
+        )
+        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+        result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
+        return result.returncode == 0, str(plist)
+    if system == "Windows":
+        result = _install_windows_health_task(arguments)
+        return result.returncode == 0, "Windows Task Scheduler: BLUN Language Guard Health"
+    return False, f"No health-monitor adapter for {system}"
+
+
+def remove_health_monitor(home: Path | None = None) -> None:
+    home = home or Path.home()
+    system = platform.system()
+    if system == "Linux":
+        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-health.timer"])
+        units = home / ".config" / "systemd" / "user"
+        for name in ("blun-language-guard-health.service", "blun-language-guard-health.timer"):
+            (units / name).unlink(missing_ok=True)
+        _run(["systemctl", "--user", "daemon-reload"])
+    elif system == "Darwin":
+        plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-health.plist"
+        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+        plist.unlink(missing_ok=True)
+    elif system == "Windows":
+        _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard Health"])
+
+
+def health_monitor_enabled() -> bool:
+    """Default existing Claude installations into the safe one-time migration."""
+    if not HEALTH_CONFIG.exists():
+        return True
+    try:
+        value = json.loads(HEALTH_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return value.get("enabled") is not False
+
+
+def _guard_stack_status(timeout: float = 1.0) -> tuple[bool, bool]:
+    try:
+        guard = probe_guard_service(timeout=timeout)
+        guard_healthy = guard.get("status") == "ok" and guard.get("isolated_key") is True
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        guard_healthy = False
+    if not guard_healthy:
+        return False, False
+    try:
+        probe_mcp_http(timeout=timeout)
+        mcp_healthy = True
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        mcp_healthy = False
+    return guard_healthy, mcp_healthy
+
+
+def _wait_for_stack(*, guard: bool = False, mcp: bool = False, attempts: int = 8) -> bool:
+    for _attempt in range(attempts):
+        guard_healthy, mcp_healthy = _guard_stack_status()
+        if (not guard or guard_healthy) and (not mcp or mcp_healthy):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def health_monitor_run(*, now: int | None = None) -> int:
+    """Probe the complete release path and make at most one dependency-ordered repair."""
+    timestamp = int(time.time()) if now is None else now
+    token = _acquire_operation_lock("health-monitor", now=timestamp)
+    if token is None:
+        print(json.dumps({"status": "busy", "checked_at": timestamp}, sort_keys=True))
+        return 0
+    try:
+        try:
+            previous = json.loads(HEALTH_STATE.read_text(encoding="utf-8")) if HEALTH_STATE.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+        guard_healthy, mcp_healthy = _guard_stack_status()
+        if guard_healthy and mcp_healthy:
+            state = {
+                "status": "ok",
+                "checked_at": timestamp,
+                "guard_healthy": True,
+                "mcp_healthy": True,
+                "consecutive_failures": 0,
+                "last_repair_at": previous.get("last_repair_at", 0),
+                "repairs": [],
+            }
+            _atomic_json(HEALTH_STATE, state)
+            print(json.dumps(state, sort_keys=True))
+            return 0
+        last_repair = int(previous.get("last_repair_at", 0))
+        if timestamp - last_repair < HEALTH_REPAIR_COOLDOWN_SECONDS:
+            state = {
+                "status": "blocked",
+                "reason": "repair-cooldown",
+                "checked_at": timestamp,
+                "guard_healthy": guard_healthy,
+                "mcp_healthy": mcp_healthy,
+                "consecutive_failures": int(previous.get("consecutive_failures", 0)) + 1,
+                "last_repair_at": last_repair,
+                "repairs": [],
+            }
+            _atomic_json(HEALTH_STATE, state)
+            print(json.dumps(state, sort_keys=True), file=sys.stderr)
+            return 1
+        repairs: list[str] = []
+        if not guard_healthy:
+            restarted, _detail = restart_guard_runtime()
+            repairs.append("guard-restart")
+            guard_healthy = restarted and _wait_for_stack(guard=True)
+        if guard_healthy:
+            _guard_now, mcp_healthy = _guard_stack_status()
+            if not mcp_healthy:
+                restarted, _detail = restart_mcp_http_runtime()
+                repairs.append("mcp-restart")
+                mcp_healthy = restarted and _wait_for_stack(guard=True, mcp=True)
+        guard_healthy, mcp_healthy = _guard_stack_status()
+        recovered = guard_healthy and mcp_healthy
+        state = {
+            "status": "recovered" if recovered else "blocked",
+            "checked_at": timestamp,
+            "guard_healthy": guard_healthy,
+            "mcp_healthy": mcp_healthy,
+            "consecutive_failures": 0 if recovered else int(previous.get("consecutive_failures", 0)) + 1,
+            "last_repair_at": timestamp,
+            "repairs": repairs,
+        }
+        _atomic_json(HEALTH_STATE, state)
+        print(json.dumps(state, sort_keys=True), file=sys.stdout if recovered else sys.stderr)
+        return 0 if recovered else 1
+    finally:
+        _release_operation_lock(token)
+
+
+def health_monitor(action: str) -> int:
+    if action == "run":
+        return health_monitor_run()
+    if action == "status":
+        if not health_monitor_enabled():
+            print(json.dumps({"status": "disabled"}))
+            return 0
+        if not HEALTH_STATE.exists():
+            print(json.dumps({"status": "not-run"}))
+            return 1
+        print(HEALTH_STATE.read_text(encoding="utf-8"), end="")
+        try:
+            state = json.loads(HEALTH_STATE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return 1
+        fresh = int(time.time()) - int(state.get("checked_at", 0)) <= 180
+        return 0 if fresh and state.get("status") in {"ok", "recovered"} else 1
+    if action == "remove":
+        remove_health_monitor()
+        _atomic_json(HEALTH_CONFIG, {"enabled": False, "interval_seconds": 60})
+        HEALTH_STATE.unlink(missing_ok=True)
+        print("Health monitor removed; guard services and secrets were preserved.")
+        return 0
+    check = health_monitor_run()
+    ok, detail = install_health_monitor()
+    if ok:
+        _atomic_json(HEALTH_CONFIG, {"enabled": True, "interval_seconds": 60})
+    print(f"{'Health monitor installed' if ok else 'Health monitor installation failed'}: {detail}")
+    return 0 if ok and check == 0 else 1
+
+
 def auto_update(action: str, interval_hours: int = 24, require_signed_commits: bool = False, scheduler: bool = True) -> int:
     if action == "enable":
         _atomic_json(UPDATE_CONFIG, {
@@ -1079,6 +1390,12 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
     config = json.loads(UPDATE_CONFIG.read_text(encoding="utf-8"))
     last = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
     due = (
+        (
+            TARGETS["claude"].is_symlink()
+            and health_monitor_enabled()
+            and (not HEALTH_CONFIG.exists() or not HEALTH_STATE.exists())
+        )
+        or
         last.get("status") != "ok"
         or int(time.time()) - int(last.get("checked_at", 0)) >= int(config["interval_hours"]) * 3600
     )
@@ -1098,6 +1415,8 @@ def main() -> int:
     service_parser.add_argument("action", choices=("install", "start", "stop", "status"))
     mcp_service_parser = sub.add_parser("mcp-service")
     mcp_service_parser.add_argument("action", choices=("install", "start", "stop", "status"))
+    monitor_parser = sub.add_parser("health-monitor")
+    monitor_parser.add_argument("action", choices=("install", "remove", "run", "status"))
     sub.add_parser("doctor")
     update_parser = sub.add_parser("update")
     update_parser.add_argument("--require-signed-commits", action="store_true")
@@ -1113,6 +1432,8 @@ def main() -> int:
         return guard_service(args.action)
     if args.command == "mcp-service":
         return mcp_service(args.action)
+    if args.command == "health-monitor":
+        return health_monitor(args.action)
     if args.command == "doctor":
         return doctor()
     if args.command == "update":

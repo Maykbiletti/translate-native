@@ -147,6 +147,22 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.7: self-healing guard stack
+
+Version 6.7 adds an independent one-minute health monitor for the two-process Claude path. It verifies both the isolated signer and the complete authenticated MCP `healthz` → `initialize` → `tools/list` path. If the signer fails, it repairs that dependency first and then rechecks the MCP; if only the MCP fails, it restarts only the MCP. Every repair is followed by a complete end-to-end probe before the state may become `recovered`.
+
+The monitor uses systemd on Linux, a LaunchAgent on macOS, and Task Scheduler on Windows. A shared atomic operation lock prevents it from fighting the updater, each run makes at most one dependency-ordered repair, and a cooldown prevents restart storms. Its state contains only health booleans, timestamps, counters, and repair labels—never source text, target text, receipts, or credentials. Failure remains fail-closed: the monitor never substitutes a local signer or releases pending output while either process is unhealthy.
+
+Fresh Claude installations enable the monitor automatically. Existing automatically updated installations detect the missing health state on their next scheduler wake-up and install it without waiting for the normal update interval:
+
+```bash
+python3 installer/blun_language_guard.py health-monitor install
+python3 installer/blun_language_guard.py health-monitor status
+python3 installer/blun_language_guard.py health-monitor run
+```
+
+`health-monitor remove` removes only the monitor schedule; it preserves both services, all secrets, and user configuration.
+
 ### Version 6.5: service-owned one-time delivery grants
 
 Version 6.5 removes the local Claude hook record as a trust decision. After `release_response` or `release_translation`, the `PostToolUse` hook sends the complete receipt context to the isolated service. A valid receipt is exchanged for a short-lived signed delivery grant bound to the exact target hash, Claude session, agent or subagent, guard version, service boot, purpose, locale, and expiry.
@@ -255,7 +271,7 @@ Linux uses a user-level systemd timer, macOS a LaunchAgent, and Windows Task Sch
 python3 installer/blun_language_guard.py auto-update enable --require-signed-commits
 ```
 
-Version 6.6 also coordinates Claude's plugin cache. When automatic updates are enabled, the owner-visible Claude executable path is recorded so an OS scheduler with a smaller `PATH` invokes the same CLI. If `translate-native@blun-language-tools` is already installed at user scope, the updater runs Claude's official non-interactive `plugin update` command and then verifies the exact installed version through `plugin list --json`. A missing plugin is never installed without consent. A plugin failure leaves the already-tested runtime and fail-closed MCP active, records a `degraded` updater state, returns nonzero, and retries on the next scheduled wake-up instead of waiting for the normal interval. A successful cache update still requires `/reload-plugins` or a new Claude session because active sessions retain their previously loaded hook paths.
+Version 6.6 also coordinates Claude's plugin cache. When automatic updates are enabled, the owner-visible Claude executable path is recorded so an OS scheduler with a smaller `PATH` invokes the same CLI. If `translate-native@blun-language-tools` is already installed at user scope, the updater runs Claude's official non-interactive `plugin update` command and then verifies the exact installed version through `plugin list --json`. A missing plugin is never installed without consent. A plugin failure leaves the already-tested runtime and fail-closed MCP active, records a `degraded` updater state, returns nonzero, and retries on the next scheduled wake-up instead of waiting for the normal interval. Version 6.7 uses the same degraded retry path for a health-monitor installation failure and shares an operation lock between updates and repairs. A successful cache update still requires `/reload-plugins` or a new Claude session because active sessions retain their previously loaded hook paths.
 
 The authoritative plugin version lives only in `.claude-plugin/plugin.json`; the marketplace entry deliberately omits a duplicate version field. Claude uses the manifest version as its cache key, avoiding two version declarations that can drift apart.
 
@@ -356,7 +372,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.6 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.7 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

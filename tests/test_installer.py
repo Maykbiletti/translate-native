@@ -22,7 +22,7 @@ SPEC.loader.exec_module(INSTALLER)
 
 
 class InstallerTests(unittest.TestCase):
-    def _fake_claude(self, root: Path, *, old_version: str = "6.5.0", new_version: str = "6.6.0", fail_update: bool = False) -> tuple[Path, Path]:
+    def _fake_claude(self, root: Path, *, old_version: str = "6.6.0", new_version: str = "6.7.0", fail_update: bool = False) -> tuple[Path, Path]:
         state = root / "plugin-version.txt"
         state.write_text(old_version, encoding="utf-8")
         executable = root / "claude"
@@ -85,33 +85,33 @@ class InstallerTests(unittest.TestCase):
 
     def test_claude_plugin_update_reaches_exact_runtime_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            executable, state = self._fake_claude(Path(directory), old_version="6.5.0", new_version="6.6.0")
-            result = INSTALLER.update_claude_plugin("6.6.0", str(executable))
+            executable, state = self._fake_claude(Path(directory), old_version="6.6.0", new_version="6.7.0")
+            result = INSTALLER.update_claude_plugin("6.7.0", str(executable))
             self.assertTrue(result["attempted"])
             self.assertTrue(result["updated"], result)
             self.assertTrue(result["reload_required"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.6.0")
-            self.assertEqual(result["status"]["version"], "6.6.0")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.0")
+            self.assertEqual(result["status"]["version"], "6.7.0")
 
     def test_claude_plugin_update_failure_is_reported_without_claiming_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             executable, state = self._fake_claude(
-                Path(directory), old_version="6.5.0", new_version="6.6.0", fail_update=True
+                Path(directory), old_version="6.6.0", new_version="6.7.0", fail_update=True
             )
-            result = INSTALLER.update_claude_plugin("6.6.0", str(executable))
+            result = INSTALLER.update_claude_plugin("6.7.0", str(executable))
             self.assertTrue(result["attempted"])
             self.assertFalse(result["updated"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.5.0")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.6.0")
             self.assertFalse(result["status"]["healthy"])
 
     def test_current_claude_plugin_is_not_updated_again(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            executable, state = self._fake_claude(Path(directory), old_version="6.6.0", new_version="broken")
-            result = INSTALLER.update_claude_plugin("6.6.0", str(executable))
+            executable, state = self._fake_claude(Path(directory), old_version="6.7.0", new_version="broken")
+            result = INSTALLER.update_claude_plugin("6.7.0", str(executable))
             self.assertFalse(result["attempted"])
             self.assertTrue(result["updated"])
             self.assertFalse(result["reload_required"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.6.0")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.0")
 
     def test_degraded_updater_state_is_due_immediately(self) -> None:
         originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE)
@@ -136,10 +136,99 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE = originals
 
+    def test_missing_health_state_migrates_claude_installation_on_next_wake(self) -> None:
+        originals = (
+            INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE, INSTALLER.HEALTH_STATE,
+            INSTALLER.HEALTH_CONFIG, INSTALLER.TARGETS,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill = root / "skill"
+            skill.mkdir()
+            claude_target = root / "claude-skill"
+            claude_target.symlink_to(skill, target_is_directory=True)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_STATE = root / "update-state.json"
+            INSTALLER.HEALTH_STATE = root / "missing-health-state.json"
+            INSTALLER.HEALTH_CONFIG = root / "missing-health-config.json"
+            INSTALLER.TARGETS = {**INSTALLER.TARGETS, "claude": claude_target}
+            INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                "enabled": True,
+                "interval_hours": 24,
+                "require_signed_commits": False,
+                "repository": INSTALLER.REPO_URL,
+            })
+            INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, {
+                "status": "ok",
+                "checked_at": int(INSTALLER.time.time()),
+            })
+            try:
+                with mock.patch.object(INSTALLER, "update", return_value=8) as updater:
+                    self.assertEqual(INSTALLER.auto_update("run"), 8)
+                    updater.assert_called_once_with(False, None)
+            finally:
+                (
+                    INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE, INSTALLER.HEALTH_STATE,
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.TARGETS,
+                ) = originals
+
+    def test_explicitly_disabled_health_monitor_is_not_reinstalled(self) -> None:
+        originals = (
+            INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE, INSTALLER.HEALTH_STATE,
+            INSTALLER.HEALTH_CONFIG, INSTALLER.TARGETS,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill = root / "skill"
+            skill.mkdir()
+            claude_target = root / "claude-skill"
+            claude_target.symlink_to(skill, target_is_directory=True)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_STATE = root / "update-state.json"
+            INSTALLER.HEALTH_STATE = root / "missing-health-state.json"
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.TARGETS = {**INSTALLER.TARGETS, "claude": claude_target}
+            INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                "enabled": True, "interval_hours": 24, "require_signed_commits": False,
+            })
+            INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, {
+                "status": "ok", "checked_at": int(INSTALLER.time.time()),
+            })
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {"enabled": False})
+            try:
+                with mock.patch.object(INSTALLER, "update") as updater, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("run"), 0)
+                updater.assert_not_called()
+            finally:
+                (
+                    INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE, INSTALLER.HEALTH_STATE,
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.TARGETS,
+                ) = originals
+
+    def test_health_monitor_remove_preserves_services_and_persists_opt_out(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {"status": "ok"})
+            try:
+                with mock.patch.object(INSTALLER, "remove_health_monitor") as remover, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("remove"), 0)
+                    self.assertEqual(INSTALLER.health_monitor("status"), 0)
+                remover.assert_called_once_with()
+                self.assertFalse(INSTALLER.HEALTH_STATE.exists())
+                policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
+                self.assertFalse(policy["enabled"])
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
     def test_missing_or_uninstalled_claude_plugin_is_not_modified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            unavailable = INSTALLER.claude_plugin_status("6.6.0", str(root / "missing-claude"))
+            unavailable = INSTALLER.claude_plugin_status("6.7.0", str(root / "missing-claude"))
             self.assertEqual(unavailable["reason"], "claude-command-unavailable")
             executable = root / "claude"
             executable.write_text(
@@ -147,7 +236,7 @@ class InstallerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-            result = INSTALLER.update_claude_plugin("6.6.0", str(executable))
+            result = INSTALLER.update_claude_plugin("6.7.0", str(executable))
             self.assertFalse(result["attempted"])
             self.assertEqual(result["status"]["reason"], "plugin-not-installed")
 
@@ -329,6 +418,157 @@ class InstallerTests(unittest.TestCase):
                 }
             }), encoding="utf-8")
             self.assertEqual(INSTALLER.project_mcp_shadows(nested), [root / ".mcp.json"])
+
+    def test_operation_lock_excludes_overlap_and_releases_only_its_owner(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            try:
+                first = INSTALLER._acquire_operation_lock("update", now=100)
+                self.assertIsNotNone(first)
+                self.assertIsNone(INSTALLER._acquire_operation_lock("health-monitor", now=101))
+                INSTALLER._release_operation_lock("not-the-owner")
+                self.assertTrue(INSTALLER.OPERATION_LOCK.exists())
+                assert first is not None
+                INSTALLER._release_operation_lock(first)
+                self.assertFalse(INSTALLER.OPERATION_LOCK.exists())
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_stale_operation_lock_is_recovered_once(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            INSTALLER.OPERATION_LOCK.write_text("stale", encoding="utf-8")
+            os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
+            try:
+                token = INSTALLER._acquire_operation_lock(
+                    "health-monitor", now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1
+                )
+                self.assertIsNotNone(token)
+                value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+                self.assertEqual(value["operation"], "health-monitor")
+                assert token is not None
+                INSTALLER._release_operation_lock(token)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_health_monitor_clean_probe_does_not_restart_services(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)), \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime") as guard_restart, \
+                     mock.patch.object(INSTALLER, "restart_mcp_http_runtime") as mcp_restart:
+                    self.assertEqual(INSTALLER.health_monitor_run(now=1000), 0)
+                guard_restart.assert_not_called()
+                mcp_restart.assert_not_called()
+                state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(state["status"], "ok")
+                self.assertEqual(state["repairs"], [])
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_skips_dependent_mcp_probe_when_signer_is_down(self) -> None:
+        with mock.patch.object(INSTALLER, "probe_guard_service", side_effect=OSError("offline")), \
+             mock.patch.object(INSTALLER, "probe_mcp_http") as mcp_probe:
+            self.assertEqual(INSTALLER._guard_stack_status(), (False, False))
+        mcp_probe.assert_not_called()
+
+    def test_health_monitor_repairs_only_failed_mcp_and_rechecks_full_stack(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            statuses = [(True, False), (True, False), (True, True)]
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", side_effect=statuses), \
+                     mock.patch.object(INSTALLER, "_wait_for_stack", return_value=True) as waiter, \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime") as guard_restart, \
+                     mock.patch.object(INSTALLER, "restart_mcp_http_runtime", return_value=(True, "test")) as mcp_restart:
+                    self.assertEqual(INSTALLER.health_monitor_run(now=2000), 0)
+                guard_restart.assert_not_called()
+                mcp_restart.assert_called_once_with()
+                waiter.assert_called_once_with(guard=True, mcp=True)
+                state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(state["status"], "recovered")
+                self.assertEqual(state["repairs"], ["mcp-restart"])
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_repairs_guard_before_dependent_mcp(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            statuses = [(False, False), (True, False), (True, True)]
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", side_effect=statuses), \
+                     mock.patch.object(INSTALLER, "_wait_for_stack", side_effect=[True, True]), \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime", return_value=(True, "guard")) as guard_restart, \
+                     mock.patch.object(INSTALLER, "restart_mcp_http_runtime", return_value=(True, "mcp")) as mcp_restart:
+                    self.assertEqual(INSTALLER.health_monitor_run(now=3000), 0)
+                guard_restart.assert_called_once_with()
+                mcp_restart.assert_called_once_with()
+                state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(state["repairs"], ["guard-restart", "mcp-restart"])
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_cooldown_prevents_restart_storm(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                "status": "blocked", "checked_at": 4000, "last_repair_at": 4000,
+                "consecutive_failures": 1,
+            })
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(False, False)), \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime") as guard_restart, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=4020), 1)
+                guard_restart.assert_not_called()
+                state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(state["reason"], "repair-cooldown")
+                self.assertEqual(state["consecutive_failures"], 2)
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_platform_schedulers_are_one_minute_and_non_overlapping(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                ok, _detail = INSTALLER.install_health_monitor(home)
+            self.assertTrue(ok)
+            timer = (home / ".config" / "systemd" / "user" / "blun-language-guard-health.timer").read_text()
+            self.assertIn("OnUnitActiveSec=1m", timer)
+            service = (home / ".config" / "systemd" / "user" / "blun-language-guard-health.service").read_text()
+            self.assertIn("health-monitor", service)
+
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                ok, _detail = INSTALLER.install_health_monitor(home)
+            self.assertTrue(ok)
+            plist = (home / "Library" / "LaunchAgents" / "ai.blun.language-guard-health.plist").read_text()
+            self.assertIn("<integer>60</integer>", plist)
+
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Windows"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                ok, _detail = INSTALLER.install_health_monitor(home)
+            self.assertTrue(ok)
+            script = runner.call_args.args[0][4]
+            self.assertIn("New-TimeSpan -Minutes 1", script)
+            self.assertIn("MultipleInstances IgnoreNew", script)
 
 
 if __name__ == "__main__":
