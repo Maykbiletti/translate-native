@@ -147,11 +147,19 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.5: service-owned one-time delivery grants
+
+Version 6.5 removes the local Claude hook record as a trust decision. After `release_response` or `release_translation`, the `PostToolUse` hook sends the complete receipt context to the isolated service. A valid receipt is exchanged for a short-lived signed delivery grant bound to the exact target hash, Claude session, agent or subagent, guard version, service boot, purpose, locale, and expiry.
+
+The owner-only hook file contains only the opaque delivery grant, target hash, and authorization time. At `Stop` or `SubagentStop`, the hook deletes the local record before asking the isolated service to consume the grant for the actual `last_assistant_message`. The service accepts each nonce exactly once. Copying a consumed record, forging a local record, changing the final response, moving a grant to another session or subagent, restarting the signer, or crossing a version boundary now fails closed.
+
+This strengthens the ordinary same-user installation without overstating it. A process that can read the service authentication token, replace managed hooks, or reach the final delivery channel can still bypass workflow enforcement. Use a separate OS identity, container, remote signer, and host-owned delivery credentials for a hostile-process boundary.
+
 ### Version 6.4: Claude plugin and mandatory final-response hooks
 
 The repository is now both a Claude Code plugin and a Claude plugin marketplace. The plugin bundles the `translate-native` skill, connects to the persistent HTTP MCP, injects mandatory policy at session start, observes successful release-tool calls, and applies `Stop` plus `SubagentStop` hooks to the actual final response.
 
-The `PostToolUse` hook does not trust the MCP result by appearance. It sends the receipt, exact target, complete source for translations, purpose, locale, and content policy to the isolated verifier. Only a valid result creates a short-lived, owner-only release record containing a target hash rather than customer prose. The stop hook consumes that record exactly once. A missing, stale, replayed, wrong-purpose, or post-release-edited result prevents Claude from stopping and tells it to run the proper release path again.
+The `PostToolUse` hook does not trust the MCP result by appearance. It sends the receipt, exact target, complete source for translations, purpose, locale, and content policy to the isolated verifier. Version 6.5 exchanges a valid result for a service-owned one-time delivery grant rather than trusting the local hook record itself. A missing, stale, replayed, wrong-purpose, or post-release-edited result prevents Claude from stopping and tells it to run the proper release path again.
 
 Install the persistent runtime first, then the marketplace plugin:
 
@@ -171,7 +179,7 @@ The plugin's checked-in components are:
 - [`hooks/hooks.json`](hooks/hooks.json): session, release-tool, main-agent, and subagent hooks;
 - [`claude_language_hook.js`](integrations/claude_language_hook.js): cross-platform, zero-package verification state machine.
 
-This closes accidental omission and catches an agent that validates one draft but returns another. It is still not a hostile-process boundary: Claude currently caps repeated stop-hook continuations, and same-user code can modify hook state or disable an unmanaged plugin. For organization-wide enforcement, force-enable the plugin and managed hooks, remove direct delivery credentials from the agent, or place a buffering BLUN host in front of rendered output.
+This closes accidental omission and catches an agent that validates one draft but returns another. A forged hook-state file alone no longer passes because the isolated service must consume its signed grant. It is still not a hostile-process boundary: same-user code may be able to read service credentials or disable an unmanaged plugin. For organization-wide enforcement, force-enable the plugin and managed hooks, remove direct delivery credentials from the agent, or place a buffering BLUN host in front of rendered output.
 
 ### Version 6.3: persistent Claude MCP
 

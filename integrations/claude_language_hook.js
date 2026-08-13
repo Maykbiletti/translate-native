@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 "use strict";
 
-// Claude lifecycle boundary: record only independently verified MCP releases,
-// then require the exact visible final response to match one fresh record.
+// Claude lifecycle boundary: exchange independently verified MCP releases for
+// service-owned one-time delivery grants, then consume one for the exact output.
 
 const crypto = require("crypto");
 const fs = require("fs");
@@ -209,7 +209,7 @@ async function postTool(input) {
   const source = purpose === "translation" && typeof args.source_text === "string" ? args.source_text : "";
   const language = typeof args.language === "string" ? args.language : "";
   const request = {
-    operation: "verify",
+    operation: "authorize_delivery",
     task_kind: purpose,
     source_text: source,
     target_text: target,
@@ -218,43 +218,56 @@ async function postTool(input) {
     content_type: typeof args.content_type === "string" ? args.content_type : "prose",
     short_text_reviewed: args.short_text_reviewed === true,
     agent_id: String(input.agent_id || "main"),
+    session_id: String(input.session_id || ""),
     channel: "claude-hook"
   };
   try {
     const verification = await callGuard(request);
-    if (verification.valid !== true) {
+    if (verification.valid !== true || typeof verification.delivery_grant !== "string") {
       emit(blocked("The isolated BLUN verifier rejected this receipt. Do not reuse it; correct and release the exact final text again."));
       return;
     }
     writeRecord(input, {
+      delivery_grant: verification.delivery_grant,
       target_sha256: textHash(target),
-      purpose,
-      language,
-      tool_use_id: String(input.tool_use_id || ""),
-      verified_at: Date.now()
+      authorized_at: Date.now()
     });
   } catch (_) {
     emit(blocked("The isolated BLUN verifier is unavailable. Fail closed and reconnect the language guard before finishing."));
   }
 }
 
-function stop(input) {
+async function stop(input) {
   const target = typeof input.last_assistant_message === "string" ? input.last_assistant_message : "";
-  if (!hasNaturalLanguage(target)) return;
+  const naturalLanguage = hasNaturalLanguage(target);
   try {
     const { destination, record } = readRecord(input);
-    const fresh = record && Number.isFinite(record.verified_at)
-      && Date.now() - record.verified_at >= 0
-      && Date.now() - record.verified_at <= MAX_RECORD_AGE_MS;
-    if (fresh && record.target_sha256 === textHash(target)) {
-      fs.unlinkSync(destination);
-      return;
-    }
+    const fresh = record && Number.isFinite(record.authorized_at)
+      && Date.now() - record.authorized_at >= 0
+      && Date.now() - record.authorized_at <= MAX_RECORD_AGE_MS;
+    const usable = fresh && typeof record.delivery_grant === "string";
     try { fs.unlinkSync(destination); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+    if (usable) {
+      try {
+        const result = await callGuard({
+          operation: "consume_delivery",
+          delivery_grant: record.delivery_grant,
+          target_text: target,
+          session_id: String(input.session_id || ""),
+          agent_id: String(input.agent_id || "main"),
+          channel: "claude-hook"
+        });
+        if (naturalLanguage && record.target_sha256 === textHash(target) && result.valid === true) return;
+      } catch (error) {
+        if (naturalLanguage) throw error;
+      }
+    }
   } catch (_) {
+    if (!naturalLanguage) return;
     emit(blocked("The BLUN hook could not verify its protected release state. Fail closed and call the correct release tool again."));
     return;
   }
+  if (!naturalLanguage) return;
   emit(blocked(
     "The exact final response has no fresh verified BLUN receipt. If this is a translation, load translate-native and call release_translation with the complete source and exact final target. Otherwise call release_response with the exact final answer. Do not edit the text after release."
   ));

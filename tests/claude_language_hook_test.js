@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("assert");
+const crypto = require("crypto");
 const fs = require("fs");
 const net = require("net");
 const os = require("os");
@@ -30,6 +31,7 @@ async function main() {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "blun-claude-hook-"));
   const token = "a".repeat(64);
   fs.writeFileSync(path.join(temporary, "service.token"), `${token}\n`, { mode: 0o600 });
+  const grants = new Map();
 
   const server = net.createServer((client) => {
     let raw = "";
@@ -40,12 +42,30 @@ async function main() {
       const request = JSON.parse(raw.slice(0, newline));
       let response;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.4.0" };
-      } else {
+        response = { status: "ok", isolated_key: true, version: "6.5.0" };
+      } else if (request.operation === "authorize_delivery") {
+        const valid = request.service_token === token && request.release_token === "valid-token";
+        const grant = `grant-${crypto.randomUUID()}`;
+        if (valid) grants.set(grant, {
+          target_text: request.target_text,
+          session_id: request.session_id,
+          agent_id: request.agent_id
+        });
         response = {
-          status: request.service_token === token && request.release_token === "valid-token" ? "PASS" : "BLOCK",
-          valid: request.service_token === token && request.release_token === "valid-token"
+          status: valid ? "PASS" : "BLOCK",
+          valid,
+          ...(valid ? { delivery_grant: grant } : {})
         };
+      } else if (request.operation === "consume_delivery") {
+        const expected = grants.get(request.delivery_grant);
+        const valid = request.service_token === token && expected
+          && expected.target_text === request.target_text
+          && expected.session_id === request.session_id
+          && expected.agent_id === request.agent_id;
+        if (valid) grants.delete(request.delivery_grant);
+        response = { status: valid ? "PASS" : "BLOCK", valid: Boolean(valid) };
+      } else {
+        response = { status: "BLOCK", valid: false };
       }
       client.end(`${JSON.stringify(response)}\n`);
     });
@@ -91,6 +111,9 @@ async function main() {
   const recorded = await runHook("post-tool", tool, environment);
   assert.strictEqual(recorded.code, 0, recorded.stderr);
   assert.strictEqual(recorded.stdout, "");
+  const stateDirectory = path.join(temporary, "claude-hooks");
+  const stateFile = path.join(stateDirectory, fs.readdirSync(stateDirectory)[0]);
+  const copiedRecord = fs.readFileSync(stateFile, "utf8");
 
   const released = await runHook("stop", {
     ...common,
@@ -100,6 +123,7 @@ async function main() {
   }, environment);
   assert.strictEqual(released.stdout, "");
 
+  fs.writeFileSync(stateFile, copiedRecord, { mode: 0o600 });
   const replay = await runHook("stop", {
     ...common,
     hook_event_name: "Stop",
@@ -117,6 +141,7 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(changed.stdout).decision, "block");
 
+  await runHook("post-tool", tool, environment);
   const noLanguage = await runHook("stop", {
     ...common,
     hook_event_name: "Stop",
@@ -124,12 +149,31 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(noLanguage.stdout, "");
+  const delayedAfterCode = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(delayedAfterCode.stdout).decision, "block");
 
   const badReceipt = await runHook("post-tool", {
     ...tool,
     tool_response: { structuredContent: { release_allowed: true, release_token: "forged" } }
   }, environment);
   assert.strictEqual(JSON.parse(badReceipt.stdout).decision, "block");
+
+  const forgedRecord = JSON.parse(copiedRecord);
+  forgedRecord.delivery_grant = "forged-delivery-grant";
+  forgedRecord.authorized_at = Date.now();
+  fs.writeFileSync(stateFile, `${JSON.stringify(forgedRecord)}\n`, { mode: 0o600 });
+  const forgedState = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(forgedState.stdout).decision, "block");
 
   await new Promise((resolve) => server.close(resolve));
   fs.rmSync(temporary, { recursive: true, force: true });

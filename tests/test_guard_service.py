@@ -78,6 +78,93 @@ class GuardServiceTests(unittest.TestCase):
         with self.assertRaises(SERVICE.GuardProtocolError):
             self.service.handle({"operation": "health", "service_token": "wrong"})
 
+    def authorize_request(self, release_token: str, target: str = "Natürlich ist das möglich.") -> dict:
+        return {
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "authorize_delivery",
+            "task_kind": "response",
+            "source_text": "",
+            "target_text": target,
+            "language": "de-DE",
+            "release_token": release_token,
+            "session_id": "session-one",
+            "agent_id": "test-agent",
+            "channel": "claude-hook",
+        }
+
+    def consume_request(self, delivery_grant: str, target: str = "Natürlich ist das möglich.") -> dict:
+        return {
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "consume_delivery",
+            "delivery_grant": delivery_grant,
+            "target_text": target,
+            "session_id": "session-one",
+            "agent_id": "test-agent",
+            "channel": "claude-hook",
+        }
+
+    def test_delivery_grant_is_exact_one_time_and_service_boot_bound(self) -> None:
+        released = self.service.handle(self.release_request())
+        def fresh_grant() -> str:
+            authorized = self.service.handle(self.authorize_request(released["release_token"]))
+            self.assertTrue(authorized["valid"], authorized)
+            return authorized["delivery_grant"]
+
+        grant = fresh_grant()
+
+        consumed = self.service.handle(self.consume_request(grant))
+        self.assertTrue(consumed["valid"], consumed)
+        replayed = self.service.handle(self.consume_request(grant))
+        self.assertFalse(replayed["valid"], replayed)
+        self.assertFalse(replayed["checks"]["one_time"])
+
+        wrong_target_grant = fresh_grant()
+        wrong_target = self.service.handle(self.consume_request(wrong_target_grant, "Geändert."))
+        self.assertFalse(wrong_target["valid"], wrong_target)
+        burned_after_edit = self.service.handle(self.consume_request(wrong_target_grant))
+        self.assertFalse(burned_after_edit["valid"], burned_after_edit)
+        self.assertFalse(burned_after_edit["checks"]["one_time"])
+
+        session_grant = fresh_grant()
+        wrong_session_request = self.consume_request(session_grant)
+        wrong_session_request["session_id"] = "another-session"
+        wrong_session = self.service.handle(wrong_session_request)
+        self.assertFalse(wrong_session["valid"], wrong_session)
+        self.assertFalse(wrong_session["checks"]["session"])
+
+        agent_grant = fresh_grant()
+        wrong_agent_request = self.consume_request(agent_grant)
+        wrong_agent_request["agent_id"] = "another-agent"
+        wrong_agent = self.service.handle(wrong_agent_request)
+        self.assertFalse(wrong_agent["valid"], wrong_agent)
+        self.assertFalse(wrong_agent["checks"]["agent"])
+
+        original_version = SERVICE.QUALITY.VERSION
+        version_grant = fresh_grant()
+        try:
+            SERVICE.QUALITY.VERSION = "future-version"
+            wrong_version = self.service.handle(self.consume_request(version_grant))
+        finally:
+            SERVICE.QUALITY.VERSION = original_version
+        self.assertFalse(wrong_version["valid"], wrong_version)
+        self.assertFalse(wrong_version["checks"]["version"])
+
+        signed_grant = fresh_grant()
+        forged = signed_grant[:-1] + ("A" if signed_grant[-1] != "A" else "B")
+        forged_result = self.service.handle(self.consume_request(forged))
+        self.assertFalse(forged_result["valid"], forged_result)
+
+        restarted = SERVICE.GuardService(
+            self.key_path, self.audit_path, "service-secret-with-at-least-32-characters"
+        )
+        restart_grant = fresh_grant()
+        restarted_result = restarted.handle(self.consume_request(restart_grant))
+        self.assertFalse(restarted_result["valid"], restarted_result)
+        self.assertFalse(restarted_result["checks"]["service_boot"])
+
+        raw = self.audit_path.read_text(encoding="utf-8")
+        self.assertNotIn(grant, raw)
+
     def test_audit_contains_hashes_but_no_candidate_or_token(self) -> None:
         target = "Diese vertrauliche Antwort bleibt aus dem Audit heraus."
         released = self.service.handle(self.release_request(target))

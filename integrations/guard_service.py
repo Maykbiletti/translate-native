@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import importlib.util
 import json
@@ -14,6 +15,7 @@ import socketserver
 import stat
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -75,10 +77,97 @@ class GuardService:
         self.audit_path = audit_path
         self.service_token = service_token
         self.key = QUALITY.load_or_create_key(key_path)
+        self.boot_id = QUALITY._b64encode(os.urandom(12))
+        self.consumed_delivery_nonces: dict[str, int] = {}
+        self.delivery_lock = threading.Lock()
         if os.name != "nt" and key_path.stat().st_mode & 0o077:
             raise RuntimeError("guard signing key permissions must be owner-only")
         GATEWAY.GUARD.KEY_PATH = key_path
         GATEWAY.GUARD.SERVICE_ENDPOINT = ""
+
+    @staticmethod
+    def _identity_hash(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _verify_release(self, request: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+        task_kind = _exact_string(request, "task_kind")
+        if task_kind not in {"response", "translation"}:
+            raise GuardProtocolError("invalid task_kind")
+        source = _exact_string(request, "source_text", required=False)
+        if task_kind == "translation" and not source.strip():
+            raise GuardProtocolError("translation verification requires source_text")
+        if task_kind == "response" and source:
+            raise GuardProtocolError("response verification cannot contain source_text")
+        result = QUALITY.verify_receipt(
+            _exact_string(request, "release_token"),
+            source,
+            _exact_string(request, "target_text"),
+            _exact_string(request, "language"),
+            self.key,
+            request.get("content_type", "prose"),
+            request.get("short_text_reviewed") is True,
+            purpose=task_kind,
+        )
+        return task_kind, source, result
+
+    def _issue_delivery_grant(self, request: dict[str, Any], task_kind: str) -> str:
+        now = int(time.time())
+        payload = {
+            "v": QUALITY.VERSION,
+            "boot": self.boot_id,
+            "target_sha256": QUALITY.canonical_hash(_exact_string(request, "target_text")),
+            "session_sha256": self._identity_hash(_exact_string(request, "session_id")),
+            "agent_sha256": self._identity_hash(_exact_string(request, "agent_id")),
+            "language": _exact_string(request, "language"),
+            "purpose": task_kind,
+            "iat": now,
+            "exp": now + 600,
+            "nonce": QUALITY._b64encode(os.urandom(16)),
+        }
+        encoded = QUALITY._b64encode(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        signature = QUALITY._b64encode(hmac.new(self.key, encoded.encode("ascii"), hashlib.sha256).digest())
+        return f"blgd1.{encoded}.{signature}"
+
+    def _consume_delivery_grant(self, request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            prefix, encoded, signature = _exact_string(request, "delivery_grant").split(".")
+            expected = QUALITY._b64encode(hmac.new(self.key, encoded.encode("ascii"), hashlib.sha256).digest())
+            if prefix != "blgd1" or not hmac.compare_digest(signature, expected):
+                raise ValueError("invalid delivery grant signature")
+            payload = json.loads(QUALITY._b64decode(encoded))
+            if not isinstance(payload, dict):
+                raise ValueError("invalid delivery grant payload")
+            nonce = payload.get("nonce")
+            if not isinstance(nonce, str) or not nonce:
+                raise ValueError("invalid delivery grant nonce")
+            now = int(time.time())
+            checks = {
+                "target": payload.get("target_sha256") == QUALITY.canonical_hash(_exact_string(request, "target_text")),
+                "session": payload.get("session_sha256") == self._identity_hash(_exact_string(request, "session_id")),
+                "agent": payload.get("agent_sha256") == self._identity_hash(_exact_string(request, "agent_id")),
+                "version": payload.get("v") == QUALITY.VERSION,
+                "service_boot": payload.get("boot") == self.boot_id,
+                "not_expired": int(payload.get("exp", 0)) >= now,
+            }
+            with self.delivery_lock:
+                self.consumed_delivery_nonces = {
+                    used_nonce: expiry
+                    for used_nonce, expiry in self.consumed_delivery_nonces.items()
+                    if expiry >= now
+                }
+                checks["one_time"] = nonce not in self.consumed_delivery_nonces
+                context_valid = all(
+                    checks[name]
+                    for name in ("session", "agent", "version", "service_boot", "not_expired", "one_time")
+                )
+                valid = context_valid and checks["target"]
+                if context_valid:
+                    self.consumed_delivery_nonces[nonce] = int(payload["exp"])
+            return {"valid": valid, "status": "PASS" if valid else "BLOCK", "checks": checks}
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            return {"valid": False, "status": "BLOCK", "error": str(error)}
 
     def _authorize(self, request: dict[str, Any]) -> None:
         supplied = request.pop("service_token", "")
@@ -106,26 +195,26 @@ class GuardService:
             AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "release"))
             return result
         if operation == "verify":
-            task_kind = _exact_string(request, "task_kind")
-            if task_kind not in {"response", "translation"}:
-                raise GuardProtocolError("invalid task_kind")
-            source = _exact_string(request, "source_text", required=False)
-            if task_kind == "translation" and not source.strip():
-                raise GuardProtocolError("translation verification requires source_text")
-            if task_kind == "response" and source:
-                raise GuardProtocolError("response verification cannot contain source_text")
-            result = QUALITY.verify_receipt(
-                _exact_string(request, "release_token"),
-                source,
-                _exact_string(request, "target_text"),
-                _exact_string(request, "language"),
-                self.key,
-                request.get("content_type", "prose"),
-                request.get("short_text_reviewed") is True,
-                purpose=task_kind,
-            )
+            _, _, result = self._verify_release(request)
             result["status"] = "PASS" if result.get("valid") else "BLOCK"
             AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "verify"))
+            return result
+        if operation == "authorize_delivery":
+            task_kind, _, result = self._verify_release(request)
+            if result.get("valid"):
+                result = {
+                    "valid": True,
+                    "status": "PASS",
+                    "delivery_grant": self._issue_delivery_grant(request, task_kind),
+                    "expires_in": 600,
+                }
+            else:
+                result["status"] = "BLOCK"
+            AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "authorize-delivery"))
+            return result
+        if operation == "consume_delivery":
+            result = self._consume_delivery_grant(request)
+            AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "consume-delivery"))
             return result
         raise GuardProtocolError("unknown operation")
 
