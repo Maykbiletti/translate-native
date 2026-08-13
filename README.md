@@ -147,6 +147,24 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.3: persistent Claude MCP
+
+Claude Code no longer needs to keep this guard alive as a child `stdio` process. The installer registers an authenticated, user-scoped Streamable HTTP server at `http://127.0.0.1:47632/mcp`. The endpoint is stateless: every tool call is a separate request, so a disconnected client pipe cannot kill the server or erase its tools. The operating system keeps the process alive and restarts it after a failure. This follows Claude Code's documented [user-scoped HTTP MCP configuration](https://code.claude.com/docs/en/mcp) and the MCP specification's [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
+
+```bash
+python3 installer/blun_language_guard.py install --target claude
+python3 installer/blun_language_guard.py mcp-service status
+python3 installer/blun_language_guard.py doctor
+```
+
+Installation safely updates the top-level user entry in `~/.claude.json`, preserves unrelated settings and MCP servers, creates `~/.claude.json.bak`, and removes stale same-name local entries stored under individual projects in that file. This matters because Claude's local and project scopes take precedence over user scope; an old project-specific `stdio` definition can otherwise make the repaired server appear unreliable only in certain repositories. Checked-in `.mcp.json` files remain project-owned and must not define another server with the same name.
+
+The exact generated shape is also available as [`claude-http.example.json`](mcp-server/claude-http.example.json) for inspection. Let the installer write the machine-specific absolute helper path instead of copying the example by hand.
+
+The Claude entry uses [`mcp_auth_headers.py`](integrations/mcp_auth_headers.py) as `headersHelper`. Claude runs that helper again at connection time and after an authentication retry, so the bearer token remains in an owner-only file instead of being copied into configuration. The HTTP server binds only to loopback, validates browser origins, requires authentication, rejects oversized or invalid requests without exiting, accepts UTF-8 BOM input, and exposes an authenticated `/healthz` probe covering the complete path to the isolated guard service.
+
+The persistent transport improves availability; it does not turn MCP instructions into a security boundary. The trusted host must still intercept output and fail closed. If the HTTP service or isolated signer is unavailable, delivery remains blocked rather than falling back to local signing or raw text.
+
 ### Version 6.2: isolated runtime enforcement
 
 Version 6.2 moves signing and final verification into [`guard_service.py`](integrations/guard_service.py), a dedicated loopback service. The MCP process and host adapters receive only a service endpoint and an authentication token; the untrusted agent child receives neither the signing key nor the service token. The service accepts UTF-8 with or without a BOM, signs releases, verifies the exact envelope at delivery time, and appends a content-free audit record containing only hashes, route metadata, guard version, and finding codes.
@@ -197,7 +215,7 @@ python3 installer/blun_language_guard.py auto-update enable --interval-hours 24
 python3 installer/blun_language_guard.py auto-update status
 ```
 
-Linux uses a user-level systemd timer, macOS a LaunchAgent, and Windows Task Scheduler. Each scheduled wake-up checks whether the configured interval is due. A candidate checkout is tested before installation, the update is fast-forward-only, post-update tests run again, and the previous revision is retained for rollback. Security-sensitive deployments can require trusted Git commit signatures:
+Linux uses a user-level systemd timer, macOS a LaunchAgent, and Windows Task Scheduler. Each scheduled wake-up checks whether the configured interval is due. A candidate checkout is tested before installation, the update is fast-forward-only, post-update tests run again, and the previous revision is retained for rollback. When Claude is installed, an update also installs or refreshes the persistent HTTP MCP, its dynamic-header helper, its autostart service, and the user-scoped Claude entry before marking the update successful. Security-sensitive deployments can require trusted Git commit signatures:
 
 ```bash
 python3 installer/blun_language_guard.py auto-update enable --require-signed-commits
@@ -300,13 +318,20 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-The server has no third-party Python dependencies:
+For Claude Code, use the persistent installation shown in Version 6.3. It uses the officially supported HTTP MCP transport and is available in every project through user scope. Check it at any time with:
+
+```bash
+python3 installer/blun_language_guard.py mcp-service status
+claude mcp get blun-language-guard
+```
+
+For other clients, the zero-dependency `stdio` transport remains available as a compatibility fallback:
 
 ```bash
 python3 translate-native/scripts/blun_language_guard.py serve
 ```
 
-Copy [`mcp-config.example.json`](mcp-server/mcp-config.example.json), replace the absolute path, and merge the `blun-language-guard` entry into the MCP configuration used by your agent CLI.
+Copy [`mcp-config.example.json`](mcp-server/mcp-config.example.json), replace the absolute path, and merge the `blun-language-guard` entry into the MCP configuration used by that agent CLI. Do not use the `stdio` fallback for Claude after installing Version 6.3; a higher-precedence project or local entry with the same name can shadow the persistent user server.
 
 Then copy the rules in [`AGENT_RULES.md`](integrations/AGENT_RULES.md) into the host's always-on instruction file:
 

@@ -17,6 +17,7 @@ Apply these rules as always-on instructions in `AGENTS.md`, `CLAUDE.md`, or the 
 13. Read the host-supplied `BLUN_LANGUAGE_GUARD_TASK_KIND`, `BLUN_LANGUAGE_GUARD_LANGUAGE`, and `BLUN_LANGUAGE_GUARD_CONTENT_TYPE` values when present. Use them for the MCP release call, but never echo them into the final envelope.
 14. The isolated guard service owns signing and verification. Never read its token file, connect to its socket directly, or retry through local-key mode when the host requires the service.
 15. Streaming candidate prose is delivery. In mandatory mode the host buffers `text-delta` and `done` events until the complete envelope has been verified; agents must not place candidate text in tool progress, logs, reasoning, or error fields.
+16. In Claude Code, use the installed user-scoped HTTP `blun-language-guard`. If it reconnects or reports unavailable, retry only through the same guarded MCP after health is restored. Never switch to raw output or an unguarded local signer.
 
 The server injects the same policy through MCP initialization instructions and exposes a `translate-native` prompt. Hosts that support an installed skill/plugin must activate it for translations. Hosts that do not support skills still receive the MCP workflow, but deterministic checks alone cannot prove fidelity or fluency.
 # Mandatory BLUN Language Gateway

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "blun-language-guard": {
+      "type": "http",
+      "url": "http://127.0.0.1:47632/mcp",
+      "headersHelper": "/absolute/path/to/blun-language-guard-mcp-headers"
+    }
+  }
+}

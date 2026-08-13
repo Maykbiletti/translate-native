@@ -34,7 +34,7 @@ const server = net.createServer(socket => {
     if (!raw.includes("\n")) return;
     const request = JSON.parse(raw.split("\n", 1)[0]);
     records.push(request);
-    socket.end(`${JSON.stringify({ valid: request.release_token === "valid", version: "6.2.0" })}\n`);
+    socket.end(`${JSON.stringify({ valid: request.release_token === "valid", version: "6.3.0" })}\n`);
   });
 });
 

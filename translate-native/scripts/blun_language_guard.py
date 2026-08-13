@@ -16,8 +16,9 @@ from typing import Any
 
 
 DIACRITICS_PATH = Path(__file__).with_name("check_diacritics.py")
-VERSION = "6.2.0"
+VERSION = "6.3.0"
 PROTOCOL_VERSION = "2025-06-18"
+SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", PROTOCOL_VERSION}
 EXACT_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$")
 MCP_INSTRUCTIONS = (
     "Treat every user-visible natural-language answer as an untrusted candidate. "
@@ -534,11 +535,18 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
     if request_id is None:
         return None
     if method == "initialize":
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        requested_protocol = params.get("protocolVersion")
+        negotiated_protocol = (
+            requested_protocol
+            if isinstance(requested_protocol, str) and requested_protocol in SUPPORTED_PROTOCOL_VERSIONS
+            else PROTOCOL_VERSION
+        )
         return {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": negotiated_protocol,
                 "capabilities": {
                     "tools": {"listChanged": False},
                     "prompts": {"listChanged": False},

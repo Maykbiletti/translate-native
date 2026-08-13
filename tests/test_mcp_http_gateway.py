@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import importlib.util
+import contextlib
+import io
+import json
+import os
+import sys
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+GATEWAY_PATH = ROOT / "integrations" / "mcp_http_gateway.py"
+HEADERS_PATH = ROOT / "integrations" / "mcp_auth_headers.py"
+SERVICE_PATH = ROOT / "integrations" / "guard_service.py"
+
+
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+GATEWAY = load("blun_test_mcp_http_gateway", GATEWAY_PATH)
+HEADERS = load("blun_test_mcp_auth_headers", HEADERS_PATH)
+SERVICE = load("blun_test_mcp_http_guard_service", SERVICE_PATH)
+
+
+class MCPHTTPGatewayTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.token = "http-access-token-with-at-least-32-characters"
+        self.server = GATEWAY.build_server("127.0.0.1", 0, self.token)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.addCleanup(self._stop_server)
+
+    def _stop_server(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def request(
+        self,
+        payload: dict | bytes,
+        *,
+        token: str | None = None,
+        origin: str | None = None,
+        protocol: str | None = "2025-06-18",
+        content_type: str = "application/json",
+    ) -> tuple[int, bytes, dict[str, str]]:
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": content_type,
+            "Accept": "application/json, text/event-stream",
+        }
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        if origin is not None:
+            headers["Origin"] = origin
+        if protocol is not None:
+            headers["MCP-Protocol-Version"] = protocol
+        request = urllib.request.Request(self.base_url + "/mcp", data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                return response.status, response.read(), dict(response.headers.items())
+        except urllib.error.HTTPError as error:
+            return error.code, error.read(), dict(error.headers.items())
+
+    def test_authenticated_stateless_initialize_and_tools(self) -> None:
+        status, body, _headers = self.request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
+        }, token=self.token, protocol=None)
+        self.assertEqual(status, 200)
+        initialized = json.loads(body)
+        self.assertEqual(initialized["result"]["protocolVersion"], "2025-03-26")
+        self.assertIn("release_response", initialized["result"]["instructions"])
+
+        status, body, _headers = self.request({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
+        }, token=self.token)
+        self.assertEqual(status, 200)
+        names = {tool["name"] for tool in json.loads(body)["result"]["tools"]}
+        self.assertIn("release_response", names)
+        self.assertIn("release_translation", names)
+
+        status, body, _headers = self.request({
+            "jsonrpc": "2.0", "method": "notifications/initialized", "params": {},
+        }, token=self.token)
+        self.assertEqual(status, 202)
+        self.assertEqual(body, b"")
+
+    def test_bom_and_bad_request_do_not_kill_service(self) -> None:
+        valid = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8")
+        status, body, _headers = self.request(b"\xef\xbb\xbf" + valid, token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["result"], {})
+
+        status, _body, _headers = self.request(b"{broken", token=self.token)
+        self.assertEqual(status, 400)
+        status, body, _headers = self.request(
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"}, token=self.token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["id"], 2)
+        self.assertTrue(self.thread.is_alive())
+
+    def test_authentication_origin_and_protocol_fail_closed(self) -> None:
+        ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+        status, _body, headers = self.request(ping)
+        self.assertEqual(status, 401)
+        self.assertIn("Bearer", headers["WWW-Authenticate"])
+        status, _body, _headers = self.request(ping, token=self.token, origin="https://attacker.example")
+        self.assertEqual(status, 403)
+        status, _body, _headers = self.request(ping, token=self.token, protocol="2099-01-01")
+        self.assertEqual(status, 400)
+        status, _body, _headers = self.request(ping, token=self.token, origin="http://localhost:3000")
+        self.assertEqual(status, 200)
+
+    def test_get_mcp_returns_method_not_allowed(self) -> None:
+        request = urllib.request.Request(
+            self.base_url + "/mcp",
+            headers={"Authorization": f"Bearer {self.token}", "Accept": "text/event-stream"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(raised.exception.code, 405)
+
+    def test_health_checks_complete_isolated_chain(self) -> None:
+        request = urllib.request.Request(
+            self.base_url + "/healthz", headers={"Authorization": f"Bearer {self.token}"},
+        )
+        with mock.patch.object(GATEWAY.GUARD, "SERVICE_ENDPOINT", "unix:/guard.sock"), mock.patch.object(
+            GATEWAY.GUARD, "_service_token", return_value="service-token"
+        ), mock.patch.object(
+            GATEWAY.GUARD.SERVICE_CLIENT,
+            "call_guard_service",
+            return_value={"status": "ok", "isolated_key": True, "version": "6.3.0"},
+        ):
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.loads(response.read())["status"], "ok")
+
+        with mock.patch.object(GATEWAY.GUARD, "SERVICE_ENDPOINT", "unix:/guard.sock"), mock.patch.object(
+            GATEWAY.GUARD, "_service_token", return_value="service-token"
+        ), mock.patch.object(
+            GATEWAY.GUARD.SERVICE_CLIENT,
+            "call_guard_service",
+            side_effect=OSError("offline"),
+        ):
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=3)
+            self.assertEqual(raised.exception.code, 503)
+
+    def test_real_http_to_isolated_service_release_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service_token = "isolated-service-token-with-at-least-32-characters"
+            token_file = root / "service.token"
+            token_file.write_text(service_token + "\n", encoding="ascii")
+            if os.name != "nt":
+                os.chmod(token_file, 0o600)
+            service = SERVICE.GuardService(root / "signing.key", root / "audit.jsonl", service_token)
+            server = SERVICE._ThreadingTCPServer(("127.0.0.1", 0), SERVICE._RequestHandler)
+            server.guard_service = service
+            server.socket_path = None
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                endpoint = f"tcp:127.0.0.1:{server.server_address[1]}"
+                with mock.patch.object(GATEWAY.GUARD, "SERVICE_ENDPOINT", endpoint), mock.patch.object(
+                    GATEWAY.GUARD, "SERVICE_TOKEN_FILE", str(token_file)
+                ):
+                    status, body, _headers = self.request({
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "release_response",
+                            "arguments": {
+                                "target_text": "Natürlich ist das möglich.",
+                                "language": "de-DE",
+                                "attestations": {"nativeness": True, "orthography": True},
+                            },
+                        },
+                    }, token=self.token)
+                    self.assertEqual(status, 200)
+                    structured = json.loads(body)["result"]["structuredContent"]
+                    self.assertTrue(structured["release_allowed"], structured)
+                    self.assertTrue(structured["release_token"].startswith("blg6."))
+
+                    request = urllib.request.Request(
+                        self.base_url + "/healthz",
+                        headers={"Authorization": f"Bearer {self.token}"},
+                    )
+                    with urllib.request.urlopen(request, timeout=3) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertTrue(json.loads(response.read())["isolated_key"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_non_loopback_bind_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            GATEWAY.build_server("0.0.0.0", 0, self.token)
+
+
+class MCPAuthHeadersTests(unittest.TestCase):
+    def test_helper_reads_owner_only_token_and_emits_one_header(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "token"
+            path.write_text("header-token-with-at-least-32-characters\n", encoding="ascii")
+            if os.name != "nt":
+                os.chmod(path, 0o600)
+            self.assertEqual(
+                HEADERS.load_token(path),
+                "header-token-with-at-least-32-characters",
+            )
+
+    def test_helper_reloads_rotated_token_for_reconnect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "token"
+            if os.name != "nt":
+                path.touch(mode=0o600)
+            previous = os.environ.get("BLUN_LANGUAGE_GUARD_MCP_TOKEN_FILE")
+            os.environ["BLUN_LANGUAGE_GUARD_MCP_TOKEN_FILE"] = str(path)
+            try:
+                outputs = []
+                for token in (
+                    "first-header-token-with-at-least-32-characters",
+                    "second-header-token-with-at-least-32-characters",
+                ):
+                    path.write_text(token + "\n", encoding="ascii")
+                    if os.name != "nt":
+                        os.chmod(path, 0o600)
+                    stream = io.StringIO()
+                    with contextlib.redirect_stdout(stream):
+                        self.assertEqual(HEADERS.main(), 0)
+                    outputs.append(json.loads(stream.getvalue())["Authorization"])
+                self.assertNotEqual(outputs[0], outputs[1])
+                self.assertTrue(outputs[1].endswith("second-header-token-with-at-least-32-characters"))
+            finally:
+                if previous is None:
+                    os.environ.pop("BLUN_LANGUAGE_GUARD_MCP_TOKEN_FILE", None)
+                else:
+                    os.environ["BLUN_LANGUAGE_GUARD_MCP_TOKEN_FILE"] = previous
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission check")
+    def test_helper_rejects_group_readable_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "token"
+            path.write_text("header-token-with-at-least-32-characters\n", encoding="ascii")
+            os.chmod(path, 0o644)
+            with self.assertRaisesRegex(RuntimeError, "owner-only"):
+                HEADERS.load_token(path)
+
+
+if __name__ == "__main__":
+    unittest.main()

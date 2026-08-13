@@ -14,6 +14,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -31,6 +33,12 @@ SIGNING_KEY = Path.home() / ".config" / "blun-language-guard" / "signing.key"
 SERVICE_COMMAND = Path.home() / ".local" / "bin" / "blun-language-guard-service"
 SERVICE_TOKEN = Path.home() / ".config" / "blun-language-guard" / "service.token"
 AUDIT_LOG = Path.home() / ".config" / "blun-language-guard" / "audit.jsonl"
+MCP_HTTP_COMMAND = Path.home() / ".local" / "bin" / "blun-language-guard-mcp"
+MCP_HEADERS_COMMAND = Path.home() / ".local" / "bin" / "blun-language-guard-mcp-headers"
+MCP_HTTP_TOKEN = Path.home() / ".config" / "blun-language-guard" / "mcp-http.token"
+MCP_HTTP_URL = "http://127.0.0.1:47632/mcp"
+CLAUDE_CONFIG = Path.home() / ".claude.json"
+MCP_SERVER_NAME = "blun-language-guard"
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -89,6 +97,26 @@ def ensure_service_token(path: Path | None = None) -> None:
     temporary.replace(path)
 
 
+def ensure_mcp_http_token(path: Path | None = None) -> None:
+    """Create a stable bearer token for the loopback HTTP MCP endpoint."""
+    path = path or MCP_HTTP_TOKEN
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not path.is_file():
+            raise RuntimeError(f"MCP access-token path is not a file: {path}")
+        token = path.read_text(encoding="utf-8-sig").strip()
+        if len(token) < 32:
+            raise RuntimeError(f"MCP access token is invalid: {path}")
+        if os.name != "nt" and path.stat().st_mode & 0o077:
+            raise RuntimeError(f"MCP access-token permissions must be owner-only: {path}")
+        return
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
+    if os.name != "nt":
+        os.chmod(temporary, 0o600)
+    temporary.replace(path)
+
+
 def install_delivery_boundary(root: Path) -> None:
     source = root / "integrations" / "enforced_delivery.py"
     if not source.is_file():
@@ -120,6 +148,20 @@ def install_guard_runtime(root: Path) -> None:
     print(f"Content-free audit log: {AUDIT_LOG}")
 
 
+def install_mcp_http_runtime(root: Path) -> None:
+    gateway = root / "integrations" / "mcp_http_gateway.py"
+    headers = root / "integrations" / "mcp_auth_headers.py"
+    for source in (gateway, headers):
+        if not source.is_file():
+            raise RuntimeError(f"Missing persistent MCP component: {source}")
+        source.chmod(source.stat().st_mode | 0o111)
+    atomic_symlink(gateway, MCP_HTTP_COMMAND)
+    atomic_symlink(headers, MCP_HEADERS_COMMAND)
+    ensure_mcp_http_token()
+    print(f"Persistent MCP command: {MCP_HTTP_COMMAND}")
+    print(f"Dynamic MCP headers command: {MCP_HEADERS_COMMAND}")
+
+
 def _service_arguments(root: Path) -> list[str]:
     return [
         sys.executable,
@@ -131,10 +173,46 @@ def _service_arguments(root: Path) -> list[str]:
     ]
 
 
+def _mcp_http_arguments(root: Path) -> list[str]:
+    return [
+        sys.executable,
+        str(root / "integrations" / "mcp_http_gateway.py"),
+        "--host", "127.0.0.1",
+        "--port", "47632",
+        "--path", "/mcp",
+        "--access-token-file", str(MCP_HTTP_TOKEN),
+        "--service-endpoint", SERVICE_ENDPOINT,
+        "--service-token-file", str(SERVICE_TOKEN),
+    ]
+
+
 def _shell_command(arguments: list[str]) -> str:
     if platform.system() == "Windows":
         return subprocess.list2cmdline(arguments)
     return " ".join(shlex.quote(value) for value in arguments)
+
+
+def _powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _install_windows_restartable_task(task_name: str, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    executable = arguments[0]
+    argument_line = subprocess.list2cmdline(arguments[1:])
+    name = _powershell_literal(task_name)
+    script = (
+        "$ErrorActionPreference='Stop';"
+        f"$action=New-ScheduledTaskAction -Execute {_powershell_literal(executable)} "
+        f"-Argument {_powershell_literal(argument_line)};"
+        "$trigger=New-ScheduledTaskTrigger -AtLogOn;"
+        "$settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew "
+        "-RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) "
+        "-ExecutionTimeLimit (New-TimeSpan -Days 3650);"
+        f"Register-ScheduledTask -TaskName {name} -Action $action -Trigger $trigger "
+        "-Settings $settings -Force | Out-Null;"
+        f"Start-ScheduledTask -TaskName {name}"
+    )
+    return _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script])
 
 
 def install_guard_autostart(root: Path) -> tuple[bool, str]:
@@ -173,13 +251,52 @@ def install_guard_autostart(root: Path) -> tuple[bool, str]:
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
         return result.returncode == 0, str(plist)
     if system == "Windows":
-        result = _run([
-            "schtasks", "/Create", "/F", "/SC", "ONLOGON",
-            "/TN", "BLUN Language Guard", "/TR", _shell_command(arguments),
-        ])
-        started = _run(["schtasks", "/Run", "/TN", "BLUN Language Guard"])
-        return result.returncode == 0 and started.returncode == 0, "Windows Task Scheduler: BLUN Language Guard"
+        result = _install_windows_restartable_task("BLUN Language Guard", arguments)
+        return result.returncode == 0, "Windows Task Scheduler: BLUN Language Guard"
     return False, f"No guard-service adapter for {system}"
+
+
+def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
+    """Install the persistent Claude-facing HTTP MCP with OS-level restart policy."""
+    arguments = _mcp_http_arguments(root)
+    system = platform.system()
+    if system == "Linux":
+        units = Path.home() / ".config" / "systemd" / "user"
+        units.mkdir(parents=True, exist_ok=True)
+        service = units / "blun-language-guard-mcp.service"
+        service.write_text(
+            "[Unit]\nDescription=BLUN persistent Streamable HTTP MCP\n"
+            "After=blun-language-guard.service\nWants=blun-language-guard.service\n\n"
+            "[Service]\nType=simple\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
+            f"ExecStart={_shell_command(arguments)}\nRestart=always\nRestartSec=1\n\n"
+            "[Install]\nWantedBy=default.target\n",
+            encoding="utf-8",
+        )
+        reload_result = _run(["systemctl", "--user", "daemon-reload"])
+        enable_result = _run(["systemctl", "--user", "enable", "--now", service.name])
+        return reload_result.returncode == 0 and enable_result.returncode == 0, str(service)
+    if system == "Darwin":
+        agents = Path.home() / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        plist = agents / "ai.blun.language-guard-mcp.plist"
+        program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
+        plist.write_text(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\"><dict><key>Label</key><string>ai.blun.language-guard-mcp</string>"
+            f"<key>ProgramArguments</key><array>{program_arguments}</array>"
+            "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>"
+            "<key>ThrottleInterval</key><integer>1</integer></dict></plist>\n",
+            encoding="utf-8",
+        )
+        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+        result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
+        return result.returncode == 0, str(plist)
+    if system == "Windows":
+        result = _install_windows_restartable_task("BLUN Language Guard MCP", arguments)
+        return result.returncode == 0, "Windows Task Scheduler: BLUN Language Guard MCP"
+    return False, f"No persistent MCP adapter for {system}"
 
 
 def restart_guard_runtime() -> tuple[bool, str]:
@@ -195,6 +312,35 @@ def restart_guard_runtime() -> tuple[bool, str]:
         result = _run(["schtasks", "/Run", "/TN", "BLUN Language Guard"])
         return result.returncode == 0, "Windows Task Scheduler"
     return False, f"No guard-service adapter for {system}"
+
+
+def restart_mcp_http_runtime() -> tuple[bool, str]:
+    system = platform.system()
+    if system == "Linux":
+        result = _run(["systemctl", "--user", "restart", "blun-language-guard-mcp.service"])
+        return result.returncode == 0, "systemd user service"
+    if system == "Darwin":
+        result = _run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/ai.blun.language-guard-mcp"])
+        return result.returncode == 0, "LaunchAgent"
+    if system == "Windows":
+        _run(["schtasks", "/End", "/TN", "BLUN Language Guard MCP"])
+        result = _run(["schtasks", "/Run", "/TN", "BLUN Language Guard MCP"])
+        return result.returncode == 0, "Windows Task Scheduler"
+    return False, f"No persistent MCP adapter for {system}"
+
+
+def remove_mcp_http_autostart() -> None:
+    system = platform.system()
+    if system == "Linux":
+        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-mcp.service"])
+        (Path.home() / ".config" / "systemd" / "user" / "blun-language-guard-mcp.service").unlink(missing_ok=True)
+        _run(["systemctl", "--user", "daemon-reload"])
+    elif system == "Darwin":
+        plist = Path.home() / "Library" / "LaunchAgents" / "ai.blun.language-guard-mcp.plist"
+        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+        plist.unlink(missing_ok=True)
+    elif system == "Windows":
+        _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard MCP"])
 
 
 def _xml_escape(value: str) -> str:
@@ -244,6 +390,152 @@ def guard_service(action: str) -> int:
     return 0 if result.get("status") == "ok" and result.get("isolated_key") is True else 1
 
 
+def claude_mcp_entry() -> dict:
+    return {
+        "type": "http",
+        "url": MCP_HTTP_URL,
+        "headersHelper": str(MCP_HEADERS_COMMAND),
+    }
+
+
+def configure_claude_mcp(path: Path | None = None) -> tuple[Path | None, int]:
+    """Atomically install the user-scoped HTTP MCP and remove stale local shadows."""
+    path = path or CLAUDE_CONFIG
+    if path.exists():
+        try:
+            current = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Refusing to modify unreadable Claude configuration: {path}: {error}") from error
+        if not isinstance(current, dict):
+            raise RuntimeError(f"Claude configuration root must be an object: {path}")
+    else:
+        current = {}
+    servers = current.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"Claude mcpServers must be an object: {path}")
+    servers[MCP_SERVER_NAME] = claude_mcp_entry()
+
+    removed_shadows = 0
+    projects = current.get("projects", {})
+    if isinstance(projects, dict):
+        for project in projects.values():
+            if not isinstance(project, dict):
+                continue
+            local_servers = project.get("mcpServers")
+            if isinstance(local_servers, dict) and MCP_SERVER_NAME in local_servers:
+                del local_servers[MCP_SERVER_NAME]
+                removed_shadows += 1
+
+    backup = None
+    if path.exists():
+        backup = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, backup)
+    _atomic_json(path, current)
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+    return backup, removed_shadows
+
+
+def project_mcp_shadows(start: Path | None = None) -> list[Path]:
+    """Return higher-precedence project MCP files that redefine the guard differently."""
+    current = (start or Path.cwd()).resolve()
+    candidates = [current, *current.parents]
+    shadows: list[Path] = []
+    for directory in candidates:
+        path = directory / ".mcp.json"
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            entry = payload.get("mcpServers", {}).get(MCP_SERVER_NAME)
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+            continue
+        if entry is not None and entry != claude_mcp_entry():
+            shadows.append(path)
+    return shadows
+
+
+def _mcp_http_request(path: str, payload: dict | None = None) -> tuple[int, dict]:
+    token = MCP_HTTP_TOKEN.read_text(encoding="utf-8-sig").strip()
+    url = MCP_HTTP_URL.removesuffix("/mcp") + path
+    headers = {"Authorization": f"Bearer {token}"}
+    data = None
+    method = "GET"
+    if payload is not None:
+        method = "POST"
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers.update({
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2025-06-18",
+        })
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=4) as response:
+            raw = response.read()
+            return response.status, json.loads(raw.decode("utf-8")) if raw else {}
+    except urllib.error.HTTPError as error:
+        raw = error.read()
+        detail = json.loads(raw.decode("utf-8")) if raw else {}
+        return error.code, detail
+
+
+def probe_mcp_http() -> dict:
+    health_status, health = _mcp_http_request("/healthz")
+    if health_status != 200 or health.get("status") != "ok" or health.get("isolated_key") is not True:
+        raise RuntimeError(f"persistent MCP health failed with HTTP {health_status}")
+    initialize_status, initialized = _mcp_http_request("/mcp", {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "blun-language-guard-doctor", "version": "1"},
+        },
+    })
+    tools_status, tools = _mcp_http_request("/mcp", {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
+    })
+    names = {
+        tool.get("name")
+        for tool in tools.get("result", {}).get("tools", [])
+        if isinstance(tool, dict)
+    }
+    if initialize_status != 200 or tools_status != 200 or not {
+        "release_response", "release_translation", "verify_release_token",
+    } <= names:
+        raise RuntimeError("persistent MCP initialize/tools probe failed")
+    return {"health": health, "initialize": initialized, "tools": sorted(names)}
+
+
+def mcp_service(action: str) -> int:
+    root = repository_root()
+    if action in {"install", "start"}:
+        install_mcp_http_runtime(root)
+        ok, detail = install_mcp_http_autostart(root)
+        print(f"{'Persistent MCP installed and started' if ok else 'Persistent MCP installation failed'}: {detail}")
+        return 0 if ok else 1
+    if action == "stop":
+        system = platform.system()
+        if system == "Linux":
+            result = _run(["systemctl", "--user", "stop", "blun-language-guard-mcp.service"])
+        elif system == "Darwin":
+            result = _run(["launchctl", "bootout", f"gui/{os.getuid()}/ai.blun.language-guard-mcp"])
+        elif system == "Windows":
+            result = _run(["schtasks", "/End", "/TN", "BLUN Language Guard MCP"])
+        else:
+            return 2
+        return int(result.returncode != 0)
+    try:
+        result = probe_mcp_http()
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        print(f"BLOCK persistent MCP unavailable: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def install(targets: list[str], *, autostart_service: bool = True) -> int:
     root = repository_root()
     skill = root / "translate-native"
@@ -252,9 +544,11 @@ def install(targets: list[str], *, autostart_service: bool = True) -> int:
         print(f"OK {target}: {TARGETS[target]} -> {skill}")
     install_delivery_boundary(root)
     install_guard_runtime(root)
+    if "claude" in targets:
+        install_mcp_http_runtime(root)
     config = {
         "mcpServers": {
-            "blun-language-guard": {
+            MCP_SERVER_NAME: {
                 "command": sys.executable,
                 "args": [str(skill / "scripts" / "blun_language_guard.py"), "serve"],
                 "env": {
@@ -272,7 +566,7 @@ def install(targets: list[str], *, autostart_service: bool = True) -> int:
         blun_config = Path.home() / ".blun" / "mcp.json"
         current = json.loads(blun_config.read_text(encoding="utf-8-sig")) if blun_config.exists() else {}
         servers = current.setdefault("mcpServers", {})
-        servers["blun-language-guard"] = config["mcpServers"]["blun-language-guard"]
+        servers[MCP_SERVER_NAME] = config["mcpServers"][MCP_SERVER_NAME]
         if blun_config.exists():
             backup = blun_config.with_suffix(".json.bak")
             shutil.copy2(blun_config, backup)
@@ -284,6 +578,42 @@ def install(targets: list[str], *, autostart_service: bool = True) -> int:
         print(f"{'Guard service installed and started' if ok else 'Guard service installation failed'}: {detail}")
         if not ok:
             return 1
+        guard_ready = False
+        for _attempt in range(15):
+            try:
+                health = probe_guard_service()
+                guard_ready = health.get("status") == "ok" and health.get("isolated_key") is True
+                if guard_ready:
+                    break
+            except (OSError, RuntimeError, ValueError):
+                pass
+            time.sleep(0.2)
+        if not guard_ready:
+            print("Guard service did not become healthy; Claude configuration was not changed.", file=sys.stderr)
+            return 1
+        if "claude" in targets:
+            mcp_ok, mcp_detail = install_mcp_http_autostart(root)
+            print(f"{'Persistent MCP installed and started' if mcp_ok else 'Persistent MCP installation failed'}: {mcp_detail}")
+            if not mcp_ok:
+                return 1
+            mcp_ready = False
+            for _attempt in range(15):
+                try:
+                    probe_mcp_http()
+                    mcp_ready = True
+                    break
+                except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+                    time.sleep(0.2)
+            if not mcp_ready:
+                print("Persistent MCP did not become healthy; Claude configuration was not changed.", file=sys.stderr)
+                return 1
+    if "claude" in targets:
+        backup, removed_shadows = configure_claude_mcp()
+        print(f"Claude user MCP configured as persistent HTTP: {CLAUDE_CONFIG}")
+        if backup:
+            print(f"Claude configuration backup: {backup}")
+        if removed_shadows:
+            print(f"Removed {removed_shadows} stale project-local Claude MCP shadow(s).")
     return 0
 
 
@@ -312,6 +642,43 @@ def doctor() -> int:
     ))
     token_secure = SERVICE_TOKEN.is_file() and (os.name == "nt" or SERVICE_TOKEN.stat().st_mode & 0o077 == 0)
     checks.append(("service authentication token", token_secure, str(SERVICE_TOKEN)))
+    mcp_gateway_source = root / "integrations" / "mcp_http_gateway.py"
+    mcp_headers_source = root / "integrations" / "mcp_auth_headers.py"
+    checks.append((
+        "persistent MCP command",
+        MCP_HTTP_COMMAND.is_symlink() and MCP_HTTP_COMMAND.resolve() == mcp_gateway_source.resolve(),
+        str(MCP_HTTP_COMMAND),
+    ))
+    checks.append((
+        "dynamic MCP headers command",
+        MCP_HEADERS_COMMAND.is_symlink() and MCP_HEADERS_COMMAND.resolve() == mcp_headers_source.resolve(),
+        str(MCP_HEADERS_COMMAND),
+    ))
+    mcp_token_secure = MCP_HTTP_TOKEN.is_file() and (os.name == "nt" or MCP_HTTP_TOKEN.stat().st_mode & 0o077 == 0)
+    checks.append(("MCP HTTP access token", mcp_token_secure, str(MCP_HTTP_TOKEN)))
+    claude_config_ok = False
+    claude_config_detail = str(CLAUDE_CONFIG)
+    if CLAUDE_CONFIG.is_file():
+        try:
+            claude_config = json.loads(CLAUDE_CONFIG.read_text(encoding="utf-8-sig"))
+            claude_entry = claude_config.get("mcpServers", {}).get(MCP_SERVER_NAME)
+            local_shadows = sum(
+                1
+                for project in claude_config.get("projects", {}).values()
+                if isinstance(project, dict)
+                and MCP_SERVER_NAME in project.get("mcpServers", {})
+            ) if isinstance(claude_config.get("projects", {}), dict) else 0
+            claude_config_ok = claude_entry == claude_mcp_entry() and local_shadows == 0
+            claude_config_detail += f"; stale local shadows={local_shadows}"
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+            claude_config_ok = False
+    checks.append(("Claude user-scoped HTTP MCP", claude_config_ok, claude_config_detail))
+    project_shadows = project_mcp_shadows()
+    checks.append((
+        "Claude project MCP precedence",
+        not project_shadows,
+        "none" if not project_shadows else ", ".join(str(path) for path in project_shadows),
+    ))
     policy_ok = False
     if DELIVERY_POLICY.is_file():
         try:
@@ -327,6 +694,14 @@ def doctor() -> int:
     checks.append(("fail-closed delivery policy", policy_ok, str(DELIVERY_POLICY)))
     service_live = guard_service("status") == 0
     checks.append(("isolated guard health", service_live, SERVICE_ENDPOINT))
+    try:
+        persistent_probe = probe_mcp_http()
+        persistent_live = True
+        persistent_detail = ", ".join(persistent_probe["tools"])
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        persistent_live = False
+        persistent_detail = str(error)
+    checks.append(("persistent Claude HTTP MCP", persistent_live, persistent_detail))
     tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
     checks.append(("test suite", tests.returncode == 0, tests.stderr.strip() or tests.stdout.strip()))
     server = root / "translate-native" / "scripts" / "blun_language_guard.py"
@@ -418,6 +793,52 @@ def update(require_signed_commits: bool = False) -> int:
         rollback = _run(["git", "reset", "--keep", previous], root)
         print("Installed revision failed its post-update check; rollback " + ("succeeded." if rollback.returncode == 0 else "FAILED."), file=sys.stderr)
         return 1
+    claude_installed = TARGETS["claude"].is_symlink()
+    mcp_runtime_preexisting = MCP_HTTP_COMMAND.exists() or MCP_HTTP_COMMAND.is_symlink()
+    mcp_headers_preexisting = MCP_HEADERS_COMMAND.exists() or MCP_HEADERS_COMMAND.is_symlink()
+    mcp_token_preexisting = MCP_HTTP_TOKEN.exists()
+    claude_config_preexisting = CLAUDE_CONFIG.exists()
+    claude_config_bytes = CLAUDE_CONFIG.read_bytes() if claude_config_preexisting else b""
+    claude_config_mode = CLAUDE_CONFIG.stat().st_mode & 0o777 if claude_config_preexisting else None
+
+    def rollback_runtime() -> subprocess.CompletedProcess[str]:
+        rollback = _run(["git", "reset", "--keep", previous], root)
+        if claude_installed:
+            if not mcp_runtime_preexisting:
+                remove_mcp_http_autostart()
+                MCP_HTTP_COMMAND.unlink(missing_ok=True)
+            if not mcp_headers_preexisting:
+                MCP_HEADERS_COMMAND.unlink(missing_ok=True)
+            if not mcp_token_preexisting:
+                MCP_HTTP_TOKEN.unlink(missing_ok=True)
+            if claude_config_preexisting:
+                temporary = CLAUDE_CONFIG.with_suffix(CLAUDE_CONFIG.suffix + ".restore")
+                temporary.write_bytes(claude_config_bytes)
+                if claude_config_mode is not None and os.name != "nt":
+                    os.chmod(temporary, claude_config_mode)
+                temporary.replace(CLAUDE_CONFIG)
+            else:
+                CLAUDE_CONFIG.unlink(missing_ok=True)
+        restart_guard_runtime()
+        if mcp_runtime_preexisting:
+            restart_mcp_http_runtime()
+        return rollback
+
+    if claude_installed:
+        try:
+            install_mcp_http_runtime(root)
+            installed, detail = install_mcp_http_autostart(root)
+            if not installed:
+                raise RuntimeError(f"persistent MCP autostart failed: {detail}")
+            configure_claude_mcp()
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+            rollback = rollback_runtime()
+            print(
+                f"Claude persistent MCP activation failed ({error}); rollback "
+                + ("succeeded." if rollback.returncode == 0 else "FAILED."),
+                file=sys.stderr,
+            )
+            return 1
     if SERVICE_COMMAND.is_symlink() or SERVICE_COMMAND.exists():
         restarted, runtime = restart_guard_runtime()
         healthy = False
@@ -432,8 +853,7 @@ def update(require_signed_commits: bool = False) -> int:
                     pass
                 time.sleep(0.2)
         if not restarted or not healthy:
-            rollback = _run(["git", "reset", "--keep", previous], root)
-            restart_guard_runtime()
+            rollback = rollback_runtime()
             print(
                 "Updated guard could not restart; rollback "
                 + ("succeeded." if rollback.returncode == 0 else "FAILED."),
@@ -441,6 +861,26 @@ def update(require_signed_commits: bool = False) -> int:
             )
             return 1
         print(f"Restarted isolated guard through {runtime}.")
+    if MCP_HTTP_COMMAND.is_symlink() or MCP_HTTP_COMMAND.exists():
+        restarted, runtime = restart_mcp_http_runtime()
+        healthy = False
+        if restarted:
+            for _attempt in range(15):
+                try:
+                    probe_mcp_http()
+                    healthy = True
+                    break
+                except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+                    time.sleep(0.2)
+        if not restarted or not healthy:
+            rollback = rollback_runtime()
+            print(
+                "Updated persistent MCP could not restart; rollback "
+                + ("succeeded." if rollback.returncode == 0 else "FAILED."),
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Restarted persistent MCP through {runtime}.")
     _atomic_json(UPDATE_STATE, {"status": "ok", "revision": revision, "previous": previous, "checked_at": int(time.time())})
     print(f"Updated to tested revision {revision}; rollback revision is {previous}")
     return 0
@@ -535,6 +975,8 @@ def main() -> int:
     install_parser.add_argument("--no-service-autostart", action="store_true")
     service_parser = sub.add_parser("service")
     service_parser.add_argument("action", choices=("install", "start", "stop", "status"))
+    mcp_service_parser = sub.add_parser("mcp-service")
+    mcp_service_parser.add_argument("action", choices=("install", "start", "stop", "status"))
     sub.add_parser("doctor")
     update_parser = sub.add_parser("update")
     update_parser.add_argument("--require-signed-commits", action="store_true")
@@ -548,6 +990,8 @@ def main() -> int:
         return install(args.targets or list(TARGETS), autostart_service=not args.no_service_autostart)
     if args.command == "service":
         return guard_service(args.action)
+    if args.command == "mcp-service":
+        return mcp_service(args.action)
     if args.command == "doctor":
         return doctor()
     if args.command == "update":
