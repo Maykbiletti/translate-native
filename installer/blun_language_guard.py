@@ -733,7 +733,7 @@ def claude_plugin_catalog_status(expected_version: str, executable: str | None =
 
 
 def update_claude_plugin(expected_version: str, executable: str | None = None) -> dict:
-    """Refresh the catalog, update an installed plugin, and verify the exact tested version."""
+    """Strictly validate, refresh, update, and verify the exact tested plugin."""
     before = claude_plugin_status(expected_version, executable)
     if not before.get("installed"):
         return {"attempted": False, "updated": False, "status": before}
@@ -741,6 +741,35 @@ def update_claude_plugin(expected_version: str, executable: str | None = None) -
         return {"attempted": False, "updated": True, "status": before, "reload_required": False}
     command = executable or shutil.which("claude")
     assert command
+    plugin_root = repository_root()
+    try:
+        validation = _run([command, "plugin", "validate", str(plugin_root), "--strict"])
+    except OSError:
+        return {
+            "attempted": True,
+            "updated": False,
+            "status": before,
+            "validation": {
+                "healthy": False,
+                "reason": "claude-command-unavailable",
+                "plugin_root": str(plugin_root),
+            },
+            "reload_required": False,
+        }
+    validation_status = {
+        "healthy": validation.returncode == 0,
+        "reason": "ok" if validation.returncode == 0 else "strict-plugin-validation-failed",
+        "plugin_root": str(plugin_root),
+    }
+    if validation.returncode:
+        return {
+            "attempted": True,
+            "updated": False,
+            "returncode": validation.returncode,
+            "status": before,
+            "validation": validation_status,
+            "reload_required": False,
+        }
     refresh = _run([command, "plugin", "marketplace", "update", CLAUDE_MARKETPLACE_NAME])
     if refresh.returncode:
         return {
@@ -748,6 +777,7 @@ def update_claude_plugin(expected_version: str, executable: str | None = None) -
             "updated": False,
             "returncode": refresh.returncode,
             "status": before,
+            "validation": validation_status,
             "catalog": {"available": False, "healthy": False, "reason": "marketplace-update-failed"},
             "reload_required": False,
         }
@@ -758,6 +788,7 @@ def update_claude_plugin(expected_version: str, executable: str | None = None) -
             "updated": False,
             "returncode": 1,
             "status": before,
+            "validation": validation_status,
             "catalog": catalog,
             "reload_required": False,
         }
@@ -769,6 +800,7 @@ def update_claude_plugin(expected_version: str, executable: str | None = None) -
         "updated": updated,
         "returncode": result.returncode,
         "status": after,
+        "validation": validation_status,
         "catalog": catalog,
         "reload_required": updated and before.get("version") != expected_version,
     }

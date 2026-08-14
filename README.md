@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.25.0: Claude-native strict validation before update
+
+Version 6.25 closes the schema-authority gap in automatic Claude plugin maintenance. Repository tests can verify the files and the BLUN contracts, but they are not Claude Code's own parser. Before refreshing a marketplace or touching an installed cache, the updater now runs the documented `claude plugin validate <plugin-root> --strict` command against the exact repository candidate that already passed the full test suite.
+
+Any validator error or warning treated as an error blocks before marketplace refresh and before `plugin update`; the previously installed cache remains unchanged and maintenance is reported as degraded. A valid candidate continues through the Version 6.24 trusted-marketplace refresh, exact catalog-version equality check, official user-scope update, and final installed-version, enabled-state, and load-error verification. An already exact healthy cache remains a no-op.
+
 ### Version 6.24.0: tested-version marketplace synchronization
 
 Version 6.24 closes a stale-catalog gap in automatic Claude plugin maintenance. Anthropic documents marketplace refresh and plugin update as separate CLI operations: `plugin marketplace update` retrieves version changes, while `plugin update` installs the latest version known to that marketplace. Calling only the latter could therefore leave an old catalog and old hooks in place even though the updater had already tested a newer repository revision.
@@ -482,7 +488,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.24.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.25.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
