@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.9.0: transactional safe rollback
+
+Version 6.9 turns the updater's recorded previous revision into an explicit, fail-closed recovery command. `rollback` accepts only an exact 40-character commit recorded by the immediately preceding successful or degraded update, requires the current `HEAD` to match that update, requires a clean worktree, and proves that the target is an available ancestor. It clones the target locally, runs its complete test suite, enforces the saved signed-commit policy when enabled, and changes the active checkout only after every preflight passes. The rolled-back checkout is tested again and already-installed guard and MCP runtimes must restart and pass their live probes; otherwise the updater restores the forward revision.
+
+Claude adds a necessary safety boundary. Anthropic documents `claude plugin update` as updating to the latest plugin and does not document a version-pinned downgrade. Therefore the command never guesses or edits Claude's cache: if the plugin is installed, its enabled, error-free cached version must already equal the rollback target before Git changes. After success, the operating-system scheduler is removed and its policy is preserved as `updater.rollback-paused.json`, so even an older rolled-back installer cannot immediately reinstall the rejected revision. Existing Claude sessions still require `/reload-plugins` or a restart.
+
 ### Version 6.8.0: mandatory plugin-cache health
 
 Version 6.8 extends the one-minute health path to the installed Claude plugin cache because the mandatory `Stop` and `SubagentStop` hooks live there. Once the monitor observes an installed `translate-native@blun-language-tools` plugin, it enrolls that cache and checks its enabled state, load errors, and exact version together with the signer and MCP. A stale or unhealthy enrolled cache blocks the overall health result and receives one official `claude plugin update ... --scope user` repair attempt under the same operation lock and exponential backoff as the services.
@@ -279,6 +285,14 @@ python3 installer/blun_language_guard.py auto-update enable --require-signed-com
 
 Version 6.6 also coordinates Claude's plugin cache. When automatic updates are enabled, the owner-visible Claude executable path is recorded so an OS scheduler with a smaller `PATH` invokes the same CLI. If `translate-native@blun-language-tools` is already installed at user scope, the updater runs Claude's official non-interactive `plugin update` command and then verifies the exact installed version through `plugin list --json`. A missing plugin is never installed without consent. A plugin failure leaves the already-tested runtime and fail-closed MCP active, records a `degraded` updater state, returns nonzero, and retries on the next scheduled wake-up instead of waiting for the normal interval. Version 6.7 uses the same degraded retry path for a health-monitor installation failure and shares an operation lock between updates and repairs. Version 6.8 enrolls an observed installed cache in the one-minute monitor, so disabling it, load errors, or later version drift can no longer leave the services green while the mandatory hooks are unhealthy. A successful cache update still requires `/reload-plugins` or a new Claude session because active sessions retain their previously loaded hook paths.
 
+To return to the exact revision saved by the last update, synchronize an installed Claude plugin to that target version first, make sure the checkout is clean, and run:
+
+```bash
+python3 installer/blun_language_guard.py rollback
+```
+
+Use `--require-signed-commits` to require a trusted signature even when the saved updater policy did not. The command never selects an arbitrary revision, never downgrades a plugin through undocumented cache manipulation, and never overwrites local changes. A successful rollback pauses scheduled updates; inspect the result, then run an explicit `update` followed by `auto-update enable` when you intentionally want to resume the forward line.
+
 The authoritative plugin version lives only in `.claude-plugin/plugin.json`; the marketplace entry deliberately omits a duplicate version field. Claude uses the manifest version as its cache key, avoiding two version declarations that can drift apart.
 
 Third-party marketplace auto-update is disabled by default in Claude. Users may enable it in the marketplace UI as an additional startup check; the operating-system updater no longer depends on that optional setting. Other platform-native plugin stores remain controlled by their host platform.
@@ -378,7 +392,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.8.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.9.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

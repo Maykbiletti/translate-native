@@ -22,6 +22,36 @@ SPEC.loader.exec_module(INSTALLER)
 
 
 class InstallerTests(unittest.TestCase):
+    def _rollback_repository(self, root: Path, *, broken_target: bool = False) -> tuple[Path, str, str]:
+        repository = root / "repo"
+        repository.mkdir()
+        self.assertEqual(INSTALLER._run(["git", "init", "-b", "main"], repository).returncode, 0)
+        self.assertEqual(INSTALLER._run(["git", "config", "user.name", "Rollback Test"], repository).returncode, 0)
+        self.assertEqual(INSTALLER._run(["git", "config", "user.email", "rollback@example.invalid"], repository).returncode, 0)
+        (repository / "VERSION").write_text("6.8.0\n", encoding="utf-8")
+        tests = repository / "tests"
+        tests.mkdir()
+        (tests / "test_smoke.py").write_text(
+            "import unittest\n\nclass SmokeTest(unittest.TestCase):\n"
+            "    def test_true(self):\n        self.assertTrue(" + ("False" if broken_target else "True") + ")\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(INSTALLER._run(["git", "add", "."], repository).returncode, 0)
+        self.assertEqual(INSTALLER._run(["git", "commit", "-m", "old"], repository).returncode, 0)
+        old = INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip()
+        (repository / "VERSION").write_text("6.9.0\n", encoding="utf-8")
+        (repository / "new-runtime.txt").write_text("new\n", encoding="utf-8")
+        if broken_target:
+            (tests / "test_smoke.py").write_text(
+                "import unittest\n\nclass SmokeTest(unittest.TestCase):\n"
+                "    def test_true(self):\n        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+        self.assertEqual(INSTALLER._run(["git", "add", "."], repository).returncode, 0)
+        self.assertEqual(INSTALLER._run(["git", "commit", "-m", "new"], repository).returncode, 0)
+        current = INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip()
+        return repository, old, current
+
     def _fake_claude(self, root: Path, *, old_version: str = "6.7.1", new_version: str = "6.8.0", fail_update: bool = False) -> tuple[Path, Path]:
         state = root / "plugin-version.txt"
         state.write_text(old_version, encoding="utf-8")
@@ -67,11 +97,160 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.repository_root = original
 
+    def test_rollback_tests_target_pauses_updater_and_records_exact_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root)
+            state_path = root / "update-state.json"
+            config_path = root / "updater.json"
+            paused_config_path = root / "updater.rollback-paused.json"
+            INSTALLER._atomic_json(state_path, {
+                "status": "ok", "revision": current, "previous": target, "checked_at": 1,
+            })
+            INSTALLER._atomic_json(config_path, {
+                "enabled": True, "interval_hours": 1, "require_signed_commits": False,
+            })
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", config_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", paused_config_path), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 mock.patch.object(INSTALLER, "SERVICE_COMMAND", root / "missing-service"), \
+                 mock.patch.object(INSTALLER, "MCP_HTTP_COMMAND", root / "missing-mcp"), \
+                 mock.patch.object(INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": root / "missing-claude"}), \
+                 mock.patch.object(INSTALLER, "remove_scheduler") as scheduler_removal, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(INSTALLER.rollback(), 0)
+                self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), target)
+                self.assertFalse((repository / "new-runtime.txt").exists())
+                state = INSTALLER.json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(state["status"], "rolled_back")
+                self.assertEqual(state["revision"], target)
+                self.assertEqual(state["rolled_back_from"], current)
+                self.assertTrue(state["auto_update_paused"])
+                self.assertFalse(config_path.exists())
+                self.assertTrue(paused_config_path.exists())
+                scheduler_removal.assert_called_once_with()
+                with mock.patch.object(INSTALLER, "update") as updater:
+                    self.assertEqual(INSTALLER.auto_update("run"), 0)
+                    updater.assert_not_called()
+
+    def test_rollback_refuses_dirty_worktree_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root)
+            state_path = root / "update-state.json"
+            INSTALLER._atomic_json(state_path, {"status": "ok", "revision": current, "previous": target})
+            (repository / "VERSION").write_text("dirty\n", encoding="utf-8")
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "missing-policy"), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER.rollback(), 2)
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), current)
+            self.assertEqual((repository / "VERSION").read_text(encoding="utf-8"), "dirty\n")
+
+    def test_rollback_refuses_stale_state_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root)
+            state_path = root / "update-state.json"
+            INSTALLER._atomic_json(state_path, {"status": "ok", "revision": target, "previous": current})
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER.rollback(), 2)
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), current)
+
+    def test_rollback_refuses_mismatched_claude_plugin_before_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root)
+            state_path = root / "update-state.json"
+            INSTALLER._atomic_json(state_path, {"status": "ok", "revision": current, "previous": target})
+            skill = root / "skill"
+            skill.mkdir()
+            claude_target = root / "claude-skill"
+            claude_target.symlink_to(skill, target_is_directory=True)
+            mismatch = {"installed": True, "healthy": False, "version": "6.9.0", "expected_version": "6.8.0"}
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "missing-policy"), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 mock.patch.object(INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": claude_target}), \
+                 mock.patch.object(INSTALLER, "claude_plugin_status", return_value=mismatch) as plugin_check, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER.rollback(), 1)
+            plugin_check.assert_called_once()
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), current)
+
+    def test_rollback_refuses_failing_target_before_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root, broken_target=True)
+            state_path = root / "update-state.json"
+            INSTALLER._atomic_json(state_path, {"status": "ok", "revision": current, "previous": target})
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "missing-policy"), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER.rollback(), 1)
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), current)
+
+    def test_rollback_preserves_saved_signed_commit_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root)
+            state_path = root / "update-state.json"
+            config_path = root / "updater.json"
+            INSTALLER._atomic_json(state_path, {"status": "ok", "revision": current, "previous": target})
+            INSTALLER._atomic_json(config_path, {"require_signed_commits": True})
+            real_run = INSTALLER._run
+
+            def reject_signature(command: list[str], cwd: Path | None = None):
+                if command[:2] == ["git", "verify-commit"]:
+                    return INSTALLER.subprocess.CompletedProcess(command, 1, "", "untrusted")
+                return real_run(command, cwd)
+
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", config_path), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 mock.patch.object(INSTALLER, "_run", side_effect=reject_signature) as runner, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER.rollback(), 1)
+            self.assertTrue(any(call.args[0][:2] == ["git", "verify-commit"] for call in runner.call_args_list))
+            self.assertEqual(real_run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), current)
+
+    def test_rollback_runtime_failure_restores_forward_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root)
+            state_path = root / "update-state.json"
+            INSTALLER._atomic_json(state_path, {"status": "ok", "revision": current, "previous": target})
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "missing-policy"), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 mock.patch.object(INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": root / "missing-claude"}), \
+                 mock.patch.object(
+                     INSTALLER, "_restart_installed_runtimes",
+                     side_effect=[(False, "probe failed"), (True, "forward restored")],
+                 ) as restarter, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER.rollback(), 1)
+            self.assertEqual(restarter.call_count, 2)
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), current)
+            self.assertEqual(INSTALLER.json.loads(state_path.read_text(encoding="utf-8"))["status"], "ok")
+
     def test_auto_update_policy_can_be_enabled_without_scheduler(self) -> None:
-        original_config = INSTALLER.UPDATE_CONFIG
-        original_state = INSTALLER.UPDATE_STATE
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
         with tempfile.TemporaryDirectory() as directory:
             INSTALLER.UPDATE_CONFIG = Path(directory) / "updater.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = Path(directory) / "updater.rollback-paused.json"
             INSTALLER.UPDATE_STATE = Path(directory) / "state.json"
             try:
                 self.assertEqual(0, INSTALLER.auto_update("enable", 12, True, scheduler=False))
@@ -80,8 +259,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue(policy["require_signed_commits"])
                 self.assertIn("claude_command", policy)
             finally:
-                INSTALLER.UPDATE_CONFIG = original_config
-                INSTALLER.UPDATE_STATE = original_state
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE = originals
 
     def test_claude_plugin_update_reaches_exact_runtime_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -594,7 +772,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.7.1", new_version="6.8.0"
+                root, old_version="6.8.0", new_version="6.9.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -607,14 +785,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.8.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.9.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.8.0")
+                self.assertEqual(state["plugin_cache_version"], "6.9.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (

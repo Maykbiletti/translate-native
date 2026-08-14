@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ TARGETS = {
     "blun": Path.home() / ".blun" / "skills" / "translate-native",
 }
 UPDATE_CONFIG = Path.home() / ".config" / "blun-language-guard" / "updater.json"
+UPDATE_PAUSED_CONFIG = Path.home() / ".config" / "blun-language-guard" / "updater.rollback-paused.json"
 UPDATE_STATE = Path.home() / ".config" / "blun-language-guard" / "update-state.json"
 HEALTH_STATE = Path.home() / ".config" / "blun-language-guard" / "health-state.json"
 HEALTH_CONFIG = Path.home() / ".config" / "blun-language-guard" / "health-monitor.json"
@@ -1109,6 +1111,184 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
     return 0
 
 
+def _restart_installed_runtimes() -> tuple[bool, str]:
+    """Restart and probe only runtimes that were installed before maintenance."""
+    restarted_names: list[str] = []
+    if SERVICE_COMMAND.exists() or SERVICE_COMMAND.is_symlink():
+        restarted, runtime = restart_guard_runtime()
+        healthy = False
+        if restarted:
+            for _attempt in range(10):
+                try:
+                    health = probe_guard_service()
+                    healthy = health.get("status") == "ok" and health.get("isolated_key") is True
+                    if healthy:
+                        break
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                time.sleep(0.2)
+        if not restarted or not healthy:
+            return False, f"isolated guard failed through {runtime}"
+        restarted_names.append("isolated guard")
+    if MCP_HTTP_COMMAND.exists() or MCP_HTTP_COMMAND.is_symlink():
+        restarted, runtime = restart_mcp_http_runtime()
+        healthy = False
+        if restarted:
+            for _attempt in range(15):
+                try:
+                    probe_mcp_http()
+                    healthy = True
+                    break
+                except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+                    time.sleep(0.2)
+        if not restarted or not healthy:
+            return False, f"persistent MCP failed through {runtime}"
+        restarted_names.append("persistent MCP")
+    return True, ", ".join(restarted_names) if restarted_names else "no installed runtime"
+
+
+def rollback(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
+    """Return to the updater-recorded previous revision without mixing runtime versions."""
+    root = repository_root()
+    if not (root / ".git").exists():
+        print("Rollback requires a Git checkout.", file=sys.stderr)
+        return 2
+    token = _acquire_operation_lock("rollback")
+    if token is None:
+        print("Another guard maintenance operation is active; rollback skipped safely.", file=sys.stderr)
+        return 3
+    try:
+        return _rollback_unlocked(require_signed_commits, claude_command)
+    finally:
+        _release_operation_lock(token)
+
+
+def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
+    root = repository_root()
+    try:
+        state = json.loads(UPDATE_STATE.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        print("No valid updater state is available; refusing to guess a rollback target.", file=sys.stderr)
+        return 2
+    current = _run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    recorded_current = state.get("revision")
+    target = state.get("previous")
+    sha = re.compile(r"[0-9a-f]{40}")
+    if (
+        state.get("status") not in {"ok", "degraded"}
+        or not isinstance(recorded_current, str)
+        or not isinstance(target, str)
+        or sha.fullmatch(recorded_current) is None
+        or sha.fullmatch(target) is None
+        or current != recorded_current
+        or target == current
+    ):
+        print("Updater state is stale or incomplete; refusing to guess a rollback target.", file=sys.stderr)
+        return 2
+    dirty = _run(["git", "status", "--porcelain", "--untracked-files=normal"], root)
+    if dirty.returncode or dirty.stdout.strip():
+        print("Rollback requires a clean worktree; current files are unchanged.", file=sys.stderr)
+        return 2
+    if _run(["git", "cat-file", "-e", f"{target}^{{commit}}"], root).returncode:
+        print("Recorded rollback commit is unavailable; current files are unchanged.", file=sys.stderr)
+        return 2
+    if _run(["git", "merge-base", "--is-ancestor", target, current], root).returncode:
+        print("Recorded rollback target is not an ancestor; current files are unchanged.", file=sys.stderr)
+        return 2
+    signed_required = require_signed_commits
+    if UPDATE_CONFIG.exists():
+        try:
+            signed_required = signed_required or bool(
+                json.loads(UPDATE_CONFIG.read_text(encoding="utf-8-sig")).get("require_signed_commits")
+            )
+        except (OSError, json.JSONDecodeError, AttributeError):
+            print("Updater policy is unreadable; rollback is blocked fail-closed.", file=sys.stderr)
+            return 2
+    with tempfile.TemporaryDirectory(prefix="blun-language-rollback-") as directory:
+        candidate = Path(directory) / "repo"
+        clone = _run(["git", "clone", "--no-hardlinks", "--no-checkout", str(root), str(candidate)])
+        checkout = _run(["git", "checkout", "--detach", target], candidate) if not clone.returncode else clone
+        tests = _run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], candidate
+        ) if not checkout.returncode else checkout
+        if clone.returncode or checkout.returncode or tests.returncode:
+            print("Rollback candidate failed checkout or tests; current installation is unchanged.", file=sys.stderr)
+            return 1
+        if signed_required and _run(["git", "verify-commit", target], candidate).returncode:
+            print("Rollback target is not signed by a trusted Git identity; current installation is unchanged.", file=sys.stderr)
+            return 1
+        try:
+            target_version = (candidate / "VERSION").read_text(encoding="utf-8-sig").strip()
+        except OSError:
+            print("Rollback target has no readable VERSION; current installation is unchanged.", file=sys.stderr)
+            return 1
+    claude_installed = TARGETS["claude"].is_symlink()
+    plugin_status: dict = {"installed": False, "reason": "claude-skill-not-installed"}
+    if claude_installed:
+        configured = claude_command or _configured_claude_command(_health_monitor_config())
+        plugin_status = claude_plugin_status(target_version, configured)
+        if plugin_status.get("reason") != "plugin-not-installed" and plugin_status.get("healthy") is not True:
+            print(
+                "Claude plugin cache does not already match the rollback version. Anthropic's public CLI "
+                "documents update-to-latest but no version-pinned downgrade; synchronize the marketplace "
+                "cache first, then retry. Current installation is unchanged.",
+                file=sys.stderr,
+            )
+            return 1
+    applied = _run(["git", "reset", "--keep", target], root)
+    if applied.returncode:
+        print("Rollback reset failed; current installation is unchanged.", file=sys.stderr)
+        return 1
+    post_tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
+    runtime_ok, runtime_detail = _restart_installed_runtimes() if not post_tests.returncode else (False, "post-rollback tests failed")
+    if claude_installed and runtime_ok:
+        configured = claude_command or _configured_claude_command(_health_monitor_config())
+        plugin_status = claude_plugin_status(target_version, configured)
+        runtime_ok = plugin_status.get("healthy") is True or plugin_status.get("reason") == "plugin-not-installed"
+        if not runtime_ok:
+            runtime_detail = "Claude plugin cache changed during rollback"
+    if not runtime_ok:
+        restored = _run(["git", "reset", "--keep", current], root)
+        _restart_installed_runtimes()
+        print(
+            f"Rollback verification failed ({runtime_detail}); forward restoration "
+            + ("succeeded." if restored.returncode == 0 else "FAILED."),
+            file=sys.stderr,
+        )
+        return 1
+    remove_scheduler()
+    if UPDATE_CONFIG.exists():
+        try:
+            UPDATE_PAUSED_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            UPDATE_CONFIG.replace(UPDATE_PAUSED_CONFIG)
+        except OSError as error:
+            restored = _run(["git", "reset", "--keep", current], root)
+            _restart_installed_runtimes()
+            print(
+                f"Rollback could not pause automatic updates ({error}); forward restoration "
+                + ("succeeded." if restored.returncode == 0 else "FAILED."),
+                file=sys.stderr,
+            )
+            return 1
+    _atomic_json(UPDATE_STATE, {
+        "status": "rolled_back",
+        "revision": target,
+        "rolled_back_from": current,
+        "checked_at": int(time.time()),
+        "runtime_version": target_version,
+        "auto_update_paused": True,
+        "paused_update_policy": str(UPDATE_PAUSED_CONFIG) if UPDATE_PAUSED_CONFIG.exists() else "not-enabled",
+        "claude_plugin": plugin_status,
+    })
+    print(
+        f"Rolled back to tested revision {target}; automatic updates are paused. "
+        "After inspection, run an explicit update and re-enable auto-update deliberately."
+    )
+    if claude_installed and plugin_status.get("installed"):
+        print("Start a new Claude session or run /reload-plugins before relying on the rolled-back hooks.")
+    return 0
+
+
 def install_scheduler() -> tuple[bool, str]:
     command = f'"{sys.executable}" "{Path(__file__).resolve()}" auto-update run'
     system = platform.system()
@@ -1509,6 +1689,7 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
             "repository": REPO_URL,
             "claude_command": shutil.which("claude") or "",
         })
+        UPDATE_PAUSED_CONFIG.unlink(missing_ok=True)
         print(f"Automatic updates enabled every {max(1, interval_hours)} hour(s).")
         if scheduler:
             ok, detail = install_scheduler()
@@ -1518,6 +1699,7 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
     if action == "disable":
         remove_scheduler()
         UPDATE_CONFIG.unlink(missing_ok=True)
+        UPDATE_PAUSED_CONFIG.unlink(missing_ok=True)
         print("Automatic updates disabled.")
         return 0
     if action == "status":
@@ -1525,11 +1707,14 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
         if UPDATE_STATE.exists():
             print(UPDATE_STATE.read_text(encoding="utf-8"))
         return 0
+    last = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
+    if last.get("status") == "rolled_back" and last.get("auto_update_paused") is True:
+        print("Automatic updates are paused after rollback; update explicitly, then re-enable auto-update.")
+        return 0
     if not UPDATE_CONFIG.exists():
         print("Automatic updates are not enabled.", file=sys.stderr)
         return 2
     config = json.loads(UPDATE_CONFIG.read_text(encoding="utf-8"))
-    last = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
     due = (
         (
             TARGETS["claude"].is_symlink()
@@ -1561,6 +1746,8 @@ def main() -> int:
     sub.add_parser("doctor")
     update_parser = sub.add_parser("update")
     update_parser.add_argument("--require-signed-commits", action="store_true")
+    rollback_parser = sub.add_parser("rollback")
+    rollback_parser.add_argument("--require-signed-commits", action="store_true")
     auto = sub.add_parser("auto-update")
     auto.add_argument("action", choices=("enable", "disable", "status", "run"))
     auto.add_argument("--interval-hours", type=int, default=24)
@@ -1579,6 +1766,8 @@ def main() -> int:
         return doctor()
     if args.command == "update":
         return update(args.require_signed_commits)
+    if args.command == "rollback":
+        return rollback(args.require_signed_commits)
     return auto_update(args.action, args.interval_hours, args.require_signed_commits, not args.no_scheduler)
 
 
