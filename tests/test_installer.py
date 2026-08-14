@@ -333,6 +333,62 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE = originals
 
+    def test_reenable_cannot_downgrade_signed_policy_without_explicit_disable(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "updater.rollback-paused.json"
+            INSTALLER.UPDATE_STATE = root / "state.json"
+            try:
+                INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                    "enabled": True, "interval_hours": 24, "require_signed_commits": True,
+                })
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("enable", 12, False, scheduler=False), 0)
+                active = INSTALLER.json.loads(INSTALLER.UPDATE_CONFIG.read_text(encoding="utf-8"))
+                self.assertEqual(active["interval_hours"], 12)
+                self.assertTrue(active["require_signed_commits"])
+
+                INSTALLER.UPDATE_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.UPDATE_PAUSED_CONFIG, {"require_signed_commits": True})
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("enable", 8, False, scheduler=False), 0)
+                restored = INSTALLER.json.loads(INSTALLER.UPDATE_CONFIG.read_text(encoding="utf-8"))
+                self.assertEqual(restored["interval_hours"], 8)
+                self.assertTrue(restored["require_signed_commits"])
+                self.assertFalse(INSTALLER.UPDATE_PAUSED_CONFIG.exists())
+
+                with mock.patch.object(INSTALLER, "remove_scheduler") as scheduler_removal, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("disable"), 0)
+                scheduler_removal.assert_called_once_with()
+                self.assertFalse(INSTALLER.UPDATE_CONFIG.exists())
+                self.assertFalse(INSTALLER.UPDATE_PAUSED_CONFIG.exists())
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("enable", 6, False, scheduler=False), 0)
+                reset = INSTALLER.json.loads(INSTALLER.UPDATE_CONFIG.read_text(encoding="utf-8"))
+                self.assertFalse(reset["require_signed_commits"])
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE = originals
+
+    def test_reenable_refuses_to_replace_invalid_saved_policy(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "updater.rollback-paused.json"
+            INSTALLER.UPDATE_STATE = root / "state.json"
+            original = b'{"require_signed_commits": "false"}\n'
+            INSTALLER.UPDATE_CONFIG.write_bytes(original)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("enable", 12, False, scheduler=False), 2)
+                self.assertEqual(INSTALLER.UPDATE_CONFIG.read_bytes(), original)
+                self.assertFalse(INSTALLER.UPDATE_PAUSED_CONFIG.exists())
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE = originals
+
     def test_claude_plugin_update_reaches_exact_runtime_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             executable, state = self._fake_claude(Path(directory), old_version="6.7.1", new_version="6.8.0")
@@ -1101,7 +1157,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.9.0", new_version="6.28.0"
+                root, old_version="6.9.0", new_version="6.29.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -1114,14 +1170,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.28.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.29.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.28.0")
+                self.assertEqual(state["plugin_cache_version"], "6.29.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (

@@ -1944,10 +1944,18 @@ def health_monitor(action: str) -> int:
 
 def auto_update(action: str, interval_hours: int = 24, require_signed_commits: bool = False, scheduler: bool = True) -> int:
     if action == "enable":
+        try:
+            signed_required = _effective_signed_commit_policy(require_signed_commits)
+        except RuntimeError:
+            print(
+                "Updater signature policy is unreadable; automatic updates were not reconfigured.",
+                file=sys.stderr,
+            )
+            return 2
         _atomic_json(UPDATE_CONFIG, {
             "enabled": True,
             "interval_hours": max(1, interval_hours),
-            "require_signed_commits": require_signed_commits,
+            "require_signed_commits": signed_required,
             "repository": REPO_URL,
             "claude_command": shutil.which("claude") or "",
         })

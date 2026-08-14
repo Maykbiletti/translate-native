@@ -147,6 +147,14 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.29.0: reconfiguration preserves signed-update enforcement
+
+Version 6.29 closes the remaining configuration-time downgrade path in the signed-commit policy. Re-running `auto-update enable` to change an interval or repair a scheduler now resolves the same monotonic active and rollback-paused policy before writing configuration. Omitting `--require-signed-commits` therefore cannot overwrite a stored `true`, and restoring automatic updates after rollback cannot discard the paused requirement.
+
+If either stored policy is malformed, non-Boolean, or unreadable, reconfiguration stops before replacing the active file or deleting the paused one. The deliberate escape path remains explicit and auditable: run `auto-update disable` to remove both policies, then enable again without the signature option.
+
+Regression tests cover interval-only reconfiguration, reactivation from a paused signed policy, preservation of invalid bytes on failure, and the explicit disable-then-enable reset control.
+
 ### Version 6.28.0: signed-update policy cannot be downgraded by omission
 
 Version 6.28 makes the optional signed-commit policy monotonic across every updater entry point. After signature enforcement is enabled, a direct `update` call without `--require-signed-commits` can no longer silently fall back to unsigned mode. The updater resolves the effective policy by combining the caller request with both the active automatic-update policy and the policy paused after a successful rollback; any stored `true` remains authoritative.
@@ -512,7 +520,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.28.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.29.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
