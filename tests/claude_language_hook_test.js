@@ -42,7 +42,7 @@ async function main() {
       const request = JSON.parse(raw.slice(0, newline));
       let response;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.12.0" };
+        response = { status: "ok", isolated_key: true, version: "6.13.0" };
       } else if (request.operation === "authorize_delivery") {
         const valid = request.service_token === token && request.release_token === "valid-token";
         const grant = `grant-${crypto.randomUUID()}`;
@@ -160,6 +160,38 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(JSON.parse(changed.stdout).decision, "block");
+
+  const stoppedAfterFailedCorrection = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: `${clean} Noch immer ungeprüft.`,
+    stop_hook_active: true
+  }, environment);
+  const hardStop = JSON.parse(stoppedAfterFailedCorrection.stdout);
+  assert.strictEqual(hardStop.continue, false);
+  assert.match(hardStop.stopReason, /stopped an unverified response/);
+  assert(!hardStop.stopReason.includes(clean), "hard-stop reason must not expose candidate text");
+  assert.strictEqual(hardStop.decision, undefined);
+
+  await runHook("post-tool", tool, environment);
+  const correctedDuringStopContinuation = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: true
+  }, environment);
+  assert.strictEqual(correctedDuringStopContinuation.stdout, "");
+
+  const stoppedSubagent = await runHook("stop", {
+    ...common,
+    agent_id: "child-agent",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "Der Unteragent versucht weiterhin eine ungeprüfte Antwort auszugeben.",
+    stop_hook_active: true
+  }, environment);
+  const subagentHardStop = JSON.parse(stoppedSubagent.stdout);
+  assert.strictEqual(subagentHardStop.continue, false);
+  assert.match(subagentHardStop.stopReason, /stopped an unverified response/);
 
   await runHook("post-tool", tool, environment);
   const noLanguage = await runHook("stop", {

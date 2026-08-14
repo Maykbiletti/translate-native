@@ -13,6 +13,7 @@ const path = require("path");
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_RECORD_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNTIME = path.join(os.homedir(), ".config", "blun-language-guard");
+let currentHookInput = null;
 
 function canonicalText(value) {
   return String(value || "")
@@ -172,6 +173,16 @@ function blocked(reason) {
   return { decision: "block", reason };
 }
 
+function blockedStop(input, reason) {
+  const repeatedStop = input && input.stop_hook_active === true
+    && ["Stop", "SubagentStop"].includes(String(input.hook_event_name || ""));
+  if (!repeatedStop) return blocked(reason);
+  return {
+    continue: false,
+    stopReason: "BLUN Language Guard stopped an unverified response after the protected correction attempt failed. Reconnect or repair the guard, then retry the response."
+  };
+}
+
 async function sessionStart() {
   try {
     const result = await callGuard({ operation: "health" }, 3000);
@@ -275,11 +286,11 @@ async function stop(input) {
     }
   } catch (_) {
     if (!naturalLanguage) return;
-    emit(blocked("The BLUN hook could not verify its protected release state. Fail closed and call the correct release tool again."));
+    emit(blockedStop(input, "The BLUN hook could not verify its protected release state. Fail closed and call the correct release tool again."));
     return;
   }
   if (!naturalLanguage) return;
-  emit(blocked(
+  emit(blockedStop(input,
     "The exact final response has no fresh verified BLUN receipt. If this is a translation, load translate-native and call release_translation with the complete source and exact final target. Otherwise call release_response with the exact final answer. Do not edit the text after release."
   ));
 }
@@ -300,6 +311,7 @@ async function readInput() {
 async function main() {
   const mode = process.argv[2];
   const input = await readInput();
+  currentHookInput = input;
   if (mode === "session-start") return sessionStart(input);
   if (mode === "post-tool") return postTool(input);
   if (mode === "stop") return stop(input);
@@ -308,9 +320,9 @@ async function main() {
 
 if (require.main === module) {
   main().catch(() => {
-    emit(blocked("BLUN language hook failed closed. Repair or reconnect the guard and retry the exact release."));
+    emit(blockedStop(currentHookInput, "BLUN language hook failed closed. Repair or reconnect the guard and retry the exact release."));
     process.exitCode = 0;
   });
 }
 
-module.exports = { canonicalText, findRelease, hasNaturalLanguage, textHash };
+module.exports = { blockedStop, canonicalText, findRelease, hasNaturalLanguage, textHash };

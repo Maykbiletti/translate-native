@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.13.0: bounded fail-closed Stop recovery
+
+Version 6.13 closes a Claude lifecycle bypass caused by repeated Stop-hook rejection. [Anthropic documents](https://code.claude.com/docs/en/hooks) that `stop_hook_active` becomes true when Claude is already continuing because of a Stop hook, while the official [hook troubleshooting guide](https://code.claude.com/docs/en/hooks-guide) explains that Claude Code eventually overrides a hook after repeated consecutive blocks. Returning `decision: "block"` forever was therefore neither reliable enforcement nor reliable recovery.
+
+The mandatory hook now gives Claude one protected correction cycle. A newly released exact response or translation can still pass during that cycle. If `stop_hook_active` is already true and the output remains unverified, both `Stop` and `SubagentStop` return the universal `continue: false` hard stop instead of adding another block. The user-visible stop reason is generic and contains no candidate text, receipt, source, or token. Tests cover the first correction request, the second-attempt hard stop, a successfully corrected signed answer, and the subagent path.
+
 ### Version 6.12.0: non-mutating portable verification
 
 Version 6.12 closes a trust-root failure in the portable pre-output verifier. Earlier portable and installed-skill hooks used the signer's load-or-create helper: a missing verifier key could therefore create a new signing key before rejecting the current receipt, and a later signer restart could adopt that unrelated key. Both hooks now only read an existing key, require at least 32 bytes, enforce owner-only permissions on POSIX systems, and fail closed without creating directories or files. The explicit `BLUN_LANGUAGE_GUARD_KEY` compatibility path remains available, but no filesystem fallback may initialize or repair signing state.
@@ -410,7 +416,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.12.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.13.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
