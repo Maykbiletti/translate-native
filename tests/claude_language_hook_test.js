@@ -45,7 +45,7 @@ async function main() {
       let response;
       let responseDelay = 0;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.19.0" };
+        response = { status: "ok", isolated_key: true, version: "6.20.0" };
       } else if (request.operation === "register_session_epoch") {
         const history = sessionEpochHistory.get(request.session_id) || new Set();
         const valid = request.service_token === token
@@ -59,9 +59,21 @@ async function main() {
         }
         response = { status: valid ? "PASS" : "BLOCK", registered: valid };
       } else if (request.operation === "authorize_delivery") {
+        if (request.release_token === "restart-valid-token") {
+          grants.clear();
+          sessionEpochs.clear();
+          sessionEpochHistory.clear();
+        }
+        const knownEpoch = sessionEpochs.get(request.session_id);
+        const history = sessionEpochHistory.get(request.session_id) || new Set();
         const valid = request.service_token === token
-          && sessionEpochs.get(request.session_id) === request.session_epoch
-          && ["valid-token", "slow-valid-token"].includes(request.release_token);
+          && ["valid-token", "slow-valid-token", "restart-valid-token"].includes(request.release_token)
+          && (knownEpoch === request.session_epoch || (knownEpoch === undefined && !history.has(request.session_epoch)));
+        if (valid && knownEpoch === undefined) {
+          history.add(request.session_epoch);
+          sessionEpochHistory.set(request.session_id, history);
+          sessionEpochs.set(request.session_id, request.session_epoch);
+        }
         if (request.release_token === "slow-valid-token") responseDelay = 100;
         if (request.release_token === "slow-rejected-token") responseDelay = 500;
         const grant = `grant-${crypto.randomUUID()}`;
@@ -253,6 +265,33 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(staleAfterResume.stdout).decision, "block");
   fs.writeFileSync(path.join(stateDirectory, mainEpochFile), `${secondEpoch}\n`, { mode: 0o600 });
+
+  const beforeServiceRestart = await runHook("post-tool", tool, environment);
+  assert.strictEqual(beforeServiceRestart.stdout, "");
+  const preRestartRecord = fs.readFileSync(stateFile, "utf8");
+  const recoveredAfterServiceRestart = await runHook("post-tool", {
+    ...tool,
+    tool_use_id: "tool-after-service-restart",
+    tool_response: {
+      structuredContent: { release_allowed: true, release_token: "restart-valid-token" }
+    }
+  }, environment);
+  assert.strictEqual(recoveredAfterServiceRestart.stdout, "");
+  const deliveredAfterServiceRestart = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(deliveredAfterServiceRestart.stdout, "");
+  fs.writeFileSync(stateFile, preRestartRecord, { mode: 0o600 });
+  const oldGrantAfterServiceRestart = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(oldGrantAfterServiceRestart.stdout).decision, "block");
 
   const recorded = await runHook("post-tool", tool, environment);
   assert.strictEqual(recorded.code, 0, recorded.stderr);

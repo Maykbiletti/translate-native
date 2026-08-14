@@ -259,6 +259,41 @@ class GuardServiceTests(unittest.TestCase):
         self.assertNotIn(self.session_epoch, raw)
         self.assertNotIn(new_epoch, raw)
 
+    def test_fresh_release_recovers_session_after_service_restart(self) -> None:
+        old_release = self.service.handle(self.release_request())
+        old_authorized = self.service.handle(self.authorize_request(old_release["release_token"]))
+        self.assertTrue(old_authorized["valid"], old_authorized)
+
+        restarted = SERVICE.GuardService(
+            self.key_path, self.audit_path, "service-secret-with-at-least-32-characters"
+        )
+        old_result = restarted.handle(self.consume_request(old_authorized["delivery_grant"]))
+        self.assertFalse(old_result["valid"], old_result)
+        self.assertFalse(old_result["checks"]["service_boot"])
+        self.assertFalse(old_result["checks"]["session_epoch_current"])
+
+        forged = restarted.handle(self.authorize_request("forged-release-token"))
+        self.assertFalse(forged["valid"], forged)
+        session_hash = SERVICE.GuardService._identity_hash("session-one")
+        self.assertNotIn(session_hash, restarted.session_epochs)
+
+        fresh_release = restarted.handle(self.release_request())
+        recovered = restarted.handle(self.authorize_request(fresh_release["release_token"]))
+        self.assertTrue(recovered["valid"], recovered)
+        self.assertEqual(
+            restarted.session_epochs[session_hash],
+            SERVICE.GuardService._identity_hash(self.session_epoch),
+        )
+        consumed = restarted.handle(self.consume_request(recovered["delivery_grant"]))
+        self.assertTrue(consumed["valid"], consumed)
+
+        restored_old_grant = restarted.handle(self.consume_request(old_authorized["delivery_grant"]))
+        self.assertFalse(restored_old_grant["valid"], restored_old_grant)
+        self.assertFalse(restored_old_grant["checks"]["service_boot"])
+
+        raw = self.audit_path.read_text(encoding="utf-8")
+        self.assertNotIn(self.session_epoch, raw)
+
     def test_delivery_grant_binds_source_language_purpose_and_policy(self) -> None:
         source = "Die Größe des Gebäudes wird täglich geprüft."
         target = "Byggnadens storlek kontrolleras dagligen."

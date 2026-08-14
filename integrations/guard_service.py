@@ -195,9 +195,18 @@ class GuardService:
 
     def _authorize_delivery(self, request: dict[str, Any], task_kind: str) -> dict[str, Any]:
         session_hash = self._identity_hash(_exact_string(request, "session_id"))
-        epoch_hash = self._identity_hash(_exact_string(request, "session_epoch"))
+        epoch = _exact_string(request, "session_epoch")
+        if re.fullmatch(r"[0-9a-f]{64}", epoch) is None:
+            raise GuardProtocolError("session_epoch must be 64 lowercase hexadecimal characters")
+        epoch_hash = self._identity_hash(epoch)
         with self.delivery_lock:
-            if self.session_epochs.get(session_hash) != epoch_hash:
+            current_epoch = self.session_epochs.get(session_hash)
+            history = self.session_epoch_history.setdefault(session_hash, set())
+            if current_epoch is None and epoch_hash not in history:
+                history.add(epoch_hash)
+                self.session_epochs[session_hash] = epoch_hash
+                current_epoch = epoch_hash
+            if current_epoch != epoch_hash:
                 return {
                     "valid": False,
                     "status": "BLOCK",
