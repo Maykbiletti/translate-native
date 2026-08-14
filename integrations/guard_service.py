@@ -160,6 +160,7 @@ class GuardService:
             "source_sha256": QUALITY.canonical_hash(_exact_string(request, "source_text", required=False)),
             "target_sha256": QUALITY.canonical_hash(_exact_string(request, "target_text")),
             "session_sha256": self._identity_hash(_exact_string(request, "session_id")),
+            "session_epoch_sha256": self._identity_hash(_exact_string(request, "session_epoch")),
             "agent_sha256": self._identity_hash(_exact_string(request, "agent_id")),
             "language": _exact_string(request, "language"),
             "purpose": task_kind,
@@ -193,6 +194,7 @@ class GuardService:
                 "target": payload.get("target_sha256") == QUALITY.canonical_hash(_exact_string(request, "target_text")),
                 "source": payload.get("source_sha256") == _exact_hash(request, "source_sha256"),
                 "session": payload.get("session_sha256") == self._identity_hash(_exact_string(request, "session_id")),
+                "session_epoch": payload.get("session_epoch_sha256") == self._identity_hash(_exact_string(request, "session_epoch")),
                 "agent": payload.get("agent_sha256") == self._identity_hash(_exact_string(request, "agent_id")),
                 "language": payload.get("language") == _exact_string(request, "language"),
                 "purpose": payload.get("purpose") == _exact_string(request, "task_kind"),
@@ -212,7 +214,7 @@ class GuardService:
                 checks["one_time"] = nonce not in self.consumed_delivery_nonces
                 identity_valid = all(
                     checks[name]
-                    for name in ("session", "agent", "version", "service_boot", "not_expired", "one_time")
+                    for name in ("session", "session_epoch", "agent", "version", "service_boot", "not_expired", "one_time")
                 )
                 valid = all(checks.values())
                 if identity_valid:

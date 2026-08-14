@@ -147,6 +147,44 @@ function sessionHash(input) {
   return crypto.createHash("sha256").update(session, "utf8").digest("hex");
 }
 
+function sessionEpochPath(input) {
+  return path.join(stateDirectory(), `session-${sessionHash(input)}.epoch`);
+}
+
+function readSessionEpoch(input) {
+  const destination = sessionEpochPath(input);
+  const stats = fs.lstatSync(destination);
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("session epoch must be a regular file");
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("session epoch permissions are too broad");
+  }
+  const epoch = fs.readFileSync(destination, "utf8").replace(/^\uFEFF/, "").trim();
+  if (!/^[a-f0-9]{64}$/.test(epoch)) throw new Error("session epoch is invalid");
+  return { destination, epoch };
+}
+
+function beginSessionEpoch(input) {
+  const directory = stateDirectory();
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const destination = sessionEpochPath(input);
+  try {
+    fs.unlinkSync(destination);
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+  invalidateSessionRecords(input);
+  const epoch = crypto.randomBytes(32).toString("hex");
+  const temporary = `${destination}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${epoch}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, destination);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+  }
+  try { fs.chmodSync(destination, 0o600); } catch (_) {}
+  return epoch;
+}
+
 function statePath(input) {
   return path.join(stateDirectory(), `${identity(input)}.json`);
 }
@@ -261,7 +299,18 @@ async function startupContext(eventName) {
   }
 }
 
-async function sessionStart() {
+async function sessionStart(input) {
+  try {
+    beginSessionEpoch(input);
+  } catch (_) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: "This Claude session is protected by mandatory BLUN Translate Native, but its delivery epoch could not be renewed. Fail closed: do not finish or deliver natural-language output until protected session state is repaired and SessionStart succeeds."
+      }
+    });
+    return;
+  }
   return startupContext("SessionStart");
 }
 
@@ -304,6 +353,13 @@ async function postTool(input) {
     input,
     "BLUN Language Guard could not clear the prior release before processing a new attempt. The new receipt is not trusted; repair protected state and release the exact final text again."
   )) return;
+  let sessionEpoch;
+  try {
+    sessionEpoch = readSessionEpoch(input).epoch;
+  } catch (_) {
+    rejectRelease(input, "BLUN Language Guard has no valid epoch for this Claude session. Start or resume the session again, then release the exact final text with a fresh receipt.");
+    return;
+  }
   const args = input.tool_input;
   const release = findRelease(input.tool_response);
   if (!args || typeof args !== "object" || !release) {
@@ -324,6 +380,7 @@ async function postTool(input) {
     short_text_reviewed: args.short_text_reviewed === true,
     agent_id: String(input.agent_id || "main"),
     session_id: String(input.session_id || ""),
+    session_epoch: sessionEpoch,
     channel: "claude-hook"
   };
   try {
@@ -335,6 +392,7 @@ async function postTool(input) {
     writeRecord(input, {
       delivery_grant: verification.delivery_grant,
       session_sha256: sessionHash(input),
+      session_epoch_sha256: textHash(sessionEpoch),
       source_sha256: textHash(source),
       target_sha256: textHash(target),
       language,
@@ -372,10 +430,12 @@ async function stop(input) {
   const naturalLanguage = hasNaturalLanguage(target);
   try {
     const { destination, record } = readRecord(input);
+    const { epoch: sessionEpoch } = readSessionEpoch(input);
     const fresh = record && Number.isFinite(record.authorized_at)
       && Date.now() - record.authorized_at >= 0
       && Date.now() - record.authorized_at <= MAX_RECORD_AGE_MS;
-    const usable = fresh && typeof record.delivery_grant === "string";
+    const usable = fresh && typeof record.delivery_grant === "string"
+      && record.session_epoch_sha256 === textHash(sessionEpoch);
     try { fs.unlinkSync(destination); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
     if (usable) {
       try {
@@ -390,6 +450,7 @@ async function stop(input) {
           short_text_reviewed: record.short_text_reviewed === true,
           session_id: String(input.session_id || ""),
           agent_id: String(input.agent_id || "main"),
+          session_epoch: sessionEpoch,
           channel: record.channel
         });
         if (naturalLanguage && record.target_sha256 === textHash(target) && result.valid === true) return;
@@ -441,4 +502,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, sessionHash, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, readSessionEpoch, sessionHash, textHash };

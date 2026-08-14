@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.18.0: session-resume-bound delivery grants
+
+Version 6.18 prevents an unconsumed delivery grant from surviving a Claude session restart, `--resume`, `--continue`, `/resume`, `/clear`, or context compaction. Anthropic's official [hooks reference](https://code.claude.com/docs/en/hooks) states that `SessionStart` runs for each of those lifecycle sources, including resumed sessions. The plugin now rotates a cryptographically random delivery epoch on every `SessionStart`, removes the session's outstanding main-agent and subagent records, and requires that epoch before it will authorize any new release.
+
+The isolated service signs only the epoch's SHA-256 binding into each delivery grant and checks the live epoch again during one-time consumption. The raw epoch remains in an owner-only local marker and never enters the grant, audit log, candidate diagnostics, or skill text. A copied pre-resume record, missing marker, unsafe marker permissions, failed rotation, cross-session epoch, or old pre-6.18 record blocks; the final `Stop` and `SubagentStop` checks therefore remain fail-closed even if stale local JSON is restored after resume.
+
 ### Version 6.17.0: invalidate grants on every rejected release
 
 Version 6.17 closes the logical-failure half of the stale-grant path. A release tool can execute successfully while returning no usable receipt, while the isolated verifier rejects that receipt, or while delivery authorization becomes unavailable. The synchronous `PostToolUse` hook now clears any earlier grant for the exact session and agent before processing every new release attempt and clears it again on every rejection path. A failed new attempt can therefore never fall back to an older authorization.
@@ -440,7 +446,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.17.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.18.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

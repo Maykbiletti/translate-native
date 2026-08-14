@@ -116,6 +116,7 @@ class GuardServiceTests(unittest.TestCase):
             "language": "de-DE",
             "release_token": release_token,
             "session_id": "session-one",
+            "session_epoch": "epoch-one",
             "agent_id": "test-agent",
             "channel": "claude-hook",
         }
@@ -132,6 +133,7 @@ class GuardServiceTests(unittest.TestCase):
             "content_type": "prose",
             "short_text_reviewed": False,
             "session_id": "session-one",
+            "session_epoch": "epoch-one",
             "agent_id": "test-agent",
             "channel": "claude-hook",
         }
@@ -164,6 +166,13 @@ class GuardServiceTests(unittest.TestCase):
         wrong_session = self.service.handle(wrong_session_request)
         self.assertFalse(wrong_session["valid"], wrong_session)
         self.assertFalse(wrong_session["checks"]["session"])
+
+        session_epoch_grant = fresh_grant()
+        wrong_epoch_request = self.consume_request(session_epoch_grant)
+        wrong_epoch_request["session_epoch"] = "epoch-two"
+        wrong_epoch = self.service.handle(wrong_epoch_request)
+        self.assertFalse(wrong_epoch["valid"], wrong_epoch)
+        self.assertFalse(wrong_epoch["checks"]["session_epoch"])
 
         agent_grant = fresh_grant()
         wrong_agent_request = self.consume_request(agent_grant)
@@ -230,7 +239,12 @@ class GuardServiceTests(unittest.TestCase):
             self.assertTrue(grant.startswith("blgd2."))
             payload = json.loads(SERVICE.QUALITY._b64decode(grant.split(".")[1]))
             self.assertEqual(payload["source_sha256"], SERVICE.QUALITY.canonical_hash(source))
+            self.assertEqual(
+                payload["session_epoch_sha256"],
+                SERVICE.GuardService._identity_hash("epoch-one"),
+            )
             self.assertNotIn(source, grant)
+            self.assertNotIn("epoch-one", grant)
             return grant
 
         base = {

@@ -43,7 +43,7 @@ async function main() {
       let response;
       let responseDelay = 0;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.17.0" };
+        response = { status: "ok", isolated_key: true, version: "6.18.0" };
       } else if (request.operation === "authorize_delivery") {
         const valid = request.service_token === token
           && ["valid-token", "slow-valid-token"].includes(request.release_token);
@@ -61,6 +61,7 @@ async function main() {
           content_type: request.content_type || "prose",
           short_text_reviewed: request.short_text_reviewed === true,
           session_id: request.session_id,
+          session_epoch: request.session_epoch,
           agent_id: request.agent_id,
           channel: request.channel
         });
@@ -79,6 +80,7 @@ async function main() {
           && expected.content_type === request.content_type
           && expected.short_text_reviewed === request.short_text_reviewed
           && expected.session_id === request.session_id
+          && expected.session_epoch === request.session_epoch
           && expected.agent_id === request.agent_id
           && expected.channel === request.channel;
         if (valid) grants.delete(request.delivery_grant);
@@ -128,6 +130,42 @@ async function main() {
   assert.match(started.stdout, /SessionStart/);
   assert.match(started.stdout, /mandatory/);
 
+  const otherSessionStarted = await runHook("session-start", {
+    ...common,
+    session_id: "session-two",
+    hook_event_name: "SessionStart",
+    source: "startup"
+  }, environment);
+  assert.strictEqual(otherSessionStarted.code, 0, otherSessionStarted.stderr);
+
+  const releaseWithoutSessionStart = await runHook("post-tool", {
+    ...tool,
+    session_id: "session-without-start",
+    tool_use_id: "tool-without-session-start"
+  }, environment);
+  assert.strictEqual(JSON.parse(releaseWithoutSessionStart.stdout).decision, "block");
+  assert.match(releaseWithoutSessionStart.stdout, /no valid epoch/);
+
+  const stateDirectory = path.join(temporary, "claude-hooks");
+  const brokenSessionHash = crypto.createHash("sha256").update("session-broken").digest("hex");
+  const brokenEpochPath = path.join(stateDirectory, `session-${brokenSessionHash}.epoch`);
+  fs.mkdirSync(brokenEpochPath);
+  const brokenResume = await runHook("session-start", {
+    ...common,
+    session_id: "session-broken",
+    hook_event_name: "SessionStart",
+    source: "resume"
+  }, environment);
+  assert.strictEqual(brokenResume.code, 0, brokenResume.stderr);
+  assert.match(brokenResume.stdout, /delivery epoch could not be renewed/);
+  const blockedBrokenSession = await runHook("post-tool", {
+    ...tool,
+    session_id: "session-broken",
+    tool_use_id: "tool-broken-session"
+  }, environment);
+  assert.strictEqual(JSON.parse(blockedBrokenSession.stdout).decision, "block");
+  fs.rmSync(brokenEpochPath, { recursive: true, force: true });
+
   const subagentStarted = await runHook("subagent-start", {
     ...common,
     hook_event_name: "SubagentStart",
@@ -142,16 +180,54 @@ async function main() {
   assert.match(subagentContext.additionalContext, /release_translation/);
   assert.match(subagentContext.additionalContext, /this session and agent identity/);
 
+  const firstRecorded = await runHook("post-tool", tool, environment);
+  assert.strictEqual(firstRecorded.stdout, "");
+  const stateFile = path.join(stateDirectory, fs.readdirSync(stateDirectory).find((name) => name.endsWith(".json")));
+  const staleBeforeResume = fs.readFileSync(stateFile, "utf8");
+  const epochFilesBeforeResume = fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".epoch"));
+  assert.strictEqual(epochFilesBeforeResume.length, 2);
+  const mainEpochFile = epochFilesBeforeResume.find((name) => name.includes(crypto.createHash("sha256").update("session-one").digest("hex")));
+  assert(mainEpochFile);
+  const firstEpoch = fs.readFileSync(path.join(stateDirectory, mainEpochFile), "utf8").trim();
+
+  const resumed = await runHook("session-start", {
+    ...common,
+    hook_event_name: "SessionStart",
+    source: "resume"
+  }, environment);
+  assert.strictEqual(resumed.code, 0, resumed.stderr);
+  assert.match(resumed.stdout, /SessionStart/);
+  const secondEpoch = fs.readFileSync(path.join(stateDirectory, mainEpochFile), "utf8").trim();
+  assert.notStrictEqual(secondEpoch, firstEpoch, "resume must rotate the delivery epoch");
+  assert(!fs.existsSync(stateFile), "resume must remove the earlier local grant");
+  if (process.platform !== "win32") {
+    fs.chmodSync(path.join(stateDirectory, mainEpochFile), 0o644);
+    const unsafeEpochRelease = await runHook("post-tool", {
+      ...tool,
+      tool_use_id: "tool-unsafe-epoch"
+    }, environment);
+    assert.strictEqual(JSON.parse(unsafeEpochRelease.stdout).decision, "block");
+    assert.match(unsafeEpochRelease.stdout, /no valid epoch/);
+    fs.chmodSync(path.join(stateDirectory, mainEpochFile), 0o600);
+  }
+  fs.writeFileSync(stateFile, staleBeforeResume, { mode: 0o600 });
+  const staleAfterResume = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(staleAfterResume.stdout).decision, "block");
+
   const recorded = await runHook("post-tool", tool, environment);
   assert.strictEqual(recorded.code, 0, recorded.stderr);
   assert.strictEqual(recorded.stdout, "");
-  const stateDirectory = path.join(temporary, "claude-hooks");
-  const stateFile = path.join(stateDirectory, fs.readdirSync(stateDirectory)[0]);
   const copiedRecord = fs.readFileSync(stateFile, "utf8");
   const parsedRecord = JSON.parse(copiedRecord);
   assert.strictEqual(parsedRecord.language, "de-DE");
   assert.strictEqual(parsedRecord.task_kind, "response");
   assert.strictEqual(parsedRecord.session_sha256, crypto.createHash("sha256").update("session-one").digest("hex"));
+  assert.strictEqual(parsedRecord.session_epoch_sha256, crypto.createHash("sha256").update(secondEpoch).digest("hex"));
   assert.strictEqual(parsedRecord.source_sha256, crypto.createHash("sha256").update("").digest("hex"));
   assert.strictEqual(parsedRecord.channel, "claude-hook");
 
