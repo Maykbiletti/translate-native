@@ -171,6 +171,15 @@ function readRecord(input) {
   }
 }
 
+function invalidateAgentRecord(input) {
+  const destination = statePath(input);
+  try {
+    fs.unlinkSync(destination);
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+}
+
 function invalidateSessionRecords(input) {
   const directory = stateDirectory();
   const expectedSession = sessionHash(input);
@@ -318,6 +327,24 @@ async function postTool(input) {
   }
 }
 
+function postToolFailure(input) {
+  const toolName = String(input.tool_name || "");
+  if (!toolName.endsWith("__release_response") && !toolName.endsWith("__release_translation")) return;
+  try {
+    invalidateAgentRecord(input);
+    emit({
+      decision: "block",
+      reason: "The BLUN release tool failed, so no response is authorized. Reconnect the language guard and retry the correct release tool with the exact final text.",
+      hookSpecificOutput: {
+        hookEventName: "PostToolUseFailure",
+        additionalContext: "Fail closed after this release-tool failure. Any earlier unconsumed grant for this session and agent has been invalidated. Do not finish, reuse an earlier release, or deliver unchecked natural-language text. Reconnect the BLUN Language Guard, then call release_translation with the complete source and exact target for a translation, or release_response with the exact final answer. Stop and SubagentStop remain the authoritative delivery boundary."
+      }
+    });
+  } catch (_) {
+    emit(blocked("BLUN Language Guard could not invalidate stale release state after the release tool failed. Do not finish or deliver natural-language output until the guard and its protected state are repaired."));
+  }
+}
+
 async function stop(input) {
   const target = typeof input.last_assistant_message === "string" ? input.last_assistant_message : "";
   const naturalLanguage = hasNaturalLanguage(target);
@@ -380,6 +407,7 @@ async function main() {
   if (mode === "subagent-start") return subagentStart(input);
   if (mode === "prompt-boundary") return promptBoundary(input);
   if (mode === "post-tool") return postTool(input);
+  if (mode === "post-tool-failure") return postToolFailure(input);
   if (mode === "stop") return stop(input);
   throw new Error("unknown Claude hook mode");
 }
@@ -391,4 +419,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateSessionRecords, sessionHash, textHash };
+module.exports = { blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, sessionHash, textHash };

@@ -63,6 +63,22 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "mcp__.*__(release_response|release_translation)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "post-tool-failure"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.16.0: fail closed after release-tool failures
+
+Version 6.16 closes the stale-grant path that appears when Claude's MCP release call fails. Anthropic's official [`PostToolUseFailure` hook contract](https://code.claude.com/docs/en/hooks) can add recovery context alongside the tool error and can return a blocking decision. The plugin now matches only failed `release_response` and `release_translation` calls, immediately removes any earlier unconsumed delivery grant for that exact Claude session and agent, and tells Claude to reconnect and repeat the correct release workflow.
+
+The failure hook never copies the candidate, source, tool error, receipt, or token into its output. It preserves grants belonging to other agents and sessions, ignores unrelated failed tools, and blocks if protected state cannot be invalidated. `Stop` and `SubagentStop` remain the authoritative delivery boundary: a failed release call never creates a grant, and the now-stale earlier text cannot pass afterward. Regression tests prove same-agent invalidation, cross-session isolation, recovery instructions for both release paths, privacy-safe output, and unchanged exact-release success.
+
 ### Version 6.15.0: mandatory subagent startup context
 
 Version 6.15 closes an instruction gap between the main Claude session and its subagents. Anthropic's official [hook lifecycle](https://code.claude.com/docs/en/hooks) places `SubagentStart` context before a subagent's first prompt. The plugin now uses that event to tell every subagent that native-language output requires its own fresh `release_response` or `release_translation` grant, bound to that session and agent identity. A subagent no longer has to discover the requirement only after `SubagentStop` rejects its first answer.
@@ -428,7 +434,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.15.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.16.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

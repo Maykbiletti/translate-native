@@ -42,7 +42,7 @@ async function main() {
       const request = JSON.parse(raw.slice(0, newline));
       let response;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.15.0" };
+        response = { status: "ok", isolated_key: true, version: "6.16.0" };
       } else if (request.operation === "authorize_delivery") {
         const valid = request.service_token === token && request.release_token === "valid-token";
         const grant = `grant-${crypto.randomUUID()}`;
@@ -188,6 +188,53 @@ async function main() {
   }, environment);
   assert.strictEqual(concurrentSessionReleased.stdout, "");
   assert.strictEqual(fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json")).length, 0);
+
+  await runHook("post-tool", tool, environment);
+  await runHook("post-tool", otherSessionTool, environment);
+  const failedRelease = await runHook("post-tool-failure", {
+    ...common,
+    hook_event_name: "PostToolUseFailure",
+    tool_name: "mcp__plugin_translate-native_guard__release_response",
+    tool_use_id: "tool-failed-release",
+    tool_input: tool.tool_input,
+    error: "connection closed"
+  }, environment);
+  assert.strictEqual(failedRelease.code, 0, failedRelease.stderr);
+  const failedReleaseOutput = JSON.parse(failedRelease.stdout);
+  assert.strictEqual(failedReleaseOutput.decision, "block");
+  assert.strictEqual(failedReleaseOutput.hookSpecificOutput.hookEventName, "PostToolUseFailure");
+  assert.match(failedReleaseOutput.hookSpecificOutput.additionalContext, /earlier unconsumed grant.*invalidated/);
+  assert.match(failedReleaseOutput.hookSpecificOutput.additionalContext, /release_translation/);
+  assert.match(failedReleaseOutput.hookSpecificOutput.additionalContext, /release_response/);
+  assert(!failedRelease.stdout.includes(clean), "failure output must not expose candidate text");
+  const remainingAfterFailure = fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json"));
+  assert.strictEqual(remainingAfterFailure.length, 1, "a failed release may invalidate only the same session and agent");
+  const preservedAfterFailure = JSON.parse(fs.readFileSync(path.join(stateDirectory, remainingAfterFailure[0]), "utf8"));
+  assert.strictEqual(preservedAfterFailure.session_sha256, crypto.createHash("sha256").update("session-two").digest("hex"));
+
+  const staleAfterFailure = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(staleAfterFailure.stdout).decision, "block");
+  const preservedSessionAfterFailure = await runHook("stop", {
+    ...common,
+    session_id: "session-two",
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(preservedSessionAfterFailure.stdout, "");
+
+  const unrelatedFailure = await runHook("post-tool-failure", {
+    ...common,
+    hook_event_name: "PostToolUseFailure",
+    tool_name: "Read",
+    error: "missing file"
+  }, environment);
+  assert.strictEqual(unrelatedFailure.stdout, "");
 
   await runHook("post-tool", tool, environment);
   const consumedRecord = fs.readFileSync(stateFile, "utf8");
