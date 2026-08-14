@@ -1040,7 +1040,12 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         guard_now, mcp_now = _guard_stack_status(timeout=4.0)
         monitor_ok = monitor_ok and guard_now and mcp_now
         if monitor_ok:
-            _atomic_json(HEALTH_CONFIG, {"enabled": True, "interval_seconds": 60})
+            monitor_config = _health_monitor_config()
+            monitor_config.update({"enabled": True, "interval_seconds": 60})
+            configured_claude = claude_command or _configured_claude_command(monitor_config)
+            if configured_claude:
+                monitor_config["claude_command"] = configured_claude
+            _atomic_json(HEALTH_CONFIG, monitor_config)
             _atomic_json(HEALTH_STATE, {
                 "status": "ok",
                 "checked_at": int(time.time()),
@@ -1058,6 +1063,17 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         "updated": False,
         "status": {"reason": "claude-skill-not-installed"},
     }
+    if monitor_expected and plugin_update.get("status", {}).get("installed"):
+        monitor_config = _health_monitor_config()
+        monitor_config.update({
+            "enabled": True,
+            "interval_seconds": 60,
+            "plugin_required": True,
+        })
+        configured_claude = claude_command or _configured_claude_command(monitor_config)
+        if configured_claude:
+            monitor_config["claude_command"] = configured_claude
+        _atomic_json(HEALTH_CONFIG, monitor_config)
     plugin_reason = plugin_update.get("status", {}).get("reason")
     plugin_failed = claude_installed and not plugin_update.get("updated") and plugin_reason != "plugin-not-installed"
     monitor_failed = monitor_expected and not monitor_install["installed"]
@@ -1234,6 +1250,84 @@ def health_monitor_enabled() -> bool:
     return value.get("enabled") is not False
 
 
+def _health_monitor_config() -> dict:
+    try:
+        value = json.loads(HEALTH_CONFIG.read_text(encoding="utf-8")) if HEALTH_CONFIG.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _configured_claude_command(config: dict | None = None) -> str:
+    """Resolve the owner-approved Claude CLI path without guessing private cache paths."""
+    config = config or _health_monitor_config()
+    command = config.get("claude_command")
+    if isinstance(command, str) and command:
+        return command
+    try:
+        updater = json.loads(UPDATE_CONFIG.read_text(encoding="utf-8")) if UPDATE_CONFIG.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        updater = {}
+    command = updater.get("claude_command") if isinstance(updater, dict) else ""
+    if isinstance(command, str) and command:
+        return command
+    return shutil.which("claude") or ""
+
+
+def _claude_plugin_monitor_status() -> dict:
+    """Check an enrolled Claude plugin cache without installing a missing plugin."""
+    config = _health_monitor_config()
+    required = config.get("plugin_required") is True
+    if not TARGETS["claude"].is_symlink():
+        return {"required": False, "healthy": True, "reason": "claude-skill-not-installed"}
+    command = _configured_claude_command(config)
+    if not command:
+        return {
+            "required": required,
+            "healthy": not required,
+            "reason": "claude-command-unavailable",
+        }
+    try:
+        expected_version = (repository_root() / "VERSION").read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return {"required": required, "healthy": False, "reason": "runtime-version-unavailable"}
+    status = claude_plugin_status(expected_version, command)
+    if status.get("installed") and not required:
+        config.update({
+            "enabled": config.get("enabled") is not False,
+            "interval_seconds": 60,
+            "plugin_required": True,
+            "claude_command": command,
+        })
+        _atomic_json(HEALTH_CONFIG, config)
+        required = True
+    if not required:
+        return {
+            "required": False,
+            "healthy": True,
+            "reason": status.get("reason", "plugin-not-enrolled"),
+            "command": command,
+        }
+    return {
+        "required": True,
+        "healthy": status.get("healthy") is True,
+        "reason": status.get("reason", "ok" if status.get("healthy") else "plugin-cache-unhealthy"),
+        "version": status.get("version", ""),
+        "expected_version": expected_version,
+        "command": command,
+        "status": status,
+    }
+
+
+def _plugin_health_fields(plugin: dict) -> dict:
+    return {
+        "plugin_required": plugin.get("required") is True,
+        "plugin_cache_healthy": plugin.get("healthy") is True,
+        "plugin_cache_version": plugin.get("version", ""),
+        "plugin_cache_reason": plugin.get("reason", ""),
+    }
+
+
 def _guard_stack_status(timeout: float = 1.0) -> tuple[bool, bool]:
     try:
         guard = probe_guard_service(timeout=timeout)
@@ -1273,7 +1367,7 @@ def _health_repair_delay(consecutive_failures: int) -> int:
 
 
 def health_monitor_run(*, now: int | None = None) -> int:
-    """Probe the complete release path and make at most one dependency-ordered repair."""
+    """Probe signer, MCP, and enrolled Claude cache, then make one ordered repair pass."""
     timestamp = int(time.time()) if now is None else now
     token = _acquire_operation_lock("health-monitor", now=timestamp)
     if token is None:
@@ -1285,7 +1379,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
         except (OSError, json.JSONDecodeError):
             previous = {}
         guard_healthy, mcp_healthy = _guard_stack_status()
-        if guard_healthy and mcp_healthy:
+        plugin = _claude_plugin_monitor_status()
+        if guard_healthy and mcp_healthy and plugin.get("healthy") is True:
             state = {
                 "status": "ok",
                 "checked_at": timestamp,
@@ -1295,6 +1390,7 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 "last_repair_at": previous.get("last_repair_at", 0),
                 "next_repair_at": 0,
                 "repairs": [],
+                **_plugin_health_fields(plugin),
             }
             _atomic_json(HEALTH_STATE, state)
             print(json.dumps(state, sort_keys=True))
@@ -1315,6 +1411,7 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 "last_repair_at": last_repair,
                 "next_repair_at": next_repair,
                 "repairs": [],
+                **_plugin_health_fields(plugin),
             }
             _atomic_json(HEALTH_STATE, state)
             print(json.dumps(state, sort_keys=True), file=sys.stderr)
@@ -1330,8 +1427,23 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 restarted, _detail = restart_mcp_http_runtime()
                 repairs.append("mcp-restart")
                 mcp_healthy = restarted and _wait_for_stack(guard=True, mcp=True)
+        if (
+            guard_healthy
+            and mcp_healthy
+            and plugin.get("required") is True
+            and plugin.get("healthy") is not True
+            and plugin.get("expected_version")
+            and plugin.get("command")
+        ):
+            plugin_update = update_claude_plugin(
+                str(plugin.get("expected_version", "")),
+                str(plugin.get("command", "")) or None,
+            )
+            if plugin_update.get("attempted"):
+                repairs.append("claude-plugin-update")
         guard_healthy, mcp_healthy = _guard_stack_status()
-        recovered = guard_healthy and mcp_healthy
+        plugin = _claude_plugin_monitor_status()
+        recovered = guard_healthy and mcp_healthy and plugin.get("healthy") is True
         failures = 0 if recovered else previous_failures + 1
         state = {
             "status": "recovered" if recovered else "blocked",
@@ -1342,6 +1454,7 @@ def health_monitor_run(*, now: int | None = None) -> int:
             "last_repair_at": timestamp,
             "next_repair_at": 0 if recovered else timestamp + _health_repair_delay(failures),
             "repairs": repairs,
+            **_plugin_health_fields(plugin),
         }
         _atomic_json(HEALTH_STATE, state)
         print(json.dumps(state, sort_keys=True), file=sys.stdout if recovered else sys.stderr)
@@ -1376,7 +1489,13 @@ def health_monitor(action: str) -> int:
     check = health_monitor_run()
     ok, detail = install_health_monitor()
     if ok:
-        _atomic_json(HEALTH_CONFIG, {"enabled": True, "interval_seconds": 60})
+        config = _health_monitor_config()
+        config.update({
+            "enabled": True,
+            "interval_seconds": 60,
+            "claude_command": _configured_claude_command(config),
+        })
+        _atomic_json(HEALTH_CONFIG, config)
     print(f"{'Health monitor installed' if ok else 'Health monitor installation failed'}: {detail}")
     return 0 if ok and check == 0 else 1
 

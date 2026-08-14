@@ -22,7 +22,7 @@ SPEC.loader.exec_module(INSTALLER)
 
 
 class InstallerTests(unittest.TestCase):
-    def _fake_claude(self, root: Path, *, old_version: str = "6.7.0", new_version: str = "6.7.1", fail_update: bool = False) -> tuple[Path, Path]:
+    def _fake_claude(self, root: Path, *, old_version: str = "6.7.1", new_version: str = "6.8.0", fail_update: bool = False) -> tuple[Path, Path]:
         state = root / "plugin-version.txt"
         state.write_text(old_version, encoding="utf-8")
         executable = root / "claude"
@@ -85,33 +85,33 @@ class InstallerTests(unittest.TestCase):
 
     def test_claude_plugin_update_reaches_exact_runtime_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            executable, state = self._fake_claude(Path(directory), old_version="6.7.0", new_version="6.7.1")
-            result = INSTALLER.update_claude_plugin("6.7.1", str(executable))
+            executable, state = self._fake_claude(Path(directory), old_version="6.7.1", new_version="6.8.0")
+            result = INSTALLER.update_claude_plugin("6.8.0", str(executable))
             self.assertTrue(result["attempted"])
             self.assertTrue(result["updated"], result)
             self.assertTrue(result["reload_required"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.1")
-            self.assertEqual(result["status"]["version"], "6.7.1")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.8.0")
+            self.assertEqual(result["status"]["version"], "6.8.0")
 
     def test_claude_plugin_update_failure_is_reported_without_claiming_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             executable, state = self._fake_claude(
-                Path(directory), old_version="6.7.0", new_version="6.7.1", fail_update=True
+                Path(directory), old_version="6.7.1", new_version="6.8.0", fail_update=True
             )
-            result = INSTALLER.update_claude_plugin("6.7.1", str(executable))
+            result = INSTALLER.update_claude_plugin("6.8.0", str(executable))
             self.assertTrue(result["attempted"])
             self.assertFalse(result["updated"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.0")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.1")
             self.assertFalse(result["status"]["healthy"])
 
     def test_current_claude_plugin_is_not_updated_again(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            executable, state = self._fake_claude(Path(directory), old_version="6.7.1", new_version="broken")
-            result = INSTALLER.update_claude_plugin("6.7.1", str(executable))
+            executable, state = self._fake_claude(Path(directory), old_version="6.8.0", new_version="broken")
+            result = INSTALLER.update_claude_plugin("6.8.0", str(executable))
             self.assertFalse(result["attempted"])
             self.assertTrue(result["updated"])
             self.assertFalse(result["reload_required"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.1")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.8.0")
 
     def test_degraded_updater_state_is_due_immediately(self) -> None:
         originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE)
@@ -228,7 +228,7 @@ class InstallerTests(unittest.TestCase):
     def test_missing_or_uninstalled_claude_plugin_is_not_modified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            unavailable = INSTALLER.claude_plugin_status("6.7.1", str(root / "missing-claude"))
+            unavailable = INSTALLER.claude_plugin_status("6.8.0", str(root / "missing-claude"))
             self.assertEqual(unavailable["reason"], "claude-command-unavailable")
             executable = root / "claude"
             executable.write_text(
@@ -236,7 +236,7 @@ class InstallerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-            result = INSTALLER.update_claude_plugin("6.7.1", str(executable))
+            result = INSTALLER.update_claude_plugin("6.8.0", str(executable))
             self.assertFalse(result["attempted"])
             self.assertEqual(result["status"]["reason"], "plugin-not-installed")
 
@@ -581,6 +581,101 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(INSTALLER._health_repair_delay(999), 3600)
             finally:
                 INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_enrolls_and_repairs_an_installed_stale_claude_plugin(self) -> None:
+        originals = (
+            INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.UPDATE_CONFIG,
+            INSTALLER.OPERATION_LOCK, INSTALLER.TARGETS,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill = root / "skill"
+            skill.mkdir()
+            claude_target = root / "claude-skill"
+            claude_target.symlink_to(skill, target_is_directory=True)
+            executable, plugin_version = self._fake_claude(
+                root, old_version="6.7.1", new_version="6.8.0"
+            )
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.UPDATE_CONFIG = root / "missing-updater.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER.TARGETS = {**INSTALLER.TARGETS, "claude": claude_target}
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": True, "interval_seconds": 60, "claude_command": str(executable),
+            })
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.8.0")
+                policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
+                self.assertTrue(policy["plugin_required"])
+                state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(state["status"], "recovered")
+                self.assertTrue(state["plugin_required"])
+                self.assertTrue(state["plugin_cache_healthy"])
+                self.assertEqual(state["plugin_cache_version"], "6.8.0")
+                self.assertEqual(state["repairs"], ["claude-plugin-update"])
+            finally:
+                (
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.UPDATE_CONFIG,
+                    INSTALLER.OPERATION_LOCK, INSTALLER.TARGETS,
+                ) = originals
+
+    def test_health_monitor_never_installs_a_missing_enrolled_claude_plugin(self) -> None:
+        originals = (
+            INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.UPDATE_CONFIG,
+            INSTALLER.OPERATION_LOCK, INSTALLER.TARGETS,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill = root / "skill"
+            skill.mkdir()
+            claude_target = root / "claude-skill"
+            claude_target.symlink_to(skill, target_is_directory=True)
+            calls = root / "calls.jsonl"
+            executable = root / "claude"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, pathlib, sys\n"
+                f"calls = pathlib.Path({str(calls)!r})\n"
+                "with calls.open('a', encoding='utf-8') as handle:\n"
+                "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "if sys.argv[1:] == ['plugin', 'list', '--json']:\n"
+                "    print('[]')\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(9)\n",
+                encoding="utf-8",
+            )
+            executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.UPDATE_CONFIG = root / "missing-updater.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER.TARGETS = {**INSTALLER.TARGETS, "claude": claude_target}
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": True,
+                "interval_seconds": 60,
+                "plugin_required": True,
+                "claude_command": str(executable),
+            })
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=7000), 1)
+                observed = [INSTALLER.json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()]
+                self.assertTrue(observed)
+                self.assertTrue(all(call == ["plugin", "list", "--json"] for call in observed))
+                state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(state["status"], "blocked")
+                self.assertFalse(state["plugin_cache_healthy"])
+                self.assertEqual(state["plugin_cache_reason"], "plugin-not-installed")
+                self.assertEqual(state["repairs"], [])
+            finally:
+                (
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.UPDATE_CONFIG,
+                    INSTALLER.OPERATION_LOCK, INSTALLER.TARGETS,
+                ) = originals
 
     def test_health_monitor_platform_schedulers_are_one_minute_and_non_overlapping(self) -> None:
         completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
