@@ -85,6 +85,33 @@ class GuardService:
         GATEWAY.GUARD.KEY_PATH = key_path
         GATEWAY.GUARD.SERVICE_ENDPOINT = ""
 
+    def _health_self_test(self) -> dict[str, bool]:
+        """Exercise the real response gate and signer without writing a canary audit record."""
+        target = "Hälsokontrollen är aktiv."
+        try:
+            released = GATEWAY.gate({
+                "task_kind": "response",
+                "source_text": "",
+                "target_text": target,
+                "language": "sv-SE",
+                "attestations": {"nativeness": True, "orthography": True},
+            })
+            release_ok = released.get("release_allowed") is True
+            token = released.get("release_token", "") if release_ok else ""
+            verified = QUALITY.verify_receipt(
+                token, "", target, "sv-SE", self.key, purpose="response"
+            )
+            tampered = QUALITY.verify_receipt(
+                token, "", target + " Ändrad.", "sv-SE", self.key, purpose="response"
+            )
+            return {
+                "release": release_ok,
+                "signature": verified.get("valid") is True,
+                "tamper_blocked": tampered.get("valid") is False,
+            }
+        except Exception:
+            return {"release": False, "signature": False, "tamper_blocked": False}
+
     @staticmethod
     def _identity_hash(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -184,11 +211,14 @@ class GuardService:
         self._authorize(request)
         operation = request.pop("operation", "")
         if operation == "health":
+            self_test = self._health_self_test()
+            healthy = all(self_test.values())
             return {
-                "status": "ok",
+                "status": "ok" if healthy else "BLOCK",
                 "service": "blun-language-guard",
                 "version": QUALITY.VERSION,
-                "isolated_key": True,
+                "isolated_key": healthy,
+                "self_test": self_test,
             }
         if operation == "release":
             result = GATEWAY.gate(request)

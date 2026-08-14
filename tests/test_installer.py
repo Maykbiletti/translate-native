@@ -418,6 +418,44 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(result["attempted"])
             self.assertEqual(result["status"]["reason"], "plugin-not-installed")
 
+    def test_persistent_mcp_probe_requires_a_real_swedish_tool_call(self) -> None:
+        responses = [
+            (200, {"status": "ok", "isolated_key": True}),
+            (200, {"result": {"protocolVersion": "2025-06-18"}}),
+            (200, {"result": {"tools": [
+                {"name": "release_response"},
+                {"name": "release_translation"},
+                {"name": "verify_release_token"},
+            ]}}),
+            (200, {"result": {"structuredContent": {
+                "status": "PASS", "release_allowed": True, "language": "sv-SE",
+            }}}),
+        ]
+        with mock.patch.object(INSTALLER, "_mcp_http_request", side_effect=responses) as request:
+            result = INSTALLER.probe_mcp_http(timeout=0.1)
+        self.assertEqual(request.call_count, 4)
+        self.assertEqual(request.call_args_list[-1].args[1]["method"], "tools/call")
+        self.assertEqual(
+            request.call_args_list[-1].args[1]["params"]["arguments"]["text"],
+            "Hälsokontrollen är aktiv.",
+        )
+        self.assertEqual(result["canary"], {"status": "PASS", "language": "sv-SE"})
+
+    def test_persistent_mcp_probe_blocks_when_tool_dispatch_is_broken(self) -> None:
+        responses = [
+            (200, {"status": "ok", "isolated_key": True}),
+            (200, {"result": {"protocolVersion": "2025-06-18"}}),
+            (200, {"result": {"tools": [
+                {"name": "release_response"},
+                {"name": "release_translation"},
+                {"name": "verify_release_token"},
+            ]}}),
+            (500, {"error": {"message": "Internal MCP failure"}}),
+        ]
+        with mock.patch.object(INSTALLER, "_mcp_http_request", side_effect=responses):
+            with self.assertRaisesRegex(RuntimeError, "tools/call"):
+                INSTALLER.probe_mcp_http(timeout=0.1)
+
     def test_signing_key_is_created_once_with_owner_only_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             key = Path(directory) / "guard" / "signing.key"
@@ -772,7 +810,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.8.0", new_version="6.9.0"
+                root, old_version="6.9.0", new_version="6.10.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -785,14 +823,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.9.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.10.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.9.0")
+                self.assertEqual(state["plugin_cache_version"], "6.10.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (

@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +78,33 @@ class GuardServiceTests(unittest.TestCase):
         self.assertFalse(verified["valid"])
         with self.assertRaises(SERVICE.GuardProtocolError):
             self.service.handle({"operation": "health", "service_token": "wrong"})
+
+    def test_health_runs_release_signature_and_tamper_self_test_without_audit(self) -> None:
+        health = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "health",
+        })
+        self.assertEqual(health["status"], "ok", health)
+        self.assertTrue(health["isolated_key"])
+        self.assertEqual(health["self_test"], {
+            "release": True,
+            "signature": True,
+            "tamper_blocked": True,
+        })
+        self.assertFalse(self.audit_path.exists())
+
+    def test_health_blocks_when_release_signing_path_is_broken(self) -> None:
+        with mock.patch.object(
+            SERVICE.GATEWAY, "gate",
+            return_value={"status": "PASS", "release_allowed": True, "release_token": "forged"},
+        ):
+            health = self.service.handle({
+                "service_token": "service-secret-with-at-least-32-characters",
+                "operation": "health",
+            })
+        self.assertEqual(health["status"], "BLOCK", health)
+        self.assertFalse(health["isolated_key"])
+        self.assertFalse(health["self_test"]["signature"])
 
     def authorize_request(self, release_token: str, target: str = "Natürlich ist das möglich.") -> dict:
         return {

@@ -505,16 +505,31 @@ def probe_mcp_http(timeout: float = 4.0) -> dict:
     tools_status, tools = _mcp_http_request("/mcp", {
         "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
     }, timeout=timeout)
+    canary_status, canary = _mcp_http_request("/mcp", {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "validate_text",
+            "arguments": {"text": "Hälsokontrollen är aktiv.", "language": "sv-SE"},
+        },
+    }, timeout=timeout)
     names = {
         tool.get("name")
         for tool in tools.get("result", {}).get("tools", [])
         if isinstance(tool, dict)
     }
-    if initialize_status != 200 or tools_status != 200 or not {
+    canary_result = canary.get("result", {}).get("structuredContent", {})
+    if initialize_status != 200 or tools_status != 200 or canary_status != 200 or not {
         "release_response", "release_translation", "verify_release_token",
-    } <= names:
-        raise RuntimeError("persistent MCP initialize/tools probe failed")
-    return {"health": health, "initialize": initialized, "tools": sorted(names)}
+    } <= names or canary_result.get("status") != "PASS" or canary_result.get("release_allowed") is not True:
+        raise RuntimeError("persistent MCP initialize/tools/call probe failed")
+    return {
+        "health": health,
+        "initialize": initialized,
+        "tools": sorted(names),
+        "canary": {"status": canary_result["status"], "language": canary_result.get("language")},
+    }
 
 
 def mcp_service(action: str) -> int:

@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GATEWAY_PATH = ROOT / "integrations" / "mcp_http_gateway.py"
 HEADERS_PATH = ROOT / "integrations" / "mcp_auth_headers.py"
 SERVICE_PATH = ROOT / "integrations" / "guard_service.py"
+INSTALLER_PATH = ROOT / "installer" / "blun_language_guard.py"
 
 
 def load(name: str, path: Path):
@@ -33,6 +34,7 @@ def load(name: str, path: Path):
 GATEWAY = load("blun_test_mcp_http_gateway", GATEWAY_PATH)
 HEADERS = load("blun_test_mcp_auth_headers", HEADERS_PATH)
 SERVICE = load("blun_test_mcp_http_guard_service", SERVICE_PATH)
+INSTALLER = load("blun_test_mcp_http_installer", INSTALLER_PATH)
 
 
 class MCPHTTPGatewayTests(unittest.TestCase):
@@ -212,6 +214,43 @@ class MCPHTTPGatewayTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+
+    def test_real_deep_monitor_probe_reaches_signer_and_swedish_tool_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service_token = "deep-probe-service-token-with-at-least-32-characters"
+            service_token_file = root / "service.token"
+            service_token_file.write_text(service_token + "\n", encoding="ascii")
+            mcp_token_file = root / "mcp.token"
+            mcp_token_file.write_text(self.token + "\n", encoding="ascii")
+            if os.name != "nt":
+                os.chmod(service_token_file, 0o600)
+                os.chmod(mcp_token_file, 0o600)
+            service = SERVICE.GuardService(root / "signing.key", root / "audit.jsonl", service_token)
+            signer = SERVICE._ThreadingTCPServer(("127.0.0.1", 0), SERVICE._RequestHandler)
+            signer.guard_service = service
+            signer.socket_path = None
+            signer_thread = threading.Thread(target=signer.serve_forever, daemon=True)
+            signer_thread.start()
+            try:
+                endpoint = f"tcp:127.0.0.1:{signer.server_address[1]}"
+                with mock.patch.object(GATEWAY.GUARD, "SERVICE_ENDPOINT", endpoint), \
+                     mock.patch.object(GATEWAY.GUARD, "SERVICE_TOKEN_FILE", str(service_token_file)), \
+                     mock.patch.object(INSTALLER, "MCP_HTTP_URL", self.base_url + "/mcp"), \
+                     mock.patch.object(INSTALLER, "MCP_HTTP_TOKEN", mcp_token_file):
+                    result = INSTALLER.probe_mcp_http(timeout=2.0)
+                self.assertEqual(result["health"]["status"], "ok")
+                self.assertEqual(result["health"]["self_test"], {
+                    "release": True,
+                    "signature": True,
+                    "tamper_blocked": True,
+                })
+                self.assertEqual(result["canary"], {"status": "PASS", "language": "sv-SE"})
+                self.assertFalse((root / "audit.jsonl").exists())
+            finally:
+                signer.shutdown()
+                signer.server_close()
+                signer_thread.join(timeout=2)
 
     def test_non_loopback_bind_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "loopback"):

@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.10.0: deep MCP health proof
+
+Version 6.10 closes a false-green health gap. The one-minute monitor no longer accepts a signer heartbeat plus MCP initialization and a matching tool list as proof that the language guard can actually execute tools. The isolated service's authenticated health operation now performs an audit-free response release with correct Swedish Unicode, verifies the resulting purpose-bound signature, and proves that a changed target is rejected. The HTTP probe then performs a real MCP `tools/call` using `validate_text` on `Hälsokontrollen är aktiv.` and requires an exact `PASS` result.
+
+No customer text, token, or synthetic canary is written to the audit log. A broken release/signature path, a gateway that merely advertises tools, or a failed tool dispatcher now makes the health monitor block and enter its existing ordered repair and bounded-backoff path. The integration suite runs this complete chain through temporary TCP signer and authenticated HTTP MCP servers without touching installed services.
+
 ### Version 6.9.0: transactional safe rollback
 
 Version 6.9 turns the updater's recorded previous revision into an explicit, fail-closed recovery command. `rollback` accepts only an exact 40-character commit recorded by the immediately preceding successful or degraded update, requires the current `HEAD` to match that update, requires a clean worktree, and proves that the target is an available ancestor. It clones the target locally, runs its complete test suite, enforces the saved signed-commit policy when enabled, and changes the active checkout only after every preflight passes. The rolled-back checkout is tested again and already-installed guard and MCP runtimes must restart and pass their live probes; otherwise the updater restores the forward revision.
@@ -392,7 +398,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.9.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.10.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
