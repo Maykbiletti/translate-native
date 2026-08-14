@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.14.0: turn-bound delivery grants
+
+Version 6.14 prevents an unconsumed Claude delivery grant from surviving an interrupted turn. Anthropic's official [hook lifecycle](https://code.claude.com/docs/en/hooks) places `UserPromptSubmit` before Claude processes each new turn. The plugin now uses that trusted boundary to invalidate every outstanding main-agent and subagent grant belonging to the current session before the new prompt is processed. A generic response released in an abandoned turn therefore cannot authorize identical text in a later turn.
+
+The added session identifier is only a SHA-256 label, never the prompt or source text. Invalidation scans only hook-state JSON records, preserves labeled concurrent sessions, tolerates unrelated or malformed foreign records, and blocks the current prompt if a matching record cannot be removed. Structurally valid pre-6.14 grant records have no session label and are discarded once during the upgrade rather than trusted across a turn boundary. Regression coverage proves cross-turn replay rejection, same-session and legacy-subagent cleanup, parallel-session isolation, and ordinary release behavior after the boundary.
+
 ### Version 6.13.0: bounded fail-closed Stop recovery
 
 Version 6.13 closes a Claude lifecycle bypass caused by repeated Stop-hook rejection. [Anthropic documents](https://code.claude.com/docs/en/hooks) that `stop_hook_active` becomes true when Claude is already continuing because of a Stop hook, while the official [hook troubleshooting guide](https://code.claude.com/docs/en/hooks-guide) explains that Claude Code eventually overrides a hook after repeated consecutive blocks. Returning `decision: "block"` forever was therefore neither reliable enforcement nor reliable recovery.
@@ -416,7 +422,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.13.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.14.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

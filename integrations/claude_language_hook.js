@@ -141,6 +141,12 @@ function identity(input) {
   return crypto.createHash("sha256").update(`${session}\0${agent}`, "utf8").digest("hex");
 }
 
+function sessionHash(input) {
+  const session = String(input.session_id || "");
+  if (!session) throw new Error("Claude hook input has no session_id");
+  return crypto.createHash("sha256").update(session, "utf8").digest("hex");
+}
+
 function statePath(input) {
   return path.join(stateDirectory(), `${identity(input)}.json`);
 }
@@ -162,6 +168,41 @@ function readRecord(input) {
   } catch (error) {
     if (error && error.code === "ENOENT") return { destination, record: null };
     throw error;
+  }
+}
+
+function invalidateSessionRecords(input) {
+  const directory = stateDirectory();
+  const expectedSession = sessionHash(input);
+  const legacyMainRecord = statePath(input);
+  let entries;
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error && error.code === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if ((!entry.isFile() && !entry.isSymbolicLink()) || !entry.name.endsWith(".json")) continue;
+    const candidate = path.join(directory, entry.name);
+    let belongsToSession = candidate === legacyMainRecord;
+    if (!belongsToSession) {
+      try {
+        const record = safeReadJson(candidate);
+        const legacyGrant = typeof record.session_sha256 !== "string"
+          && typeof record.delivery_grant === "string"
+          && Number.isFinite(record.authorized_at);
+        belongsToSession = record.session_sha256 === expectedSession || legacyGrant;
+      } catch (_) {
+        continue;
+      }
+    }
+    if (!belongsToSession) continue;
+    try {
+      fs.unlinkSync(candidate);
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+    }
   }
 }
 
@@ -205,6 +246,14 @@ async function sessionStart() {
   }
 }
 
+function promptBoundary(input) {
+  try {
+    invalidateSessionRecords(input);
+  } catch (_) {
+    emit(blocked("BLUN Language Guard could not invalidate release state from the prior turn. The prompt is blocked to prevent cross-turn receipt reuse."));
+  }
+}
+
 async function postTool(input) {
   const toolName = String(input.tool_name || "");
   const purpose = toolName.endsWith("__release_translation") ? "translation"
@@ -240,6 +289,7 @@ async function postTool(input) {
     }
     writeRecord(input, {
       delivery_grant: verification.delivery_grant,
+      session_sha256: sessionHash(input),
       source_sha256: textHash(source),
       target_sha256: textHash(target),
       language,
@@ -313,6 +363,7 @@ async function main() {
   const input = await readInput();
   currentHookInput = input;
   if (mode === "session-start") return sessionStart(input);
+  if (mode === "prompt-boundary") return promptBoundary(input);
   if (mode === "post-tool") return postTool(input);
   if (mode === "stop") return stop(input);
   throw new Error("unknown Claude hook mode");
@@ -325,4 +376,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { blockedStop, canonicalText, findRelease, hasNaturalLanguage, textHash };
+module.exports = { blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateSessionRecords, sessionHash, textHash };

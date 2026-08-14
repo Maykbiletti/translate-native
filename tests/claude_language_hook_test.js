@@ -42,7 +42,7 @@ async function main() {
       const request = JSON.parse(raw.slice(0, newline));
       let response;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.13.0" };
+        response = { status: "ok", isolated_key: true, version: "6.14.0" };
       } else if (request.operation === "authorize_delivery") {
         const valid = request.service_token === token && request.release_token === "valid-token";
         const grant = `grant-${crypto.randomUUID()}`;
@@ -132,8 +132,51 @@ async function main() {
   const parsedRecord = JSON.parse(copiedRecord);
   assert.strictEqual(parsedRecord.language, "de-DE");
   assert.strictEqual(parsedRecord.task_kind, "response");
+  assert.strictEqual(parsedRecord.session_sha256, crypto.createHash("sha256").update("session-one").digest("hex"));
   assert.strictEqual(parsedRecord.source_sha256, crypto.createHash("sha256").update("").digest("hex"));
   assert.strictEqual(parsedRecord.channel, "claude-hook");
+
+  const childTool = { ...tool, agent_id: "child-agent", tool_use_id: "tool-child" };
+  const otherSessionTool = { ...tool, session_id: "session-two", tool_use_id: "tool-other-session" };
+  await runHook("post-tool", childTool, environment);
+  await runHook("post-tool", otherSessionTool, environment);
+  const legacyChild = { ...parsedRecord };
+  delete legacyChild.session_sha256;
+  const legacyChildFile = path.join(
+    stateDirectory,
+    `${crypto.createHash("sha256").update("legacy-session\0child-agent").digest("hex")}.json`
+  );
+  fs.writeFileSync(legacyChildFile, `${JSON.stringify(legacyChild)}\n`, { mode: 0o600 });
+  const invalidated = await runHook("prompt-boundary", {
+    ...common,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Beginne eine neue Aufgabe."
+  }, environment);
+  assert.strictEqual(invalidated.stdout, "");
+  const remainingAfterBoundary = fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json"));
+  assert.strictEqual(remainingAfterBoundary.length, 1, "only another labeled session's grant may remain");
+  const remainingRecord = JSON.parse(fs.readFileSync(path.join(stateDirectory, remainingAfterBoundary[0]), "utf8"));
+  assert.strictEqual(remainingRecord.session_sha256, crypto.createHash("sha256").update("session-two").digest("hex"));
+
+  const crossTurnReplay = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(crossTurnReplay.stdout).decision, "block");
+  const concurrentSessionReleased = await runHook("stop", {
+    ...common,
+    session_id: "session-two",
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(concurrentSessionReleased.stdout, "");
+  assert.strictEqual(fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json")).length, 0);
+
+  await runHook("post-tool", tool, environment);
+  const consumedRecord = fs.readFileSync(stateFile, "utf8");
 
   const released = await runHook("stop", {
     ...common,
@@ -143,7 +186,7 @@ async function main() {
   }, environment);
   assert.strictEqual(released.stdout, "");
 
-  fs.writeFileSync(stateFile, copiedRecord, { mode: 0o600 });
+  fs.writeFileSync(stateFile, consumedRecord, { mode: 0o600 });
   const replay = await runHook("stop", {
     ...common,
     hook_event_name: "Stop",

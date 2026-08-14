@@ -16,6 +16,21 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "prompt-boundary"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "mcp__.*__(release_response|release_translation)$",
