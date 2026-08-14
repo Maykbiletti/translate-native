@@ -333,6 +333,95 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE = originals
 
+    def test_atomic_json_does_not_follow_predictable_temporary_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "updater.json"
+            sentinel = root / "sentinel.txt"
+            sentinel.write_text("do not replace\n", encoding="utf-8")
+            legacy_temporary = policy.with_suffix(policy.suffix + ".tmp")
+            try:
+                legacy_temporary.symlink_to(sentinel)
+            except OSError as error:
+                self.skipTest(f"symbolic links are unavailable: {error}")
+
+            INSTALLER._atomic_json(policy, {"enabled": True})
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not replace\n")
+            self.assertTrue(legacy_temporary.is_symlink())
+            self.assertFalse(policy.is_symlink())
+            self.assertEqual(INSTALLER.json.loads(policy.read_text(encoding="utf-8")), {"enabled": True})
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(policy.stat().st_mode), 0o600)
+
+    def test_update_policy_loader_rejects_links_special_files_size_and_invalid_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            target.write_text('{"enabled": true, "require_signed_commits": true}\n', encoding="utf-8")
+            linked = root / "linked.json"
+            try:
+                linked.symlink_to(target)
+            except OSError as error:
+                self.skipTest(f"symbolic links are unavailable: {error}")
+            with self.assertRaisesRegex(RuntimeError, "Unsafe updater policy file type"):
+                INSTALLER._load_update_policy(linked)
+
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b" " * (INSTALLER.MAX_UPDATE_POLICY_BYTES + 1))
+            with self.assertRaisesRegex(RuntimeError, "exceeds size limit"):
+                INSTALLER._load_update_policy(oversized)
+
+            invalid_values = (
+                {"enabled": "true"},
+                {"require_signed_commits": 1},
+                {"interval_hours": True},
+                {"interval_hours": 0},
+                {"repository": []},
+                {"claude_command": 7},
+            )
+            invalid = root / "invalid.json"
+            for payload in invalid_values:
+                with self.subTest(payload=payload):
+                    invalid.write_text(INSTALLER.json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(RuntimeError, "Invalid updater policy field"):
+                        INSTALLER._load_update_policy(invalid)
+
+            if os.name != "nt" and hasattr(os, "mkfifo"):
+                fifo = root / "policy.fifo"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(RuntimeError, "Unsafe updater policy file type"):
+                    INSTALLER._load_update_policy(fifo)
+
+    def test_auto_update_status_and_run_reject_linked_policy_without_worker_call(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            INSTALLER._atomic_json(target, {
+                "enabled": True,
+                "interval_hours": 1,
+                "require_signed_commits": True,
+            })
+            linked = root / "updater.json"
+            try:
+                linked.symlink_to(target)
+            except OSError as error:
+                self.skipTest(f"symbolic links are unavailable: {error}")
+            INSTALLER.UPDATE_CONFIG = linked
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "missing-paused.json"
+            INSTALLER.UPDATE_STATE = root / "missing-state.json"
+            try:
+                with mock.patch.object(INSTALLER, "update") as updater, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("run"), 2)
+                    self.assertEqual(INSTALLER.auto_update("status"), 2)
+                updater.assert_not_called()
+                self.assertTrue(linked.is_symlink())
+                self.assertTrue(INSTALLER.json.loads(target.read_text(encoding="utf-8"))["require_signed_commits"])
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE = originals
+
     def test_reenable_cannot_downgrade_signed_policy_without_explicit_disable(self) -> None:
         originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
         with tempfile.TemporaryDirectory() as directory:
@@ -1157,7 +1246,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.9.0", new_version="6.29.0"
+                root, old_version="6.9.0", new_version="6.30.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -1170,14 +1259,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.29.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.30.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.29.0")
+                self.assertEqual(state["plugin_cache_version"], "6.30.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (

@@ -11,6 +11,7 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,7 @@ CLAUDE_PLUGIN_NAME = "translate-native@blun-language-tools"
 CLAUDE_MARKETPLACE_NAME = "blun-language-tools"
 OPERATION_LOCK_STALE_SECONDS = 30 * 60
 HEALTH_REPAIR_BACKOFF_SECONDS = (60, 120, 300, 900, 3600)
+MAX_UPDATE_POLICY_BYTES = 64 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -1036,11 +1038,18 @@ def doctor() -> int:
         valid and tamper_blocked and purpose_blocked,
         "valid receipt accepted; edited target and wrong purpose rejected",
     ))
-    if UPDATE_CONFIG.exists():
-        config = json.loads(UPDATE_CONFIG.read_text(encoding="utf-8"))
-        state = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
-        maximum_age = int(config.get("interval_hours", 24)) * 7200
-        fresh = int(time.time()) - int(state.get("checked_at", 0)) <= maximum_age
+    try:
+        updater_config = _load_update_policy(UPDATE_CONFIG)
+    except RuntimeError:
+        checks.append(("automatic updater policy", False, str(UPDATE_CONFIG)))
+        updater_config = None
+    if updater_config is not None:
+        try:
+            state = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
+            maximum_age = int(updater_config.get("interval_hours", 24)) * 7200
+            fresh = int(time.time()) - int(state.get("checked_at", 0)) <= maximum_age
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            fresh = False
         checks.append(("automatic updater heartbeat", fresh, str(UPDATE_STATE)))
     if TARGETS["claude"].is_symlink() and health_monitor_enabled():
         try:
@@ -1059,9 +1068,74 @@ def doctor() -> int:
 
 def _atomic_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _load_update_policy(path: Path) -> dict | None:
+    """Read one bounded regular policy file without following symbolic links."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Unreadable updater policy: {path}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"Unsafe updater policy file type: {path}")
+    if metadata.st_size > MAX_UPDATE_POLICY_BYTES:
+        raise RuntimeError(f"Updater policy exceeds size limit: {path}")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise RuntimeError(f"Unsafe updater policy file type: {path}")
+            if (
+                metadata.st_ino
+                and opened.st_ino
+                and (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino)
+            ):
+                raise RuntimeError(f"Updater policy changed while opening: {path}")
+            raw = handle.read(MAX_UPDATE_POLICY_BYTES + 1)
+    except (OSError, RuntimeError) as error:
+        if isinstance(error, RuntimeError):
+            raise
+        raise RuntimeError(f"Unreadable updater policy: {path}") from error
+    if len(raw) > MAX_UPDATE_POLICY_BYTES:
+        raise RuntimeError(f"Updater policy exceeds size limit: {path}")
+    try:
+        policy = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Unreadable updater policy: {path}") from error
+    if not isinstance(policy, dict):
+        raise RuntimeError(f"Invalid updater policy: {path}")
+
+    bool_fields = ("enabled", "require_signed_commits")
+    for field in bool_fields:
+        if field in policy and not isinstance(policy[field], bool):
+            raise RuntimeError(f"Invalid updater policy field {field}: {path}")
+    if "interval_hours" in policy and (
+        isinstance(policy["interval_hours"], bool)
+        or not isinstance(policy["interval_hours"], int)
+        or policy["interval_hours"] < 1
+    ):
+        raise RuntimeError(f"Invalid updater policy field interval_hours: {path}")
+    for field in ("repository", "claude_command"):
+        if field in policy and not isinstance(policy[field], str):
+            raise RuntimeError(f"Invalid updater policy field {field}: {path}")
+    return policy
 
 
 def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | None:
@@ -1105,17 +1179,10 @@ def _effective_signed_commit_policy(requested: bool = False) -> bool:
     """Keep an enabled signature requirement monotonic across every entry point."""
     required = requested
     for path in (UPDATE_CONFIG, UPDATE_PAUSED_CONFIG):
-        if not path.exists():
+        policy = _load_update_policy(path)
+        if policy is None:
             continue
-        try:
-            policy = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"Unreadable updater policy: {path}") from error
-        if not isinstance(policy, dict):
-            raise RuntimeError(f"Invalid updater policy: {path}")
         saved = policy.get("require_signed_commits", False)
-        if not isinstance(saved, bool):
-            raise RuntimeError(f"Invalid signed-commit policy: {path}")
         required = required or saved
     return required
 
@@ -1707,8 +1774,8 @@ def _configured_claude_command(config: dict | None = None) -> str:
     if isinstance(command, str) and command:
         return command
     try:
-        updater = json.loads(UPDATE_CONFIG.read_text(encoding="utf-8")) if UPDATE_CONFIG.exists() else {}
-    except (OSError, json.JSONDecodeError):
+        updater = _load_update_policy(UPDATE_CONFIG) or {}
+    except RuntimeError:
         updater = {}
     command = updater.get("claude_command") if isinstance(updater, dict) else ""
     if isinstance(command, str) and command:
@@ -1946,19 +2013,19 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
     if action == "enable":
         try:
             signed_required = _effective_signed_commit_policy(require_signed_commits)
-        except RuntimeError:
+            _atomic_json(UPDATE_CONFIG, {
+                "enabled": True,
+                "interval_hours": max(1, interval_hours),
+                "require_signed_commits": signed_required,
+                "repository": REPO_URL,
+                "claude_command": shutil.which("claude") or "",
+            })
+        except (OSError, RuntimeError):
             print(
                 "Updater signature policy is unreadable; automatic updates were not reconfigured.",
                 file=sys.stderr,
             )
             return 2
-        _atomic_json(UPDATE_CONFIG, {
-            "enabled": True,
-            "interval_hours": max(1, interval_hours),
-            "require_signed_commits": signed_required,
-            "repository": REPO_URL,
-            "claude_command": shutil.which("claude") or "",
-        })
         UPDATE_PAUSED_CONFIG.unlink(missing_ok=True)
         print(f"Automatic updates enabled every {max(1, interval_hours)} hour(s).")
         if scheduler:
@@ -1973,7 +2040,12 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
         print("Automatic updates disabled.")
         return 0
     if action == "status":
-        print(UPDATE_CONFIG.read_text(encoding="utf-8") if UPDATE_CONFIG.exists() else json.dumps({"enabled": False}))
+        try:
+            config = _load_update_policy(UPDATE_CONFIG)
+        except RuntimeError:
+            print("Updater policy is unreadable; status is blocked fail-closed.", file=sys.stderr)
+            return 2
+        print(json.dumps(config if config is not None else {"enabled": False}, indent=2))
         if UPDATE_STATE.exists():
             print(UPDATE_STATE.read_text(encoding="utf-8"))
         return 0
@@ -1981,10 +2053,17 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
     if last.get("status") == "rolled_back" and last.get("auto_update_paused") is True:
         print("Automatic updates are paused after rollback; update explicitly, then re-enable auto-update.")
         return 0
-    if not UPDATE_CONFIG.exists():
+    try:
+        config = _load_update_policy(UPDATE_CONFIG)
+    except RuntimeError:
+        print("Updater policy is unreadable; automatic update is blocked fail-closed.", file=sys.stderr)
+        return 2
+    if config is None:
         print("Automatic updates are not enabled.", file=sys.stderr)
         return 2
-    config = json.loads(UPDATE_CONFIG.read_text(encoding="utf-8"))
+    if config.get("enabled") is not True:
+        print("Automatic update policy is not enabled; update is blocked fail-closed.", file=sys.stderr)
+        return 2
     due = (
         (
             TARGETS["claude"].is_symlink()
