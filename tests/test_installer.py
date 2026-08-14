@@ -52,7 +52,9 @@ class InstallerTests(unittest.TestCase):
         new = INSTALLER._run(["git", "rev-parse", "HEAD"], upstream).stdout.strip()
         return upstream, active, old, new
 
-    def _rollback_repository(self, root: Path, *, broken_target: bool = False) -> tuple[Path, str, str]:
+    def _rollback_repository(
+        self, root: Path, *, broken_target: bool = False, target_test_marker: Path | None = None,
+    ) -> tuple[Path, str, str]:
         repository = root / "repo"
         repository.mkdir()
         self.assertEqual(INSTALLER._run(["git", "init", "-b", "main"], repository).returncode, 0)
@@ -61,8 +63,13 @@ class InstallerTests(unittest.TestCase):
         (repository / "VERSION").write_text("6.8.0\n", encoding="utf-8")
         tests = repository / "tests"
         tests.mkdir()
+        marker_setup = (
+            "from pathlib import Path\n"
+            f"Path({str(target_test_marker)!r}).write_text('executed', encoding='utf-8')\n"
+            if target_test_marker is not None else ""
+        )
         (tests / "test_smoke.py").write_text(
-            "import unittest\n\nclass SmokeTest(unittest.TestCase):\n"
+            marker_setup + "import unittest\n\nclass SmokeTest(unittest.TestCase):\n"
             "    def test_true(self):\n        self.assertTrue(" + ("False" if broken_target else "True") + ")\n",
             encoding="utf-8",
         )
@@ -274,6 +281,22 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(any(call.args[0][:2] == ["git", "verify-commit"] for call in runner.call_args_list))
             self.assertEqual(real_run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), current)
 
+    def test_rollback_verifies_required_signature_before_executing_target_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "rollback-test-executed"
+            repository, target, current = self._rollback_repository(root, target_test_marker=marker)
+            state_path = root / "update-state.json"
+            INSTALLER._atomic_json(state_path, {"status": "ok", "revision": current, "previous": target})
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "missing-policy"), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER.rollback(require_signed_commits=True), 1)
+            self.assertFalse(marker.exists())
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(), current)
+
     def test_rollback_runtime_failure_restores_forward_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -346,6 +369,29 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(calls[2], ["plugin", "marketplace", "update", "blun-language-tools"])
             self.assertEqual(calls[3], ["plugin", "list", "--available", "--json"])
             self.assertFalse(any(call[:2] == ["plugin", "update"] for call in calls))
+
+    def test_update_verifies_required_signature_before_executing_candidate_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, active, old, _candidate = self._update_repository_pair(root)
+            marker = root / "candidate-test-executed"
+            (upstream / "tests" / "test_smoke.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+                "import unittest\n\nclass SmokeTest(unittest.TestCase):\n"
+                "    def test_true(self):\n        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(INSTALLER._run(["git", "add", "tests/test_smoke.py"], upstream).returncode, 0)
+            self.assertEqual(INSTALLER._run(["git", "commit", "-m", "untrusted candidate"], upstream).returncode, 0)
+            with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                 mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                 mock.patch.object(INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": root / "missing-claude"}), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER._update_unlocked(require_signed_commits=True), 1)
+            self.assertFalse(marker.exists())
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(), old)
+            self.assertFalse((active / "new-runtime.txt").exists())
 
     def test_failed_candidate_preflight_preserves_repository_and_runtimes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -995,7 +1041,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.9.0", new_version="6.26.0"
+                root, old_version="6.9.0", new_version="6.27.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -1008,14 +1054,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.26.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.27.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.26.0")
+                self.assertEqual(state["plugin_cache_version"], "6.27.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (

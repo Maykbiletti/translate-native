@@ -147,6 +147,14 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.27.0: verify trust before executing candidate code
+
+Version 6.27 closes an updater supply-chain gap in the optional signed-commit policy. Previously, a clean clone ran its repository-owned test suite before `git verify-commit` rejected an unsigned update or rollback target. Test discovery imports Python modules, so a rejected commit could execute code even though it never became active.
+
+When `require_signed_commits` is enabled, both forward update and rollback now resolve and verify the exact checked-out commit immediately after clone or checkout. Only a trusted signature permits test discovery, candidate metadata reads, Claude preflight, fetch, merge, or runtime work. Signature rejection leaves the active checkout and every installed runtime unchanged. The default remains compatible: installations that do not require signed commits continue to test unsigned candidates before activation.
+
+The regression tests place an observable import-time marker inside an unsigned candidate and an unsigned rollback target. Both operations must reject the commit while the marker remains absent, proving that the result is not merely a later rollback after code execution.
+
 ### Version 6.26.0: fail-closed Claude preflight before runtime cutover
 
 Version 6.26 closes the split-version window caused by discovering a deterministic Claude plugin failure only after the repository, signer, and MCP had already advanced. When the Claude plugin is installed, the updater now validates the clean temporary candidate with Claude's strict validator, refreshes only the trusted marketplace, and proves exact catalog-version equality while the active checkout and both persistent runtimes are still untouched.
@@ -496,7 +504,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.26.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.27.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

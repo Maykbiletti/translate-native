@@ -1127,16 +1127,16 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         if clone.returncode:
             print(clone.stderr, file=sys.stderr)
             return 1
-        tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], candidate)
-        if tests.returncode:
-            print("Candidate update failed tests; current installation is unchanged.", file=sys.stderr)
-            return 1
         revision = _run(["git", "rev-parse", "HEAD"], candidate).stdout.strip()
         if require_signed_commits:
             verified = _run(["git", "verify-commit", revision], candidate)
             if verified.returncode:
                 print("Candidate update is not signed by a trusted Git identity; current installation is unchanged.", file=sys.stderr)
                 return 1
+        tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], candidate)
+        if tests.returncode:
+            print("Candidate update failed tests; current installation is unchanged.", file=sys.stderr)
+            return 1
         try:
             expected_version = (candidate / "VERSION").read_text(encoding="utf-8-sig").strip()
         except OSError:
@@ -1447,14 +1447,17 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         candidate = Path(directory) / "repo"
         clone = _run(["git", "clone", "--no-hardlinks", "--no-checkout", str(root), str(candidate)])
         checkout = _run(["git", "checkout", "--detach", target], candidate) if not clone.returncode else clone
-        tests = _run(
-            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], candidate
-        ) if not checkout.returncode else checkout
-        if clone.returncode or checkout.returncode or tests.returncode:
-            print("Rollback candidate failed checkout or tests; current installation is unchanged.", file=sys.stderr)
+        if clone.returncode or checkout.returncode:
+            print("Rollback candidate failed checkout; current installation is unchanged.", file=sys.stderr)
             return 1
         if signed_required and _run(["git", "verify-commit", target], candidate).returncode:
             print("Rollback target is not signed by a trusted Git identity; current installation is unchanged.", file=sys.stderr)
+            return 1
+        tests = _run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], candidate
+        )
+        if tests.returncode:
+            print("Rollback candidate failed tests; current installation is unchanged.", file=sys.stderr)
             return 1
         try:
             target_version = (candidate / "VERSION").read_text(encoding="utf-8-sig").strip()
