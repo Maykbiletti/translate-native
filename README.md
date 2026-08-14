@@ -147,11 +147,11 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
-### Version 6.7: self-healing guard stack
+### Version 6.7.1: self-healing guard stack
 
 Version 6.7 adds an independent one-minute health monitor for the two-process Claude path. It verifies both the isolated signer and the complete authenticated MCP `healthz` → `initialize` → `tools/list` path. If the signer fails, it repairs that dependency first and then rechecks the MCP; if only the MCP fails, it restarts only the MCP. Every repair is followed by a complete end-to-end probe before the state may become `recovered`.
 
-The monitor uses systemd on Linux, a LaunchAgent on macOS, and Task Scheduler on Windows. A shared atomic operation lock prevents it from fighting the updater, each run makes at most one dependency-ordered repair, and a cooldown prevents restart storms. Its state contains only health booleans, timestamps, counters, and repair labels—never source text, target text, receipts, or credentials. Failure remains fail-closed: the monitor never substitutes a local signer or releases pending output while either process is unhealthy.
+The monitor uses systemd on Linux, a LaunchAgent on macOS, and Task Scheduler on Windows. A shared atomic operation lock prevents it from fighting the updater, and each run makes at most one dependency-ordered repair. Version 6.7.1 replaces the ineffective fixed cooldown with persistent exponential backoff: repeated failed repairs wait 1, 2, 5, 15, and then at most 60 minutes, while health probes continue every minute. A skipped probe does not increase the failure count or postpone the next eligible repair, and a successful end-to-end probe resets the backoff immediately. Its state contains only health booleans, timestamps, counters, and repair labels—never source text, target text, receipts, or credentials. Failure remains fail-closed: the monitor never substitutes a local signer or releases pending output while either process is unhealthy.
 
 Fresh Claude installations enable the monitor automatically. Existing automatically updated installations detect the missing health state on their next scheduler wake-up and install it without waiting for the normal update interval:
 
@@ -372,7 +372,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.7 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.7.1 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

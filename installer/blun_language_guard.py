@@ -44,7 +44,7 @@ CLAUDE_CONFIG = Path.home() / ".claude.json"
 MCP_SERVER_NAME = "blun-language-guard"
 CLAUDE_PLUGIN_NAME = "translate-native@blun-language-tools"
 OPERATION_LOCK_STALE_SECONDS = 30 * 60
-HEALTH_REPAIR_COOLDOWN_SECONDS = 45
+HEALTH_REPAIR_BACKOFF_SECONDS = (60, 120, 300, 900, 3600)
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -1048,6 +1048,7 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
                 "mcp_healthy": True,
                 "consecutive_failures": 0,
                 "last_repair_at": 0,
+                "next_repair_at": 0,
                 "repairs": [],
             })
         monitor_install = {"attempted": True, "installed": monitor_ok, "detail": monitor_detail}
@@ -1258,6 +1259,19 @@ def _wait_for_stack(*, guard: bool = False, mcp: bool = False, attempts: int = 8
     return False
 
 
+def _state_integer(value: object, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _health_repair_delay(consecutive_failures: int) -> int:
+    """Return bounded exponential backoff after a failed repair attempt."""
+    index = min(max(consecutive_failures - 1, 0), len(HEALTH_REPAIR_BACKOFF_SECONDS) - 1)
+    return HEALTH_REPAIR_BACKOFF_SECONDS[index]
+
+
 def health_monitor_run(*, now: int | None = None) -> int:
     """Probe the complete release path and make at most one dependency-ordered repair."""
     timestamp = int(time.time()) if now is None else now
@@ -1279,21 +1293,27 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 "mcp_healthy": True,
                 "consecutive_failures": 0,
                 "last_repair_at": previous.get("last_repair_at", 0),
+                "next_repair_at": 0,
                 "repairs": [],
             }
             _atomic_json(HEALTH_STATE, state)
             print(json.dumps(state, sort_keys=True))
             return 0
-        last_repair = int(previous.get("last_repair_at", 0))
-        if timestamp - last_repair < HEALTH_REPAIR_COOLDOWN_SECONDS:
+        previous_failures = _state_integer(previous.get("consecutive_failures"))
+        last_repair = _state_integer(previous.get("last_repair_at"))
+        next_repair = _state_integer(previous.get("next_repair_at"))
+        if not next_repair and previous.get("status") == "blocked" and last_repair:
+            next_repair = last_repair + _health_repair_delay(previous_failures)
+        if timestamp < next_repair:
             state = {
                 "status": "blocked",
-                "reason": "repair-cooldown",
+                "reason": "repair-backoff",
                 "checked_at": timestamp,
                 "guard_healthy": guard_healthy,
                 "mcp_healthy": mcp_healthy,
-                "consecutive_failures": int(previous.get("consecutive_failures", 0)) + 1,
+                "consecutive_failures": previous_failures,
                 "last_repair_at": last_repair,
+                "next_repair_at": next_repair,
                 "repairs": [],
             }
             _atomic_json(HEALTH_STATE, state)
@@ -1312,13 +1332,15 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 mcp_healthy = restarted and _wait_for_stack(guard=True, mcp=True)
         guard_healthy, mcp_healthy = _guard_stack_status()
         recovered = guard_healthy and mcp_healthy
+        failures = 0 if recovered else previous_failures + 1
         state = {
             "status": "recovered" if recovered else "blocked",
             "checked_at": timestamp,
             "guard_healthy": guard_healthy,
             "mcp_healthy": mcp_healthy,
-            "consecutive_failures": 0 if recovered else int(previous.get("consecutive_failures", 0)) + 1,
+            "consecutive_failures": failures,
             "last_repair_at": timestamp,
+            "next_repair_at": 0 if recovered else timestamp + _health_repair_delay(failures),
             "repairs": repairs,
         }
         _atomic_json(HEALTH_STATE, state)

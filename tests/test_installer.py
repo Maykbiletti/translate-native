@@ -22,7 +22,7 @@ SPEC.loader.exec_module(INSTALLER)
 
 
 class InstallerTests(unittest.TestCase):
-    def _fake_claude(self, root: Path, *, old_version: str = "6.6.0", new_version: str = "6.7.0", fail_update: bool = False) -> tuple[Path, Path]:
+    def _fake_claude(self, root: Path, *, old_version: str = "6.7.0", new_version: str = "6.7.1", fail_update: bool = False) -> tuple[Path, Path]:
         state = root / "plugin-version.txt"
         state.write_text(old_version, encoding="utf-8")
         executable = root / "claude"
@@ -85,33 +85,33 @@ class InstallerTests(unittest.TestCase):
 
     def test_claude_plugin_update_reaches_exact_runtime_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            executable, state = self._fake_claude(Path(directory), old_version="6.6.0", new_version="6.7.0")
-            result = INSTALLER.update_claude_plugin("6.7.0", str(executable))
+            executable, state = self._fake_claude(Path(directory), old_version="6.7.0", new_version="6.7.1")
+            result = INSTALLER.update_claude_plugin("6.7.1", str(executable))
             self.assertTrue(result["attempted"])
             self.assertTrue(result["updated"], result)
             self.assertTrue(result["reload_required"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.0")
-            self.assertEqual(result["status"]["version"], "6.7.0")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.1")
+            self.assertEqual(result["status"]["version"], "6.7.1")
 
     def test_claude_plugin_update_failure_is_reported_without_claiming_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             executable, state = self._fake_claude(
-                Path(directory), old_version="6.6.0", new_version="6.7.0", fail_update=True
+                Path(directory), old_version="6.7.0", new_version="6.7.1", fail_update=True
             )
-            result = INSTALLER.update_claude_plugin("6.7.0", str(executable))
+            result = INSTALLER.update_claude_plugin("6.7.1", str(executable))
             self.assertTrue(result["attempted"])
             self.assertFalse(result["updated"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.6.0")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.0")
             self.assertFalse(result["status"]["healthy"])
 
     def test_current_claude_plugin_is_not_updated_again(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            executable, state = self._fake_claude(Path(directory), old_version="6.7.0", new_version="broken")
-            result = INSTALLER.update_claude_plugin("6.7.0", str(executable))
+            executable, state = self._fake_claude(Path(directory), old_version="6.7.1", new_version="broken")
+            result = INSTALLER.update_claude_plugin("6.7.1", str(executable))
             self.assertFalse(result["attempted"])
             self.assertTrue(result["updated"])
             self.assertFalse(result["reload_required"])
-            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.0")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.1")
 
     def test_degraded_updater_state_is_due_immediately(self) -> None:
         originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_STATE)
@@ -228,7 +228,7 @@ class InstallerTests(unittest.TestCase):
     def test_missing_or_uninstalled_claude_plugin_is_not_modified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            unavailable = INSTALLER.claude_plugin_status("6.7.0", str(root / "missing-claude"))
+            unavailable = INSTALLER.claude_plugin_status("6.7.1", str(root / "missing-claude"))
             self.assertEqual(unavailable["reason"], "claude-command-unavailable")
             executable = root / "claude"
             executable.write_text(
@@ -236,7 +236,7 @@ class InstallerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-            result = INSTALLER.update_claude_plugin("6.7.0", str(executable))
+            result = INSTALLER.update_claude_plugin("6.7.1", str(executable))
             self.assertFalse(result["attempted"])
             self.assertEqual(result["status"]["reason"], "plugin-not-installed")
 
@@ -469,6 +469,7 @@ class InstallerTests(unittest.TestCase):
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "ok")
                 self.assertEqual(state["repairs"], [])
+                self.assertEqual(state["next_repair_at"], 0)
             finally:
                 INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
 
@@ -497,6 +498,8 @@ class InstallerTests(unittest.TestCase):
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertEqual(state["repairs"], ["mcp-restart"])
+                self.assertEqual(state["consecutive_failures"], 0)
+                self.assertEqual(state["next_repair_at"], 0)
             finally:
                 INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
 
@@ -520,7 +523,7 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
 
-    def test_health_monitor_cooldown_prevents_restart_storm(self) -> None:
+    def test_health_monitor_backoff_prevents_minute_restart_storm(self) -> None:
         originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -528,17 +531,54 @@ class InstallerTests(unittest.TestCase):
             INSTALLER.OPERATION_LOCK = root / "operation.lock"
             INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
                 "status": "blocked", "checked_at": 4000, "last_repair_at": 4000,
-                "consecutive_failures": 1,
+                "consecutive_failures": 3,
             })
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(False, False)), \
                      mock.patch.object(INSTALLER, "restart_guard_runtime") as guard_restart, \
                      contextlib.redirect_stderr(io.StringIO()):
-                    self.assertEqual(INSTALLER.health_monitor_run(now=4020), 1)
+                    self.assertEqual(INSTALLER.health_monitor_run(now=4060), 1)
                 guard_restart.assert_not_called()
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
-                self.assertEqual(state["reason"], "repair-cooldown")
-                self.assertEqual(state["consecutive_failures"], 2)
+                self.assertEqual(state["reason"], "repair-backoff")
+                self.assertEqual(state["consecutive_failures"], 3)
+                self.assertEqual(state["next_repair_at"], 4300)
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_failed_repairs_back_off_exponentially_and_cap_at_one_hour(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(False, False)), \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime", return_value=(False, "offline")), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=5000), 1)
+                first = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(first["consecutive_failures"], 1)
+                self.assertEqual(first["next_repair_at"], 5060)
+
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(False, False)), \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime", return_value=(False, "offline")) as restart, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=5030), 1)
+                restart.assert_not_called()
+                unchanged = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(unchanged["consecutive_failures"], 1)
+                self.assertEqual(unchanged["next_repair_at"], 5060)
+
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(False, False)), \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime", return_value=(False, "offline")) as restart, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=5060), 1)
+                restart.assert_called_once_with()
+                second = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
+                self.assertEqual(second["consecutive_failures"], 2)
+                self.assertEqual(second["next_repair_at"], 5180)
+                self.assertEqual(INSTALLER._health_repair_delay(999), 3600)
             finally:
                 INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
 
