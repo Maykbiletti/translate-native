@@ -45,7 +45,7 @@ async function main() {
       let response;
       let responseDelay = 0;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.23.0" };
+        response = { status: "ok", isolated_key: true, version: "6.24.0" };
       } else if (request.operation === "register_session_epoch") {
         const history = sessionEpochHistory.get(request.session_id) || new Set();
         const valid = request.service_token === token

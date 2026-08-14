@@ -52,9 +52,15 @@ class InstallerTests(unittest.TestCase):
         current = INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip()
         return repository, old, current
 
-    def _fake_claude(self, root: Path, *, old_version: str = "6.7.1", new_version: str = "6.8.0", fail_update: bool = False) -> tuple[Path, Path]:
+    def _fake_claude(
+        self, root: Path, *, old_version: str = "6.7.1", new_version: str = "6.8.0",
+        advertised_version: str | None = None, fail_marketplace_update: bool = False,
+        fail_update: bool = False,
+    ) -> tuple[Path, Path]:
         state = root / "plugin-version.txt"
         state.write_text(old_version, encoding="utf-8")
+        marketplace_ready = root / "marketplace-ready"
+        advertised_version = new_version if advertised_version is None else advertised_version
         executable = root / "claude"
         executable.write_text(
             "#!/usr/bin/env python3\n"
@@ -64,6 +70,13 @@ class InstallerTests(unittest.TestCase):
             "if args == ['plugin', 'list', '--json']:\n"
             "    print(json.dumps([{'name': 'translate-native', 'marketplace': 'blun-language-tools', "
             "'version': state.read_text().strip(), 'enabled': True, 'errors': []}]))\n"
+            "    raise SystemExit(0)\n"
+            "if args == ['plugin', 'marketplace', 'update', 'blun-language-tools']:\n"
+            + ("    raise SystemExit(1)\n" if fail_marketplace_update else f"    pathlib.Path({str(marketplace_ready)!r}).write_text('ready')\n    raise SystemExit(0)\n")
+            + "if args == ['plugin', 'list', '--available', '--json']:\n"
+            f"    if not pathlib.Path({str(marketplace_ready)!r}).exists(): raise SystemExit(3)\n"
+            "    print(json.dumps([{'name': 'translate-native', 'marketplace': 'blun-language-tools', "
+            f"'version': {advertised_version!r}}}]))\n"
             "    raise SystemExit(0)\n"
             "if args == ['plugin', 'update', 'translate-native@blun-language-tools', '--scope', 'user']:\n"
             + ("    raise SystemExit(1)\n" if fail_update else f"    state.write_text({new_version!r})\n    raise SystemExit(0)\n")
@@ -270,6 +283,30 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(result["reload_required"])
             self.assertEqual(state.read_text(encoding="utf-8"), "6.8.0")
             self.assertEqual(result["status"]["version"], "6.8.0")
+            self.assertTrue(result["catalog"]["healthy"])
+
+    def test_claude_plugin_update_blocks_when_marketplace_refresh_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable, state = self._fake_claude(
+                Path(directory), fail_marketplace_update=True
+            )
+            result = INSTALLER.update_claude_plugin("6.8.0", str(executable))
+            self.assertTrue(result["attempted"])
+            self.assertFalse(result["updated"])
+            self.assertEqual(result["catalog"]["reason"], "marketplace-update-failed")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.1")
+
+    def test_claude_plugin_update_blocks_catalog_version_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable, state = self._fake_claude(
+                Path(directory), advertised_version="6.8.1"
+            )
+            result = INSTALLER.update_claude_plugin("6.8.0", str(executable))
+            self.assertTrue(result["attempted"])
+            self.assertFalse(result["updated"])
+            self.assertEqual(result["catalog"]["reason"], "catalog-version-mismatch")
+            self.assertEqual(result["catalog"]["version"], "6.8.1")
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.7.1")
 
     def test_claude_plugin_update_failure_is_reported_without_claiming_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -810,7 +847,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.9.0", new_version="6.23.0"
+                root, old_version="6.9.0", new_version="6.24.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -823,14 +860,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.23.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.24.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.23.0")
+                self.assertEqual(state["plugin_cache_version"], "6.24.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (
