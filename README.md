@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.12.0: non-mutating portable verification
+
+Version 6.12 closes a trust-root failure in the portable pre-output verifier. Earlier portable and installed-skill hooks used the signer's load-or-create helper: a missing verifier key could therefore create a new signing key before rejecting the current receipt, and a later signer restart could adopt that unrelated key. Both hooks now only read an existing key, require at least 32 bytes, enforce owner-only permissions on POSIX systems, and fail closed without creating directories or files. The explicit `BLUN_LANGUAGE_GUARD_KEY` compatibility path remains available, but no filesystem fallback may initialize or repair signing state.
+
+Regression tests exercise both shipped hook locations, prove that a missing key remains absent, prove that broadly readable keys block on POSIX, and retain the existing exact-receipt success and edited-target rejection controls. Version 6.11's complete context-bound one-time delivery grants remain unchanged.
+
 ### Version 6.11.0: complete delivery-context binding
 
 Version 6.11 closes the final context gap between a successful release tool call and Claude's actual `Stop` or `SubagentStop`. The isolated service now signs the canonical source hash, target hash, exact language, task purpose, content type, short-text review flag, delivery channel, Claude session, agent identity, guard version, service boot, expiry, and nonce into every one-time delivery grant. The stop hook must return that complete context when consuming the grant; any changed, missing, stale, copied, or cross-context value blocks delivery.
@@ -386,7 +392,7 @@ python3 installer/blun_language_guard.py update
 
 Installation uses atomic symlinks for Codex and Claude Code and refuses to overwrite existing non-symlink skill folders. It installs `~/.local/bin/blun-language-deliver`, the isolated service command, owner-only key and service-token files, autostart configuration, a content-free audit path, and a fail-closed policy; writes a mergeable MCP snippet without overwriting unrelated host configuration; and merges the BLUN MCP entry safely. Updates are cloned and tested before the active checkout is fast-forwarded, then the service is restarted and health-checked; a failed restart rolls the checkout back. `doctor` checks the delivery command, service health, secret permissions, mandatory policy, test suite, live MCP tools, signed receipts, and updater heartbeat.
 
-The portable fail-closed hook is [`pre_output_guard.py`](integrations/pre_output_guard.py). It accepts `task_kind`, target, locale, receipt, and the complete source for translations as JSON on stdin and exits nonzero when verification fails. Host-specific adapters must pass the candidate output into this contract; a host hook that exposes no candidate text cannot enforce output validation.
+The portable fail-closed hook is [`pre_output_guard.py`](integrations/pre_output_guard.py). It accepts `task_kind`, target, locale, receipt, and the complete source for translations as JSON on stdin and exits nonzero when verification fails. It only reads an existing owner-only verification key and never creates or repairs signing state. Host-specific adapters must pass the candidate output into this contract; a host hook that exposes no candidate text cannot enforce output validation.
 
 ### Supported structured formats
 
@@ -404,7 +410,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.11.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.12.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

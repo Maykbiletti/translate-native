@@ -42,7 +42,7 @@ async function main() {
       const request = JSON.parse(raw.slice(0, newline));
       let response;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.11.0" };
+        response = { status: "ok", isolated_key: true, version: "6.12.0" };
       } else if (request.operation === "authorize_delivery") {
         const valid = request.service_token === token && request.release_token === "valid-token";
         const grant = `grant-${crypto.randomUUID()}`;

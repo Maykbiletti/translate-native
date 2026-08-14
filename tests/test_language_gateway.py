@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "integrations" / "language_gateway.py"
 PRE_OUTPUT = ROOT / "integrations" / "pre_output_guard.py"
+INSTALLED_PRE_OUTPUT = ROOT / "translate-native" / "scripts" / "pre_output_guard.py"
 SPEC = importlib.util.spec_from_file_location("blun_test_gateway", PATH)
 assert SPEC and SPEC.loader
 GATEWAY = importlib.util.module_from_spec(SPEC)
@@ -116,6 +117,77 @@ class LanguageGatewayTests(unittest.TestCase):
             text=True, capture_output=True, check=False, env=environment,
         )
         self.assertEqual(rejected.returncode, 1, rejected.stdout + rejected.stderr)
+
+    def test_pre_output_hooks_never_create_a_missing_verifier_key(self) -> None:
+        request = {
+            "task_kind": "response",
+            "target_text": "Natürlich bleibt die Prüfung geschlossen.",
+            "language": "de-DE",
+            "release_token": "blg6.invalid",
+        }
+        for hook in (PRE_OUTPUT, INSTALLED_PRE_OUTPUT):
+            with self.subTest(hook=hook):
+                missing = Path(self.temporary.name) / hook.parent.name / "missing.key"
+                environment = dict(os.environ)
+                environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
+                environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(missing)
+                result = subprocess.run(
+                    [sys.executable, str(hook)],
+                    input=json.dumps(request, ensure_ascii=False),
+                    text=True, capture_output=True, check=False, env=environment,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertFalse(missing.exists())
+                self.assertIn("verification fails closed", result.stdout)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits are not authoritative on Windows")
+    def test_pre_output_hooks_reject_a_broadly_readable_verifier_key(self) -> None:
+        request = {
+            "task_kind": "response",
+            "target_text": "Natürlich bleibt die Prüfung geschlossen.",
+            "language": "de-DE",
+            "release_token": "blg6.invalid",
+        }
+        for hook in (PRE_OUTPUT, INSTALLED_PRE_OUTPUT):
+            with self.subTest(hook=hook):
+                key = Path(self.temporary.name) / hook.parent.name / "broad.key"
+                key.parent.mkdir(parents=True, exist_ok=True)
+                key.write_bytes(b"k" * 32)
+                key.chmod(0o644)
+                environment = dict(os.environ)
+                environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
+                environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(key)
+                result = subprocess.run(
+                    [sys.executable, str(hook)],
+                    input=json.dumps(request, ensure_ascii=False),
+                    text=True, capture_output=True, check=False, env=environment,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("broader than owner-only", result.stdout)
+
+    def test_pre_output_hooks_reject_a_short_verifier_key(self) -> None:
+        request = {
+            "task_kind": "response",
+            "target_text": "Natürlich bleibt die Prüfung geschlossen.",
+            "language": "de-DE",
+            "release_token": "blg6.invalid",
+        }
+        for hook in (PRE_OUTPUT, INSTALLED_PRE_OUTPUT):
+            with self.subTest(hook=hook):
+                key = Path(self.temporary.name) / hook.parent.name / "short.key"
+                key.parent.mkdir(parents=True, exist_ok=True)
+                key.write_bytes(b"too-short")
+                key.chmod(0o600)
+                environment = dict(os.environ)
+                environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
+                environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(key)
+                result = subprocess.run(
+                    [sys.executable, str(hook)],
+                    input=json.dumps(request, ensure_ascii=False),
+                    text=True, capture_output=True, check=False, env=environment,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("signing key is invalid", result.stdout)
 
     def test_fully_attested_swedish_translation_is_released(self) -> None:
         result = GATEWAY.gate({
