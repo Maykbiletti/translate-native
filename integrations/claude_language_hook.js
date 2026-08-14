@@ -224,26 +224,40 @@ function blockedStop(input, reason) {
   };
 }
 
-async function sessionStart() {
+function startupMessage(eventName, healthy) {
+  const subject = eventName === "SubagentStart" ? "This subagent" : "This Claude session";
+  if (!healthy) {
+    return `${subject} is protected by mandatory BLUN Translate Native, but its isolated guard is unavailable. Fail closed: do not finish or deliver natural-language output until the service is healthy.`;
+  }
+  return `${subject} is protected by mandatory BLUN Translate Native. Before every natural-language final answer call release_response with the exact final text. For translations load the translate-native skill and call release_translation with the complete source and target. Do not rely on another agent's release: the final visible text must use a fresh grant bound to this session and agent identity and remain byte-for-byte equivalent after Unicode normalization to the released target.`;
+}
+
+async function startupContext(eventName) {
   try {
     const result = await callGuard({ operation: "health" }, 3000);
     const healthy = result.status === "ok" && result.isolated_key === true;
     emit({
       hookSpecificOutput: {
-        hookEventName: "SessionStart",
-        additionalContext: healthy
-          ? "BLUN Translate Native is mandatory. Before every natural-language final answer call release_response with the exact final text. For translations load the translate-native skill and call release_translation with the complete source and target. The final visible text must remain byte-for-byte equivalent after Unicode normalization to the released target."
-          : "BLUN Translate Native is mandatory but its isolated guard is unhealthy. Fail closed: do not finish or deliver natural-language output until the service is healthy."
+        hookEventName: eventName,
+        additionalContext: startupMessage(eventName, healthy)
       }
     });
   } catch (_) {
     emit({
       hookSpecificOutput: {
-        hookEventName: "SessionStart",
-        additionalContext: "BLUN Translate Native is mandatory but unavailable. Fail closed and repair or reconnect the guard before delivering natural-language output."
+        hookEventName: eventName,
+        additionalContext: startupMessage(eventName, false)
       }
     });
   }
+}
+
+async function sessionStart() {
+  return startupContext("SessionStart");
+}
+
+async function subagentStart() {
+  return startupContext("SubagentStart");
 }
 
 function promptBoundary(input) {
@@ -363,6 +377,7 @@ async function main() {
   const input = await readInput();
   currentHookInput = input;
   if (mode === "session-start") return sessionStart(input);
+  if (mode === "subagent-start") return subagentStart(input);
   if (mode === "prompt-boundary") return promptBoundary(input);
   if (mode === "post-tool") return postTool(input);
   if (mode === "stop") return stop(input);

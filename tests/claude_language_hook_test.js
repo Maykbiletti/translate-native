@@ -42,7 +42,7 @@ async function main() {
       const request = JSON.parse(raw.slice(0, newline));
       let response;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.14.0" };
+        response = { status: "ok", isolated_key: true, version: "6.15.0" };
       } else if (request.operation === "authorize_delivery") {
         const valid = request.service_token === token && request.release_token === "valid-token";
         const grant = `grant-${crypto.randomUUID()}`;
@@ -122,6 +122,20 @@ async function main() {
   assert.strictEqual(started.code, 0, started.stderr);
   assert.match(started.stdout, /SessionStart/);
   assert.match(started.stdout, /mandatory/);
+
+  const subagentStarted = await runHook("subagent-start", {
+    ...common,
+    hook_event_name: "SubagentStart",
+    agent_id: "child-agent",
+    agent_type: "Explore"
+  }, environment);
+  assert.strictEqual(subagentStarted.code, 0, subagentStarted.stderr);
+  const subagentContext = JSON.parse(subagentStarted.stdout).hookSpecificOutput;
+  assert.strictEqual(subagentContext.hookEventName, "SubagentStart");
+  assert.match(subagentContext.additionalContext, /This subagent/);
+  assert.match(subagentContext.additionalContext, /release_response/);
+  assert.match(subagentContext.additionalContext, /release_translation/);
+  assert.match(subagentContext.additionalContext, /this session and agent identity/);
 
   const recorded = await runHook("post-tool", tool, environment);
   assert.strictEqual(recorded.code, 0, recorded.stderr);
@@ -329,6 +343,16 @@ async function main() {
   }
 
   await new Promise((resolve) => server.close(resolve));
+  const unavailableSubagent = await runHook("subagent-start", {
+    ...common,
+    hook_event_name: "SubagentStart",
+    agent_id: "offline-child",
+    agent_type: "general-purpose"
+  }, environment);
+  const unavailableContext = JSON.parse(unavailableSubagent.stdout).hookSpecificOutput;
+  assert.strictEqual(unavailableContext.hookEventName, "SubagentStart");
+  assert.match(unavailableContext.additionalContext, /isolated guard is unavailable/);
+  assert.match(unavailableContext.additionalContext, /Fail closed/);
   fs.rmSync(temporary, { recursive: true, force: true });
 }
 

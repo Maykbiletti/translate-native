@@ -16,6 +16,22 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "subagent-start"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
