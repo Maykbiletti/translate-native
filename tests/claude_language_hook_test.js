@@ -42,14 +42,23 @@ async function main() {
       const request = JSON.parse(raw.slice(0, newline));
       let response;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.10.0" };
+        response = { status: "ok", isolated_key: true, version: "6.11.0" };
       } else if (request.operation === "authorize_delivery") {
         const valid = request.service_token === token && request.release_token === "valid-token";
         const grant = `grant-${crypto.randomUUID()}`;
         if (valid) grants.set(grant, {
+          source_sha256: crypto.createHash("sha256").update(
+            String(request.source_text || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").normalize("NFC"),
+            "utf8"
+          ).digest("hex"),
           target_text: request.target_text,
+          language: request.language,
+          task_kind: request.task_kind,
+          content_type: request.content_type || "prose",
+          short_text_reviewed: request.short_text_reviewed === true,
           session_id: request.session_id,
-          agent_id: request.agent_id
+          agent_id: request.agent_id,
+          channel: request.channel
         });
         response = {
           status: valid ? "PASS" : "BLOCK",
@@ -59,9 +68,15 @@ async function main() {
       } else if (request.operation === "consume_delivery") {
         const expected = grants.get(request.delivery_grant);
         const valid = request.service_token === token && expected
+          && expected.source_sha256 === request.source_sha256
           && expected.target_text === request.target_text
+          && expected.language === request.language
+          && expected.task_kind === request.task_kind
+          && expected.content_type === request.content_type
+          && expected.short_text_reviewed === request.short_text_reviewed
           && expected.session_id === request.session_id
-          && expected.agent_id === request.agent_id;
+          && expected.agent_id === request.agent_id
+          && expected.channel === request.channel;
         if (valid) grants.delete(request.delivery_grant);
         response = { status: valid ? "PASS" : "BLOCK", valid: Boolean(valid) };
       } else {
@@ -114,6 +129,11 @@ async function main() {
   const stateDirectory = path.join(temporary, "claude-hooks");
   const stateFile = path.join(stateDirectory, fs.readdirSync(stateDirectory)[0]);
   const copiedRecord = fs.readFileSync(stateFile, "utf8");
+  const parsedRecord = JSON.parse(copiedRecord);
+  assert.strictEqual(parsedRecord.language, "de-DE");
+  assert.strictEqual(parsedRecord.task_kind, "response");
+  assert.strictEqual(parsedRecord.source_sha256, crypto.createHash("sha256").update("").digest("hex"));
+  assert.strictEqual(parsedRecord.channel, "claude-hook");
 
   const released = await runHook("stop", {
     ...common,
@@ -174,6 +194,64 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(JSON.parse(forgedState.stdout).decision, "block");
+
+  const source = "Die Größe des Gebäudes wird täglich geprüft.";
+  const translation = "Byggnadens storlek kontrolleras dagligen.";
+  const translationTool = {
+    ...common,
+    hook_event_name: "PostToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__release_translation",
+    tool_use_id: "tool-translation",
+    tool_input: {
+      source_text: source,
+      target_text: translation,
+      language: "sv-SE",
+      content_type: "prose",
+      attestations: {
+        meaning: true,
+        completeness: true,
+        precision: true,
+        nativeness: true,
+        locale_fit: true,
+        orthography: true,
+        integrity: true
+      }
+    },
+    tool_response: {
+      structuredContent: { release_allowed: true, release_token: "valid-token" }
+    }
+  };
+  await runHook("post-tool", translationTool, environment);
+  const translationRecord = fs.readFileSync(stateFile, "utf8");
+  assert(!translationRecord.includes(source), "hook state must not persist the source text");
+  const translated = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: translation,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(translated.stdout, "");
+
+  for (const [field, value] of [
+    ["source_sha256", "0".repeat(64)],
+    ["language", "de-DE"],
+    ["task_kind", "response"],
+    ["content_type", "title"],
+    ["short_text_reviewed", true],
+    ["channel", "other-hook"]
+  ]) {
+    await runHook("post-tool", translationTool, environment);
+    const changedRecord = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    changedRecord[field] = value;
+    fs.writeFileSync(stateFile, `${JSON.stringify(changedRecord)}\n`, { mode: 0o600 });
+    const contextualTamper = await runHook("stop", {
+      ...common,
+      hook_event_name: "Stop",
+      last_assistant_message: translation,
+      stop_hook_active: false
+    }, environment);
+    assert.strictEqual(JSON.parse(contextualTamper.stdout).decision, "block", field);
+  }
 
   await new Promise((resolve) => server.close(resolve));
   fs.rmSync(temporary, { recursive: true, force: true });

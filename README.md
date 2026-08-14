@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.11.0: complete delivery-context binding
+
+Version 6.11 closes the final context gap between a successful release tool call and Claude's actual `Stop` or `SubagentStop`. The isolated service now signs the canonical source hash, target hash, exact language, task purpose, content type, short-text review flag, delivery channel, Claude session, agent identity, guard version, service boot, expiry, and nonce into every one-time delivery grant. The stop hook must return that complete context when consuming the grant; any changed, missing, stale, copied, or cross-context value blocks delivery.
+
+The Claude hook stores only the canonical source hash, never the complete translation source. The full source remains bound by the original signed release receipt and is independently verified before the delivery grant is issued. A translation grant therefore cannot be relabeled as a normal response, moved to another locale or content policy, or detached from its source context at the last delivery boundary. Version 6.10's deep health probe and existing one-time, target, session, subagent, restart, and replay protections remain unchanged.
+
 ### Version 6.10.0: deep MCP health proof
 
 Version 6.10 closes a false-green health gap. The one-minute monitor no longer accepts a signer heartbeat plus MCP initialization and a matching tool list as proof that the language guard can actually execute tools. The isolated service's authenticated health operation now performs an audit-free response release with correct Swedish Unicode, verifies the resulting purpose-bound signature, and proves that a changed target is rejected. The HTTP probe then performs a real MCP `tools/call` using `validate_text` on `Hälsokontrollen är aktiv.` and requires an exact `PASS` result.
@@ -185,7 +191,7 @@ python3 installer/blun_language_guard.py health-monitor run
 
 Version 6.5 removes the local Claude hook record as a trust decision. After `release_response` or `release_translation`, the `PostToolUse` hook sends the complete receipt context to the isolated service. A valid receipt is exchanged for a short-lived signed delivery grant bound to the exact target hash, Claude session, agent or subagent, guard version, service boot, purpose, locale, and expiry.
 
-The owner-only hook file contains only the opaque delivery grant, target hash, and authorization time. At `Stop` or `SubagentStop`, the hook deletes the local record before asking the isolated service to consume the grant for the actual `last_assistant_message`. The service accepts each nonce exactly once. Copying a consumed record, forging a local record, changing the final response, moving a grant to another session or subagent, restarting the signer, or crossing a version boundary now fails closed.
+The owner-only hook file contains the opaque delivery grant, canonical source and target hashes, signed context labels, and authorization time—never the source or target prose. At `Stop` or `SubagentStop`, the hook deletes the local record before asking the isolated service to consume the grant for the actual `last_assistant_message` and exact recorded context. The service accepts each nonce exactly once. Copying a consumed record, forging or relabeling a local record, changing the final response, moving a grant to another session or subagent, restarting the signer, or crossing a version boundary now fails closed.
 
 This strengthens the ordinary same-user installation without overstating it. A process that can read the service authentication token, replace managed hooks, or reach the final delivery channel can still bypass workflow enforcement. Use a separate OS identity, container, remote signer, and host-owned delivery credentials for a hostile-process boundary.
 
@@ -398,7 +404,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.10.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.11.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

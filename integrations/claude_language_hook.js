@@ -229,7 +229,13 @@ async function postTool(input) {
     }
     writeRecord(input, {
       delivery_grant: verification.delivery_grant,
+      source_sha256: textHash(source),
       target_sha256: textHash(target),
+      language,
+      task_kind: purpose,
+      content_type: typeof args.content_type === "string" ? args.content_type : "prose",
+      short_text_reviewed: args.short_text_reviewed === true,
+      channel: "claude-hook",
       authorized_at: Date.now()
     });
   } catch (_) {
@@ -252,10 +258,15 @@ async function stop(input) {
         const result = await callGuard({
           operation: "consume_delivery",
           delivery_grant: record.delivery_grant,
+          source_sha256: record.source_sha256,
           target_text: target,
+          language: record.language,
+          task_kind: record.task_kind,
+          content_type: record.content_type,
+          short_text_reviewed: record.short_text_reviewed === true,
           session_id: String(input.session_id || ""),
           agent_id: String(input.agent_id || "main"),
-          channel: "claude-hook"
+          channel: record.channel
         });
         if (naturalLanguage && record.target_sha256 === textHash(target) && result.valid === true) return;
       } catch (error) {

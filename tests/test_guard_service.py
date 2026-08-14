@@ -125,7 +125,12 @@ class GuardServiceTests(unittest.TestCase):
             "service_token": "service-secret-with-at-least-32-characters",
             "operation": "consume_delivery",
             "delivery_grant": delivery_grant,
+            "source_sha256": SERVICE.QUALITY.canonical_hash(""),
             "target_text": target,
+            "language": "de-DE",
+            "task_kind": "response",
+            "content_type": "prose",
+            "short_text_reviewed": False,
             "session_id": "session-one",
             "agent_id": "test-agent",
             "channel": "claude-hook",
@@ -192,6 +197,68 @@ class GuardServiceTests(unittest.TestCase):
 
         raw = self.audit_path.read_text(encoding="utf-8")
         self.assertNotIn(grant, raw)
+
+    def test_delivery_grant_binds_source_language_purpose_and_policy(self) -> None:
+        source = "Die Größe des Gebäudes wird täglich geprüft."
+        target = "Byggnadens storlek kontrolleras dagligen."
+        released = self.service.handle({
+            **self.release_request(target),
+            "task_kind": "translation",
+            "source_text": source,
+            "language": "sv-SE",
+            "attestations": {
+                "meaning": True,
+                "completeness": True,
+                "precision": True,
+                "nativeness": True,
+                "locale_fit": True,
+                "orthography": True,
+                "integrity": True,
+            },
+        })
+        self.assertTrue(released["release_allowed"], released)
+
+        def fresh_grant() -> str:
+            authorized = self.service.handle({
+                **self.authorize_request(released["release_token"], target),
+                "task_kind": "translation",
+                "source_text": source,
+                "language": "sv-SE",
+            })
+            self.assertTrue(authorized["valid"], authorized)
+            grant = authorized["delivery_grant"]
+            self.assertTrue(grant.startswith("blgd2."))
+            payload = json.loads(SERVICE.QUALITY._b64decode(grant.split(".")[1]))
+            self.assertEqual(payload["source_sha256"], SERVICE.QUALITY.canonical_hash(source))
+            self.assertNotIn(source, grant)
+            return grant
+
+        base = {
+            **self.consume_request(fresh_grant(), target),
+            "source_sha256": SERVICE.QUALITY.canonical_hash(source),
+            "language": "sv-SE",
+            "task_kind": "translation",
+        }
+        self.assertTrue(self.service.handle(base)["valid"])
+
+        mutations = {
+            "source": {"source_sha256": SERVICE.QUALITY.canonical_hash(source + " Geändert.")},
+            "language": {"language": "de-DE"},
+            "purpose": {"task_kind": "response"},
+            "content_type": {"content_type": "title"},
+            "short_text_reviewed": {"short_text_reviewed": True},
+            "channel": {"channel": "other-hook"},
+        }
+        for check, change in mutations.items():
+            with self.subTest(check=check):
+                request = {
+                    **base,
+                    "delivery_grant": fresh_grant(),
+                    **change,
+                }
+                result = self.service.handle(request)
+                self.assertFalse(result["valid"], result)
+                self.assertFalse(result["checks"][check], result)
 
     def test_audit_contains_hashes_but_no_candidate_or_token(self) -> None:
         target = "Diese vertrauliche Antwort bleibt aus dem Audit heraus."
