@@ -259,6 +259,54 @@ class GuardServiceTests(unittest.TestCase):
         self.assertNotIn(self.session_epoch, raw)
         self.assertNotIn(new_epoch, raw)
 
+    def test_session_retirement_is_epoch_bound_and_blocks_old_grants(self) -> None:
+        released = self.service.handle(self.release_request())
+        old_authorized = self.service.handle(self.authorize_request(released["release_token"]))
+        self.assertTrue(old_authorized["valid"], old_authorized)
+
+        retired = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "retire_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": self.session_epoch,
+        })
+        self.assertEqual(retired, {"status": "PASS", "retired": True})
+        self.assertNotIn(self.session_epoch, json.dumps(retired))
+
+        restored = self.service.handle(
+            self.consume_request(old_authorized["delivery_grant"])
+        )
+        self.assertFalse(restored["valid"], restored)
+        self.assertFalse(restored["checks"]["session_epoch_current"])
+
+        stale_authorization = self.service.handle(
+            self.authorize_request(released["release_token"])
+        )
+        self.assertFalse(stale_authorization["valid"], stale_authorization)
+        self.assertFalse(stale_authorization["checks"]["session_epoch_current"])
+
+        new_epoch = "b" * 64
+        registered = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "register_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": new_epoch,
+        })
+        self.assertTrue(registered["registered"], registered)
+
+        delayed_retirement = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "retire_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": self.session_epoch,
+        })
+        self.assertEqual(delayed_retirement, {"status": "BLOCK", "retired": False})
+
+        fresh_request = self.authorize_request(released["release_token"])
+        fresh_request["session_epoch"] = new_epoch
+        fresh = self.service.handle(fresh_request)
+        self.assertTrue(fresh["valid"], fresh)
+
     def test_fresh_release_recovers_session_after_service_restart(self) -> None:
         old_release = self.service.handle(self.release_request())
         old_authorized = self.service.handle(self.authorize_request(old_release["release_token"]))

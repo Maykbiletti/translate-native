@@ -45,7 +45,7 @@ async function main() {
       let response;
       let responseDelay = 0;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.22.0" };
+        response = { status: "ok", isolated_key: true, version: "6.23.0" };
       } else if (request.operation === "register_session_epoch") {
         const history = sessionEpochHistory.get(request.session_id) || new Set();
         const valid = request.service_token === token
@@ -58,6 +58,18 @@ async function main() {
           sessionEpochs.set(request.session_id, request.session_epoch);
         }
         response = { status: valid ? "PASS" : "BLOCK", registered: valid };
+      } else if (request.operation === "retire_session_epoch") {
+        const knownEpoch = sessionEpochs.get(request.session_id);
+        const valid = request.service_token === token
+          && knownEpoch === request.session_epoch;
+        if (valid) {
+          const tombstone = crypto.randomBytes(32).toString("hex");
+          const history = sessionEpochHistory.get(request.session_id) || new Set();
+          history.add(tombstone);
+          sessionEpochHistory.set(request.session_id, history);
+          sessionEpochs.set(request.session_id, tombstone);
+        }
+        response = { status: valid ? "PASS" : "BLOCK", retired: valid };
       } else if (request.operation === "authorize_delivery") {
         if (request.release_token === "restart-valid-token") {
           grants.clear();
@@ -410,6 +422,63 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(deliveredFreshAfterStopFailure.stdout, "");
+
+  await runHook("post-tool", tool, environment);
+  await runHook("post-tool", childTool, environment);
+  await runHook("post-tool", otherSessionTool, environment);
+  const recordBeforeSessionEnd = fs.readFileSync(stateFile, "utf8");
+  const epochBeforeSessionEnd = fs.readFileSync(path.join(stateDirectory, mainEpochFile), "utf8").trim();
+  const ended = await runHook("session-end", {
+    ...common,
+    hook_event_name: "SessionEnd",
+    reason: "other"
+  }, environment);
+  assert.strictEqual(ended.code, 0, ended.stderr);
+  assert.strictEqual(ended.stdout, "", "SessionEnd cleanup must be silent");
+  assert(!fs.existsSync(path.join(stateDirectory, mainEpochFile)), "SessionEnd must remove the local epoch first");
+  const remainingAfterSessionEnd = fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json"));
+  assert.strictEqual(remainingAfterSessionEnd.length, 1, "SessionEnd must clear only its session");
+  const preservedAfterSessionEnd = JSON.parse(fs.readFileSync(path.join(stateDirectory, remainingAfterSessionEnd[0]), "utf8"));
+  assert.strictEqual(preservedAfterSessionEnd.session_sha256, crypto.createHash("sha256").update("session-two").digest("hex"));
+
+  fs.writeFileSync(stateFile, recordBeforeSessionEnd, { mode: 0o600 });
+  fs.writeFileSync(path.join(stateDirectory, mainEpochFile), `${epochBeforeSessionEnd}\n`, { mode: 0o600 });
+  const restoredAfterSessionEnd = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(restoredAfterSessionEnd.stdout).decision, "block", "restored ended-session state must fail against the service tombstone");
+
+  const resumedAfterSessionEnd = await runHook("session-start", {
+    ...common,
+    hook_event_name: "SessionStart",
+    source: "resume"
+  }, environment);
+  assert.strictEqual(resumedAfterSessionEnd.code, 0, resumedAfterSessionEnd.stderr);
+  const epochAfterSessionEnd = fs.readFileSync(path.join(stateDirectory, mainEpochFile), "utf8").trim();
+  assert.notStrictEqual(epochAfterSessionEnd, epochBeforeSessionEnd, "resume must replace the retired epoch");
+  const freshAfterSessionEnd = await runHook("post-tool", {
+    ...tool,
+    tool_use_id: "tool-fresh-after-session-end"
+  }, environment);
+  assert.strictEqual(freshAfterSessionEnd.stdout, "");
+  const deliveredAfterSessionEnd = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(deliveredAfterSessionEnd.stdout, "");
+  const parallelAfterSessionEnd = await runHook("stop", {
+    ...common,
+    session_id: "session-two",
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(parallelAfterSessionEnd.stdout, "");
 
   await runHook("post-tool", tool, environment);
   await runHook("post-tool", otherSessionTool, environment);

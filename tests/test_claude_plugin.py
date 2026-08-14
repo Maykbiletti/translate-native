@@ -32,6 +32,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("StopFailure", hooks)
         self.assertIn("Stop", hooks)
         self.assertIn("SubagentStop", hooks)
+        self.assertIn("SessionEnd", hooks)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for Claude hook tests")
     def test_hook_requires_exact_verified_final_text(self) -> None:

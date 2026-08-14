@@ -193,6 +193,21 @@ class GuardService:
             self.session_epochs[session_hash] = epoch_hash
         return {"status": "PASS", "registered": True}
 
+    def _retire_session_epoch(self, request: dict[str, Any]) -> dict[str, Any]:
+        session_hash = self._identity_hash(_exact_string(request, "session_id"))
+        epoch = _exact_string(request, "session_epoch")
+        if re.fullmatch(r"[0-9a-f]{64}", epoch) is None:
+            raise GuardProtocolError("session_epoch must be 64 lowercase hexadecimal characters")
+        expected_epoch_hash = self._identity_hash(epoch)
+        tombstone_hash = self._identity_hash(os.urandom(32).hex())
+        with self.delivery_lock:
+            if self.session_epochs.get(session_hash) != expected_epoch_hash:
+                return {"status": "BLOCK", "retired": False}
+            history = self.session_epoch_history.setdefault(session_hash, set())
+            history.add(tombstone_hash)
+            self.session_epochs[session_hash] = tombstone_hash
+        return {"status": "PASS", "retired": True}
+
     def _authorize_delivery(self, request: dict[str, Any], task_kind: str) -> dict[str, Any]:
         session_hash = self._identity_hash(_exact_string(request, "session_id"))
         epoch = _exact_string(request, "session_epoch")
@@ -303,6 +318,8 @@ class GuardService:
             return result
         if operation == "register_session_epoch":
             return self._register_session_epoch(request)
+        if operation == "retire_session_epoch":
+            return self._retire_session_epoch(request)
         if operation == "authorize_delivery":
             task_kind, _, result = self._verify_release(request)
             if result.get("valid"):

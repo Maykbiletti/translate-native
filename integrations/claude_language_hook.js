@@ -344,6 +344,29 @@ async function stopFailure(input) {
   }
 }
 
+async function sessionEnd(input) {
+  let previousEpoch = "";
+  try {
+    const current = readSessionEpoch(input);
+    previousEpoch = current.epoch;
+    fs.unlinkSync(current.destination);
+  } catch (_) {
+    try { fs.unlinkSync(sessionEpochPath(input)); } catch (_) {}
+  }
+  try { invalidateSessionRecords(input); } catch (_) {}
+  if (!previousEpoch) return;
+  try {
+    await callGuard({
+      operation: "retire_session_epoch",
+      session_id: String(input.session_id || ""),
+      session_epoch: previousEpoch
+    }, 700);
+  } catch (_) {
+    // SessionEnd cannot block termination. Local authority is already gone;
+    // a later SessionStart must establish a fresh service-authoritative epoch.
+  }
+}
+
 function invalidateReleaseState(input, failureReason) {
   try {
     invalidateAgentRecord(input);
@@ -508,6 +531,7 @@ async function main() {
   if (mode === "subagent-start") return subagentStart(input);
   if (mode === "prompt-boundary") return promptBoundary(input);
   if (mode === "stop-failure") return stopFailure(input);
+  if (mode === "session-end") return sessionEnd(input);
   if (mode === "post-tool") return postTool(input);
   if (mode === "post-tool-failure") return postToolFailure(input);
   if (mode === "stop") return stop(input);
@@ -521,4 +545,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, readSessionEpoch, sessionHash, stopFailure, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, readSessionEpoch, sessionEnd, sessionHash, stopFailure, textHash };
