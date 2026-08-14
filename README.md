@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.21.0: invalidate grants after API failure
+
+Version 6.21 handles Claude's `StopFailure` lifecycle event, which Anthropic documents as running instead of `Stop` when a turn ends because of an API error. A rate limit, authentication failure, server error, output-limit failure, or other API failure now removes every unconsumed main-agent and subagent delivery grant belonging to that exact Claude session. A later retry must therefore obtain a fresh response or translation release; another concurrent session remains untouched.
+
+The cleanup is deliberately silent. Anthropic documents that `StopFailure` output and exit status are ignored, so the hook does not pretend it can block or guide Claude at this event. It emits no candidate, rendered API error, or diagnostic detail. The next `UserPromptSubmit`, `Stop`, and `SubagentStop` boundaries remain fail-closed if protected state is unavailable or could not be removed.
+
 ### Version 6.20.0: safe recovery after guard-service restart
 
 Version 6.20 lets an already running Claude session recover after the isolated guard service restarts. Anthropic's official [hooks reference](https://code.claude.com/docs/en/hooks) describes `SessionStart` as a session lifecycle event, so restarting an independent local service does not itself create a new Claude startup boundary. Version 6.19 therefore invalidated old grants safely but also left the restarted service without the active session epoch until Claude restarted or resumed.
@@ -458,7 +464,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.20.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.21.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

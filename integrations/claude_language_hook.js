@@ -334,6 +334,15 @@ function promptBoundary(input) {
   }
 }
 
+function stopFailure(input) {
+  try {
+    invalidateSessionRecords(input);
+  } catch (_) {
+    // Claude ignores StopFailure output and exit status. A later prompt or Stop
+    // remains fail-closed if protected state could not be removed here.
+  }
+}
+
 function invalidateReleaseState(input, failureReason) {
   try {
     invalidateAgentRecord(input);
@@ -497,6 +506,7 @@ async function main() {
   if (mode === "session-start") return sessionStart(input);
   if (mode === "subagent-start") return subagentStart(input);
   if (mode === "prompt-boundary") return promptBoundary(input);
+  if (mode === "stop-failure") return stopFailure(input);
   if (mode === "post-tool") return postTool(input);
   if (mode === "post-tool-failure") return postToolFailure(input);
   if (mode === "stop") return stop(input);
@@ -510,4 +520,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, readSessionEpoch, sessionHash, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, readSessionEpoch, sessionHash, stopFailure, textHash };

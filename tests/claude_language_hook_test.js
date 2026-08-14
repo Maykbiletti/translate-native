@@ -45,7 +45,7 @@ async function main() {
       let response;
       let responseDelay = 0;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.20.0" };
+        response = { status: "ok", isolated_key: true, version: "6.21.0" };
       } else if (request.operation === "register_session_epoch") {
         const history = sessionEpochHistory.get(request.session_id) || new Set();
         const valid = request.service_token === token
@@ -343,6 +343,46 @@ async function main() {
   }, environment);
   assert.strictEqual(concurrentSessionReleased.stdout, "");
   assert.strictEqual(fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json")).length, 0);
+
+  await runHook("post-tool", tool, environment);
+  await runHook("post-tool", childTool, environment);
+  await runHook("post-tool", otherSessionTool, environment);
+  const failedTurn = await runHook("stop-failure", {
+    ...common,
+    hook_event_name: "StopFailure",
+    error: "rate_limit",
+    error_details: `private diagnostic containing ${clean}`,
+    last_assistant_message: `API Error containing ${clean}`
+  }, environment);
+  assert.strictEqual(failedTurn.code, 0, failedTurn.stderr);
+  assert.strictEqual(failedTurn.stdout, "", "StopFailure cleanup must not expose failure or candidate text");
+  const remainingAfterStopFailure = fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json"));
+  assert.strictEqual(remainingAfterStopFailure.length, 1, "StopFailure must clear every grant for only its session");
+  const preservedAfterStopFailure = JSON.parse(fs.readFileSync(path.join(stateDirectory, remainingAfterStopFailure[0]), "utf8"));
+  assert.strictEqual(preservedAfterStopFailure.session_sha256, crypto.createHash("sha256").update("session-two").digest("hex"));
+  const mainAfterStopFailure = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(mainAfterStopFailure.stdout).decision, "block");
+  const childAfterStopFailure = await runHook("stop", {
+    ...common,
+    hook_event_name: "SubagentStop",
+    agent_id: "child-agent",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(childAfterStopFailure.stdout).decision, "block");
+  const otherSessionAfterStopFailure = await runHook("stop", {
+    ...common,
+    session_id: "session-two",
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(otherSessionAfterStopFailure.stdout, "");
 
   await runHook("post-tool", tool, environment);
   await runHook("post-tool", otherSessionTool, environment);

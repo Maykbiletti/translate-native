@@ -29,6 +29,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("UserPromptSubmit", hooks)
         self.assertIn("PostToolUse", hooks)
         self.assertIn("PostToolUseFailure", hooks)
+        self.assertIn("StopFailure", hooks)
         self.assertIn("Stop", hooks)
         self.assertIn("SubagentStop", hooks)
 

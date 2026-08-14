@@ -79,6 +79,21 @@
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "stop-failure"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
