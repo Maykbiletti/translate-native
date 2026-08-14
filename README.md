@@ -147,6 +147,14 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.28.0: signed-update policy cannot be downgraded by omission
+
+Version 6.28 makes the optional signed-commit policy monotonic across every updater entry point. After signature enforcement is enabled, a direct `update` call without `--require-signed-commits` can no longer silently fall back to unsigned mode. The updater resolves the effective policy by combining the caller request with both the active automatic-update policy and the policy paused after a successful rollback; any stored `true` remains authoritative.
+
+Malformed JSON, a non-object policy, or a non-Boolean `require_signed_commits` value now blocks update and rollback fail-closed before candidate testing or active mutation. This prevents values such as the string `"false"` from being interpreted inconsistently. Disabling automatic updates still explicitly removes both stored policies, preserving the existing operator-controlled escape hatch.
+
+Regression tests prove that an unsigned candidate cannot execute its import-time marker through a flagless direct update, that the paused rollback policy reaches the update worker as `true`, and that a type-invalid policy never invokes the worker.
+
 ### Version 6.27.0: verify trust before executing candidate code
 
 Version 6.27 closes an updater supply-chain gap in the optional signed-commit policy. Previously, a clean clone ran its repository-owned test suite before `git verify-commit` rejected an unsigned update or rollback target. Test discovery imports Python modules, so a rejected commit could execute code even though it never became active.
@@ -504,7 +512,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.27.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.28.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

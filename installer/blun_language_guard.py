@@ -1101,17 +1101,41 @@ def _release_operation_lock(token: str) -> None:
         OPERATION_LOCK.unlink(missing_ok=True)
 
 
+def _effective_signed_commit_policy(requested: bool = False) -> bool:
+    """Keep an enabled signature requirement monotonic across every entry point."""
+    required = requested
+    for path in (UPDATE_CONFIG, UPDATE_PAUSED_CONFIG):
+        if not path.exists():
+            continue
+        try:
+            policy = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Unreadable updater policy: {path}") from error
+        if not isinstance(policy, dict):
+            raise RuntimeError(f"Invalid updater policy: {path}")
+        saved = policy.get("require_signed_commits", False)
+        if not isinstance(saved, bool):
+            raise RuntimeError(f"Invalid signed-commit policy: {path}")
+        required = required or saved
+    return required
+
+
 def update(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     if not (root / ".git").exists():
         print("Update requires a Git checkout; reinstall from the latest release.", file=sys.stderr)
+        return 2
+    try:
+        signed_required = _effective_signed_commit_policy(require_signed_commits)
+    except RuntimeError:
+        print("Updater signature policy is unreadable; update is blocked fail-closed.", file=sys.stderr)
         return 2
     token = _acquire_operation_lock("update")
     if token is None:
         print("Another guard maintenance operation is active; update skipped safely.", file=sys.stderr)
         return 3
     try:
-        return _update_unlocked(require_signed_commits, claude_command)
+        return _update_unlocked(signed_required, claude_command)
     finally:
         _release_operation_lock(token)
 
@@ -1434,15 +1458,11 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
     if _run(["git", "merge-base", "--is-ancestor", target, current], root).returncode:
         print("Recorded rollback target is not an ancestor; current files are unchanged.", file=sys.stderr)
         return 2
-    signed_required = require_signed_commits
-    if UPDATE_CONFIG.exists():
-        try:
-            signed_required = signed_required or bool(
-                json.loads(UPDATE_CONFIG.read_text(encoding="utf-8-sig")).get("require_signed_commits")
-            )
-        except (OSError, json.JSONDecodeError, AttributeError):
-            print("Updater policy is unreadable; rollback is blocked fail-closed.", file=sys.stderr)
-            return 2
+    try:
+        signed_required = _effective_signed_commit_policy(require_signed_commits)
+    except RuntimeError:
+        print("Updater signature policy is unreadable; rollback is blocked fail-closed.", file=sys.stderr)
+        return 2
     with tempfile.TemporaryDirectory(prefix="blun-language-rollback-") as directory:
         candidate = Path(directory) / "repo"
         clone = _run(["git", "clone", "--no-hardlinks", "--no-checkout", str(root), str(candidate)])
