@@ -147,6 +147,14 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.26.0: fail-closed Claude preflight before runtime cutover
+
+Version 6.26 closes the split-version window caused by discovering a deterministic Claude plugin failure only after the repository, signer, and MCP had already advanced. When the Claude plugin is installed, the updater now validates the clean temporary candidate with Claude's strict validator, refreshes only the trusted marketplace, and proves exact catalog-version equality while the active checkout and both persistent runtimes are still untouched.
+
+Only a successful preflight permits the fast-forward and runtime restarts. The later plugin-cache step consumes that exact expected-version preflight instead of repeating mutation-prone discovery. Validator failure, marketplace failure, catalog drift, an unavailable Claude executable, or process loss records a degraded retry while preserving the active commit, services, and installed cache. A disappearing plugin between preflight and application also fails closed. Tests prove the preflight never invokes `plugin update`, a rejected candidate does not fetch, merge, restart, or create its new runtime file, and process loss becomes a structured failure instead of crashing the scheduler.
+
+The unavoidable residual race is explicit: Claude's documented update command targets the latest marketplace version rather than a pinned content digest. Final enabled-state, load-error, and exact-version verification therefore remains mandatory after application; any mismatch leaves delivery degraded and fail-closed.
+
 ### Version 6.25.0: Claude-native strict validation before update
 
 Version 6.25 closes the schema-authority gap in automatic Claude plugin maintenance. Repository tests can verify the files and the BLUN contracts, but they are not Claude Code's own parser. Before refreshing a marketplace or touching an installed cache, the updater now runs the documented `claude plugin validate <plugin-root> --strict` command against the exact repository candidate that already passed the full test suite.
@@ -488,7 +496,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.25.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.26.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

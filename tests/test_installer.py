@@ -22,6 +22,36 @@ SPEC.loader.exec_module(INSTALLER)
 
 
 class InstallerTests(unittest.TestCase):
+    def _update_repository_pair(self, root: Path) -> tuple[Path, Path, str, str]:
+        upstream = root / "upstream"
+        upstream.mkdir()
+        self.assertEqual(INSTALLER._run(["git", "init", "-b", "main"], upstream).returncode, 0)
+        self.assertEqual(INSTALLER._run(["git", "config", "user.name", "Update Test"], upstream).returncode, 0)
+        self.assertEqual(
+            INSTALLER._run(["git", "config", "user.email", "update@example.invalid"], upstream).returncode,
+            0,
+        )
+        (upstream / "VERSION").write_text("6.25.0\n", encoding="utf-8")
+        (upstream / "translate-native").mkdir()
+        tests = upstream / "tests"
+        tests.mkdir()
+        (tests / "test_smoke.py").write_text(
+            "import unittest\n\nclass SmokeTest(unittest.TestCase):\n"
+            "    def test_true(self):\n        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(INSTALLER._run(["git", "add", "."], upstream).returncode, 0)
+        self.assertEqual(INSTALLER._run(["git", "commit", "-m", "old"], upstream).returncode, 0)
+        old = INSTALLER._run(["git", "rev-parse", "HEAD"], upstream).stdout.strip()
+        active = root / "active"
+        self.assertEqual(INSTALLER._run(["git", "clone", str(upstream), str(active)]).returncode, 0)
+        (upstream / "VERSION").write_text("6.26.0\n", encoding="utf-8")
+        (upstream / "new-runtime.txt").write_text("new\n", encoding="utf-8")
+        self.assertEqual(INSTALLER._run(["git", "add", "."], upstream).returncode, 0)
+        self.assertEqual(INSTALLER._run(["git", "commit", "-m", "candidate"], upstream).returncode, 0)
+        new = INSTALLER._run(["git", "rev-parse", "HEAD"], upstream).stdout.strip()
+        return upstream, active, old, new
+
     def _rollback_repository(self, root: Path, *, broken_target: bool = False) -> tuple[Path, str, str]:
         repository = root / "repo"
         repository.mkdir()
@@ -298,6 +328,79 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(calls[1][:2], ["plugin", "validate"])
             self.assertEqual(calls[1][-1], "--strict")
             self.assertEqual(calls[2], ["plugin", "marketplace", "update", "blun-language-tools"])
+
+    def test_claude_plugin_preflight_does_not_mutate_the_installed_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable, state = self._fake_claude(root, old_version="6.25.0", new_version="6.26.0")
+            result = INSTALLER.preflight_claude_plugin_update("6.26.0", str(executable), ROOT)
+            self.assertTrue(result["ready"], result)
+            self.assertTrue(result["needs_update"])
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.25.0")
+            calls = [
+                INSTALLER.json.loads(line)
+                for line in (root / "claude-calls.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(calls[0], ["plugin", "list", "--json"])
+            self.assertEqual(calls[1][:2], ["plugin", "validate"])
+            self.assertEqual(calls[2], ["plugin", "marketplace", "update", "blun-language-tools"])
+            self.assertEqual(calls[3], ["plugin", "list", "--available", "--json"])
+            self.assertFalse(any(call[:2] == ["plugin", "update"] for call in calls))
+
+    def test_failed_candidate_preflight_preserves_repository_and_runtimes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, active, old, candidate = self._update_repository_pair(root)
+            fake_root = root / "fake-claude"
+            fake_root.mkdir()
+            executable, state = self._fake_claude(
+                fake_root,
+                old_version="6.25.0",
+                new_version="6.26.0",
+                fail_validation=True,
+            )
+            claude_skill = root / "claude-skill"
+            claude_skill.symlink_to(active / "translate-native", target_is_directory=True)
+            update_state = root / "update-state.json"
+            with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                 mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", update_state), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "TARGETS",
+                     {**INSTALLER.TARGETS, "claude": claude_skill},
+                 ), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(INSTALLER._update_unlocked(claude_command=str(executable)), 1)
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(), old)
+            self.assertFalse((active / "new-runtime.txt").exists())
+            self.assertEqual(state.read_text(encoding="utf-8"), "6.25.0")
+            recorded = INSTALLER.json.loads(update_state.read_text(encoding="utf-8"))
+            self.assertEqual(recorded["status"], "degraded")
+            self.assertEqual(recorded["revision"], old)
+            self.assertEqual(recorded["candidate_revision"], candidate)
+            self.assertTrue(recorded["runtime_unchanged"])
+            calls = [
+                INSTALLER.json.loads(line)
+                for line in (fake_root / "claude-calls.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(calls), 2)
+            self.assertFalse(any(call[:2] == ["plugin", "update"] for call in calls))
+
+    def test_preflight_process_loss_is_structured_and_fail_closed(self) -> None:
+        listed = INSTALLER.subprocess.CompletedProcess(
+            [],
+            0,
+            '[{"name":"translate-native","marketplace":"blun-language-tools",'
+            '"version":"6.25.0","enabled":true,"errors":[]}]',
+            "",
+        )
+        validated = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(INSTALLER, "_run", side_effect=[listed, validated, OSError("gone")]) as runner:
+            result = INSTALLER.preflight_claude_plugin_update("6.26.0", "/missing/claude", ROOT)
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["catalog"]["reason"], "claude-command-unavailable")
+        self.assertEqual(runner.call_count, 3)
 
     def test_claude_plugin_update_blocks_before_mutation_when_strict_validation_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -892,7 +995,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.9.0", new_version="6.25.0"
+                root, old_version="6.9.0", new_version="6.26.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -905,14 +1008,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.25.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.26.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.25.0")
+                self.assertEqual(state["plugin_cache_version"], "6.26.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (

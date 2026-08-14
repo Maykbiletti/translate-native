@@ -732,78 +732,183 @@ def claude_plugin_catalog_status(expected_version: str, executable: str | None =
     }
 
 
-def update_claude_plugin(expected_version: str, executable: str | None = None) -> dict:
-    """Strictly validate, refresh, update, and verify the exact tested plugin."""
+def preflight_claude_plugin_update(
+    expected_version: str,
+    executable: str | None = None,
+    plugin_root: Path | None = None,
+) -> dict:
+    """Prove a tested plugin is available before any runtime cutover."""
     before = claude_plugin_status(expected_version, executable)
+    if before.get("reason") == "plugin-not-installed":
+        return {
+            "attempted": False,
+            "ready": True,
+            "needs_update": False,
+            "status": before,
+            "expected_version": expected_version,
+        }
     if not before.get("installed"):
-        return {"attempted": False, "updated": False, "status": before}
+        return {
+            "attempted": False,
+            "ready": False,
+            "needs_update": False,
+            "status": before,
+            "expected_version": expected_version,
+        }
     if before.get("healthy") is True:
-        return {"attempted": False, "updated": True, "status": before, "reload_required": False}
+        return {
+            "attempted": False,
+            "ready": True,
+            "needs_update": False,
+            "status": before,
+            "expected_version": expected_version,
+        }
     command = executable or shutil.which("claude")
     assert command
-    plugin_root = repository_root()
+    root = (plugin_root or repository_root()).resolve()
     try:
-        validation = _run([command, "plugin", "validate", str(plugin_root), "--strict"])
+        validation = _run([command, "plugin", "validate", str(root), "--strict"])
     except OSError:
         return {
             "attempted": True,
-            "updated": False,
+            "ready": False,
+            "needs_update": True,
             "status": before,
+            "expected_version": expected_version,
             "validation": {
                 "healthy": False,
                 "reason": "claude-command-unavailable",
-                "plugin_root": str(plugin_root),
+                "plugin_root": str(root),
             },
-            "reload_required": False,
         }
     validation_status = {
         "healthy": validation.returncode == 0,
         "reason": "ok" if validation.returncode == 0 else "strict-plugin-validation-failed",
-        "plugin_root": str(plugin_root),
+        "plugin_root": str(root),
     }
     if validation.returncode:
         return {
             "attempted": True,
-            "updated": False,
+            "ready": False,
+            "needs_update": True,
             "returncode": validation.returncode,
             "status": before,
+            "expected_version": expected_version,
             "validation": validation_status,
-            "reload_required": False,
         }
-    refresh = _run([command, "plugin", "marketplace", "update", CLAUDE_MARKETPLACE_NAME])
+    try:
+        refresh = _run([command, "plugin", "marketplace", "update", CLAUDE_MARKETPLACE_NAME])
+    except OSError:
+        return {
+            "attempted": True,
+            "ready": False,
+            "needs_update": True,
+            "status": before,
+            "expected_version": expected_version,
+            "validation": validation_status,
+            "catalog": {"available": False, "healthy": False, "reason": "claude-command-unavailable"},
+        }
     if refresh.returncode:
         return {
             "attempted": True,
-            "updated": False,
+            "ready": False,
+            "needs_update": True,
             "returncode": refresh.returncode,
             "status": before,
+            "expected_version": expected_version,
             "validation": validation_status,
             "catalog": {"available": False, "healthy": False, "reason": "marketplace-update-failed"},
-            "reload_required": False,
         }
     catalog = claude_plugin_catalog_status(expected_version, command)
     if catalog.get("healthy") is not True:
         return {
             "attempted": True,
-            "updated": False,
+            "ready": False,
+            "needs_update": True,
             "returncode": 1,
             "status": before,
+            "expected_version": expected_version,
             "validation": validation_status,
             "catalog": catalog,
+        }
+    return {
+        "attempted": True,
+        "ready": True,
+        "needs_update": True,
+        "status": before,
+        "expected_version": expected_version,
+        "validation": validation_status,
+        "catalog": catalog,
+    }
+
+
+def _apply_claude_plugin_update(
+    expected_version: str,
+    executable: str | None,
+    preflight: dict,
+) -> dict:
+    """Apply only a matching successful preflight and verify the public cache state."""
+    if preflight.get("ready") is not True or preflight.get("expected_version") != expected_version:
+        return {**preflight, "updated": False, "reload_required": False}
+    if preflight.get("needs_update") is not True:
+        status = claude_plugin_status(expected_version, executable)
+        installed_or_absent = status.get("healthy") is True or status.get("reason") == "plugin-not-installed"
+        return {
+            **preflight,
+            "updated": installed_or_absent,
+            "status": status,
             "reload_required": False,
         }
-    result = _run([command, "plugin", "update", CLAUDE_PLUGIN_NAME, "--scope", "user"])
+    command = executable or shutil.which("claude")
+    if not command:
+        return {
+            **preflight,
+            "updated": False,
+            "status": {"installed": False, "healthy": False, "reason": "claude-command-unavailable"},
+            "reload_required": False,
+        }
+    current = claude_plugin_status(expected_version, command)
+    if current.get("healthy") is True:
+        return {**preflight, "updated": True, "status": current, "reload_required": False}
+    if current.get("installed") is not True:
+        return {
+            **preflight,
+            "updated": False,
+            "status": {
+                **current,
+                "healthy": False,
+                "reason": "plugin-disappeared-after-preflight",
+            },
+            "reload_required": False,
+        }
+    try:
+        result = _run([command, "plugin", "update", CLAUDE_PLUGIN_NAME, "--scope", "user"])
+    except OSError:
+        return {
+            **preflight,
+            "updated": False,
+            "status": {**current, "healthy": False, "reason": "claude-command-unavailable"},
+            "reload_required": False,
+        }
     after = claude_plugin_status(expected_version, command)
     updated = result.returncode == 0 and after.get("healthy") is True
     return {
-        "attempted": True,
+        **preflight,
         "updated": updated,
         "returncode": result.returncode,
         "status": after,
-        "validation": validation_status,
-        "catalog": catalog,
-        "reload_required": updated and before.get("version") != expected_version,
+        "reload_required": updated and preflight.get("status", {}).get("version") != expected_version,
     }
+
+
+def update_claude_plugin(expected_version: str, executable: str | None = None) -> dict:
+    """Preflight, update, and verify the exact tested plugin."""
+    preflight = preflight_claude_plugin_update(expected_version, executable)
+    before = preflight.get("status", {})
+    result = _apply_claude_plugin_update(expected_version, executable, preflight)
+    if result.get("updated") and before.get("version") != expected_version:
+        result["reload_required"] = True
+    return result
 
 
 def doctor() -> int:
@@ -1013,6 +1118,9 @@ def update(require_signed_commits: bool = False, claude_command: str | None = No
 
 def _update_unlocked(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
+    previous = _run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    claude_installed = TARGETS["claude"].is_symlink()
+    claude_preflight: dict | None = None
     with tempfile.TemporaryDirectory(prefix="blun-language-guard-") as directory:
         candidate = Path(directory) / "repo"
         clone = _run(["git", "clone", "--depth", "1", REPO_URL, str(candidate)])
@@ -1029,7 +1137,35 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             if verified.returncode:
                 print("Candidate update is not signed by a trusted Git identity; current installation is unchanged.", file=sys.stderr)
                 return 1
-    previous = _run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+        try:
+            expected_version = (candidate / "VERSION").read_text(encoding="utf-8-sig").strip()
+        except OSError:
+            print("Candidate update has no readable VERSION; current installation is unchanged.", file=sys.stderr)
+            return 1
+        if claude_installed:
+            claude_preflight = preflight_claude_plugin_update(
+                expected_version,
+                claude_command,
+                candidate,
+            )
+            if claude_preflight.get("ready") is not True:
+                _atomic_json(UPDATE_STATE, {
+                    "status": "degraded",
+                    "revision": previous,
+                    "previous": previous,
+                    "candidate_revision": revision,
+                    "checked_at": int(time.time()),
+                    "runtime_version": (root / "VERSION").read_text(encoding="utf-8-sig").strip(),
+                    "candidate_version": expected_version,
+                    "claude_plugin": claude_preflight,
+                    "runtime_unchanged": True,
+                })
+                print(
+                    "Claude plugin preflight failed; current repository and runtimes are unchanged. "
+                    "The updater remains degraded and will retry safely.",
+                    file=sys.stderr,
+                )
+                return 1
     fetch = _run(["git", "fetch", "origin", revision], root)
     if fetch.returncode:
         print(fetch.stderr, file=sys.stderr)
@@ -1043,7 +1179,6 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         rollback = _run(["git", "reset", "--keep", previous], root)
         print("Installed revision failed its post-update check; rollback " + ("succeeded." if rollback.returncode == 0 else "FAILED."), file=sys.stderr)
         return 1
-    claude_installed = TARGETS["claude"].is_symlink()
     mcp_runtime_preexisting = MCP_HTTP_COMMAND.exists() or MCP_HTTP_COMMAND.is_symlink()
     mcp_headers_preexisting = MCP_HEADERS_COMMAND.exists() or MCP_HEADERS_COMMAND.is_symlink()
     mcp_token_preexisting = MCP_HTTP_TOKEN.exists()
@@ -1160,7 +1295,11 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             })
         monitor_install = {"attempted": True, "installed": monitor_ok, "detail": monitor_detail}
     expected_version = (root / "VERSION").read_text(encoding="utf-8-sig").strip()
-    plugin_update = update_claude_plugin(expected_version, claude_command) if claude_installed else {
+    plugin_update = _apply_claude_plugin_update(
+        expected_version,
+        claude_command,
+        claude_preflight or {},
+    ) if claude_installed else {
         "attempted": False,
         "updated": False,
         "status": {"reason": "claude-skill-not-installed"},
