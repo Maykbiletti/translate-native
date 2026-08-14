@@ -163,7 +163,7 @@ function readSessionEpoch(input) {
   return { destination, epoch };
 }
 
-function beginSessionEpoch(input) {
+async function beginSessionEpoch(input) {
   const directory = stateDirectory();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const destination = sessionEpochPath(input);
@@ -174,6 +174,14 @@ function beginSessionEpoch(input) {
   }
   invalidateSessionRecords(input);
   const epoch = crypto.randomBytes(32).toString("hex");
+  const registration = await callGuard({
+    operation: "register_session_epoch",
+    session_id: String(input.session_id || ""),
+    session_epoch: epoch
+  }, 3000);
+  if (registration.status !== "PASS" || registration.registered !== true) {
+    throw new Error("isolated guard rejected the session epoch");
+  }
   const temporary = `${destination}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(temporary, `${epoch}\n`, { encoding: "utf8", mode: 0o600 });
@@ -301,7 +309,7 @@ async function startupContext(eventName) {
 
 async function sessionStart(input) {
   try {
-    beginSessionEpoch(input);
+    await beginSessionEpoch(input);
   } catch (_) {
     emit({
       hookSpecificOutput: {

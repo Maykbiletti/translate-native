@@ -32,6 +32,8 @@ async function main() {
   const token = "a".repeat(64);
   fs.writeFileSync(path.join(temporary, "service.token"), `${token}\n`, { mode: 0o600 });
   const grants = new Map();
+  const sessionEpochs = new Map();
+  const sessionEpochHistory = new Map();
 
   const server = net.createServer((client) => {
     let raw = "";
@@ -43,9 +45,22 @@ async function main() {
       let response;
       let responseDelay = 0;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.18.0" };
+        response = { status: "ok", isolated_key: true, version: "6.19.0" };
+      } else if (request.operation === "register_session_epoch") {
+        const history = sessionEpochHistory.get(request.session_id) || new Set();
+        const valid = request.service_token === token
+          && request.session_id !== "session-registration-rejected"
+          && /^[a-f0-9]{64}$/.test(String(request.session_epoch || ""))
+          && !history.has(request.session_epoch);
+        if (valid) {
+          history.add(request.session_epoch);
+          sessionEpochHistory.set(request.session_id, history);
+          sessionEpochs.set(request.session_id, request.session_epoch);
+        }
+        response = { status: valid ? "PASS" : "BLOCK", registered: valid };
       } else if (request.operation === "authorize_delivery") {
         const valid = request.service_token === token
+          && sessionEpochs.get(request.session_id) === request.session_epoch
           && ["valid-token", "slow-valid-token"].includes(request.release_token);
         if (request.release_token === "slow-valid-token") responseDelay = 100;
         if (request.release_token === "slow-rejected-token") responseDelay = 500;
@@ -81,6 +96,7 @@ async function main() {
           && expected.short_text_reviewed === request.short_text_reviewed
           && expected.session_id === request.session_id
           && expected.session_epoch === request.session_epoch
+          && sessionEpochs.get(request.session_id) === request.session_epoch
           && expected.agent_id === request.agent_id
           && expected.channel === request.channel;
         if (valid) grants.delete(request.delivery_grant);
@@ -166,6 +182,23 @@ async function main() {
   assert.strictEqual(JSON.parse(blockedBrokenSession.stdout).decision, "block");
   fs.rmSync(brokenEpochPath, { recursive: true, force: true });
 
+  const rejectedRegistration = await runHook("session-start", {
+    ...common,
+    session_id: "session-registration-rejected",
+    hook_event_name: "SessionStart",
+    source: "resume"
+  }, environment);
+  assert.strictEqual(rejectedRegistration.code, 0, rejectedRegistration.stderr);
+  assert.match(rejectedRegistration.stdout, /delivery epoch could not be renewed/);
+  const rejectedSessionHash = crypto.createHash("sha256").update("session-registration-rejected").digest("hex");
+  assert(!fs.existsSync(path.join(stateDirectory, `session-${rejectedSessionHash}.epoch`)));
+  const blockedRejectedRegistration = await runHook("post-tool", {
+    ...tool,
+    session_id: "session-registration-rejected",
+    tool_use_id: "tool-rejected-registration"
+  }, environment);
+  assert.strictEqual(JSON.parse(blockedRejectedRegistration.stdout).decision, "block");
+
   const subagentStarted = await runHook("subagent-start", {
     ...common,
     hook_event_name: "SubagentStart",
@@ -211,6 +244,7 @@ async function main() {
     fs.chmodSync(path.join(stateDirectory, mainEpochFile), 0o600);
   }
   fs.writeFileSync(stateFile, staleBeforeResume, { mode: 0o600 });
+  fs.writeFileSync(path.join(stateDirectory, mainEpochFile), `${firstEpoch}\n`, { mode: 0o600 });
   const staleAfterResume = await runHook("stop", {
     ...common,
     hook_event_name: "Stop",
@@ -218,6 +252,7 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(JSON.parse(staleAfterResume.stdout).decision, "block");
+  fs.writeFileSync(path.join(stateDirectory, mainEpochFile), `${secondEpoch}\n`, { mode: 0o600 });
 
   const recorded = await runHook("post-tool", tool, environment);
   assert.strictEqual(recorded.code, 0, recorded.stderr);

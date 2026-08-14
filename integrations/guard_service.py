@@ -94,6 +94,8 @@ class GuardService:
         self.key = QUALITY.load_or_create_key(key_path)
         self.boot_id = QUALITY._b64encode(os.urandom(12))
         self.consumed_delivery_nonces: dict[str, int] = {}
+        self.session_epochs: dict[str, str] = {}
+        self.session_epoch_history: dict[str, set[str]] = {}
         self.delivery_lock = threading.Lock()
         if os.name != "nt" and key_path.stat().st_mode & 0o077:
             raise RuntimeError("guard signing key permissions must be owner-only")
@@ -177,6 +179,37 @@ class GuardService:
         signature = QUALITY._b64encode(hmac.new(self.key, encoded.encode("ascii"), hashlib.sha256).digest())
         return f"blgd2.{encoded}.{signature}"
 
+    def _register_session_epoch(self, request: dict[str, Any]) -> dict[str, Any]:
+        session_hash = self._identity_hash(_exact_string(request, "session_id"))
+        epoch = _exact_string(request, "session_epoch")
+        if re.fullmatch(r"[0-9a-f]{64}", epoch) is None:
+            raise GuardProtocolError("session_epoch must be 64 lowercase hexadecimal characters")
+        epoch_hash = self._identity_hash(epoch)
+        with self.delivery_lock:
+            history = self.session_epoch_history.setdefault(session_hash, set())
+            if epoch_hash in history:
+                return {"status": "BLOCK", "registered": False}
+            history.add(epoch_hash)
+            self.session_epochs[session_hash] = epoch_hash
+        return {"status": "PASS", "registered": True}
+
+    def _authorize_delivery(self, request: dict[str, Any], task_kind: str) -> dict[str, Any]:
+        session_hash = self._identity_hash(_exact_string(request, "session_id"))
+        epoch_hash = self._identity_hash(_exact_string(request, "session_epoch"))
+        with self.delivery_lock:
+            if self.session_epochs.get(session_hash) != epoch_hash:
+                return {
+                    "valid": False,
+                    "status": "BLOCK",
+                    "checks": {"session_epoch_current": False},
+                }
+            return {
+                "valid": True,
+                "status": "PASS",
+                "delivery_grant": self._issue_delivery_grant(request, task_kind),
+                "expires_in": 600,
+            }
+
     def _consume_delivery_grant(self, request: dict[str, Any]) -> dict[str, Any]:
         try:
             prefix, encoded, signature = _exact_string(request, "delivery_grant").split(".")
@@ -190,11 +223,13 @@ class GuardService:
             if not isinstance(nonce, str) or not nonce:
                 raise ValueError("invalid delivery grant nonce")
             now = int(time.time())
+            session_hash = self._identity_hash(_exact_string(request, "session_id"))
+            epoch_hash = self._identity_hash(_exact_string(request, "session_epoch"))
             checks = {
                 "target": payload.get("target_sha256") == QUALITY.canonical_hash(_exact_string(request, "target_text")),
                 "source": payload.get("source_sha256") == _exact_hash(request, "source_sha256"),
-                "session": payload.get("session_sha256") == self._identity_hash(_exact_string(request, "session_id")),
-                "session_epoch": payload.get("session_epoch_sha256") == self._identity_hash(_exact_string(request, "session_epoch")),
+                "session": payload.get("session_sha256") == session_hash,
+                "session_epoch": payload.get("session_epoch_sha256") == epoch_hash,
                 "agent": payload.get("agent_sha256") == self._identity_hash(_exact_string(request, "agent_id")),
                 "language": payload.get("language") == _exact_string(request, "language"),
                 "purpose": payload.get("purpose") == _exact_string(request, "task_kind"),
@@ -206,6 +241,7 @@ class GuardService:
                 "not_expired": int(payload.get("exp", 0)) >= now,
             }
             with self.delivery_lock:
+                checks["session_epoch_current"] = self.session_epochs.get(session_hash) == epoch_hash
                 self.consumed_delivery_nonces = {
                     used_nonce: expiry
                     for used_nonce, expiry in self.consumed_delivery_nonces.items()
@@ -214,7 +250,7 @@ class GuardService:
                 checks["one_time"] = nonce not in self.consumed_delivery_nonces
                 identity_valid = all(
                     checks[name]
-                    for name in ("session", "session_epoch", "agent", "version", "service_boot", "not_expired", "one_time")
+                    for name in ("session", "session_epoch", "session_epoch_current", "agent", "version", "service_boot", "not_expired", "one_time")
                 )
                 valid = all(checks.values())
                 if identity_valid:
@@ -256,15 +292,12 @@ class GuardService:
             result["status"] = "PASS" if result.get("valid") else "BLOCK"
             AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "verify"))
             return result
+        if operation == "register_session_epoch":
+            return self._register_session_epoch(request)
         if operation == "authorize_delivery":
             task_kind, _, result = self._verify_release(request)
             if result.get("valid"):
-                result = {
-                    "valid": True,
-                    "status": "PASS",
-                    "delivery_grant": self._issue_delivery_grant(request, task_kind),
-                    "expires_in": 600,
-                }
+                result = self._authorize_delivery(request, task_kind)
             else:
                 result["status"] = "BLOCK"
             AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "authorize-delivery"))

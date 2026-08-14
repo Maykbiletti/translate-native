@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.19.0: service-authoritative session epochs
+
+Version 6.19 closes the remaining two-file replay path in the Claude hook. Version 6.18 rejected an old local grant record after `SessionStart` rotated its epoch marker, but restoring both the record and its matching old marker could recreate the local state. The isolated guard service now registers the active epoch for each hashed Claude session and atomically requires that registered value before issuing or consuming any delivery grant.
+
+Every startup, resume, clear, compaction, or fork therefore replaces the service-authoritative epoch as well as the owner-only local marker. Previously registered epochs cannot be registered again during the same service boot. Restoring both old files, authorizing against an obsolete epoch, replaying an earlier registration, or losing the registration response blocks; another session remains independent. The service retains only session and epoch hashes, and neither the raw epoch nor candidate text enters its audit log. Anthropic's official [hooks reference](https://code.claude.com/docs/en/hooks) documents these `SessionStart` lifecycle sources.
+
 ### Version 6.18.0: session-resume-bound delivery grants
 
 Version 6.18 prevents an unconsumed delivery grant from surviving a Claude session restart, `--resume`, `--continue`, `/resume`, `/clear`, or context compaction. Anthropic's official [hooks reference](https://code.claude.com/docs/en/hooks) states that `SessionStart` runs for each of those lifecycle sources, including resumed sessions. The plugin now rotates a cryptographically random delivery epoch on every `SessionStart`, removes the session's outstanding main-agent and subagent records, and requires that epoch before it will authorize any new release.
@@ -446,7 +452,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.18.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.19.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

@@ -37,6 +37,14 @@ class GuardServiceTests(unittest.TestCase):
         self.key_path = root / "signing.key"
         self.audit_path = root / "audit.jsonl"
         self.service = SERVICE.GuardService(self.key_path, self.audit_path, "service-secret-with-at-least-32-characters")
+        self.session_epoch = "a" * 64
+        registered = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "register_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": self.session_epoch,
+        })
+        self.assertTrue(registered["registered"], registered)
 
     def release_request(self, target: str = "Natürlich ist das möglich.") -> dict:
         return {
@@ -116,7 +124,7 @@ class GuardServiceTests(unittest.TestCase):
             "language": "de-DE",
             "release_token": release_token,
             "session_id": "session-one",
-            "session_epoch": "epoch-one",
+            "session_epoch": self.session_epoch,
             "agent_id": "test-agent",
             "channel": "claude-hook",
         }
@@ -133,7 +141,7 @@ class GuardServiceTests(unittest.TestCase):
             "content_type": "prose",
             "short_text_reviewed": False,
             "session_id": "session-one",
-            "session_epoch": "epoch-one",
+            "session_epoch": self.session_epoch,
             "agent_id": "test-agent",
             "channel": "claude-hook",
         }
@@ -169,7 +177,7 @@ class GuardServiceTests(unittest.TestCase):
 
         session_epoch_grant = fresh_grant()
         wrong_epoch_request = self.consume_request(session_epoch_grant)
-        wrong_epoch_request["session_epoch"] = "epoch-two"
+        wrong_epoch_request["session_epoch"] = "b" * 64
         wrong_epoch = self.service.handle(wrong_epoch_request)
         self.assertFalse(wrong_epoch["valid"], wrong_epoch)
         self.assertFalse(wrong_epoch["checks"]["session_epoch"])
@@ -207,6 +215,50 @@ class GuardServiceTests(unittest.TestCase):
         raw = self.audit_path.read_text(encoding="utf-8")
         self.assertNotIn(grant, raw)
 
+    def test_service_epoch_rotation_blocks_restored_local_state(self) -> None:
+        released = self.service.handle(self.release_request())
+        old_authorized = self.service.handle(self.authorize_request(released["release_token"]))
+        self.assertTrue(old_authorized["valid"], old_authorized)
+        old_grant = old_authorized["delivery_grant"]
+
+        new_epoch = "b" * 64
+        rotated = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "register_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": new_epoch,
+        })
+        self.assertTrue(rotated["registered"], rotated)
+
+        restored = self.service.handle(self.consume_request(old_grant))
+        self.assertFalse(restored["valid"], restored)
+        self.assertTrue(restored["checks"]["session_epoch"])
+        self.assertFalse(restored["checks"]["session_epoch_current"])
+
+        stale_authorization = self.service.handle(self.authorize_request(released["release_token"]))
+        self.assertFalse(stale_authorization["valid"], stale_authorization)
+        self.assertFalse(stale_authorization["checks"]["session_epoch_current"])
+
+        replayed_registration = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "register_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": self.session_epoch,
+        })
+        self.assertFalse(replayed_registration["registered"], replayed_registration)
+
+        new_authorization_request = self.authorize_request(released["release_token"])
+        new_authorization_request["session_epoch"] = new_epoch
+        new_authorized = self.service.handle(new_authorization_request)
+        self.assertTrue(new_authorized["valid"], new_authorized)
+        new_consume_request = self.consume_request(new_authorized["delivery_grant"])
+        new_consume_request["session_epoch"] = new_epoch
+        self.assertTrue(self.service.handle(new_consume_request)["valid"])
+
+        raw = self.audit_path.read_text(encoding="utf-8")
+        self.assertNotIn(self.session_epoch, raw)
+        self.assertNotIn(new_epoch, raw)
+
     def test_delivery_grant_binds_source_language_purpose_and_policy(self) -> None:
         source = "Die Größe des Gebäudes wird täglich geprüft."
         target = "Byggnadens storlek kontrolleras dagligen."
@@ -241,10 +293,10 @@ class GuardServiceTests(unittest.TestCase):
             self.assertEqual(payload["source_sha256"], SERVICE.QUALITY.canonical_hash(source))
             self.assertEqual(
                 payload["session_epoch_sha256"],
-                SERVICE.GuardService._identity_hash("epoch-one"),
+                SERVICE.GuardService._identity_hash(self.session_epoch),
             )
             self.assertNotIn(source, grant)
-            self.assertNotIn("epoch-one", grant)
+            self.assertNotIn(self.session_epoch, grant)
             return grant
 
         base = {
