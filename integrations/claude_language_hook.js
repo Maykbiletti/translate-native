@@ -277,15 +277,37 @@ function promptBoundary(input) {
   }
 }
 
+function invalidateReleaseState(input, failureReason) {
+  try {
+    invalidateAgentRecord(input);
+    return true;
+  } catch (_) {
+    emit(blocked(failureReason));
+    return false;
+  }
+}
+
+function rejectRelease(input, reason) {
+  if (!invalidateReleaseState(
+    input,
+    "BLUN Language Guard could not invalidate stale release state after rejecting a release attempt. Do not finish or deliver natural-language output until protected state is repaired."
+  )) return;
+  emit(blocked(reason));
+}
+
 async function postTool(input) {
   const toolName = String(input.tool_name || "");
   const purpose = toolName.endsWith("__release_translation") ? "translation"
     : toolName.endsWith("__release_response") ? "response" : "";
   if (!purpose) return;
+  if (!invalidateReleaseState(
+    input,
+    "BLUN Language Guard could not clear the prior release before processing a new attempt. The new receipt is not trusted; repair protected state and release the exact final text again."
+  )) return;
   const args = input.tool_input;
   const release = findRelease(input.tool_response);
   if (!args || typeof args !== "object" || !release) {
-    emit(blocked("BLUN Language Guard returned no usable release receipt. Correct the finding and call the proper release tool again."));
+    rejectRelease(input, "BLUN Language Guard returned no usable release receipt. Correct the finding and call the proper release tool again.");
     return;
   }
   const target = typeof args.target_text === "string" ? args.target_text : "";
@@ -307,7 +329,7 @@ async function postTool(input) {
   try {
     const verification = await callGuard(request);
     if (verification.valid !== true || typeof verification.delivery_grant !== "string") {
-      emit(blocked("The isolated BLUN verifier rejected this receipt. Do not reuse it; correct and release the exact final text again."));
+      rejectRelease(input, "The isolated BLUN verifier rejected this receipt. Do not reuse it; correct and release the exact final text again.");
       return;
     }
     writeRecord(input, {
@@ -323,7 +345,7 @@ async function postTool(input) {
       authorized_at: Date.now()
     });
   } catch (_) {
-    emit(blocked("The isolated BLUN verifier is unavailable. Fail closed and reconnect the language guard before finishing."));
+    rejectRelease(input, "The isolated BLUN verifier is unavailable. Fail closed and reconnect the language guard before finishing.");
   }
 }
 

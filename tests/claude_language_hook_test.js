@@ -41,10 +41,14 @@ async function main() {
       if (newline < 0) return;
       const request = JSON.parse(raw.slice(0, newline));
       let response;
+      let responseDelay = 0;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.16.0" };
+        response = { status: "ok", isolated_key: true, version: "6.17.0" };
       } else if (request.operation === "authorize_delivery") {
-        const valid = request.service_token === token && request.release_token === "valid-token";
+        const valid = request.service_token === token
+          && ["valid-token", "slow-valid-token"].includes(request.release_token);
+        if (request.release_token === "slow-valid-token") responseDelay = 100;
+        if (request.release_token === "slow-rejected-token") responseDelay = 500;
         const grant = `grant-${crypto.randomUUID()}`;
         if (valid) grants.set(grant, {
           source_sha256: crypto.createHash("sha256").update(
@@ -82,7 +86,8 @@ async function main() {
       } else {
         response = { status: "BLOCK", valid: false };
       }
-      client.end(`${JSON.stringify(response)}\n`);
+      const finish = () => client.end(`${JSON.stringify(response)}\n`);
+      if (responseDelay > 0) setTimeout(finish, responseDelay); else finish();
     });
   });
   await new Promise((resolve, reject) => {
@@ -237,6 +242,80 @@ async function main() {
   assert.strictEqual(unrelatedFailure.stdout, "");
 
   await runHook("post-tool", tool, environment);
+  await runHook("post-tool", otherSessionTool, environment);
+  const missingReceipt = await runHook("post-tool", {
+    ...tool,
+    tool_use_id: "tool-missing-receipt",
+    tool_response: { structuredContent: { release_allowed: false, findings: ["native-review-required"] } }
+  }, environment);
+  assert.strictEqual(JSON.parse(missingReceipt.stdout).decision, "block");
+  assert(!missingReceipt.stdout.includes(clean), "receipt rejection must not expose candidate text");
+  const remainingAfterMissingReceipt = fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json"));
+  assert.strictEqual(remainingAfterMissingReceipt.length, 1, "logical release failure may clear only the same session and agent");
+  const preservedAfterMissingReceipt = JSON.parse(fs.readFileSync(path.join(stateDirectory, remainingAfterMissingReceipt[0]), "utf8"));
+  assert.strictEqual(preservedAfterMissingReceipt.session_sha256, crypto.createHash("sha256").update("session-two").digest("hex"));
+  const staleAfterMissingReceipt = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(staleAfterMissingReceipt.stdout).decision, "block");
+  const parallelAfterMissingReceipt = await runHook("stop", {
+    ...common,
+    session_id: "session-two",
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(parallelAfterMissingReceipt.stdout, "");
+
+  await runHook("post-tool", tool, environment);
+  const rejectedReceipt = await runHook("post-tool", {
+    ...tool,
+    tool_use_id: "tool-rejected-receipt",
+    tool_response: { structuredContent: { release_allowed: true, release_token: "forged" } }
+  }, environment);
+  assert.strictEqual(JSON.parse(rejectedReceipt.stdout).decision, "block");
+  const staleAfterRejectedReceipt = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(staleAfterRejectedReceipt.stdout).decision, "block");
+
+  const slowValid = {
+    ...tool,
+    tool_use_id: "tool-slow-valid",
+    tool_response: { structuredContent: { release_allowed: true, release_token: "slow-valid-token" } }
+  };
+  const slowRejected = {
+    ...tool,
+    tool_use_id: "tool-slow-rejected",
+    tool_response: { structuredContent: { release_allowed: true, release_token: "slow-rejected-token" } }
+  };
+  const [parallelSuccess, parallelRejection] = await Promise.all([
+    runHook("post-tool", slowValid, environment),
+    runHook("post-tool", slowRejected, environment)
+  ]);
+  assert.strictEqual(parallelSuccess.stdout, "");
+  assert.strictEqual(JSON.parse(parallelRejection.stdout).decision, "block");
+  const staleAfterParallelRejection = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(staleAfterParallelRejection.stdout).decision, "block");
+
+  fs.mkdirSync(stateFile);
+  const unclearedPriorState = await runHook("post-tool", tool, environment);
+  assert.strictEqual(JSON.parse(unclearedPriorState.stdout).decision, "block");
+  assert.match(unclearedPriorState.stdout, /could not clear the prior release/);
+  fs.rmSync(stateFile, { recursive: true, force: true });
+
+  await runHook("post-tool", tool, environment);
   const consumedRecord = fs.readFileSync(stateFile, "utf8");
 
   const released = await runHook("stop", {
@@ -313,12 +392,6 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(delayedAfterCode.stdout).decision, "block");
 
-  const badReceipt = await runHook("post-tool", {
-    ...tool,
-    tool_response: { structuredContent: { release_allowed: true, release_token: "forged" } }
-  }, environment);
-  assert.strictEqual(JSON.parse(badReceipt.stdout).decision, "block");
-
   const forgedRecord = JSON.parse(copiedRecord);
   forgedRecord.delivery_grant = "forged-delivery-grant";
   forgedRecord.authorized_at = Date.now();
@@ -389,7 +462,20 @@ async function main() {
     assert.strictEqual(JSON.parse(contextualTamper.stdout).decision, "block", field);
   }
 
+  await runHook("post-tool", tool, environment);
   await new Promise((resolve) => server.close(resolve));
+  const verifierUnavailable = await runHook("post-tool", {
+    ...tool,
+    tool_use_id: "tool-verifier-unavailable"
+  }, environment);
+  assert.strictEqual(JSON.parse(verifierUnavailable.stdout).decision, "block");
+  const staleAfterVerifierUnavailable = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(staleAfterVerifierUnavailable.stdout).decision, "block");
   const unavailableSubagent = await runHook("subagent-start", {
     ...common,
     hook_event_name: "SubagentStart",

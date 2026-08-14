@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.17.0: invalidate grants on every rejected release
+
+Version 6.17 closes the logical-failure half of the stale-grant path. A release tool can execute successfully while returning no usable receipt, while the isolated verifier rejects that receipt, or while delivery authorization becomes unavailable. The synchronous `PostToolUse` hook now clears any earlier grant for the exact session and agent before processing every new release attempt and clears it again on every rejection path. A failed new attempt can therefore never fall back to an older authorization.
+
+The second invalidation is deliberate: Anthropic's official [hooks reference](https://code.claude.com/docs/en/hooks) documents that `PostToolUse` hooks run concurrently for parallel tool calls. Rechecking on rejection ensures that a later failure removes a grant written by an overlapping earlier attempt, while a later successful attempt may still establish its own exact grant. Missing receipts, verifier rejection, verifier outages, protected-state deletion failures, cross-session isolation, privacy-safe diagnostics, and ordinary success all have regression coverage.
+
 ### Version 6.16.0: fail closed after release-tool failures
 
 Version 6.16 closes the stale-grant path that appears when Claude's MCP release call fails. Anthropic's official [`PostToolUseFailure` hook contract](https://code.claude.com/docs/en/hooks) can add recovery context alongside the tool error and can return a blocking decision. The plugin now matches only failed `release_response` and `release_translation` calls, immediately removes any earlier unconsumed delivery grant for that exact Claude session and agent, and tells Claude to reconnect and repeat the correct release workflow.
@@ -434,7 +440,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.16.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.17.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
