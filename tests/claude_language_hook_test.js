@@ -45,7 +45,7 @@ async function main() {
       let response;
       let responseDelay = 0;
       if (request.operation === "health") {
-        response = { status: "ok", isolated_key: true, version: "6.21.0" };
+        response = { status: "ok", isolated_key: true, version: "6.22.0" };
       } else if (request.operation === "register_session_epoch") {
         const history = sessionEpochHistory.get(request.session_id) || new Set();
         const valid = request.service_token === token
@@ -347,6 +347,8 @@ async function main() {
   await runHook("post-tool", tool, environment);
   await runHook("post-tool", childTool, environment);
   await runHook("post-tool", otherSessionTool, environment);
+  const recordBeforeStopFailure = fs.readFileSync(stateFile, "utf8");
+  const epochBeforeStopFailure = fs.readFileSync(path.join(stateDirectory, mainEpochFile), "utf8").trim();
   const failedTurn = await runHook("stop-failure", {
     ...common,
     hook_event_name: "StopFailure",
@@ -356,6 +358,8 @@ async function main() {
   }, environment);
   assert.strictEqual(failedTurn.code, 0, failedTurn.stderr);
   assert.strictEqual(failedTurn.stdout, "", "StopFailure cleanup must not expose failure or candidate text");
+  const epochAfterStopFailure = fs.readFileSync(path.join(stateDirectory, mainEpochFile), "utf8").trim();
+  assert.notStrictEqual(epochAfterStopFailure, epochBeforeStopFailure, "StopFailure must rotate the service-authoritative epoch");
   const remainingAfterStopFailure = fs.readdirSync(stateDirectory).filter((name) => name.endsWith(".json"));
   assert.strictEqual(remainingAfterStopFailure.length, 1, "StopFailure must clear every grant for only its session");
   const preservedAfterStopFailure = JSON.parse(fs.readFileSync(path.join(stateDirectory, remainingAfterStopFailure[0]), "utf8"));
@@ -383,6 +387,29 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(otherSessionAfterStopFailure.stdout, "");
+
+  fs.writeFileSync(stateFile, recordBeforeStopFailure, { mode: 0o600 });
+  fs.writeFileSync(path.join(stateDirectory, mainEpochFile), `${epochBeforeStopFailure}\n`, { mode: 0o600 });
+  const restoredAfterStopFailure = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(restoredAfterStopFailure.stdout).decision, "block", "restored local state must fail against the rotated service epoch");
+  fs.writeFileSync(path.join(stateDirectory, mainEpochFile), `${epochAfterStopFailure}\n`, { mode: 0o600 });
+  const freshAfterStopFailure = await runHook("post-tool", {
+    ...tool,
+    tool_use_id: "tool-fresh-after-stop-failure"
+  }, environment);
+  assert.strictEqual(freshAfterStopFailure.stdout, "");
+  const deliveredFreshAfterStopFailure = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(deliveredFreshAfterStopFailure.stdout, "");
 
   await runHook("post-tool", tool, environment);
   await runHook("post-tool", otherSessionTool, environment);
@@ -654,6 +681,14 @@ async function main() {
 
   await runHook("post-tool", tool, environment);
   await new Promise((resolve) => server.close(resolve));
+  const failedTurnWithoutGuard = await runHook("stop-failure", {
+    ...common,
+    hook_event_name: "StopFailure",
+    error: "server_error",
+    error_details: "guard also unavailable"
+  }, environment);
+  assert.strictEqual(failedTurnWithoutGuard.stdout, "");
+  assert(!fs.existsSync(path.join(stateDirectory, mainEpochFile)), "failed StopFailure rotation must remove the old local epoch");
   const verifierUnavailable = await runHook("post-tool", {
     ...tool,
     tool_use_id: "tool-verifier-unavailable"

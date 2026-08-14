@@ -334,12 +334,13 @@ function promptBoundary(input) {
   }
 }
 
-function stopFailure(input) {
+async function stopFailure(input) {
   try {
-    invalidateSessionRecords(input);
+    await beginSessionEpoch(input);
   } catch (_) {
-    // Claude ignores StopFailure output and exit status. A later prompt or Stop
-    // remains fail-closed if protected state could not be removed here.
+    // beginSessionEpoch removes the old local marker before service registration.
+    // Claude ignores StopFailure output and exit status, so any incomplete
+    // rotation remains silent and fail-closed until SessionStart repairs it.
   }
 }
 
