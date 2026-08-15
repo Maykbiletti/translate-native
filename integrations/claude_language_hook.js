@@ -346,6 +346,21 @@ function preTool(input) {
   });
 }
 
+function isDirectTelegramDeliveryTool(toolName) {
+  return /^mcp__.*telegram.*__(?:reply|send|send_message|sendMessage)$/i.test(String(toolName || ""));
+}
+
+function preDelivery(input) {
+  if (!isDirectTelegramDeliveryTool(input.tool_name)) return;
+  emit({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: "Direct Telegram delivery is disabled by mandatory BLUN Translate Native. Return the verified final response normally; the host-owned bridge must deliver it after Stop verification."
+    }
+  });
+}
+
 function blockedStop(input, reason) {
   const repeatedStop = input && input.stop_hook_active === true
     && ["Stop", "SubagentStop"].includes(String(input.hook_event_name || ""));
@@ -362,7 +377,7 @@ function startupMessage(eventName, healthy) {
   if (!healthy) {
     return `${subject} is protected by mandatory BLUN Translate Native, but its isolated guard is unavailable. Fail closed: do not finish or deliver natural-language output until the service is healthy.${policyInstruction ? ` ${policyInstruction}` : ""}`;
   }
-  return `${subject} is protected by mandatory BLUN Translate Native. Before every natural-language final answer call release_response with the exact final text. For translations load the translate-native skill and call release_translation with the complete source and target. Do not rely on another agent's release: the final visible text must use a fresh grant bound to this session and agent identity and remain byte-for-byte equivalent after Unicode normalization to the released target.${policyInstruction ? ` ${policyInstruction}` : ""}`;
+  return `${subject} is protected by mandatory BLUN Translate Native. Before every natural-language final answer call release_response with the exact final text. For translations load the translate-native skill and call release_translation with the complete source and target. Never call a Telegram reply or send tool directly; after Stop verifies the exact final response, the host-owned bridge delivers it. Do not rely on another agent's release: the final visible text must use a fresh grant bound to this session and agent identity and remain byte-for-byte equivalent after Unicode normalization to the released target.${policyInstruction ? ` ${policyInstruction}` : ""}`;
 }
 
 async function startupContext(eventName) {
@@ -636,6 +651,7 @@ async function main() {
   if (mode === "prompt-boundary") return promptBoundary(input);
   if (mode === "stop-failure") return stopFailure(input);
   if (mode === "session-end") return sessionEnd(input);
+  if (mode === "pre-delivery") return preDelivery(input);
   if (mode === "pre-tool") return preTool(input);
   if (mode === "post-tool") return postTool(input);
   if (mode === "post-tool-failure") return postToolFailure(input);
@@ -650,4 +666,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, preTool, readSessionEpoch, sessionEnd, sessionHash, stopFailure, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readSessionEpoch, sessionEnd, sessionHash, stopFailure, textHash };

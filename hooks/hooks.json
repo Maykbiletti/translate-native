@@ -77,6 +77,20 @@
             "timeout": 8
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*telegram.*__(reply|send|send_message|sendMessage)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "pre-delivery"
+            ],
+            "timeout": 8
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [

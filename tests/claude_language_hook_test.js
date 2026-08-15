@@ -197,6 +197,26 @@ async function main() {
   assert.strictEqual(rewrittenOutput.updatedInput.target_text, clean);
   assert.match(rewrittenOutput.additionalContext, /"de-DE"/);
 
+  const directTelegramReply = await runHook("pre-delivery", {
+    ...policyCommon,
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__plugin-telegram_telegram__reply",
+    tool_input: { chat_id: "private-chat", text: clean }
+  }, { BLUN_LANGUAGE_GUARD_RUNTIME: path.join(temporary, "unavailable-guard") });
+  const directTelegramOutput = JSON.parse(directTelegramReply.stdout).hookSpecificOutput;
+  assert.strictEqual(directTelegramOutput.hookEventName, "PreToolUse");
+  assert.strictEqual(directTelegramOutput.permissionDecision, "deny");
+  assert.match(directTelegramOutput.permissionDecisionReason, /host-owned bridge/);
+  assert(!directTelegramReply.stdout.includes(clean), "direct-delivery denial must not expose candidate text");
+
+  const telegramReadTool = await runHook("pre-delivery", {
+    ...policyCommon,
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__plugin-telegram_telegram__get_updates",
+    tool_input: { chat_id: "private-chat" }
+  }, policyEnvironment);
+  assert.strictEqual(telegramReadTool.stdout, "", "read-only Telegram tools must remain available");
+
   const wrongPurpose = await runHook("pre-tool", {
     ...policyCommon,
     hook_event_name: "PreToolUse",

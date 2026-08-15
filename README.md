@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.41.0: Claude blocks direct Telegram delivery
+
+Version 6.41 enforces the existing host-owned delivery contract at Claude's tool boundary. A Claude agent can no longer call a Telegram `reply`, `send`, `send_message`, or `sendMessage` MCP tool before its actual final response reaches `Stop`. The `PreToolUse` hook denies only those delivery operations, never copies their candidate text into the denial, and remains closed even when the language service is unavailable. Read-only Telegram operations remain unaffected.
+
+The agent returns its verified final response normally. After `Stop` consumes the fresh grant bound to the exact response, the host-owned bridge remains responsible for delivery. This prevents a direct Telegram tool call from escaping before the lifecycle gate while preserving the non-bypassable host boundary. The implementation follows Anthropic's official [hook reference](https://code.claude.com/docs/en/hooks), where `PreToolUse` can deny a tool call before execution. Regression tests cover the observed `plugin-telegram_telegram.reply` path, candidate confidentiality, and a read-only Telegram control.
+
 ### Version 6.40.0: Claude binds release calls to the host language
 
 Version 6.40 closes the remaining Claude-side path behind delayed `language mismatch` failures. When the trusted host supplies `BLUN_LANGUAGE_GUARD_LANGUAGE` or `BLUN_LANGUAGE_GUARD_TASK_KIND`, the plugin repeats that policy at session and prompt boundaries, rewrites the release tool's `language` argument to the exact host tag in `PreToolUse`, and rejects a wrong release purpose. `PostToolUse` independently rechecks both fields before exchanging the receipt for a delivery grant, so an older client, hook race, or direct invocation cannot bypass the binding.
@@ -586,7 +592,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.40.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.41.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
