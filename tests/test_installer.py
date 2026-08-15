@@ -45,6 +45,11 @@ class InstallerTests(unittest.TestCase):
         old = INSTALLER._run(["git", "rev-parse", "HEAD"], upstream).stdout.strip()
         active = root / "active"
         self.assertEqual(INSTALLER._run(["git", "clone", str(upstream), str(active)]).returncode, 0)
+        self.assertEqual(INSTALLER._run(["git", "config", "user.name", "Update Test"], active).returncode, 0)
+        self.assertEqual(
+            INSTALLER._run(["git", "config", "user.email", "update@example.invalid"], active).returncode,
+            0,
+        )
         (upstream / "VERSION").write_text("6.26.0\n", encoding="utf-8")
         (upstream / "new-runtime.txt").write_text("new\n", encoding="utf-8")
         self.assertEqual(INSTALLER._run(["git", "add", "."], upstream).returncode, 0)
