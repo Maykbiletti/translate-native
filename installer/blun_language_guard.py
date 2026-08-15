@@ -1429,6 +1429,21 @@ def _effective_signed_commit_policy(requested: bool = False) -> bool:
     return required
 
 
+def _clean_checkout_revision(root: Path) -> str | None:
+    """Return the exact HEAD only when every tracked and untracked path is clean."""
+    head = _run(["git", "rev-parse", "--verify", "HEAD^{commit}"], root)
+    revision = head.stdout.strip()
+    if head.returncode or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        return None
+    status_result = _run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        root,
+    )
+    if status_result.returncode or status_result.stdout.strip():
+        return None
+    return revision
+
+
 def update(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     if not (root / ".git").exists():
@@ -1451,7 +1466,13 @@ def update(require_signed_commits: bool = False, claude_command: str | None = No
 
 def _update_unlocked(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
-    previous = _run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    previous = _clean_checkout_revision(root)
+    if previous is None:
+        print(
+            "Update requires a valid, completely clean checkout; local files are unchanged.",
+            file=sys.stderr,
+        )
+        return 2
     claude_installed = TARGETS["claude"].is_symlink()
     claude_preflight: dict | None = None
     with tempfile.TemporaryDirectory(prefix="blun-language-guard-") as directory:
@@ -1499,6 +1520,12 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
                     file=sys.stderr,
                 )
                 return 1
+    if _clean_checkout_revision(root) != previous:
+        print(
+            "The active checkout changed during update preflight; candidate activation is blocked.",
+            file=sys.stderr,
+        )
+        return 2
     fetch = _run(["git", "fetch", "origin", revision], root)
     if fetch.returncode:
         print(fetch.stderr, file=sys.stderr)
