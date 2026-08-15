@@ -1565,11 +1565,50 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             file=sys.stderr,
         )
         return 2
-    post_tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
-    if post_tests.returncode:
-        rollback = _run(["git", "reset", "--keep", previous], root)
-        print("Installed revision failed its post-update check; rollback " + ("succeeded." if rollback.returncode == 0 else "FAILED."), file=sys.stderr)
-        return 1
+    post_tests = _run(
+        [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-q"],
+        root,
+    )
+    post_revision = _clean_checkout_revision(root)
+    if post_tests.returncode or post_revision != revision:
+        observed = _run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
+        ).stdout.strip()
+        if observed == revision:
+            rollback = _run(["git", "reset", "--keep", previous], root)
+            restored_head = _run(
+                ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
+            ).stdout.strip()
+            restored = rollback.returncode == 0 and restored_head == previous
+            outcome = (
+                "the previous revision was restored without discarding local work."
+                if restored
+                else "the safe repository rollback failed. Manual inspection is required."
+            )
+            if post_tests.returncode:
+                print(
+                    "Installed revision failed its post-update check; runtime activation is blocked and "
+                    + outcome,
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                "The active checkout changed while running post-update tests; runtime activation is "
+                "blocked and " + outcome,
+                file=sys.stderr,
+            )
+            return 2 if restored else 1
+        detail = (
+            "Installed revision failed its post-update check"
+            if post_tests.returncode
+            else "HEAD changed independently while running post-update tests"
+        )
+        print(
+            detail
+            + "; runtime activation is blocked and the independent commit was not reset.",
+            file=sys.stderr,
+        )
+        return 1 if post_tests.returncode else 2
     mcp_runtime_preexisting = MCP_HTTP_COMMAND.exists() or MCP_HTTP_COMMAND.is_symlink()
     mcp_headers_preexisting = MCP_HEADERS_COMMAND.exists() or MCP_HEADERS_COMMAND.is_symlink()
     mcp_token_preexisting = MCP_HTTP_TOKEN.exists()

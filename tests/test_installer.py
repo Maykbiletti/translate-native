@@ -287,6 +287,84 @@ class InstallerTests(unittest.TestCase):
                     self.assertFalse((active / "new-runtime.txt").exists())
                 self.assertEqual(local_file.read_text(encoding="utf-8"), "operator work during cutover\n")
 
+    def test_update_post_tests_guard_preserves_uncommitted_and_committed_work(self) -> None:
+        for test_result in ("pass", "fail"):
+            for change_kind in ("dirty", "new-head"):
+                with self.subTest(test_result=test_result, change_kind=change_kind), \
+                     tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    upstream, active, old, candidate = self._update_repository_pair(root)
+                    local_file = active / "during-post-update-tests.txt"
+                    service = root / "installed-service"
+                    mcp = root / "installed-mcp"
+                    service.write_text("installed\n", encoding="utf-8")
+                    mcp.write_text("installed\n", encoding="utf-8")
+                    real_run = INSTALLER._run
+                    mutated = False
+
+                    def mutate_after_post_tests(command: list[str], cwd: Path | None = None):
+                        nonlocal mutated
+                        result = real_run(command, cwd)
+                        if (
+                            not mutated
+                            and command[:4] == [sys.executable, "-B", "-m", "unittest"]
+                            and cwd == active
+                        ):
+                            mutated = True
+                            local_file.write_text(
+                                "operator work during post-update tests\n",
+                                encoding="utf-8",
+                            )
+                            if change_kind == "new-head":
+                                self.assertEqual(
+                                    real_run(["git", "add", local_file.name], active).returncode,
+                                    0,
+                                )
+                                self.assertEqual(
+                                    real_run(["git", "commit", "-m", "operator work"], active).returncode,
+                                    0,
+                                )
+                            if test_result == "fail":
+                                return INSTALLER.subprocess.CompletedProcess(
+                                    command, 1, result.stdout, "injected post-test failure"
+                                )
+                        return result
+
+                    errors = io.StringIO()
+                    with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                         mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                         mock.patch.object(
+                             INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": root / "missing-claude"}
+                         ), \
+                         mock.patch.object(INSTALLER, "SERVICE_COMMAND", service), \
+                         mock.patch.object(INSTALLER, "MCP_HTTP_COMMAND", mcp), \
+                         mock.patch.object(INSTALLER, "_run", side_effect=mutate_after_post_tests), \
+                         mock.patch.object(INSTALLER, "restart_guard_runtime") as guard_restart, \
+                         mock.patch.object(INSTALLER, "restart_mcp_http_runtime") as mcp_restart, \
+                         contextlib.redirect_stderr(errors):
+                        expected = 1 if test_result == "fail" else 2
+                        self.assertEqual(INSTALLER._update_unlocked(), expected)
+                    observed = real_run(["git", "rev-parse", "HEAD"], active).stdout.strip()
+                    self.assertEqual(observed == old, change_kind == "dirty")
+                    if change_kind == "new-head":
+                        self.assertIn("independent commit was not reset", errors.getvalue())
+                        self.assertEqual(
+                            real_run(
+                                ["git", "merge-base", "--is-ancestor", candidate, observed],
+                                active,
+                            ).returncode,
+                            0,
+                        )
+                    else:
+                        self.assertIn("without discarding local work", errors.getvalue())
+                        self.assertFalse((active / "new-runtime.txt").exists())
+                    self.assertEqual(
+                        local_file.read_text(encoding="utf-8"),
+                        "operator work during post-update tests\n",
+                    )
+                    guard_restart.assert_not_called()
+                    mcp_restart.assert_not_called()
+
     def test_rollback_tests_target_pauses_updater_and_records_exact_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
