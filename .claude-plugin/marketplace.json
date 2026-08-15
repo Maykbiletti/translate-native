@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "translate-native",
-      "source": ".",
+      "source": "./",
       "description": "Native translation, Unicode orthography, persistent MCP, and mandatory Claude response hooks."
     }
   ]

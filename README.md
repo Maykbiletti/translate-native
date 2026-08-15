@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.41.1: strict Claude plugin paths
+
+Version 6.41.1 fixes the two remaining path violations reported by Claude's strict plugin validator. The marketplace now declares its repository-root source as `./`, satisfying Claude's requirement that relative marketplace sources start with `./`. The manifest's `skills` entry now names the `./translate-native` directory that contains `SKILL.md`, rather than naming the Markdown file as if it were a skill directory.
+
+The version is bumped because Claude uses the manifest version as the plugin cache and update key; publishing corrected bytes under Version 6.41.0 would leave existing installations unchanged. A repository regression now resolves every declared skill path to a directory containing `SKILL.md` and rejects marketplace sources that do not use Claude's strict relative-path form. Hooks, MCP configuration, delivery policy, and live processes are unchanged. See Anthropic's official [plugin path rules](https://code.claude.com/docs/en/plugins-reference#path-behavior-rules) and [marketplace source rules](https://code.claude.com/docs/en/plugin-marketplaces#relative-paths).
+
 ### Version 6.41.0: Claude blocks direct Telegram delivery
 
 Version 6.41 enforces the existing host-owned delivery contract at Claude's tool boundary. A Claude agent can no longer call a Telegram `reply`, `send`, `send_message`, or `sendMessage` MCP tool before its actual final response reaches `Stop`. The `PreToolUse` hook denies only those delivery operations, never copies their candidate text into the denial, and remains closed even when the language service is unavailable. Read-only Telegram operations remain unaffected.
@@ -592,7 +598,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.41.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.41.1 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
