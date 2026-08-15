@@ -179,7 +179,11 @@ async function verifyForDelivery({ rawEnvelope, hostContext, endpoint, serviceTo
     channel: String(channel || ""),
   }, { serviceToken });
   if (result?.valid !== true) {
-    throw new LanguageGuardBlocked("isolated guard rejected the exact output", "receipt_rejected");
+    const failedChecks = result?.checks && typeof result.checks === "object"
+      ? Object.entries(result.checks).filter(([, passed]) => passed !== true).map(([name]) => name)
+      : [];
+    const detail = failedChecks.length ? ` (failed checks: ${failedChecks.join(", ")})` : "";
+    throw new LanguageGuardBlocked(`isolated guard rejected the exact output${detail}`, "receipt_rejected");
   }
   return { text: envelope.target_text, route, verification: result };
 }

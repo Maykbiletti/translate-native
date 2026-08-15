@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.39.0: authoritative reply language wins over Telegram UI language
+
+Version 6.39 fixes a real delivery failure in which Telegram's `senderLanguageCode` could override the host's configured response locale. That Telegram field describes the sender's client/interface language and is not reliable evidence for the language of the current message. A German release such as `de-DE` could therefore be checked against `en` or another short UI tag and fail with `language mismatch` even though the text was correct.
+
+The BLUN adapter now resolves the language in a strict trust order: explicit per-task guard language, dedicated guard or response configuration, general host language, explicit Telegram conversation language, and only then the legacy sender UI language as a compatibility fallback. The chosen tag is still preserved exactly—`de`, `de-DE`, and `de-AT` are not treated as interchangeable—and the mandatory agent instruction now names the exact release-tool argument. Rejections also identify failed receipt fields without exposing protected text. Regression tests cover configured German with an English Telegram UI, explicit Swedish routing, Catalan conversation metadata, and diagnostic failure output.
+
 ### Version 6.38.0: update verifies the checkout after repository tests
 
 Version 6.38 closes the post-test race in forward updates. Post-update tests run without creating Python bytecode, and the updater then requires the exact completely clean tested candidate before any persistent runtime, Claude integration, health monitor, or update state can change.
@@ -574,7 +580,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.38.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.39.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

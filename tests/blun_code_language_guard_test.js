@@ -8,6 +8,7 @@ const path = require("node:path");
 const {
   bootstrapLanguageGuardMcp,
   createBlunLanguageGuard,
+  resolveLanguage,
 } = require("../integrations/adapters/blun-code-language-guard");
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "blun-code-guard-"));
@@ -61,6 +62,29 @@ server.listen(0, "127.0.0.1", async () => {
     const guard = createBlunLanguageGuard({ store, getConfig: () => ({ language: "de-DE" }), environment: {} });
     assert.equal(guard.mandatory, true);
     const context = guard.context({ messages: [{ role: "user", content: "Antworte bitte." }], meta: {}, channel: "desktop" });
+    assert.equal(context.route.language, "de-DE");
+    assert.equal(context.languageSource, "config.language");
+    assert.match(guard.mandatoryInstruction(context), /Pass language exactly as "de-DE"/);
+
+    const telegramContext = guard.context({
+      messages: [{ role: "user", content: "Antworte bitte." }],
+      meta: { telegram: { senderLanguageCode: "en" } },
+      channel: "telegram",
+    });
+    assert.equal(telegramContext.route.language, "de-DE", "Telegram UI language must not override the configured response language");
+    assert.equal(telegramContext.languageSource, "config.language");
+
+    const explicitContext = guard.context({
+      messages: [{ role: "user", content: "Svara på svenska." }],
+      meta: { languageGuardLanguage: "sv-SE", telegram: { senderLanguageCode: "en" } },
+      channel: "telegram",
+    });
+    assert.equal(explicitContext.route.language, "sv-SE");
+    assert.equal(explicitContext.languageSource, "meta.languageGuardLanguage");
+    assert.deepEqual(
+      resolveLanguage({ telegram: { conversationLanguage: "ca-ES", senderLanguageCode: "en" } }, {}),
+      { language: "ca-ES", source: "meta.telegram.conversationLanguage" },
+    );
     const events = [];
     const buffered = guard.bufferedEmitter(event => events.push(event));
     buffered({ type: "text-delta", delta: "secret draft" });
@@ -72,6 +96,7 @@ server.listen(0, "127.0.0.1", async () => {
     }, context, event => events.push(event));
     assert.equal(released.answer, "Natürlich ist das möglich.");
     assert.equal(released.languageGuardVerified, true);
+    assert.equal(released.languageGuard.languageSource, "config.language");
     assert.equal(records.at(-1).task_kind, "response");
     assert.equal(records.at(-1).service_token, "service-token-with-at-least-32-characters");
     assert.ok(!JSON.stringify(events).includes("secret draft"));

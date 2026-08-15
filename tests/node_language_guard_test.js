@@ -29,7 +29,8 @@ const server = net.createServer(socket => {
     if (newline < 0) return;
     const request = JSON.parse(raw.slice(0, newline));
     requests.push(request);
-    socket.end(`${JSON.stringify({ valid: request.release_token === "valid-token", checks: { target: true } })}\n`);
+    const valid = request.release_token === "valid-token";
+    socket.end(`${JSON.stringify({ valid, checks: { target: valid, language: request.language === "sv-SE" || request.language === "de-DE" } })}\n`);
   });
 });
 
@@ -72,7 +73,7 @@ server.listen(0, "127.0.0.1", async () => {
       botToken: "host-only-token",
       chatId: "123",
       telegramRequest: async () => sent.push("must-not-send"),
-    }), LanguageGuardBlocked);
+    }), error => error instanceof LanguageGuardBlocked && /failed checks: target/.test(error.message));
     assert.equal(sent.length, before);
   } finally {
     server.close();

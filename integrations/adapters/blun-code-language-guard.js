@@ -83,9 +83,27 @@ function resolveGuardConnection({ store, environment = process.env }) {
   return { endpoint, serviceToken };
 }
 
+function resolveLanguage(meta, config) {
+  const candidates = [
+    [meta?.languageGuardLanguage, "meta.languageGuardLanguage"],
+    [config?.languageGuardLanguage, "config.languageGuardLanguage"],
+    [config?.responseLanguage, "config.responseLanguage"],
+    [config?.language, "config.language"],
+    [meta?.telegram?.conversationLanguage, "meta.telegram.conversationLanguage"],
+    // Telegram's senderLanguageCode describes the sender's client/interface
+    // language. It is not reliable evidence for the language of this message,
+    // so retain it only as a backwards-compatible last resort.
+    [meta?.telegram?.senderLanguageCode, "meta.telegram.senderLanguageCode"],
+  ];
+  for (const [value, source] of candidates) {
+    const language = String(value || "").trim();
+    if (language) return { language, source };
+  }
+  return { language: "", source: "missing" };
+}
+
 function languageFromMeta(meta, config) {
-  const telegramLanguage = meta?.telegram?.senderLanguageCode;
-  return String(meta?.languageGuardLanguage || telegramLanguage || config?.language || "").trim();
+  return resolveLanguage(meta, config).language;
 }
 
 function createBlunLanguageGuard({ store, getConfig, environment = process.env }) {
@@ -95,7 +113,8 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
     const sourceText = taskKind === "translation"
       ? String(meta.languageGuardSourceText || "")
       : "";
-    const language = languageFromMeta(meta, getConfig?.() || {});
+    const languageResolution = resolveLanguage(meta, getConfig?.() || {});
+    const language = languageResolution.language;
     const route = routeHostContext({
       task_kind: taskKind,
       operation: taskKind === "translation" ? "translation" : "chat",
@@ -120,6 +139,7 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
       channel: String(channel || "desktop"),
       prompt,
       route,
+      languageSource: languageResolution.source,
     };
   }
 
@@ -131,6 +151,7 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
     return [
       "[BLUN LANGUAGE GUARD — MANDATORY]",
       `The host classified this output as ${guardContext.route.taskKind} in ${guardContext.route.language}.`,
+      `Pass language exactly as ${JSON.stringify(guardContext.route.language)} to ${tool}; do not substitute a base language or another locale.`,
       translationRule,
       `Before final output, call ${tool} for the complete final candidate with truthful attestations.`,
       "Final output must be exactly one JSON object with only target_text and release_token.",
@@ -178,6 +199,7 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
       languageGuard: {
         taskKind: verified.route.taskKind,
         language: verified.route.language,
+        languageSource: guardContext.languageSource,
         version: verified.verification?.version || "",
       },
     };
@@ -198,5 +220,7 @@ module.exports = {
   loadLegacyGuardConfig,
   bootstrapLanguageGuardMcp,
   resolveGuardConnection,
+  resolveLanguage,
+  languageFromMeta,
   createBlunLanguageGuard,
 };
