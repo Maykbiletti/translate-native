@@ -48,6 +48,7 @@ MCP_SERVER_NAME = "blun-language-guard"
 CLAUDE_PLUGIN_NAME = "translate-native@blun-language-tools"
 CLAUDE_MARKETPLACE_NAME = "blun-language-tools"
 OPERATION_LOCK_STALE_SECONDS = 30 * 60
+MAX_OPERATION_LOCK_BYTES = 4 * 1024
 HEALTH_REPAIR_BACKOFF_SECONDS = (60, 120, 300, 900, 3600)
 MAX_UPDATE_POLICY_BYTES = 64 * 1024
 SERVICE_ENDPOINT = (
@@ -1138,8 +1139,127 @@ def _load_update_policy(path: Path) -> dict | None:
     return policy
 
 
+def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
+    if first.st_ino and second.st_ino:
+        return (
+            first.st_dev,
+            first.st_ino,
+            first.st_ctime_ns,
+            first.st_size,
+            first.st_mtime_ns,
+        ) == (
+            second.st_dev,
+            second.st_ino,
+            second.st_ctime_ns,
+            second.st_size,
+            second.st_mtime_ns,
+        )
+    return (
+        first.st_mode,
+        first.st_size,
+        first.st_mtime_ns,
+    ) == (
+        second.st_mode,
+        second.st_size,
+        second.st_mtime_ns,
+    )
+
+
+def _windows_process_is_alive(pid: int) -> bool:
+    """Query a Windows process handle without sending it a signal."""
+    import ctypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == 5  # Access denied still proves that the process exists.
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True  # Ambiguous inspection must preserve the existing lock.
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        return _windows_process_is_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_operation_lock(metadata: os.stat_result) -> dict | None:
+    """Read the exact bounded lock instance described by metadata."""
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_OPERATION_LOCK_BYTES:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(OPERATION_LOCK, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode) or not _same_file_identity(metadata, opened):
+                return None
+            raw = handle.read(MAX_OPERATION_LOCK_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_OPERATION_LOCK_BYTES:
+        return None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return value
+
+
+def _operation_lock_owner_alive(metadata: os.stat_result) -> bool | None:
+    """Return the validated owner's liveness, or None for an untrusted lock body."""
+    value = _read_operation_lock(metadata)
+    if value is None:
+        return None
+    pid = value.get("pid")
+    operation = value.get("operation")
+    started_at = value.get("started_at")
+    token = value.get("token")
+    if (
+        isinstance(pid, bool)
+        or not isinstance(pid, int)
+        or pid <= 0
+        or not isinstance(operation, str)
+        or not operation
+        or isinstance(started_at, bool)
+        or not isinstance(started_at, int)
+        or not isinstance(token, str)
+        or re.fullmatch(r"[0-9a-f]{32}", token) is None
+    ):
+        return None
+    return _process_is_alive(pid)
+
+
 def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | None:
-    """Take a same-user cross-platform lock without waiting or trusting its contents."""
+    """Take a same-user cross-platform lock without racing a living owner."""
     timestamp = int(time.time()) if now is None else now
     token = os.urandom(16).hex()
     OPERATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
@@ -1148,12 +1268,18 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
             descriptor = os.open(OPERATION_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
             try:
-                stale = timestamp - int(OPERATION_LOCK.stat().st_mtime) > OPERATION_LOCK_STALE_SECONDS
+                metadata = OPERATION_LOCK.lstat()
+                stale = timestamp - int(metadata.st_mtime) > OPERATION_LOCK_STALE_SECONDS
             except OSError:
                 stale = False
             if not stale or attempt:
                 return None
+            if _operation_lock_owner_alive(metadata) is True:
+                return None
             try:
+                current = OPERATION_LOCK.lstat()
+                if not _same_file_identity(metadata, current):
+                    return None
                 OPERATION_LOCK.unlink()
             except OSError:
                 return None
@@ -1168,11 +1294,18 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
 def _release_operation_lock(token: str) -> None:
     """Release only the lock instance acquired by this process."""
     try:
-        value = json.loads(OPERATION_LOCK.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        metadata = OPERATION_LOCK.lstat()
+    except OSError:
         return
-    if value.get("token") == token:
-        OPERATION_LOCK.unlink(missing_ok=True)
+    value = _read_operation_lock(metadata)
+    if value is None or value.get("token") != token:
+        return
+    try:
+        current = OPERATION_LOCK.lstat()
+        if _same_file_identity(metadata, current):
+            OPERATION_LOCK.unlink()
+    except OSError:
+        return
 
 
 def _effective_signed_commit_policy(requested: bool = False) -> bool:

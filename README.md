@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.31.0: live maintenance locks cannot expire underneath their owner
+
+Version 6.31 closes a race between long update, rollback and health-monitor operations. The shared lock no longer becomes removable merely because its timestamp is older than 30 minutes. A validated lock whose process is still alive remains authoritative for its complete lifetime, so a slow test suite or plugin preflight cannot be overtaken by a repair process.
+
+Recovery still works after a crash: only an old lock with a confirmed dead owner, or an old malformed lock with no trustworthy owner, may be replaced. Before either stale recovery or normal release deletes anything, the installer rechecks that the path still names the exact file instance it inspected. A concurrently replaced lock is therefore preserved. Lock reads are bounded, regular-file-only and no-follow where the platform supports it; process liveness is checked without sending a signal that changes process state.
+
 ### Version 6.30.0: updater policy files are fail-closed inputs
 
 Version 6.30 treats both active and rollback-paused updater policies as security-sensitive input at every public updater path. Policy reads now reject symbolic links, directories, FIFOs and other special files before opening them; cap input at 64 KiB; and validate the stored Boolean, interval, repository and Claude-command field types. `status`, scheduled `run`, direct update, rollback, reconfiguration and the doctor therefore fail closed instead of following a redirected file, hanging on a pipe or crashing on malformed schema.
@@ -526,7 +532,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.30.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.31.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

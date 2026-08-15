@@ -1105,6 +1105,112 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.OPERATION_LOCK = original
 
+    def test_old_operation_lock_owned_by_living_process_is_never_stolen(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            try:
+                token = INSTALLER._acquire_operation_lock("update", now=100)
+                self.assertIsNotNone(token)
+                os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
+
+                contender = INSTALLER._acquire_operation_lock(
+                    "health-monitor", now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 3600
+                )
+
+                self.assertIsNone(contender)
+                value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+                self.assertEqual(value["pid"], os.getpid())
+                self.assertEqual(value["token"], token)
+                assert token is not None
+                INSTALLER._release_operation_lock(token)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_old_operation_lock_from_dead_process_is_recovered(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
+                "operation": "update", "pid": 424242, "started_at": 100, "token": "a" * 32,
+            })
+            os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
+            try:
+                with mock.patch.object(INSTALLER, "_process_is_alive", return_value=False) as alive:
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor", now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1
+                    )
+                alive.assert_called_once_with(424242)
+                self.assertIsNotNone(token)
+                value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+                self.assertEqual(value["operation"], "health-monitor")
+                self.assertEqual(value["pid"], os.getpid())
+                assert token is not None
+                INSTALLER._release_operation_lock(token)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_windows_liveness_probe_never_uses_process_signals(self) -> None:
+        pid = os.getpid() + 1000
+        with mock.patch.object(INSTALLER.os, "name", "nt"), \
+             mock.patch.object(INSTALLER, "_windows_process_is_alive", return_value=True) as windows_probe, \
+             mock.patch.object(INSTALLER.os, "kill") as process_signal:
+            self.assertTrue(INSTALLER._process_is_alive(pid))
+        windows_probe.assert_called_once_with(pid)
+        process_signal.assert_not_called()
+
+    def test_changed_operation_lock_is_not_removed_during_stale_recovery(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            INSTALLER.OPERATION_LOCK.write_text("stale", encoding="utf-8")
+            os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
+
+            def replace_lock(_metadata: os.stat_result) -> bool:
+                INSTALLER.OPERATION_LOCK.unlink()
+                INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
+                    "operation": "rollback", "pid": os.getpid(), "started_at": 200, "token": "replacement",
+                })
+                return False
+
+            try:
+                with mock.patch.object(INSTALLER, "_operation_lock_owner_alive", side_effect=replace_lock):
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor", now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1
+                    )
+                self.assertIsNone(token)
+                value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+                self.assertEqual(value["operation"], "rollback")
+                self.assertEqual(value["token"], "replacement")
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_changed_operation_lock_is_not_removed_during_release(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            try:
+                token = INSTALLER._acquire_operation_lock("update", now=100)
+                self.assertIsNotNone(token)
+                original_value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+
+                def replace_after_read(_metadata: os.stat_result) -> dict:
+                    INSTALLER.OPERATION_LOCK.unlink()
+                    INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
+                        "operation": "rollback", "pid": os.getpid(), "started_at": 200, "token": "replacement",
+                    })
+                    return original_value
+
+                with mock.patch.object(INSTALLER, "_read_operation_lock", side_effect=replace_after_read):
+                    assert token is not None
+                    INSTALLER._release_operation_lock(token)
+
+                value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+                self.assertEqual(value["operation"], "rollback")
+                self.assertEqual(value["token"], "replacement")
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
     def test_health_monitor_clean_probe_does_not_restart_services(self) -> None:
         originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
         with tempfile.TemporaryDirectory() as directory:
@@ -1246,7 +1352,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.9.0", new_version="6.30.0"
+                root, old_version="6.9.0", new_version="6.31.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -1259,14 +1365,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.30.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.31.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.30.0")
+                self.assertEqual(state["plugin_cache_version"], "6.31.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (
