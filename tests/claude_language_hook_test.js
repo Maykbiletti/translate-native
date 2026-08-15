@@ -170,6 +170,91 @@ async function main() {
   assert.match(started.stdout, /SessionStart/);
   assert.match(started.stdout, /mandatory/);
 
+  const policyEnvironment = {
+    ...environment,
+    BLUN_LANGUAGE_GUARD_LANGUAGE: "de-DE",
+    BLUN_LANGUAGE_GUARD_TASK_KIND: "response"
+  };
+  const policyCommon = { ...common, session_id: "session-policy" };
+  const policyStarted = await runHook("session-start", {
+    ...policyCommon,
+    hook_event_name: "SessionStart",
+    source: "startup"
+  }, policyEnvironment);
+  const policyStartupContext = JSON.parse(policyStarted.stdout).hookSpecificOutput.additionalContext;
+  assert.match(policyStartupContext, /requires release_response/);
+  assert.match(policyStartupContext, /language exactly as "de-DE"/);
+
+  const rewrittenRelease = await runHook("pre-tool", {
+    ...policyCommon,
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__release_response",
+    tool_input: { target_text: clean, language: "en" }
+  }, policyEnvironment);
+  const rewrittenOutput = JSON.parse(rewrittenRelease.stdout).hookSpecificOutput;
+  assert.strictEqual(rewrittenOutput.hookEventName, "PreToolUse");
+  assert.strictEqual(rewrittenOutput.updatedInput.language, "de-DE");
+  assert.strictEqual(rewrittenOutput.updatedInput.target_text, clean);
+  assert.match(rewrittenOutput.additionalContext, /"de-DE"/);
+
+  const wrongPurpose = await runHook("pre-tool", {
+    ...policyCommon,
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__release_translation",
+    tool_input: { source_text: "Hello", target_text: "Hallo", language: "de-DE" }
+  }, policyEnvironment);
+  const wrongPurposeOutput = JSON.parse(wrongPurpose.stdout).hookSpecificOutput;
+  assert.strictEqual(wrongPurposeOutput.permissionDecision, "deny");
+  assert.match(wrongPurposeOutput.permissionDecisionReason, /requires release_response/);
+
+  const invalidPolicy = await runHook("pre-tool", {
+    ...policyCommon,
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__release_response",
+    tool_input: { target_text: clean, language: "de-DE" }
+  }, { ...environment, BLUN_LANGUAGE_GUARD_LANGUAGE: "auto" });
+  const invalidPolicyOutput = JSON.parse(invalidPolicy.stdout).hookSpecificOutput;
+  assert.strictEqual(invalidPolicyOutput.permissionDecision, "deny");
+  assert.match(invalidPolicyOutput.permissionDecisionReason, /invalid host release policy/);
+
+  const policyPrompt = await runHook("prompt-boundary", {
+    ...policyCommon,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Antworte bitte."
+  }, policyEnvironment);
+  const policyPromptOutput = JSON.parse(policyPrompt.stdout).hookSpecificOutput;
+  assert.strictEqual(policyPromptOutput.hookEventName, "UserPromptSubmit");
+  assert.match(policyPromptOutput.additionalContext, /language exactly as "de-DE"/);
+
+  const policyTool = {
+    ...tool,
+    ...policyCommon,
+    tool_use_id: "tool-policy"
+  };
+  const mismatchedPolicyRelease = await runHook("post-tool", {
+    ...policyTool,
+    tool_input: { ...policyTool.tool_input, language: "de" }
+  }, policyEnvironment);
+  assert.strictEqual(JSON.parse(mismatchedPolicyRelease.stdout).decision, "block");
+  assert.match(mismatchedPolicyRelease.stdout, /language exactly \\"de-DE\\"/);
+  assert(!mismatchedPolicyRelease.stdout.includes(clean), "policy rejection must not expose candidate text");
+
+  const matchingPolicyRelease = await runHook("post-tool", policyTool, policyEnvironment);
+  assert.strictEqual(matchingPolicyRelease.stdout, "");
+  const policyDelivered = await runHook("stop", {
+    ...policyCommon,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, policyEnvironment);
+  assert.strictEqual(policyDelivered.stdout, "");
+  const policyEnded = await runHook("session-end", {
+    ...policyCommon,
+    hook_event_name: "SessionEnd",
+    reason: "other"
+  }, policyEnvironment);
+  assert.strictEqual(policyEnded.stdout, "");
+
   const otherSessionStarted = await runHook("session-start", {
     ...common,
     session_id: "session-two",

@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.40.0: Claude binds release calls to the host language
+
+Version 6.40 closes the remaining Claude-side path behind delayed `language mismatch` failures. When the trusted host supplies `BLUN_LANGUAGE_GUARD_LANGUAGE` or `BLUN_LANGUAGE_GUARD_TASK_KIND`, the plugin repeats that policy at session and prompt boundaries, rewrites the release tool's `language` argument to the exact host tag in `PreToolUse`, and rejects a wrong release purpose. `PostToolUse` independently rechecks both fields before exchanging the receipt for a delivery grant, so an older client, hook race, or direct invocation cannot bypass the binding.
+
+No locale equivalence is introduced: `de`, `de-DE`, and `de-AT` remain distinct signed values. Installations without either host variable retain the existing behavior, while an explicitly present but malformed policy fails closed. The implementation follows Anthropic's official [hook reference](https://code.claude.com/docs/en/hooks): `PreToolUse` may return `updatedInput`, and `UserPromptSubmit` may inject `additionalContext`. Regression tests cover automatic `de-DE` correction, wrong-purpose denial, invalid-policy denial, prompt reinforcement, exact post-tool enforcement, and the no-policy compatibility path.
+
 ### Version 6.39.0: authoritative reply language wins over Telegram UI language
 
 Version 6.39 fixes a real delivery failure in which Telegram's `senderLanguageCode` could override the host's configured response locale. That Telegram field describes the sender's client/interface language and is not reliable evidence for the language of the current message. A German release such as `de-DE` could therefore be checked against `en` or another short UI tag and fail with `language mismatch` even though the text was correct.
@@ -580,7 +586,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.39.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.40.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

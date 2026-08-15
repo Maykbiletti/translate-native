@@ -13,6 +13,7 @@ const path = require("path");
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_RECORD_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNTIME = path.join(os.homedir(), ".config", "blun-language-guard");
+const EXACT_LANGUAGE = /^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/;
 let currentHookInput = null;
 
 function canonicalText(value) {
@@ -269,6 +270,82 @@ function blocked(reason) {
   return { decision: "block", reason };
 }
 
+function hostReleasePolicy(environment = process.env) {
+  const hasLanguage = Object.prototype.hasOwnProperty.call(environment, "BLUN_LANGUAGE_GUARD_LANGUAGE");
+  const hasTaskKind = Object.prototype.hasOwnProperty.call(environment, "BLUN_LANGUAGE_GUARD_TASK_KIND");
+  if (!hasLanguage && !hasTaskKind) return null;
+  const language = hasLanguage ? String(environment.BLUN_LANGUAGE_GUARD_LANGUAGE || "").trim() : "";
+  const taskKind = hasTaskKind ? String(environment.BLUN_LANGUAGE_GUARD_TASK_KIND || "").trim().toLowerCase() : "";
+  if (hasLanguage && (!EXACT_LANGUAGE.test(language) || ["auto", "all"].includes(language.toLowerCase()))) {
+    throw new Error("host release language must be an exact language or locale tag");
+  }
+  if (hasTaskKind && !["response", "translation"].includes(taskKind)) {
+    throw new Error("host release task kind must be response or translation");
+  }
+  return { language, taskKind };
+}
+
+function hostPolicyInstruction() {
+  let policy;
+  try {
+    policy = hostReleasePolicy();
+  } catch (_) {
+    return "The trusted host release policy is invalid. Fail closed: do not call a release tool, finish, or deliver natural-language output until the host policy is repaired.";
+  }
+  if (!policy) return "";
+  const parts = [];
+  if (policy.taskKind) {
+    const tool = policy.taskKind === "translation" ? "release_translation" : "release_response";
+    parts.push(`The trusted host requires ${tool}; do not use the other release purpose.`);
+  }
+  if (policy.language) {
+    parts.push(`Pass language exactly as ${JSON.stringify(policy.language)}. Do not substitute a base language or another locale.`);
+  }
+  return parts.join(" ");
+}
+
+function preTool(input) {
+  const toolName = String(input.tool_name || "");
+  const purpose = toolName.endsWith("__release_translation") ? "translation"
+    : toolName.endsWith("__release_response") ? "response" : "";
+  if (!purpose) return;
+  let policy;
+  try {
+    policy = hostReleasePolicy();
+  } catch (error) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `BLUN Language Guard blocked an invalid host release policy: ${error.message}.`,
+      }
+    });
+    return;
+  }
+  if (!policy) return;
+  if (policy.taskKind && policy.taskKind !== purpose) {
+    const required = policy.taskKind === "translation" ? "release_translation" : "release_response";
+    emit({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `The trusted host requires ${required} for this turn.`,
+      }
+    });
+    return;
+  }
+  if (!policy.language) return;
+  const toolInput = input.tool_input && typeof input.tool_input === "object" && !Array.isArray(input.tool_input)
+    ? input.tool_input : {};
+  emit({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      updatedInput: { ...toolInput, language: policy.language },
+      additionalContext: `The trusted host fixed this release to language ${JSON.stringify(policy.language)}.`,
+    }
+  });
+}
+
 function blockedStop(input, reason) {
   const repeatedStop = input && input.stop_hook_active === true
     && ["Stop", "SubagentStop"].includes(String(input.hook_event_name || ""));
@@ -281,10 +358,11 @@ function blockedStop(input, reason) {
 
 function startupMessage(eventName, healthy) {
   const subject = eventName === "SubagentStart" ? "This subagent" : "This Claude session";
+  const policyInstruction = hostPolicyInstruction();
   if (!healthy) {
-    return `${subject} is protected by mandatory BLUN Translate Native, but its isolated guard is unavailable. Fail closed: do not finish or deliver natural-language output until the service is healthy.`;
+    return `${subject} is protected by mandatory BLUN Translate Native, but its isolated guard is unavailable. Fail closed: do not finish or deliver natural-language output until the service is healthy.${policyInstruction ? ` ${policyInstruction}` : ""}`;
   }
-  return `${subject} is protected by mandatory BLUN Translate Native. Before every natural-language final answer call release_response with the exact final text. For translations load the translate-native skill and call release_translation with the complete source and target. Do not rely on another agent's release: the final visible text must use a fresh grant bound to this session and agent identity and remain byte-for-byte equivalent after Unicode normalization to the released target.`;
+  return `${subject} is protected by mandatory BLUN Translate Native. Before every natural-language final answer call release_response with the exact final text. For translations load the translate-native skill and call release_translation with the complete source and target. Do not rely on another agent's release: the final visible text must use a fresh grant bound to this session and agent identity and remain byte-for-byte equivalent after Unicode normalization to the released target.${policyInstruction ? ` ${policyInstruction}` : ""}`;
 }
 
 async function startupContext(eventName) {
@@ -331,6 +409,16 @@ function promptBoundary(input) {
     invalidateSessionRecords(input);
   } catch (_) {
     emit(blocked("BLUN Language Guard could not invalidate release state from the prior turn. The prompt is blocked to prevent cross-turn receipt reuse."));
+    return;
+  }
+  const policyInstruction = hostPolicyInstruction();
+  if (policyInstruction) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: policyInstruction,
+      }
+    });
   }
 }
 
@@ -410,6 +498,22 @@ async function postTool(input) {
   const target = typeof args.target_text === "string" ? args.target_text : "";
   const source = purpose === "translation" && typeof args.source_text === "string" ? args.source_text : "";
   const language = typeof args.language === "string" ? args.language : "";
+  let policy;
+  try {
+    policy = hostReleasePolicy();
+  } catch (_) {
+    rejectRelease(input, "The trusted host release policy is invalid. Repair it before releasing or delivering natural-language output.");
+    return;
+  }
+  if (policy?.taskKind && policy.taskKind !== purpose) {
+    const required = policy.taskKind === "translation" ? "release_translation" : "release_response";
+    rejectRelease(input, `The trusted host requires ${required} for this turn. Call that release tool with a fresh candidate.`);
+    return;
+  }
+  if (policy?.language && policy.language !== language) {
+    rejectRelease(input, `The release used the wrong language tag. Retry with language exactly ${JSON.stringify(policy.language)}.`);
+    return;
+  }
   const request = {
     operation: "authorize_delivery",
     task_kind: purpose,
@@ -532,6 +636,7 @@ async function main() {
   if (mode === "prompt-boundary") return promptBoundary(input);
   if (mode === "stop-failure") return stopFailure(input);
   if (mode === "session-end") return sessionEnd(input);
+  if (mode === "pre-tool") return preTool(input);
   if (mode === "post-tool") return postTool(input);
   if (mode === "post-tool-failure") return postToolFailure(input);
   if (mode === "stop") return stop(input);
@@ -545,4 +650,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, readSessionEpoch, sessionEnd, sessionHash, stopFailure, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, postToolFailure, preTool, readSessionEpoch, sessionEnd, sessionHash, stopFailure, textHash };
