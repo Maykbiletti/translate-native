@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -1209,6 +1210,98 @@ def _process_is_alive(pid: int) -> bool:
     return True
 
 
+def _windows_process_start_identity(pid: int) -> str | None:
+    """Return the immutable Windows creation time without signalling the process."""
+    import ctypes
+
+    class FileTime(ctypes.Structure):
+        _fields_ = (("low", ctypes.c_ulong), ("high", ctypes.c_ulong))
+
+    process_query_limited_information = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessTimes.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+    )
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return None
+    try:
+        creation = FileTime()
+        exit_time = FileTime()
+        kernel_time = FileTime()
+        user_time = FileTime()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            return None
+        return f"windows:{creation.high:08x}{creation.low:08x}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _linux_process_start_identity(pid: int) -> str | None:
+    """Bind a Linux PID to both its boot and kernel start tick."""
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip().lower()
+        process_stat = Path("/proc/self/stat") if pid == os.getpid() else Path(f"/proc/{pid}/stat")
+        raw = process_stat.read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None
+    if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", boot_id) is None or len(raw) > 4096:
+        return None
+    closing_parenthesis = raw.rfind(")")
+    if closing_parenthesis < 0:
+        return None
+    fields = raw[closing_parenthesis + 1:].split()
+    if len(fields) <= 19 or not fields[19].isdigit():
+        return None
+    return f"linux:{boot_id}:{fields[19]}"
+
+
+def _posix_process_start_identity(pid: int) -> str | None:
+    """Hash the stable process start timestamp exposed by portable ps."""
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            env={**os.environ, "LC_ALL": "C"},
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    started = " ".join(result.stdout.split())
+    if result.returncode or not started or len(started) > 256:
+        return None
+    return "posix:" + hashlib.sha256(started.encode("utf-8")).hexdigest()
+
+
+def _process_start_identity(pid: int) -> str | None:
+    """Return a process-generation identifier, or None when inspection is ambiguous."""
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        return _windows_process_start_identity(pid)
+    if sys.platform.startswith("linux"):
+        return _linux_process_start_identity(pid)
+    return _posix_process_start_identity(pid)
+
+
 def _read_operation_lock(metadata: os.stat_result) -> dict | None:
     """Read the exact bounded lock instance described by metadata."""
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_OPERATION_LOCK_BYTES:
@@ -1243,6 +1336,7 @@ def _operation_lock_owner_alive(metadata: os.stat_result) -> bool | None:
     operation = value.get("operation")
     started_at = value.get("started_at")
     token = value.get("token")
+    process_start_id = value.get("process_start_id")
     if (
         isinstance(pid, bool)
         or not isinstance(pid, int)
@@ -1255,7 +1349,18 @@ def _operation_lock_owner_alive(metadata: os.stat_result) -> bool | None:
         or re.fullmatch(r"[0-9a-f]{32}", token) is None
     ):
         return None
-    return _process_is_alive(pid)
+    alive = _process_is_alive(pid)
+    if not alive or process_start_id is None:
+        return alive
+    if (
+        not isinstance(process_start_id, str)
+        or re.fullmatch(r"(?:linux|windows|posix):[0-9a-f:-]{1,128}", process_start_id) is None
+    ):
+        return None
+    current_start_id = _process_start_identity(pid)
+    if current_start_id is None:
+        return True  # Ambiguous inspection must preserve the existing lock.
+    return current_start_id == process_start_id
 
 
 def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | None:
@@ -1284,8 +1389,12 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
             except OSError:
                 return None
             continue
+        lock_value = {"operation": operation, "pid": os.getpid(), "started_at": timestamp, "token": token}
+        process_start_id = _process_start_identity(os.getpid())
+        if process_start_id is not None:
+            lock_value["process_start_id"] = process_start_id
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump({"operation": operation, "pid": os.getpid(), "started_at": timestamp, "token": token}, handle)
+            json.dump(lock_value, handle)
             handle.write("\n")
         return token
     return None

@@ -1087,6 +1087,32 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.OPERATION_LOCK = original
 
+    def test_new_operation_lock_records_process_generation_when_available(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        start_id = "linux:11111111-1111-1111-1111-111111111111:100"
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            try:
+                with mock.patch.object(INSTALLER, "_process_start_identity", return_value=start_id):
+                    token = INSTALLER._acquire_operation_lock("update", now=100)
+                self.assertIsNotNone(token)
+                value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+                self.assertEqual(value["process_start_id"], start_id)
+                assert token is not None
+                INSTALLER._release_operation_lock(token)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux procfs-specific check")
+    def test_linux_current_process_generation_is_boot_bound(self) -> None:
+        identity = INSTALLER._linux_process_start_identity(os.getpid())
+        self.assertIsNotNone(identity)
+        assert identity is not None
+        self.assertRegex(
+            identity,
+            r"^linux:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9]+$",
+        )
+
     def test_stale_operation_lock_is_recovered_once(self) -> None:
         original = INSTALLER.OPERATION_LOCK
         with tempfile.TemporaryDirectory() as directory:
@@ -1127,6 +1153,93 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.OPERATION_LOCK = original
 
+    def test_reused_live_pid_does_not_preserve_an_old_process_generation(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
+                "operation": "update", "pid": 424242, "started_at": 100, "token": "a" * 32,
+                "process_start_id": "linux:11111111-1111-1111-1111-111111111111:100",
+            })
+            os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
+            try:
+                with mock.patch.object(INSTALLER, "_process_is_alive", return_value=True), \
+                     mock.patch.object(
+                         INSTALLER, "_process_start_identity",
+                         return_value="linux:11111111-1111-1111-1111-111111111111:200",
+                     ):
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor", now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1
+                    )
+                self.assertIsNotNone(token)
+                value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+                self.assertEqual(value["operation"], "health-monitor")
+                assert token is not None
+                INSTALLER._release_operation_lock(token)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_matching_process_generation_preserves_an_old_live_lock(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        start_id = "linux:11111111-1111-1111-1111-111111111111:100"
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
+                "operation": "update", "pid": 424242, "started_at": 100, "token": "a" * 32,
+                "process_start_id": start_id,
+            })
+            os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
+            try:
+                with mock.patch.object(INSTALLER, "_process_is_alive", return_value=True), \
+                     mock.patch.object(INSTALLER, "_process_start_identity", return_value=start_id):
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor", now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1
+                    )
+                self.assertIsNone(token)
+                value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
+                self.assertEqual(value["token"], "a" * 32)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_ambiguous_process_generation_preserves_an_old_live_lock(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
+                "operation": "update", "pid": 424242, "started_at": 100, "token": "a" * 32,
+                "process_start_id": "posix:" + "a" * 64,
+            })
+            os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
+            try:
+                with mock.patch.object(INSTALLER, "_process_is_alive", return_value=True), \
+                     mock.patch.object(INSTALLER, "_process_start_identity", return_value=None):
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor", now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1
+                    )
+                self.assertIsNone(token)
+                self.assertTrue(INSTALLER.OPERATION_LOCK.exists())
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_legacy_live_lock_without_process_generation_remains_compatible(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
+                "operation": "update", "pid": 424242, "started_at": 100, "token": "a" * 32,
+            })
+            os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
+            try:
+                with mock.patch.object(INSTALLER, "_process_is_alive", return_value=True), \
+                     mock.patch.object(INSTALLER, "_process_start_identity") as start_probe:
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor", now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1
+                    )
+                self.assertIsNone(token)
+                start_probe.assert_not_called()
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
     def test_old_operation_lock_from_dead_process_is_recovered(self) -> None:
         original = INSTALLER.OPERATION_LOCK
         with tempfile.TemporaryDirectory() as directory:
@@ -1156,6 +1269,17 @@ class InstallerTests(unittest.TestCase):
              mock.patch.object(INSTALLER, "_windows_process_is_alive", return_value=True) as windows_probe, \
              mock.patch.object(INSTALLER.os, "kill") as process_signal:
             self.assertTrue(INSTALLER._process_is_alive(pid))
+        windows_probe.assert_called_once_with(pid)
+        process_signal.assert_not_called()
+
+    def test_windows_process_generation_probe_never_uses_process_signals(self) -> None:
+        pid = os.getpid() + 1000
+        with mock.patch.object(INSTALLER.os, "name", "nt"), \
+             mock.patch.object(
+                 INSTALLER, "_windows_process_start_identity", return_value="windows:0000000000000001"
+             ) as windows_probe, \
+             mock.patch.object(INSTALLER.os, "kill") as process_signal:
+            self.assertEqual(INSTALLER._process_start_identity(pid), "windows:0000000000000001")
         windows_probe.assert_called_once_with(pid)
         process_signal.assert_not_called()
 
@@ -1352,7 +1476,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.9.0", new_version="6.31.0"
+                root, old_version="6.9.0", new_version="6.32.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -1365,14 +1489,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.31.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.32.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.31.0")
+                self.assertEqual(state["plugin_cache_version"], "6.32.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (
