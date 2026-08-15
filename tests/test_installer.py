@@ -218,6 +218,75 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(local_file.read_text(encoding="utf-8"), "parallel work\n")
                 self.assertFalse((active / "new-runtime.txt").exists())
 
+    def test_update_rechecks_checkout_after_fetch_before_fast_forward(self) -> None:
+        for change_kind in ("dirty", "new-head"):
+            with self.subTest(change_kind=change_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                upstream, active, old, candidate = self._update_repository_pair(root)
+                local_file = active / "during-fetch.txt"
+                real_run = INSTALLER._run
+
+                def mutate_after_fetch(command: list[str], cwd: Path | None = None):
+                    result = real_run(command, cwd)
+                    if command[:2] == ["git", "fetch"] and cwd == active and result.returncode == 0:
+                        local_file.write_text("operator work during fetch\n", encoding="utf-8")
+                        if change_kind == "new-head":
+                            self.assertEqual(real_run(["git", "add", local_file.name], active).returncode, 0)
+                            self.assertEqual(real_run(["git", "commit", "-m", "operator work"], active).returncode, 0)
+                    return result
+
+                errors = io.StringIO()
+                with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                     mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                     mock.patch.object(
+                         INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": root / "missing-claude"}
+                     ), \
+                     mock.patch.object(INSTALLER, "_run", side_effect=mutate_after_fetch), \
+                     contextlib.redirect_stderr(errors):
+                    self.assertEqual(INSTALLER._update_unlocked(), 2)
+                self.assertIn("changed while fetching", errors.getvalue())
+                current = real_run(["git", "rev-parse", "HEAD"], active).stdout.strip()
+                self.assertEqual(current == old, change_kind == "dirty")
+                self.assertNotEqual(current, candidate)
+                self.assertEqual(local_file.read_text(encoding="utf-8"), "operator work during fetch\n")
+                self.assertFalse((active / "new-runtime.txt").exists())
+
+    def test_update_cutover_guard_preserves_uncommitted_and_committed_work(self) -> None:
+        for change_kind in ("dirty", "new-head"):
+            with self.subTest(change_kind=change_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                upstream, active, old, candidate = self._update_repository_pair(root)
+                local_file = active / "during-cutover.txt"
+                real_run = INSTALLER._run
+
+                def mutate_after_merge(command: list[str], cwd: Path | None = None):
+                    result = real_run(command, cwd)
+                    if command[:2] == ["git", "merge"] and cwd == active and result.returncode == 0:
+                        local_file.write_text("operator work during cutover\n", encoding="utf-8")
+                        if change_kind == "new-head":
+                            self.assertEqual(real_run(["git", "add", local_file.name], active).returncode, 0)
+                            self.assertEqual(real_run(["git", "commit", "-m", "operator work"], active).returncode, 0)
+                    return result
+
+                errors = io.StringIO()
+                with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                     mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                     mock.patch.object(
+                         INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": root / "missing-claude"}
+                     ), \
+                     mock.patch.object(INSTALLER, "_run", side_effect=mutate_after_merge), \
+                     contextlib.redirect_stderr(errors):
+                    self.assertEqual(INSTALLER._update_unlocked(), 2)
+                current = real_run(["git", "rev-parse", "HEAD"], active).stdout.strip()
+                self.assertEqual(current == old, change_kind == "dirty")
+                if change_kind == "new-head":
+                    self.assertIn("HEAD changed independently", errors.getvalue())
+                    self.assertEqual(real_run(["git", "merge-base", "--is-ancestor", candidate, current], active).returncode, 0)
+                else:
+                    self.assertIn("rolled back without discarding local work", errors.getvalue())
+                    self.assertFalse((active / "new-runtime.txt").exists())
+                self.assertEqual(local_file.read_text(encoding="utf-8"), "operator work during cutover\n")
+
     def test_rollback_tests_target_pauses_updater_and_records_exact_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1541,7 +1610,7 @@ class InstallerTests(unittest.TestCase):
             claude_target = root / "claude-skill"
             claude_target.symlink_to(skill, target_is_directory=True)
             executable, plugin_version = self._fake_claude(
-                root, old_version="6.9.0", new_version="6.33.0"
+                root, old_version="6.9.0", new_version="6.34.0"
             )
             INSTALLER.HEALTH_CONFIG = root / "health-config.json"
             INSTALLER.HEALTH_STATE = root / "health-state.json"
@@ -1554,14 +1623,14 @@ class InstallerTests(unittest.TestCase):
             try:
                 with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)):
                     self.assertEqual(INSTALLER.health_monitor_run(now=6000), 0)
-                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.33.0")
+                self.assertEqual(plugin_version.read_text(encoding="utf-8"), "6.34.0")
                 policy = INSTALLER.json.loads(INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8"))
                 self.assertTrue(policy["plugin_required"])
                 state = INSTALLER.json.loads(INSTALLER.HEALTH_STATE.read_text(encoding="utf-8"))
                 self.assertEqual(state["status"], "recovered")
                 self.assertTrue(state["plugin_required"])
                 self.assertTrue(state["plugin_cache_healthy"])
-                self.assertEqual(state["plugin_cache_version"], "6.33.0")
+                self.assertEqual(state["plugin_cache_version"], "6.34.0")
                 self.assertEqual(state["repairs"], ["claude-plugin-update"])
             finally:
                 (

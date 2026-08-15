@@ -147,6 +147,12 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.34.0: update cutover rechecks both sides of the fast-forward
+
+Version 6.34 closes the remaining network and cutover windows in the clean-checkout contract. After the tested revision is fetched, the updater rechecks the exact pre-update `HEAD` and every tracked, staged, and untracked path before running the fast-forward. Work created while the network request is in progress therefore blocks before the repository moves.
+
+Immediately after a successful fast-forward, the updater requires the exact tested revision and a clean checkout before post-update tests or persistent-runtime activation can begin. If uncommitted work appears during the cutover, the updater attempts `git reset --keep`: it returns to the previous revision only when Git can preserve those bytes, otherwise it leaves the state for manual inspection. If another process creates a commit, the updater never resets that independent history. Fetch-time dirty work, fetch-time commits, cutover-time dirty work, and cutover-time commits are separate regression cases.
+
 ### Version 6.33.0: automatic updates never mix with local work
 
 Version 6.33 makes a completely clean active checkout a precondition for automatic and manual repository updates. Tracked edits, staged changes and untracked files now block before the temporary candidate is cloned or any repository-owned candidate test can execute. The updater never stashes, resets, deletes or overwrites local work.
@@ -544,7 +550,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.33.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.34.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

@@ -1530,10 +1530,41 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
     if fetch.returncode:
         print(fetch.stderr, file=sys.stderr)
         return 1
+    if _clean_checkout_revision(root) != previous:
+        print(
+            "The active checkout changed while fetching the tested update; candidate activation is blocked.",
+            file=sys.stderr,
+        )
+        return 2
     merge = _run(["git", "merge", "--ff-only", revision], root)
     if merge.returncode:
         print(merge.stderr, file=sys.stderr)
         return 1
+    if _clean_checkout_revision(root) != revision:
+        current = _run(["git", "rev-parse", "--verify", "HEAD^{commit}"], root).stdout.strip()
+        if current == revision:
+            rollback = _run(["git", "reset", "--keep", previous], root)
+            restored_head = _run(
+                ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
+            ).stdout.strip()
+            restored = rollback.returncode == 0 and restored_head == previous
+            outcome = (
+                "the tested revision was rolled back without discarding local work."
+                if restored
+                else "the safe repository rollback failed. Manual inspection is required."
+            )
+            print(
+                "The active checkout changed during update cutover; runtime activation is blocked and "
+                + outcome,
+                file=sys.stderr,
+            )
+            return 2 if restored else 1
+        print(
+            "HEAD changed independently during update cutover; runtime activation is blocked and the "
+            "independent commit was not reset.",
+            file=sys.stderr,
+        )
+        return 2
     post_tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
     if post_tests.returncode:
         rollback = _run(["git", "reset", "--keep", previous], root)
