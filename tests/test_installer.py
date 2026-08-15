@@ -498,6 +498,65 @@ class InstallerTests(unittest.TestCase):
                 restarter.assert_not_called()
                 scheduler_removal.assert_not_called()
 
+    def test_rollback_post_tests_guard_preserves_uncommitted_and_committed_work(self) -> None:
+        for change_kind in ("dirty", "new-head"):
+            with self.subTest(change_kind=change_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repository, target, current = self._rollback_repository(root)
+                state_path = root / "update-state.json"
+                INSTALLER._atomic_json(
+                    state_path, {"status": "ok", "revision": current, "previous": target}
+                )
+                local_file = repository / "during-post-rollback-tests.txt"
+                real_run = INSTALLER._run
+                mutated = False
+
+                def mutate_after_post_tests(command: list[str], cwd: Path | None = None):
+                    nonlocal mutated
+                    result = real_run(command, cwd)
+                    if (
+                        not mutated
+                        and command[:4] == [sys.executable, "-B", "-m", "unittest"]
+                        and cwd == repository
+                        and result.returncode == 0
+                    ):
+                        mutated = True
+                        local_file.write_text("operator work during post-rollback tests\n", encoding="utf-8")
+                        if change_kind == "new-head":
+                            self.assertEqual(real_run(["git", "add", local_file.name], repository).returncode, 0)
+                            self.assertEqual(real_run(["git", "commit", "-m", "operator work"], repository).returncode, 0)
+                    return result
+
+                errors = io.StringIO()
+                with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                     mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                     mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "missing-policy"), \
+                     mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                     mock.patch.object(INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": root / "missing-claude"}), \
+                     mock.patch.object(INSTALLER, "_run", side_effect=mutate_after_post_tests), \
+                     mock.patch.object(INSTALLER, "_restart_installed_runtimes") as restarter, \
+                     mock.patch.object(INSTALLER, "remove_scheduler") as scheduler_removal, \
+                     contextlib.redirect_stderr(errors):
+                    self.assertEqual(INSTALLER.rollback(), 2)
+                self.assertIn("while running post-rollback tests", errors.getvalue())
+                observed = real_run(["git", "rev-parse", "HEAD"], repository).stdout.strip()
+                self.assertEqual(observed == current, change_kind == "dirty")
+                if change_kind == "new-head":
+                    self.assertIn("HEAD changed independently", errors.getvalue())
+                    self.assertEqual(
+                        real_run(["git", "merge-base", "--is-ancestor", target, observed], repository).returncode,
+                        0,
+                    )
+                else:
+                    self.assertIn("restored without discarding local work", errors.getvalue())
+                    self.assertTrue((repository / "new-runtime.txt").exists())
+                self.assertEqual(
+                    local_file.read_text(encoding="utf-8"),
+                    "operator work during post-rollback tests\n",
+                )
+                restarter.assert_not_called()
+                scheduler_removal.assert_not_called()
+
     def test_rollback_preserves_saved_signed_commit_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

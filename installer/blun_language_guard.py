@@ -1872,11 +1872,7 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
             file=sys.stderr,
         )
         return 2
-    applied = _run(["git", "reset", "--keep", target], root)
-    if applied.returncode:
-        print("Rollback reset failed; current installation is unchanged.", file=sys.stderr)
-        return 1
-    if _clean_checkout_revision(root) != target:
+    def block_changed_cutover(phase: str) -> int:
         observed = _run(
             ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
         ).stdout.strip()
@@ -1892,18 +1888,30 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
                 else "the safe forward restoration failed. Manual inspection is required."
             )
             print(
-                "The active checkout changed during rollback cutover; runtime activation is blocked and "
+                f"The active checkout changed {phase}; runtime activation is blocked and "
                 + outcome,
                 file=sys.stderr,
             )
             return 2 if safe else 1
         print(
-            "HEAD changed independently during rollback cutover; runtime activation is blocked and the "
+            f"HEAD changed independently {phase}; runtime activation is blocked and the "
             "independent commit was not reset.",
             file=sys.stderr,
         )
         return 2
-    post_tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
+
+    applied = _run(["git", "reset", "--keep", target], root)
+    if applied.returncode:
+        print("Rollback reset failed; current installation is unchanged.", file=sys.stderr)
+        return 1
+    if _clean_checkout_revision(root) != target:
+        return block_changed_cutover("during rollback cutover")
+    post_tests = _run(
+        [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-q"],
+        root,
+    )
+    if _clean_checkout_revision(root) != target:
+        return block_changed_cutover("while running post-rollback tests")
     runtime_ok, runtime_detail = _restart_installed_runtimes() if not post_tests.returncode else (False, "post-rollback tests failed")
     if claude_installed and runtime_ok:
         configured = claude_command or _configured_claude_command(_health_monitor_config())
