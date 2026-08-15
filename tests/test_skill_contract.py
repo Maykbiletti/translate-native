@@ -21,6 +21,8 @@ MCP_SERVER = ROOT / "translate-native" / "scripts" / "blun_language_guard.py"
 INSTALLED_GATEWAY = ROOT / "translate-native" / "scripts" / "language_gateway.py"
 INSTALLED_PRE_OUTPUT = ROOT / "translate-native" / "scripts" / "pre_output_guard.py"
 AGENT_RULES = ROOT / "integrations" / "AGENT_RULES.md"
+MCP_HTTP_GATEWAY = ROOT / "integrations" / "mcp_http_gateway.py"
+MCP_AUTH_HEADERS = ROOT / "integrations" / "mcp_auth_headers.py"
 
 
 class SkillContractTests(unittest.TestCase):
@@ -86,6 +88,16 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("task_kind: translation", skill)
         self.assertIn("host", skill.casefold())
         self.assertIn("translate-native", rules)
+
+    def test_claude_persistent_http_mcp_is_part_of_the_contract(self) -> None:
+        skill = SKILL.read_text(encoding="utf-8")
+        rules = AGENT_RULES.read_text(encoding="utf-8")
+        premortem = (ROOT / "docs" / "PREMORTEM.md").read_text(encoding="utf-8")
+        self.assertTrue(MCP_HTTP_GATEWAY.is_file())
+        self.assertTrue(MCP_AUTH_HEADERS.is_file())
+        self.assertIn("Streamable HTTP", skill)
+        self.assertIn("user-scoped HTTP", rules)
+        self.assertIn("stale project-local Claude MCP", premortem)
 
     def test_swedish_agent_copy_is_a_documented_regression_case(self) -> None:
         content = TRANSLATIONESE_REVIEW.read_text(encoding="utf-8")

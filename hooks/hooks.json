@@ -1,0 +1,174 @@
+{
+  "description": "Bind Claude's actual final response to a verified BLUN Language Guard receipt.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "session-start"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "subagent-start"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "prompt-boundary"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__.*__(release_response|release_translation)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "post-tool"
+            ],
+            "timeout": 12
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__.*__(release_response|release_translation)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "pre-tool"
+            ],
+            "timeout": 8
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*telegram.*__(reply|send|send_message|sendMessage)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "pre-delivery"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "mcp__.*__(release_response|release_translation)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "post-tool-failure"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "stop-failure"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "stop"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "stop"
+            ],
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
+              "session-end"
+            ],
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

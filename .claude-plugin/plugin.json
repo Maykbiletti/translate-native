@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "translate-native",
+  "displayName": "BLUN Translate Native",
+  "version": "6.41.0",
+  "description": "Mandatory native-language and orthography release gate for Claude responses and translations.",
+  "author": {
+    "name": "BLUN"
+  },
+  "homepage": "https://github.com/Maykbiletti/translate-native",
+  "repository": "https://github.com/Maykbiletti/translate-native",
+  "license": "MIT",
+  "keywords": [
+    "translation",
+    "localization",
+    "diacritics",
+    "mcp",
+    "language-guard"
+  ],
+  "defaultEnabled": true,
+  "skills": [
+    "./translate-native/SKILL.md"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}
