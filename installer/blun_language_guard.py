@@ -1872,7 +1872,9 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
             file=sys.stderr,
         )
         return 2
-    def block_changed_cutover(phase: str) -> int:
+    def block_changed_cutover(
+        phase: str, *, restart_forward_runtime: bool = False
+    ) -> int:
         observed = _run(
             ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
         ).stdout.strip()
@@ -1881,12 +1883,21 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
             restored_head = _run(
                 ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
             ).stdout.strip()
-            safe = restored.returncode == 0 and restored_head == current
-            outcome = (
-                "the forward revision was restored without discarding local work."
-                if safe
-                else "the safe forward restoration failed. Manual inspection is required."
-            )
+            repository_restored = restored.returncode == 0 and restored_head == current
+            runtime_restored = True
+            runtime_restore_detail = ""
+            if repository_restored and restart_forward_runtime:
+                runtime_restored, runtime_restore_detail = _restart_installed_runtimes()
+            safe = repository_restored and runtime_restored
+            if safe:
+                outcome = "the forward revision and runtimes were restored without discarding local work."
+            elif repository_restored:
+                outcome = (
+                    "the forward revision was restored without discarding local work, but its runtimes "
+                    f"failed to restart ({runtime_restore_detail}). Manual inspection is required."
+                )
+            else:
+                outcome = "the safe forward restoration failed. Manual inspection is required."
             print(
                 f"The active checkout changed {phase}; runtime activation is blocked and "
                 + outcome,
@@ -1919,6 +1930,10 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         runtime_ok = plugin_status.get("healthy") is True or plugin_status.get("reason") == "plugin-not-installed"
         if not runtime_ok:
             runtime_detail = "Claude plugin cache changed during rollback"
+    if _clean_checkout_revision(root) != target:
+        return block_changed_cutover(
+            "during rollback runtime verification", restart_forward_runtime=True
+        )
     if not runtime_ok:
         restored = _run(["git", "reset", "--keep", current], root)
         _restart_installed_runtimes()
