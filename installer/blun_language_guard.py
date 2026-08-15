@@ -1800,7 +1800,13 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
     except (OSError, json.JSONDecodeError):
         print("No valid updater state is available; refusing to guess a rollback target.", file=sys.stderr)
         return 2
-    current = _run(["git", "rev-parse", "HEAD"], root).stdout.strip()
+    current = _clean_checkout_revision(root)
+    if current is None:
+        print(
+            "Rollback requires a valid, completely clean checkout; current files are unchanged.",
+            file=sys.stderr,
+        )
+        return 2
     recorded_current = state.get("revision")
     target = state.get("previous")
     sha = re.compile(r"[0-9a-f]{40}")
@@ -1814,10 +1820,6 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         or target == current
     ):
         print("Updater state is stale or incomplete; refusing to guess a rollback target.", file=sys.stderr)
-        return 2
-    dirty = _run(["git", "status", "--porcelain", "--untracked-files=normal"], root)
-    if dirty.returncode or dirty.stdout.strip():
-        print("Rollback requires a clean worktree; current files are unchanged.", file=sys.stderr)
         return 2
     if _run(["git", "cat-file", "-e", f"{target}^{{commit}}"], root).returncode:
         print("Recorded rollback commit is unavailable; current files are unchanged.", file=sys.stderr)
@@ -1864,10 +1866,43 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
                 file=sys.stderr,
             )
             return 1
+    if _clean_checkout_revision(root) != current:
+        print(
+            "The active checkout changed during rollback preflight; rollback activation is blocked.",
+            file=sys.stderr,
+        )
+        return 2
     applied = _run(["git", "reset", "--keep", target], root)
     if applied.returncode:
         print("Rollback reset failed; current installation is unchanged.", file=sys.stderr)
         return 1
+    if _clean_checkout_revision(root) != target:
+        observed = _run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
+        ).stdout.strip()
+        if observed == target:
+            restored = _run(["git", "reset", "--keep", current], root)
+            restored_head = _run(
+                ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
+            ).stdout.strip()
+            safe = restored.returncode == 0 and restored_head == current
+            outcome = (
+                "the forward revision was restored without discarding local work."
+                if safe
+                else "the safe forward restoration failed. Manual inspection is required."
+            )
+            print(
+                "The active checkout changed during rollback cutover; runtime activation is blocked and "
+                + outcome,
+                file=sys.stderr,
+            )
+            return 2 if safe else 1
+        print(
+            "HEAD changed independently during rollback cutover; runtime activation is blocked and the "
+            "independent commit was not reset.",
+            file=sys.stderr,
+        )
+        return 2
     post_tests = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"], root)
     runtime_ok, runtime_detail = _restart_installed_runtimes() if not post_tests.returncode else (False, "post-rollback tests failed")
     if claude_installed and runtime_ok:
