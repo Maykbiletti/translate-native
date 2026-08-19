@@ -95,7 +95,21 @@ LANGUAGE_CHARACTER_PROFILES = {
 ASCII_FOLDING_PROFILES = {
     # Conventional transliterations whose density is measurable without a dictionary.
     # Thresholds deliberately avoid treating one ordinary letter sequence as proof.
-    "de": {"patterns": (r"ae", r"oe", r"ue"), "native": "äöüÄÖÜ", "minimum": 3},
+    # German ``ue`` is also a native vowel sequence in words such as ``neue``
+    # and ``Abenteuer`` and in the productive loan suffix ``-uell``. Count it
+    # only where the surrounding letters still make an ASCII-folded umlaut
+    # plausible. The short-stem exception deliberately keeps ``Muell`` and
+    # similar folded forms measurable while accepting ``aktuell`` and
+    # ``individuell``.
+    "de": {
+        "patterns": (
+            r"ae",
+            r"oe",
+            r"(?<![aeiouyäöüq])(?:(?<![A-Za-zÄÖÜäöüß]{3})ue(?=ll)|ue(?!ll))",
+        ),
+        "native": "äöüÄÖÜ",
+        "minimum": 3,
+    },
     "sv": {"patterns": (r"aa", r"ae", r"oe"), "native": "åäöÅÄÖ", "minimum": 1},
     "da": {"patterns": (r"aa", r"ae", r"oe"), "native": "åæøÅÆØ", "minimum": 1},
     "no": {"patterns": (r"aa", r"ae", r"oe"), "native": "åæøÅÆØ", "minimum": 1},

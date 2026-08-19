@@ -276,6 +276,52 @@ class LanguageGuardMCPTests(unittest.TestCase):
         })
         self.assertTrue(report["release_allowed"], report)
 
+    def test_native_german_uell_words_do_not_create_ascii_folding_pressure(self) -> None:
+        # Regression: the old raw ``ue`` count blocked this native paragraph
+        # because its twelve legitimate -uell sequences outnumbered its eleven
+        # umlauts. Umlaut density is not evidence that a text is correct or
+        # incorrect; the candidate sequence must itself be plausible folding.
+        target = (
+            "Die aktuelle, individuelle, virtuelle, visuelle, manuelle, eventuelle, "
+            "sexuelle, kontextuelle, punktuelle, aktuelle, individuelle und virtuelle "
+            "Lösung ist zuverlässig, gründlich, vollständig, höflich, präzise, "
+            "verständlich, übersichtlich, natürlich, möglich und schön."
+        )
+        self.assertEqual(sum(target.count(character) for character in "äöüÄÖÜ"), 11)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
+        report = MODULE.release_response({
+            "target_text": target,
+            "language": "de-DE",
+            "attestations": {"nativeness": True, "orthography": True},
+        })
+        self.assertTrue(report["release_allowed"], report)
+
+    def test_native_german_ue_sequences_do_not_look_ascii_folded(self) -> None:
+        controls = (
+            "Neue treue Freunde erleben genaue Abenteuer und erneuern teure Gebäude.",
+            "Quellen und bequeme neue Abenteuer brauchen genaue Planung.",
+        )
+        for target in controls:
+            with self.subTest(target=target):
+                report = MODULE.validate_text(target, "de-DE", content_type="prose")
+                self.assertEqual(report["status"], "PASS", report)
+
+    def test_real_german_ascii_folding_still_blocks_with_native_noise(self) -> None:
+        target = (
+            "Ä Ö Ü ä ö ü Ä Ö Ü ä ö. "
+            "Haendler pruefen taeglich die Qualitaet im Buero. "
+            "Jeder Kaeufer erhaelt Zugang zum Gebaeude und moechte zurueck. "
+            "Haendler pruefen taeglich die Qualitaet im Buero. "
+            "Jeder Kaeufer erhaelt Zugang zum Gebaeude und moechte zurueck."
+        )
+        report = MODULE.validate_text(target, "de-DE", content_type="prose")
+        codes = {finding["code"] for finding in report["findings"]}
+        self.assertEqual(report["status"], "BLOCK")
+        self.assertIn("ascii-folding-pressure", codes)
+        self.assertIn("suspected-ascii-substitution", codes)
+
     def test_correct_german_double_s_never_counts_as_ascii_folding(self) -> None:
         correct_ui_copy = (
             "Ihre Adresse wurde gespeichert.",
