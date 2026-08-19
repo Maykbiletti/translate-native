@@ -586,7 +586,11 @@ function postToolFailure(input) {
 }
 
 async function stop(input) {
-  const target = typeof input.last_assistant_message === "string" ? input.last_assistant_message : "";
+  if (!input || typeof input.last_assistant_message !== "string") {
+    emit(blockedStop(input, "The BLUN hook received no valid last_assistant_message and cannot verify the actual final response. Fail closed and retry after Claude supplies the documented Stop output field."));
+    return;
+  }
+  const target = input.last_assistant_message;
   const naturalLanguage = hasNaturalLanguage(target);
   try {
     const { destination, record } = readRecord(input);

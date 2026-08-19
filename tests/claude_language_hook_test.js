@@ -170,6 +170,30 @@ async function main() {
   assert.match(started.stdout, /SessionStart/);
   assert.match(started.stdout, /mandatory/);
 
+  for (const invalidMessage of [undefined, null, { text: clean }]) {
+    const malformedInput = {
+      ...common,
+      hook_event_name: "Stop",
+      stop_hook_active: false
+    };
+    if (invalidMessage !== undefined) malformedInput.last_assistant_message = invalidMessage;
+    const malformedStop = await runHook("stop", malformedInput, environment);
+    const malformedBlock = JSON.parse(malformedStop.stdout);
+    assert.strictEqual(malformedBlock.decision, "block");
+    assert.match(malformedBlock.reason, /last_assistant_message/);
+  }
+
+  const malformedRepeatedSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-invalid-output",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: [clean],
+    stop_hook_active: true
+  }, environment);
+  const malformedSubagentHardStop = JSON.parse(malformedRepeatedSubagentStop.stdout);
+  assert.strictEqual(malformedSubagentHardStop.continue, false);
+  assert.match(malformedSubagentHardStop.stopReason, /stopped an unverified response/);
+
   const policyEnvironment = {
     ...environment,
     BLUN_LANGUAGE_GUARD_LANGUAGE: "de-DE",
