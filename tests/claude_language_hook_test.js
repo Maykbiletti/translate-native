@@ -10,6 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
+const { readProtectedRecord, removeExactRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -29,6 +30,18 @@ function runHook(mode, input, environment) {
 
 async function main() {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "blun-claude-hook-"));
+  const replacedRecord = path.join(temporary, "replaced-record.json");
+  fs.writeFileSync(replacedRecord, '{"grant":"first"}\n', { mode: 0o600 });
+  const inspectedRecord = readProtectedRecord(replacedRecord);
+  fs.renameSync(replacedRecord, `${replacedRecord}.old`);
+  fs.writeFileSync(replacedRecord, '{"grant":"other"}\n', { mode: 0o600 });
+  assert.throws(
+    () => removeExactRecord(replacedRecord, inspectedRecord.fileIdentity),
+    /changed before consumption/
+  );
+  assert(fs.existsSync(replacedRecord), "a replacement record must not be removed");
+  fs.unlinkSync(replacedRecord);
+  fs.unlinkSync(`${replacedRecord}.old`);
   const token = "a".repeat(64);
   fs.writeFileSync(path.join(temporary, "service.token"), `${token}\n`, { mode: 0o600 });
   const grants = new Map();
@@ -445,6 +458,58 @@ async function main() {
   assert.strictEqual(parsedRecord.session_epoch_sha256, crypto.createHash("sha256").update(secondEpoch).digest("hex"));
   assert.strictEqual(parsedRecord.source_sha256, crypto.createHash("sha256").update("").digest("hex"));
   assert.strictEqual(parsedRecord.channel, "claude-hook");
+
+  if (process.platform !== "win32") {
+    fs.chmodSync(stateFile, 0o644);
+    const broadPermissions = await runHook("stop", {
+      ...common,
+      hook_event_name: "Stop",
+      last_assistant_message: clean,
+      stop_hook_active: false
+    }, environment);
+    assert.strictEqual(JSON.parse(broadPermissions.stdout).decision, "block");
+    assert(fs.existsSync(stateFile), "an unsafe record must not be consumed");
+    fs.chmodSync(stateFile, 0o600);
+    const recoveredPermissions = await runHook("stop", {
+      ...common,
+      hook_event_name: "Stop",
+      last_assistant_message: clean,
+      stop_hook_active: false
+    }, environment);
+    assert.strictEqual(recoveredPermissions.stdout, "");
+
+    await runHook("post-tool", { ...tool, tool_use_id: "tool-symlink-record" }, environment);
+    const externalRecord = path.join(temporary, "external-grant-record.json");
+    const externalBytes = fs.readFileSync(stateFile);
+    fs.writeFileSync(externalRecord, externalBytes, { mode: 0o600 });
+    fs.unlinkSync(stateFile);
+    fs.symlinkSync(externalRecord, stateFile);
+    const symlinkRecord = await runHook("stop", {
+      ...common,
+      hook_event_name: "Stop",
+      last_assistant_message: clean,
+      stop_hook_active: false
+    }, environment);
+    assert.strictEqual(JSON.parse(symlinkRecord.stdout).decision, "block");
+    assert(fs.lstatSync(stateFile).isSymbolicLink(), "the hook must not consume a symlink as protected state");
+    assert.deepStrictEqual(fs.readFileSync(externalRecord), externalBytes, "symlink rejection must not alter its target");
+    fs.unlinkSync(stateFile);
+    fs.unlinkSync(externalRecord);
+  } else {
+    fs.unlinkSync(stateFile);
+  }
+
+  await runHook("post-tool", { ...tool, tool_use_id: "tool-oversized-record" }, environment);
+  fs.writeFileSync(stateFile, `${"x".repeat(64 * 1024)}\n`, { mode: 0o600 });
+  const oversizedRecord = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(oversizedRecord.stdout).decision, "block");
+  assert(fs.statSync(stateFile).size > 64 * 1024, "oversized state must remain unconsumed");
+  fs.unlinkSync(stateFile);
 
   const childTool = { ...tool, agent_id: "child-agent", tool_use_id: "tool-child" };
   const otherSessionTool = { ...tool, session_id: "session-two", tool_use_id: "tool-other-session" };

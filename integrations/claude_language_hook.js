@@ -11,6 +11,7 @@ const os = require("os");
 const path = require("path");
 
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_RECORD_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNTIME = path.join(os.homedir(), ".config", "blun-language-guard");
 const EXACT_LANGUAGE = /^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/;
@@ -198,22 +199,94 @@ function statePath(input) {
   return path.join(stateDirectory(), `${identity(input)}.json`);
 }
 
+function validateRecordStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    throw new Error("delivery grant state must be a regular file");
+  }
+  if (stats.size < 1 || stats.size > MAX_RECORD_BYTES) {
+    throw new Error("delivery grant state has an invalid size");
+  }
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("delivery grant state permissions are too broad");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error("delivery grant state has the wrong owner");
+  }
+}
+
+function recordIdentity(stats) {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    ctimeMs: stats.ctimeMs,
+    mtimeMs: stats.mtimeMs
+  };
+}
+
+function sameRecordIdentity(stats, expected) {
+  return expected && stats.dev === expected.dev && stats.ino === expected.ino
+    && stats.size === expected.size && stats.ctimeMs === expected.ctimeMs
+    && stats.mtimeMs === expected.mtimeMs;
+}
+
+function readProtectedRecord(destination) {
+  const before = fs.lstatSync(destination);
+  validateRecordStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validateRecordStats(opened);
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("delivery grant state changed while opening");
+    }
+    const raw = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("delivery grant state root must be an object");
+    }
+    return { record: parsed, fileIdentity: recordIdentity(opened) };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function removeExactRecord(destination, expected) {
+  const current = fs.lstatSync(destination);
+  validateRecordStats(current);
+  if (!sameRecordIdentity(current, expected)) {
+    throw new Error("delivery grant state changed before consumption");
+  }
+  fs.unlinkSync(destination);
+}
+
 function writeRecord(input, record) {
   const directory = stateDirectory();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const destination = statePath(input);
-  const temporary = `${destination}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-  fs.renameSync(temporary, destination);
-  try { fs.chmodSync(destination, 0o600); } catch (_) {}
+  const temporary = `${destination}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, destination);
+    try { fs.chmodSync(destination, 0o600); } catch (_) {}
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+  }
 }
 
 function readRecord(input) {
   const destination = statePath(input);
   try {
-    return { destination, record: safeReadJson(destination) };
+    return { destination, ...readProtectedRecord(destination) };
   } catch (error) {
-    if (error && error.code === "ENOENT") return { destination, record: null };
+    if (error && error.code === "ENOENT") return { destination, record: null, fileIdentity: null };
     throw error;
   }
 }
@@ -244,7 +317,7 @@ function invalidateSessionRecords(input) {
     let belongsToSession = candidate === legacyMainRecord;
     if (!belongsToSession) {
       try {
-        const record = safeReadJson(candidate);
+        const { record } = readProtectedRecord(candidate);
         const legacyGrant = typeof record.session_sha256 !== "string"
           && typeof record.delivery_grant === "string"
           && Number.isFinite(record.authorized_at);
@@ -593,14 +666,14 @@ async function stop(input) {
   const target = input.last_assistant_message;
   const naturalLanguage = hasNaturalLanguage(target);
   try {
-    const { destination, record } = readRecord(input);
+    const { destination, record, fileIdentity } = readRecord(input);
     const { epoch: sessionEpoch } = readSessionEpoch(input);
     const fresh = record && Number.isFinite(record.authorized_at)
       && Date.now() - record.authorized_at >= 0
       && Date.now() - record.authorized_at <= MAX_RECORD_AGE_MS;
     const usable = fresh && typeof record.delivery_grant === "string"
       && record.session_epoch_sha256 === textHash(sessionEpoch);
-    try { fs.unlinkSync(destination); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+    if (record) removeExactRecord(destination, fileIdentity);
     if (usable) {
       try {
         const result = await callGuard({
@@ -670,4 +743,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readSessionEpoch, sessionEnd, sessionHash, stopFailure, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedRecord, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash };
