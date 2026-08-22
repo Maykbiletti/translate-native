@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +21,67 @@ SPEC.loader.exec_module(QUALITY)
 
 class ReceiptTests(unittest.TestCase):
     KEY = b"k" * 32
+
+    def test_signing_key_is_created_once_and_rejects_invalid_sizes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "signing.key"
+            created = QUALITY.load_or_create_key(key_path)
+            self.assertEqual(len(created), 32)
+            self.assertEqual(QUALITY.load_or_create_key(key_path), created)
+
+            key_path.write_bytes(b"short")
+            with self.assertRaisesRegex(ValueError, "invalid size"):
+                QUALITY.load_or_create_key(key_path)
+            key_path.write_bytes(b"x" * (QUALITY.MAX_SIGNING_KEY_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "invalid size"):
+                QUALITY.load_or_create_key(key_path)
+
+    def test_signing_key_rejects_identity_change_while_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "signing.key"
+            key_path.write_bytes(b"k" * 32)
+            key_path.chmod(0o600)
+            details = key_path.stat()
+            opened = SimpleNamespace(
+                st_mode=details.st_mode,
+                st_size=details.st_size,
+                st_uid=details.st_uid,
+                st_dev=details.st_dev,
+                st_ino=details.st_ino,
+                st_ctime_ns=details.st_ctime_ns,
+                st_mtime_ns=details.st_mtime_ns,
+            )
+            changed = SimpleNamespace(**vars(opened))
+            changed.st_mtime_ns += 1
+            with mock.patch.object(QUALITY.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(ValueError, "changed while reading"):
+                    QUALITY.load_existing_key(key_path)
+
+    @unittest.skipIf(os.name == "nt", "POSIX link and permission test")
+    def test_signing_key_rejects_links_and_does_not_follow_legacy_temp_link(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key_path = root / "signing.key"
+            sentinel = root / "sentinel"
+            sentinel.write_bytes(b"s" * 32)
+            legacy_temporary = key_path.with_suffix(".tmp")
+            legacy_temporary.symlink_to(sentinel)
+
+            QUALITY.load_or_create_key(key_path)
+            self.assertEqual(sentinel.read_bytes(), b"s" * 32)
+            self.assertTrue(legacy_temporary.is_symlink())
+
+            key_path.unlink()
+            key_path.symlink_to(sentinel)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                QUALITY.load_or_create_key(key_path)
+            self.assertEqual(sentinel.read_bytes(), b"s" * 32)
+
+            key_path.unlink()
+            key_path.write_bytes(b"k" * 32)
+            key_path.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "owner-only"):
+                QUALITY.load_or_create_key(key_path)
 
     def test_receipt_is_bound_to_every_input(self) -> None:
         token = QUALITY.issue_receipt("Hello", "Hej", "sv-SE", self.KEY)

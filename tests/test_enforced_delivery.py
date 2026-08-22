@@ -234,6 +234,19 @@ class EnforcedDeliveryTests(unittest.TestCase):
         self.assertIn("permissions", result.stderr)
         self.assertEqual(result.stdout, "")
 
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_linked_key_fails_closed(self) -> None:
+        linked = Path(self.temporary.name) / "linked.key"
+        linked.symlink_to(self.key_path)
+        result = self.run_delivery(
+            self.envelope("Natürlich ist das möglich."),
+            "--key-file", str(linked),
+            "--task-kind", "response", "--language", "de-DE",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("signing key is invalid", result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_sync_sender_is_never_called_for_invalid_receipt(self) -> None:
         calls: list[str] = []
         policy = MODULE.HostPolicy("response", "de-DE")

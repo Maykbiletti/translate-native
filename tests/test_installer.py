@@ -1340,6 +1340,35 @@ class InstallerTests(unittest.TestCase):
             if INSTALLER.os.name != "nt":
                 self.assertEqual(key.stat().st_mode & 0o077, 0)
 
+    def test_signing_key_rejects_invalid_existing_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "signing.key"
+            key.write_bytes(b"short")
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER.ensure_signing_key(key)
+            key.write_bytes(b"x" * (64 * 1024 + 1))
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER.ensure_signing_key(key)
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_signing_key_does_not_follow_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key = root / "signing.key"
+            sentinel = root / "sentinel"
+            sentinel.write_bytes(b"s" * 32)
+            key.with_suffix(".tmp").symlink_to(sentinel)
+
+            INSTALLER.ensure_signing_key(key)
+            self.assertEqual(sentinel.read_bytes(), b"s" * 32)
+            self.assertTrue(key.with_suffix(".tmp").is_symlink())
+
+            key.unlink()
+            key.symlink_to(sentinel)
+            with self.assertRaisesRegex(RuntimeError, "regular file"):
+                INSTALLER.ensure_signing_key(key)
+            self.assertEqual(sentinel.read_bytes(), b"s" * 32)
+
     def test_install_delivery_boundary_creates_command_policy_and_key(self) -> None:
         originals = (
             INSTALLER.DELIVERY_COMMAND,

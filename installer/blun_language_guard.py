@@ -77,17 +77,33 @@ def ensure_signing_key(path: Path | None = None) -> None:
     """Create the local trust key once and never replace an existing key."""
     path = path or SIGNING_KEY
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if not path.is_file():
-            raise RuntimeError(f"Signing-key path is not a file: {path}")
-        if os.name != "nt" and path.stat().st_mode & 0o077:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        details = None
+    if details is not None:
+        if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+            raise RuntimeError(f"Signing-key path is not a regular file: {path}")
+        if details.st_size < 32 or details.st_size > 64 * 1024:
+            raise RuntimeError(f"Signing key has an invalid size: {path}")
+        if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
             raise RuntimeError(f"Signing-key permissions must be owner-only: {path}")
+        if hasattr(os, "getuid") and details.st_uid != os.getuid():
+            raise RuntimeError(f"Signing-key owner is invalid: {path}")
         return
-    temporary = path.with_suffix(".tmp")
-    temporary.write_bytes(os.urandom(32))
-    if os.name != "nt":
-        os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        ensure_signing_key(path)
+        return
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(os.urandom(32))
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def ensure_service_token(path: Path | None = None) -> None:

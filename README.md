@@ -431,6 +431,8 @@ The persistent transport improves availability; it does not turn MCP instruction
 
 Version 6.2 moves signing and final verification into [`guard_service.py`](integrations/guard_service.py), a dedicated loopback service. The MCP process and host adapters receive only a service endpoint and an authentication token; the untrusted agent child receives neither the signing key nor the service token. The service accepts UTF-8 with or without a BOM, signs releases, verifies the exact envelope at delivery time, and appends a content-free audit record containing only hashes, route metadata, guard version, and finding codes.
 
+The signing key is treated as protected trust-root state. Signer and verifier paths accept only bounded, owner-only regular files, refuse symbolic links, open without following links where supported, and compare file identity across inspection and reading. First creation reserves the final path exclusively and requests owner-only mode `0600` where POSIX permissions apply; the former predictable `.tmp` name is never touched, and a concurrent creator can neither replace an existing key nor redirect initialization through a prepared link.
+
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:
 
 ```bash

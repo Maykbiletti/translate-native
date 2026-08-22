@@ -189,6 +189,34 @@ class LanguageGatewayTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("signing key is invalid", result.stdout)
 
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_pre_output_hooks_reject_a_linked_verifier_key(self) -> None:
+        request = {
+            "task_kind": "response",
+            "target_text": "Natürlich bleibt die Prüfung geschlossen.",
+            "language": "de-DE",
+            "release_token": "blg6.invalid",
+        }
+        for hook in (PRE_OUTPUT, INSTALLED_PRE_OUTPUT):
+            with self.subTest(hook=hook):
+                root = Path(self.temporary.name) / hook.parent.name
+                root.mkdir(parents=True, exist_ok=True)
+                target = root / "known.key"
+                target.write_bytes(b"k" * 32)
+                target.chmod(0o600)
+                linked = root / "linked.key"
+                linked.symlink_to(target)
+                environment = dict(os.environ)
+                environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
+                environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(linked)
+                result = subprocess.run(
+                    [sys.executable, str(hook)],
+                    input=json.dumps(request, ensure_ascii=False),
+                    text=True, capture_output=True, check=False, env=environment,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("signing key is invalid", result.stdout)
+
     def test_fully_attested_swedish_translation_is_released(self) -> None:
         result = GATEWAY.gate({
             "task_kind": "translation",
