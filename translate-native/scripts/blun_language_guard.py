@@ -131,10 +131,7 @@ def _service_token() -> str:
         return direct
     if not SERVICE_TOKEN_FILE:
         return ""
-    token = Path(SERVICE_TOKEN_FILE).read_text(encoding="utf-8-sig").strip()
-    if len(token) < 32:
-        raise SERVICE_CLIENT.GuardServiceError("guard service token is invalid")
-    return token
+    return SERVICE_CLIENT.load_service_token(Path(SERVICE_TOKEN_FILE))
 
 
 def _isolated_release(task_kind: str, arguments: dict[str, Any]) -> dict[str, Any] | None:

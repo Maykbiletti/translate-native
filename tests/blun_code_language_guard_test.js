@@ -8,12 +8,19 @@ const path = require("node:path");
 const {
   bootstrapLanguageGuardMcp,
   createBlunLanguageGuard,
+  readProtectedServiceToken,
   resolveLanguage,
 } = require("../integrations/adapters/blun-code-language-guard");
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "blun-code-guard-"));
 const tokenFile = path.join(temporary, "service.token");
-fs.writeFileSync(tokenFile, "service-token-with-at-least-32-characters\n");
+fs.writeFileSync(tokenFile, "service-token-with-at-least-32-characters\n", { mode: 0o600 });
+assert.equal(readProtectedServiceToken(tokenFile), "service-token-with-at-least-32-characters");
+if (process.platform !== "win32") {
+  const linkedToken = path.join(temporary, "linked-service.token");
+  fs.symlinkSync(tokenFile, linkedToken);
+  assert.throws(() => readProtectedServiceToken(linkedToken), /regular file/);
+}
 const records = [];
 const store = {
   servers: [],

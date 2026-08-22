@@ -433,6 +433,8 @@ Version 6.2 moves signing and final verification into [`guard_service.py`](integ
 
 The signing key is treated as protected trust-root state. Signer and verifier paths accept only bounded, owner-only regular files, refuse symbolic links, open without following links where supported, and compare file identity across inspection and reading. First creation reserves the final path exclusively and requests owner-only mode `0600` where POSIX permissions apply; the former predictable `.tmp` name is never touched, and a concurrent creator can neither replace an existing key nor redirect initialization through a prepared link.
 
+The isolated service authentication token now uses the same protected-state contract everywhere it is consumed: the signer, MCP process, mandatory host delivery command, Claude hooks, BLUN Code adapter, installer probe, and doctor accept only a bounded regular file, require owner-only access where POSIX permission bits apply, and verify its identity before and after reading. Installation reserves the final token path exclusively, requests owner-only mode `0600` on POSIX systems, and never touches the former predictable `.tmp` name. A linked, oversized, broadly readable, replaced, or malformed token therefore fails closed before any request reaches the signer; direct environment-token deployments remain compatible.
+
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:
 
 ```bash

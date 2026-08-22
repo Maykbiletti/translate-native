@@ -9,6 +9,57 @@ const {
 } = require("./node-language-guard");
 
 const SERVER_NAME = "blun-language-guard";
+const MAX_SERVICE_TOKEN_BYTES = 64 * 1024;
+
+function protectedFileIdentity(stats) {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    ctimeMs: stats.ctimeMs,
+    mtimeMs: stats.mtimeMs,
+  };
+}
+
+function sameProtectedFile(stats, expected) {
+  return stats.dev === expected.dev && stats.ino === expected.ino
+    && stats.size === expected.size && stats.ctimeMs === expected.ctimeMs
+    && stats.mtimeMs === expected.mtimeMs;
+}
+
+function validateServiceTokenStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("service token must be a regular file");
+  if (stats.size < 32 || stats.size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) throw new Error("service token permissions are too broad");
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) throw new Error("service token has the wrong owner");
+}
+
+function readProtectedServiceToken(destination) {
+  const before = fs.lstatSync(destination);
+  validateServiceTokenStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validateServiceTokenStats(opened);
+    if (!sameProtectedFile(opened, protectedFileIdentity(before))) throw new Error("service token changed while opening");
+    const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (count === 0) break;
+      size += count;
+    }
+    const after = fs.fstatSync(descriptor);
+    if (!sameProtectedFile(after, protectedFileIdentity(opened))) throw new Error("service token changed while reading");
+    if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
+    const token = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "").trim();
+    if (token.length < 32) throw new Error("service token is invalid");
+    return token;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
 
 function loadLegacyGuardConfig(userHome) {
   const file = path.join(userHome, ".blun", "mcp.json");
@@ -75,7 +126,7 @@ function resolveGuardConnection({ store, environment = process.env }) {
     throw new LanguageGuardBlocked("mandatory language guard is not configured", "guard_unavailable");
   }
   let serviceToken;
-  try { serviceToken = fs.readFileSync(tokenFile, "utf8").replace(/^\uFEFF/, "").trim(); }
+  try { serviceToken = readProtectedServiceToken(tokenFile); }
   catch { throw new LanguageGuardBlocked("mandatory language guard token is unavailable", "guard_unavailable"); }
   if (serviceToken.length < 32) {
     throw new LanguageGuardBlocked("mandatory language guard token is invalid", "guard_unavailable");
@@ -218,6 +269,7 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
 module.exports = {
   SERVER_NAME,
   loadLegacyGuardConfig,
+  readProtectedServiceToken,
   bootstrapLanguageGuardMcp,
   resolveGuardConnection,
   resolveLanguage,

@@ -364,12 +364,7 @@ if hasattr(socketserver, "UnixStreamServer"):
 def _token_from_file(path: Path | None) -> str:
     if path is None:
         return ""
-    token = path.read_text(encoding="utf-8-sig").strip()
-    if len(token) < 32:
-        raise RuntimeError("service token must contain at least 32 characters")
-    if os.name != "nt" and path.stat().st_mode & 0o077:
-        raise RuntimeError("service token permissions must be owner-only")
-    return token
+    return CLIENT.load_service_token(path)
 
 
 def build_server(endpoint: str, service: GuardService):

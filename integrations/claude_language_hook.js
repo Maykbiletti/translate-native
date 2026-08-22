@@ -13,6 +13,7 @@ const path = require("path");
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_EPOCH_BYTES = 128;
+const MAX_SERVICE_TOKEN_BYTES = 64 * 1024;
 const MAX_RECORD_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNTIME = path.join(os.homedir(), ".config", "blun-language-guard");
 const EXACT_LANGUAGE = /^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/;
@@ -42,6 +43,48 @@ function safeReadJson(file) {
   return parsed;
 }
 
+function validateServiceTokenStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("service token must be a regular file");
+  if (stats.size < 32 || stats.size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("service token permissions are too broad");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error("service token has the wrong owner");
+  }
+}
+
+function readProtectedServiceToken(destination) {
+  const before = fs.lstatSync(destination);
+  validateServiceTokenStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validateServiceTokenStats(opened);
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("service token changed while opening");
+    }
+    const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (count === 0) break;
+      size += count;
+    }
+    const after = fs.fstatSync(descriptor);
+    if (!sameRecordIdentity(after, recordIdentity(opened))) {
+      throw new Error("service token changed while reading");
+    }
+    if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
+    const token = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "").trim();
+    if (token.length < 32) throw new Error("service token is invalid");
+    return token;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function runtimeConfig() {
   const runtime = process.env.BLUN_LANGUAGE_GUARD_RUNTIME || DEFAULT_RUNTIME;
   const policyPath = process.env.BLUN_LANGUAGE_GUARD_POLICY || path.join(runtime, "delivery-policy.json");
@@ -52,7 +95,7 @@ function runtimeConfig() {
   }
   const endpoint = process.env.BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT || isolated.endpoint;
   const tokenFile = process.env.BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE || isolated.token_file;
-  const token = process.env.BLUN_LANGUAGE_GUARD_SERVICE_TOKEN || fs.readFileSync(tokenFile, "utf8").replace(/^\uFEFF/, "").trim();
+  const token = process.env.BLUN_LANGUAGE_GUARD_SERVICE_TOKEN || readProtectedServiceToken(tokenFile);
   if (!endpoint || token.length < 32) {
     throw new Error("isolated service endpoint or token is invalid");
   }
@@ -770,4 +813,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedRecord, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash };

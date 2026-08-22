@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
-import tempfile
-import unittest
-from unittest import mock
 import json
+import os
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
+import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -75,6 +76,32 @@ class LanguageGuardMCPTests(unittest.TestCase):
             self.assertEqual(report["reason"], "isolated-guard-unavailable")
         finally:
             MODULE.SERVICE_ENDPOINT = previous
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_isolated_service_rejects_a_linked_token_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "service.token"
+            token.write_text("s" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            linked = root / "linked.token"
+            linked.symlink_to(token)
+            previous_endpoint = MODULE.SERVICE_ENDPOINT
+            previous_file = MODULE.SERVICE_TOKEN_FILE
+            MODULE.SERVICE_ENDPOINT = "unix:/guard.sock"
+            MODULE.SERVICE_TOKEN_FILE = str(linked)
+            try:
+                report = MODULE.release_response({
+                    "target_text": "Natürlich bleibt der Dienst geschlossen.",
+                    "language": "de-DE",
+                    "attestations": {"nativeness": True, "orthography": True},
+                })
+            finally:
+                MODULE.SERVICE_ENDPOINT = previous_endpoint
+                MODULE.SERVICE_TOKEN_FILE = previous_file
+            self.assertFalse(report["release_allowed"])
+            self.assertEqual(report["reason"], "isolated-guard-unavailable")
+            self.assertIn("regular file", report["error"])
 
     def test_initialize_injects_mandatory_output_and_translation_instructions(self) -> None:
         response = MODULE.handle_message({"jsonrpc": "2.0", "id": 1, "method": "initialize"})

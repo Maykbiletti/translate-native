@@ -207,6 +207,35 @@ class EnforcedDeliveryTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertNotIn(target, result.stderr)
 
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_linked_service_token_fails_closed_before_delivery(self) -> None:
+        root = Path(self.temporary.name)
+        token_path = root / "service.token"
+        token_path.write_text("s" * 64 + "\n", encoding="ascii")
+        token_path.chmod(0o600)
+        linked = root / "linked-service.token"
+        linked.symlink_to(token_path)
+        policy_path = root / "delivery-policy.json"
+        policy_path.write_text(json.dumps({
+            "mandatory": True,
+            "isolated_service": {
+                "required": True,
+                "endpoint": "tcp:127.0.0.1:1",
+                "token_file": str(linked),
+            },
+        }), encoding="utf-8")
+        target = "Natürlich bleibt die Zustellung geschlossen."
+        result = self.run_delivery(
+            self.envelope(target),
+            "--policy-file", str(policy_path),
+            "--task-kind", "response",
+            "--language", "de-DE",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("regular file", result.stderr)
+        self.assertNotIn(target, result.stderr)
+
     def test_missing_key_fails_closed_instead_of_creating_one(self) -> None:
         missing = Path(self.temporary.name) / "missing.key"
         result = subprocess.run(

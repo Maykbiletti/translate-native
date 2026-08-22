@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -45,6 +46,47 @@ class GuardServiceTests(unittest.TestCase):
             "session_epoch": self.session_epoch,
         })
         self.assertTrue(registered["registered"], registered)
+
+    def test_service_token_file_is_bounded_and_stable(self) -> None:
+        root = Path(self.temporary.name)
+        token_path = root / "service.token"
+        token_path.write_text("s" * 64 + "\n", encoding="ascii")
+        token_path.chmod(0o600)
+        self.assertEqual(CLIENT.load_service_token(token_path), "s" * 64)
+
+        details = token_path.stat()
+        opened = SimpleNamespace(
+            st_mode=details.st_mode,
+            st_size=details.st_size,
+            st_uid=details.st_uid,
+            st_dev=details.st_dev,
+            st_ino=details.st_ino,
+            st_ctime_ns=details.st_ctime_ns,
+            st_mtime_ns=details.st_mtime_ns,
+        )
+        changed = SimpleNamespace(**vars(opened))
+        changed.st_mtime_ns += 1
+        with mock.patch.object(CLIENT.os, "fstat", side_effect=(opened, changed)):
+            with self.assertRaisesRegex(CLIENT.GuardServiceError, "changed while reading"):
+                CLIENT.load_service_token(token_path)
+
+        token_path.write_bytes(b"x" * (CLIENT.MAX_SERVICE_TOKEN_BYTES + 1))
+        with self.assertRaisesRegex(CLIENT.GuardServiceError, "invalid size"):
+            CLIENT.load_service_token(token_path)
+
+    @unittest.skipIf(os.name == "nt", "POSIX link and permission test")
+    def test_service_token_file_rejects_links_and_open_permissions(self) -> None:
+        root = Path(self.temporary.name)
+        token_path = root / "service.token"
+        token_path.write_text("s" * 64 + "\n", encoding="ascii")
+        token_path.chmod(0o600)
+        linked = root / "linked.token"
+        linked.symlink_to(token_path)
+        with self.assertRaisesRegex(CLIENT.GuardServiceError, "regular file"):
+            CLIENT.load_service_token(linked)
+        token_path.chmod(0o644)
+        with self.assertRaisesRegex(CLIENT.GuardServiceError, "owner-only"):
+            CLIENT.load_service_token(token_path)
 
     def release_request(self, target: str = "Natürlich ist das möglich.") -> dict:
         return {

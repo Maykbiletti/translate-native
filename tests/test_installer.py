@@ -1423,6 +1423,35 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.AUDIT_LOG,
                 ) = originals
 
+    def test_service_token_rejects_invalid_existing_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            token = Path(directory) / "service.token"
+            token.write_bytes(b"short")
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER.ensure_service_token(token)
+            token.write_bytes(b"x" * (64 * 1024 + 1))
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER.ensure_service_token(token)
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_service_token_does_not_follow_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "service.token"
+            sentinel = root / "sentinel"
+            sentinel.write_text("s" * 64 + "\n", encoding="ascii")
+            token.with_suffix(".tmp").symlink_to(sentinel)
+
+            INSTALLER.ensure_service_token(token)
+            self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
+            self.assertTrue(token.with_suffix(".tmp").is_symlink())
+
+            token.unlink()
+            token.symlink_to(sentinel)
+            with self.assertRaisesRegex(RuntimeError, "regular file"):
+                INSTALLER.ensure_service_token(token)
+            self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
+
     def test_mcp_http_runtime_installs_commands_and_owner_only_token(self) -> None:
         originals = (
             INSTALLER.MCP_HTTP_COMMAND,

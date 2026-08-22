@@ -247,10 +247,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         access_token = load_access_token(args.access_token_file)
-        if not args.service_token_file.is_file():
-            raise RuntimeError(f"Guard service-token file does not exist: {args.service_token_file}")
         GUARD.SERVICE_ENDPOINT = args.service_endpoint
         GUARD.SERVICE_TOKEN_FILE = str(args.service_token_file)
+        GUARD._service_token()
         server = build_server(args.host, args.port, access_token, args.path)
     except (OSError, RuntimeError, ValueError) as error:
         print(f"BLOCK: {error}", file=sys.stderr)

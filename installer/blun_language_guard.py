@@ -106,24 +106,77 @@ def ensure_signing_key(path: Path | None = None) -> None:
         os.close(descriptor)
 
 
+def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_service_token_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Service-token path is not a regular file: {path}")
+    if details.st_size < 32 or details.st_size > 64 * 1024:
+        raise RuntimeError(f"Service token has an invalid size: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise RuntimeError(f"Service-token permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Service-token owner is invalid: {path}")
+
+
+def _read_protected_service_token(path: Path) -> str:
+    before = path.lstat()
+    _validate_service_token_details(path, before)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _validate_service_token_details(path, opened)
+        if _service_token_identity(opened) != _service_token_identity(before):
+            raise RuntimeError(f"Service token changed while opening: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(64 * 1024 + 1)
+        after = os.fstat(descriptor)
+        if _service_token_identity(after) != _service_token_identity(opened):
+            raise RuntimeError(f"Service token changed while reading: {path}")
+    finally:
+        os.close(descriptor)
+    if len(raw) > 64 * 1024:
+        raise RuntimeError(f"Service token has an invalid size: {path}")
+    try:
+        token = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"Service token is not valid UTF-8: {path}") from error
+    if len(token) < 32:
+        raise RuntimeError(f"Service token is invalid: {path}")
+    return token
+
+
 def ensure_service_token(path: Path | None = None) -> None:
     """Create a stable text token used only by host adapters and the MCP process."""
     path = path or SERVICE_TOKEN
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if not path.is_file():
-            raise RuntimeError(f"Service-token path is not a file: {path}")
-        token = path.read_text(encoding="utf-8-sig").strip()
-        if len(token) < 32:
-            raise RuntimeError(f"Service token is invalid: {path}")
-        if os.name != "nt" and path.stat().st_mode & 0o077:
-            raise RuntimeError(f"Service-token permissions must be owner-only: {path}")
+    try:
+        _read_protected_service_token(path)
         return
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
-    if os.name != "nt":
-        os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    except FileNotFoundError:
+        pass
+    token = os.urandom(32).hex().encode("ascii") + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        _read_protected_service_token(path)
+        return
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(token)
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def ensure_mcp_http_token(path: Path | None = None) -> None:
@@ -383,7 +436,7 @@ def probe_guard_service(timeout: float = 3.0) -> dict:
     assert spec and spec.loader
     client = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(client)
-    token = SERVICE_TOKEN.read_text(encoding="utf-8-sig").strip()
+    token = client.load_service_token(SERVICE_TOKEN)
     return client.call_guard_service(
         SERVICE_ENDPOINT,
         {"operation": "health"},
@@ -951,7 +1004,11 @@ def doctor() -> int:
         SERVICE_COMMAND.is_symlink() and SERVICE_COMMAND.resolve() == service_source.resolve(),
         str(SERVICE_COMMAND),
     ))
-    token_secure = SERVICE_TOKEN.is_file() and (os.name == "nt" or SERVICE_TOKEN.stat().st_mode & 0o077 == 0)
+    try:
+        _read_protected_service_token(SERVICE_TOKEN)
+        token_secure = True
+    except (OSError, RuntimeError):
+        token_secure = False
     checks.append(("service authentication token", token_secure, str(SERVICE_TOKEN)))
     mcp_gateway_source = root / "integrations" / "mcp_http_gateway.py"
     mcp_headers_source = root / "integrations" / "mcp_auth_headers.py"

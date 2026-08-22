@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
-const { beginSessionEpoch, readProtectedRecord, readSessionEpoch, removeExactRecord } = require(HOOK);
+const { beginSessionEpoch, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -43,7 +43,14 @@ async function main() {
   fs.unlinkSync(replacedRecord);
   fs.unlinkSync(`${replacedRecord}.old`);
   const token = "a".repeat(64);
-  fs.writeFileSync(path.join(temporary, "service.token"), `${token}\n`, { mode: 0o600 });
+  const serviceTokenFile = path.join(temporary, "service.token");
+  fs.writeFileSync(serviceTokenFile, `${token}\n`, { mode: 0o600 });
+  assert.strictEqual(readProtectedServiceToken(serviceTokenFile), token);
+  if (process.platform !== "win32") {
+    const linkedToken = path.join(temporary, "linked-service.token");
+    fs.symlinkSync(serviceTokenFile, linkedToken);
+    assert.throws(() => readProtectedServiceToken(linkedToken), /regular file/);
+  }
   const grants = new Map();
   const sessionEpochs = new Map();
   const sessionEpochHistory = new Map();

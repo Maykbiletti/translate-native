@@ -310,9 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if service_endpoint:
             service_token = ""
             if token_file:
-                service_token = token_file.read_text(encoding="utf-8-sig").strip()
-                if len(service_token) < 32:
-                    raise DeliveryBlocked("service token is invalid")
+                service_token = SERVICE_CLIENT.load_service_token(token_file)
             target = verify_envelope_with_service(
                 envelope,
                 policy,
