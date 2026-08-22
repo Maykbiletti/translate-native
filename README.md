@@ -435,6 +435,8 @@ The signing key is treated as protected trust-root state. Signer and verifier pa
 
 The isolated service authentication token now uses the same protected-state contract everywhere it is consumed: the signer, MCP process, mandatory host delivery command, Claude hooks, BLUN Code adapter, installer probe, and doctor accept only a bounded regular file, require owner-only access where POSIX permission bits apply, and verify its identity before and after reading. Installation reserves the final token path exclusively, requests owner-only mode `0600` on POSIX systems, and never touches the former predictable `.tmp` name. A linked, oversized, broadly readable, replaced, or malformed token therefore fails closed before any request reaches the signer; direct environment-token deployments remain compatible.
 
+Health-monitor policy and backoff state use the same protected-file discipline. The installer accepts only bounded owner-only regular JSON files, opens them without following links where supported, verifies stable identity across the complete read, and validates the persisted Boolean, integer, string, and repair-list fields. Unsafe health state blocks status, repair, and update candidate execution without restarting services, resetting backoff, replacing a linked path, or changing its target. Missing files retain the existing first-run migration behavior, valid owner-only files remain compatible, and POSIX permission checks remain disabled on Windows where those mode bits are not authoritative.
+
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:
 
 ```bash

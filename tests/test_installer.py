@@ -1850,6 +1850,119 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
 
+    def test_health_monitor_files_are_bounded_and_schema_validated(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            try:
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                    "enabled": True,
+                    "interval_seconds": 60,
+                    "plugin_required": False,
+                    "claude_command": "claude",
+                })
+                self.assertTrue(INSTALLER.health_monitor_enabled())
+
+                INSTALLER.HEALTH_CONFIG.write_bytes(
+                    b"x" * (INSTALLER.MAX_HEALTH_FILE_BYTES + 1)
+                )
+                if os.name != "nt":
+                    INSTALLER.HEALTH_CONFIG.chmod(0o600)
+                with self.assertRaisesRegex(RuntimeError, "size limit"):
+                    INSTALLER._load_health_config()
+
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {"enabled": "false"})
+                with self.assertRaisesRegex(RuntimeError, "field enabled"):
+                    INSTALLER._load_health_config()
+
+                INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                    "status": "blocked",
+                    "checked_at": 10,
+                    "consecutive_failures": True,
+                })
+                with self.assertRaisesRegex(RuntimeError, "consecutive_failures"):
+                    INSTALLER._load_health_state()
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX link and permission test")
+    def test_health_monitor_rejects_links_and_open_permissions_without_repair(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            sentinel = root / "sentinel.json"
+            INSTALLER._atomic_json(sentinel, {
+                "status": "blocked",
+                "checked_at": 100,
+                "consecutive_failures": 5,
+                "last_repair_at": 100,
+                "next_repair_at": 3700,
+            })
+            INSTALLER.HEALTH_STATE.symlink_to(sentinel)
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status") as probe, \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime") as restart, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=200), 2)
+                probe.assert_not_called()
+                restart.assert_not_called()
+                self.assertTrue(INSTALLER.HEALTH_STATE.is_symlink())
+                self.assertEqual(
+                    INSTALLER.json.loads(sentinel.read_text(encoding="utf-8"))["next_repair_at"],
+                    3700,
+                )
+
+                INSTALLER.HEALTH_STATE.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {"status": "ok", "checked_at": 200})
+                INSTALLER.HEALTH_STATE.chmod(0o644)
+                with self.assertRaisesRegex(RuntimeError, "owner-only"):
+                    INSTALLER._load_health_state()
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_rejects_state_identity_change_while_reading(self) -> None:
+        original = INSTALLER.HEALTH_STATE
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            replacement = root / "replacement.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {"status": "ok", "checked_at": 1})
+            INSTALLER._atomic_json(replacement, {"status": "ok", "checked_at": 2})
+            opened = INSTALLER.HEALTH_STATE.stat()
+            changed = replacement.stat()
+            try:
+                with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                    with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                        INSTALLER._load_health_state()
+            finally:
+                INSTALLER.HEALTH_STATE = original
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_update_blocks_unsafe_health_policy_before_candidate_execution(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "sentinel.json"
+            INSTALLER._atomic_json(sentinel, {"enabled": False})
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_CONFIG.symlink_to(sentinel)
+            INSTALLER.HEALTH_STATE = root / "missing-state.json"
+            try:
+                with mock.patch.object(INSTALLER, "_clean_checkout_revision", return_value="a" * 40), \
+                     mock.patch.object(INSTALLER, "_run") as runner, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER._update_unlocked(), 2)
+                runner.assert_not_called()
+                self.assertTrue(INSTALLER.HEALTH_CONFIG.is_symlink())
+                self.assertFalse(INSTALLER.json.loads(sentinel.read_text(encoding="utf-8"))["enabled"])
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
     def test_health_monitor_skips_dependent_mcp_probe_when_signer_is_down(self) -> None:
         with mock.patch.object(INSTALLER, "probe_guard_service", side_effect=OSError("offline")), \
              mock.patch.object(INSTALLER, "probe_mcp_http") as mcp_probe:

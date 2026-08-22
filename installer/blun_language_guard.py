@@ -52,6 +52,7 @@ OPERATION_LOCK_STALE_SECONDS = 30 * 60
 MAX_OPERATION_LOCK_BYTES = 4 * 1024
 HEALTH_REPAIR_BACKOFF_SECONDS = (60, 120, 300, 900, 3600)
 MAX_UPDATE_POLICY_BYTES = 64 * 1024
+MAX_HEALTH_FILE_BYTES = 64 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -1126,12 +1127,17 @@ def doctor() -> int:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             fresh = False
         checks.append(("automatic updater heartbeat", fresh, str(UPDATE_STATE)))
-    if TARGETS["claude"].is_symlink() and health_monitor_enabled():
+    try:
+        monitor_enabled = health_monitor_enabled()
+    except RuntimeError:
+        checks.append(("automatic health monitor policy", False, str(HEALTH_CONFIG)))
+        monitor_enabled = False
+    if TARGETS["claude"].is_symlink() and monitor_enabled:
         try:
-            health_state = json.loads(HEALTH_STATE.read_text(encoding="utf-8"))
+            health_state = _load_health_state() or {}
             health_fresh = int(time.time()) - int(health_state.get("checked_at", 0)) <= 180
             monitor_ok = health_fresh and health_state.get("status") in {"ok", "recovered"}
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        except (RuntimeError, TypeError, ValueError):
             monitor_ok = False
         checks.append(("automatic health monitor", monitor_ok, str(HEALTH_STATE)))
     failed = False
@@ -1237,6 +1243,103 @@ def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
         second.st_size,
         second.st_mtime_ns,
     )
+
+
+def _load_protected_health_json(path: Path, label: str) -> dict | None:
+    """Read one bounded owner-only health file without following links."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Unreadable {label}: {path}") from error
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+        raise RuntimeError(f"Unsafe {label} file type: {path}")
+    if before.st_size > MAX_HEALTH_FILE_BYTES:
+        raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(before.st_mode) & 0o077:
+        raise RuntimeError(f"{label.capitalize()} permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and before.st_uid != os.getuid():
+        raise RuntimeError(f"{label.capitalize()} owner is invalid: {path}")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode) or not _same_file_identity(before, opened):
+                raise RuntimeError(f"{label.capitalize()} changed while opening: {path}")
+            raw = handle.read(MAX_HEALTH_FILE_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except (OSError, RuntimeError) as error:
+        if isinstance(error, RuntimeError):
+            raise
+        raise RuntimeError(f"Unreadable {label}: {path}") from error
+    if len(raw) > MAX_HEALTH_FILE_BYTES:
+        raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
+    if (
+        not _same_file_identity(opened, after_read)
+        or not _same_file_identity(opened, after_path)
+    ):
+        raise RuntimeError(f"{label.capitalize()} changed while reading: {path}")
+    try:
+        value = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Unreadable {label}: {path}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Invalid {label}: {path}")
+    return value
+
+
+def _load_health_config() -> dict | None:
+    value = _load_protected_health_json(HEALTH_CONFIG, "health-monitor policy")
+    if value is None:
+        return None
+    for field in ("enabled", "plugin_required"):
+        if field in value and not isinstance(value[field], bool):
+            raise RuntimeError(f"Invalid health-monitor policy field {field}: {HEALTH_CONFIG}")
+    if "interval_seconds" in value and (
+        isinstance(value["interval_seconds"], bool)
+        or not isinstance(value["interval_seconds"], int)
+        or value["interval_seconds"] < 1
+    ):
+        raise RuntimeError(
+            f"Invalid health-monitor policy field interval_seconds: {HEALTH_CONFIG}"
+        )
+    if "claude_command" in value and not isinstance(value["claude_command"], str):
+        raise RuntimeError(
+            f"Invalid health-monitor policy field claude_command: {HEALTH_CONFIG}"
+        )
+    return value
+
+
+def _load_health_state() -> dict | None:
+    value = _load_protected_health_json(HEALTH_STATE, "health-monitor state")
+    if value is None:
+        return None
+    integer_fields = ("checked_at", "consecutive_failures", "last_repair_at", "next_repair_at")
+    for field in integer_fields:
+        if field in value and (
+            isinstance(value[field], bool)
+            or not isinstance(value[field], int)
+            or value[field] < 0
+        ):
+            raise RuntimeError(f"Invalid health-monitor state field {field}: {HEALTH_STATE}")
+    for field in ("guard_healthy", "mcp_healthy", "plugin_required", "plugin_cache_healthy"):
+        if field in value and not isinstance(value[field], bool):
+            raise RuntimeError(f"Invalid health-monitor state field {field}: {HEALTH_STATE}")
+    for field in ("status", "reason", "plugin_cache_version", "plugin_cache_reason"):
+        if field in value and not isinstance(value[field], str):
+            raise RuntimeError(f"Invalid health-monitor state field {field}: {HEALTH_STATE}")
+    repairs = value.get("repairs")
+    if repairs is not None and (
+        not isinstance(repairs, list)
+        or len(repairs) > 32
+        or any(not isinstance(item, str) or len(item) > 128 for item in repairs)
+    ):
+        raise RuntimeError(f"Invalid health-monitor state field repairs: {HEALTH_STATE}")
+    return value
 
 
 def _windows_process_is_alive(pid: int) -> bool:
@@ -1547,6 +1650,16 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         )
         return 2
     claude_installed = TARGETS["claude"].is_symlink()
+    try:
+        initial_monitor_config = _health_monitor_config()
+        _load_health_state()
+    except RuntimeError as error:
+        print(
+            f"Health-monitor protected state is unsafe; update is blocked before candidate execution: {error}",
+            file=sys.stderr,
+        )
+        return 2
+    monitor_enabled = initial_monitor_config.get("enabled") is not False
     claude_preflight: dict | None = None
     with tempfile.TemporaryDirectory(prefix="blun-language-guard-") as directory:
         candidate = Path(directory) / "repo"
@@ -1769,7 +1882,7 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             )
             return 1
         print(f"Restarted persistent MCP through {runtime}.")
-    monitor_expected = claude_installed and health_monitor_enabled()
+    monitor_expected = claude_installed and monitor_enabled
     monitor_install = {
         "attempted": False,
         "installed": not monitor_expected,
@@ -1780,7 +1893,7 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         guard_now, mcp_now = _guard_stack_status(timeout=4.0)
         monitor_ok = monitor_ok and guard_now and mcp_now
         if monitor_ok:
-            monitor_config = _health_monitor_config()
+            monitor_config = dict(initial_monitor_config)
             monitor_config.update({"enabled": True, "interval_seconds": 60})
             configured_claude = claude_command or _configured_claude_command(monitor_config)
             if configured_claude:
@@ -1808,7 +1921,7 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         "status": {"reason": "claude-skill-not-installed"},
     }
     if monitor_expected and plugin_update.get("status", {}).get("installed"):
-        monitor_config = _health_monitor_config()
+        monitor_config = dict(initial_monitor_config)
         monitor_config.update({
             "enabled": True,
             "interval_seconds": 60,
@@ -1919,6 +2032,15 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
             file=sys.stderr,
         )
         return 2
+    try:
+        rollback_monitor_config = _health_monitor_config()
+        _load_health_state()
+    except RuntimeError as error:
+        print(
+            f"Health-monitor protected state is unsafe; rollback is blocked before candidate execution: {error}",
+            file=sys.stderr,
+        )
+        return 2
     recorded_current = state.get("revision")
     target = state.get("previous")
     sha = re.compile(r"[0-9a-f]{40}")
@@ -1968,7 +2090,7 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
     claude_installed = TARGETS["claude"].is_symlink()
     plugin_status: dict = {"installed": False, "reason": "claude-skill-not-installed"}
     if claude_installed:
-        configured = claude_command or _configured_claude_command(_health_monitor_config())
+        configured = claude_command or _configured_claude_command(rollback_monitor_config)
         plugin_status = claude_plugin_status(target_version, configured)
         if plugin_status.get("reason") != "plugin-not-installed" and plugin_status.get("healthy") is not True:
             print(
@@ -2037,7 +2159,7 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         return block_changed_cutover("while running post-rollback tests")
     runtime_ok, runtime_detail = _restart_installed_runtimes() if not post_tests.returncode else (False, "post-rollback tests failed")
     if claude_installed and runtime_ok:
-        configured = claude_command or _configured_claude_command(_health_monitor_config())
+        configured = claude_command or _configured_claude_command(rollback_monitor_config)
         plugin_status = claude_plugin_status(target_version, configured)
         runtime_ok = plugin_status.get("healthy") is True or plugin_status.get("reason") == "plugin-not-installed"
         if not runtime_ok:
@@ -2220,21 +2342,14 @@ def remove_health_monitor(home: Path | None = None) -> None:
 
 def health_monitor_enabled() -> bool:
     """Default existing Claude installations into the safe one-time migration."""
-    if not HEALTH_CONFIG.exists():
-        return True
-    try:
-        value = json.loads(HEALTH_CONFIG.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    value = _load_health_config()
+    if value is None:
         return True
     return value.get("enabled") is not False
 
 
 def _health_monitor_config() -> dict:
-    try:
-        value = json.loads(HEALTH_CONFIG.read_text(encoding="utf-8")) if HEALTH_CONFIG.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    return _load_health_config() or {}
 
 
 def _configured_claude_command(config: dict | None = None) -> str:
@@ -2253,9 +2368,9 @@ def _configured_claude_command(config: dict | None = None) -> str:
     return shutil.which("claude") or ""
 
 
-def _claude_plugin_monitor_status() -> dict:
+def _claude_plugin_monitor_status(config: dict | None = None) -> dict:
     """Check an enrolled Claude plugin cache without installing a missing plugin."""
-    config = _health_monitor_config()
+    config = dict(config) if config is not None else _health_monitor_config()
     required = config.get("plugin_required") is True
     if not TARGETS["claude"].is_symlink():
         return {"required": False, "healthy": True, "reason": "claude-skill-not-installed"}
@@ -2354,11 +2469,18 @@ def health_monitor_run(*, now: int | None = None) -> int:
         return 0
     try:
         try:
-            previous = json.loads(HEALTH_STATE.read_text(encoding="utf-8")) if HEALTH_STATE.exists() else {}
-        except (OSError, json.JSONDecodeError):
-            previous = {}
+            config = _health_monitor_config()
+            previous = _load_health_state() or {}
+        except RuntimeError as error:
+            print(json.dumps({
+                "status": "blocked",
+                "reason": "unsafe-health-state",
+                "checked_at": timestamp,
+                "detail": str(error),
+            }, sort_keys=True), file=sys.stderr)
+            return 2
         guard_healthy, mcp_healthy = _guard_stack_status()
-        plugin = _claude_plugin_monitor_status()
+        plugin = _claude_plugin_monitor_status(config)
         if guard_healthy and mcp_healthy and plugin.get("healthy") is True:
             state = {
                 "status": "ok",
@@ -2421,7 +2543,7 @@ def health_monitor_run(*, now: int | None = None) -> int:
             if plugin_update.get("attempted"):
                 repairs.append("claude-plugin-update")
         guard_healthy, mcp_healthy = _guard_stack_status()
-        plugin = _claude_plugin_monitor_status()
+        plugin = _claude_plugin_monitor_status(config)
         recovered = guard_healthy and mcp_healthy and plugin.get("healthy") is True
         failures = 0 if recovered else previous_failures + 1
         state = {
@@ -2446,17 +2568,23 @@ def health_monitor(action: str) -> int:
     if action == "run":
         return health_monitor_run()
     if action == "status":
-        if not health_monitor_enabled():
+        try:
+            enabled = health_monitor_enabled()
+        except RuntimeError as error:
+            print(f"Health-monitor policy is unsafe; status is blocked fail-closed: {error}", file=sys.stderr)
+            return 2
+        if not enabled:
             print(json.dumps({"status": "disabled"}))
             return 0
-        if not HEALTH_STATE.exists():
+        try:
+            state = _load_health_state()
+        except RuntimeError as error:
+            print(f"Health-monitor state is unsafe; status is blocked fail-closed: {error}", file=sys.stderr)
+            return 2
+        if state is None:
             print(json.dumps({"status": "not-run"}))
             return 1
-        print(HEALTH_STATE.read_text(encoding="utf-8"), end="")
-        try:
-            state = json.loads(HEALTH_STATE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return 1
+        print(json.dumps(state, indent=2, sort_keys=True))
         fresh = int(time.time()) - int(state.get("checked_at", 0)) <= 180
         return 0 if fresh and state.get("status") in {"ok", "recovered"} else 1
     if action == "remove":
@@ -2466,6 +2594,8 @@ def health_monitor(action: str) -> int:
         print("Health monitor removed; guard services and secrets were preserved.")
         return 0
     check = health_monitor_run()
+    if check == 2:
+        return 2
     ok, detail = install_health_monitor()
     if ok:
         config = _health_monitor_config()
@@ -2534,10 +2664,19 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
     if config.get("enabled") is not True:
         print("Automatic update policy is not enabled; update is blocked fail-closed.", file=sys.stderr)
         return 2
+    try:
+        monitor_enabled = health_monitor_enabled()
+        _load_health_state()
+    except RuntimeError as error:
+        print(
+            f"Health-monitor protected state is unsafe; automatic update is blocked fail-closed: {error}",
+            file=sys.stderr,
+        )
+        return 2
     due = (
         (
             TARGETS["claude"].is_symlink()
-            and health_monitor_enabled()
+            and monitor_enabled
             and (not HEALTH_CONFIG.exists() or not HEALTH_STATE.exists())
         )
         or
