@@ -55,6 +55,7 @@ MAX_UPDATE_POLICY_BYTES = 64 * 1024
 MAX_HEALTH_FILE_BYTES = 64 * 1024
 MAX_UPDATE_STATE_BYTES = 64 * 1024
 MAX_MCP_HTTP_TOKEN_BYTES = 64 * 1024
+MAX_DELIVERY_POLICY_BYTES = 64 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -263,6 +264,8 @@ def install_delivery_boundary(root: Path) -> None:
     source = root / "integrations" / "enforced_delivery.py"
     if not source.is_file():
         raise RuntimeError(f"Missing delivery boundary: {source}")
+    if DELIVERY_POLICY.exists() or DELIVERY_POLICY.is_symlink():
+        _load_delivery_policy()
     source.chmod(source.stat().st_mode | 0o111)
     atomic_symlink(source, DELIVERY_COMMAND)
     ensure_signing_key()
@@ -1112,18 +1115,10 @@ def doctor() -> int:
         not project_shadows,
         "none" if not project_shadows else ", ".join(str(path) for path in project_shadows),
     ))
-    policy_ok = False
-    if DELIVERY_POLICY.is_file():
-        try:
-            policy = json.loads(DELIVERY_POLICY.read_text(encoding="utf-8-sig"))
-            policy_ok = (
-                policy.get("mandatory") is True
-                and policy.get("direct_delivery_allowed") is False
-                and policy.get("raw_streaming_allowed") is False
-                and policy.get("isolated_service", {}).get("required") is True
-            )
-        except (OSError, json.JSONDecodeError):
-            policy_ok = False
+    try:
+        policy_ok = _load_delivery_policy() is not None
+    except RuntimeError:
+        policy_ok = False
     checks.append(("fail-closed delivery policy", policy_ok, str(DELIVERY_POLICY)))
     service_live = guard_service("status") == 0
     checks.append(("isolated guard health", service_live, SERVICE_ENDPOINT))
@@ -1377,6 +1372,32 @@ def _load_health_config() -> dict | None:
         raise RuntimeError(
             f"Invalid health-monitor policy field claude_command: {HEALTH_CONFIG}"
         )
+    return value
+
+
+def _load_delivery_policy() -> dict | None:
+    value = _load_protected_state_json(
+        DELIVERY_POLICY, "delivery policy", MAX_DELIVERY_POLICY_BYTES
+    )
+    if value is None:
+        return None
+    isolated = value.get("isolated_service")
+    if (
+        value.get("mandatory") is not True
+        or value.get("fail_closed") is not True
+        or value.get("direct_delivery_allowed") is not False
+        or value.get("raw_streaming_allowed") is not False
+        or value.get("on_guard_error") != "block"
+        or not isinstance(isolated, dict)
+        or isolated.get("required") is not True
+    ):
+        raise RuntimeError(f"Invalid delivery policy: {DELIVERY_POLICY}")
+    for field in ("endpoint", "token_file", "audit_file"):
+        candidate = isolated.get(field)
+        if not isinstance(candidate, str) or not candidate.strip() or len(candidate) > 4096:
+            raise RuntimeError(
+                f"Invalid delivery policy field isolated_service.{field}: {DELIVERY_POLICY}"
+            )
     return value
 
 

@@ -14,6 +14,7 @@ const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_EPOCH_BYTES = 128;
 const MAX_SERVICE_TOKEN_BYTES = 64 * 1024;
+const MAX_POLICY_BYTES = 64 * 1024;
 const MAX_RECORD_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNTIME = path.join(os.homedir(), ".config", "blun-language-guard");
 const EXACT_LANGUAGE = /^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/;
@@ -34,11 +35,63 @@ function hasNaturalLanguage(value) {
   return /\p{L}/u.test(String(value || ""));
 }
 
-function safeReadJson(file) {
-  const raw = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+function validatePolicyStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("delivery policy must be a regular file");
+  if (stats.size < 2 || stats.size > MAX_POLICY_BYTES) throw new Error("delivery policy has an invalid size");
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("delivery policy permissions are too broad");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error("delivery policy has the wrong owner");
+  }
+}
+
+function readProtectedDeliveryPolicy(file) {
+  const before = fs.lstatSync(file);
+  validatePolicyStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
+  let raw;
+  let opened;
+  try {
+    opened = fs.fstatSync(descriptor);
+    validatePolicyStats(opened);
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("delivery policy changed while opening");
+    }
+    const buffer = Buffer.alloc(MAX_POLICY_BYTES + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (count === 0) break;
+      size += count;
+    }
+    const afterRead = fs.fstatSync(descriptor);
+    if (!sameRecordIdentity(afterRead, recordIdentity(opened))) {
+      throw new Error("delivery policy changed while reading");
+    }
+    if (size > MAX_POLICY_BYTES) throw new Error("delivery policy has an invalid size");
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "");
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  if (!sameRecordIdentity(fs.lstatSync(file), recordIdentity(opened))) {
+    throw new Error("delivery policy changed while reading");
+  }
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("JSON root must be an object");
+    throw new Error("delivery policy root must be an object");
+  }
+  const isolated = parsed.isolated_service;
+  if (parsed.mandatory !== true || !isolated || typeof isolated !== "object" || Array.isArray(isolated)
+      || isolated.required !== true || typeof isolated.endpoint !== "string" || !isolated.endpoint.trim()
+      || isolated.endpoint.length > 4096 || typeof isolated.token_file !== "string" || !isolated.token_file.trim()
+      || isolated.token_file.length > 4096
+      || (Object.hasOwn(parsed, "fail_closed") && parsed.fail_closed !== true)
+      || (Object.hasOwn(parsed, "direct_delivery_allowed") && parsed.direct_delivery_allowed !== false)
+      || (Object.hasOwn(parsed, "raw_streaming_allowed") && parsed.raw_streaming_allowed !== false)
+      || (Object.hasOwn(parsed, "on_guard_error") && parsed.on_guard_error !== "block")) {
+    throw new Error("mandatory isolated-service policy is invalid");
   }
   return parsed;
 }
@@ -88,7 +141,7 @@ function readProtectedServiceToken(destination) {
 function runtimeConfig() {
   const runtime = process.env.BLUN_LANGUAGE_GUARD_RUNTIME || DEFAULT_RUNTIME;
   const policyPath = process.env.BLUN_LANGUAGE_GUARD_POLICY || path.join(runtime, "delivery-policy.json");
-  const policy = safeReadJson(policyPath);
+  const policy = readProtectedDeliveryPolicy(policyPath);
   const isolated = policy.isolated_service;
   if (policy.mandatory !== true || !isolated || isolated.required !== true) {
     throw new Error("mandatory isolated-service policy is missing");
@@ -813,4 +866,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash };

@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
-const { beginSessionEpoch, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord } = require(HOOK);
+const { beginSessionEpoch, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -158,14 +158,41 @@ async function main() {
   });
   const address = server.address();
   assert(address && typeof address === "object");
-  fs.writeFileSync(path.join(temporary, "delivery-policy.json"), JSON.stringify({
+  const policyFile = path.join(temporary, "delivery-policy.json");
+  fs.writeFileSync(policyFile, JSON.stringify({
     mandatory: true,
     isolated_service: {
       required: true,
       endpoint: `tcp:127.0.0.1:${address.port}`,
       token_file: path.join(temporary, "service.token")
     }
-  }));
+  }), { mode: 0o600 });
+  assert.strictEqual(readProtectedDeliveryPolicy(policyFile).mandatory, true);
+  if (process.platform !== "win32") {
+    const linkedPolicy = path.join(temporary, "linked-policy.json");
+    fs.symlinkSync(policyFile, linkedPolicy);
+    assert.throws(() => readProtectedDeliveryPolicy(linkedPolicy), /regular file/);
+    fs.chmodSync(policyFile, 0o644);
+    assert.throws(() => readProtectedDeliveryPolicy(policyFile), /permissions/);
+    fs.chmodSync(policyFile, 0o600);
+  }
+  const oversizedPolicy = path.join(temporary, "oversized-policy.json");
+  fs.writeFileSync(oversizedPolicy, "{" + " ".repeat(64 * 1024) + "}", { mode: 0o600 });
+  assert.throws(() => readProtectedDeliveryPolicy(oversizedPolicy), /invalid size/);
+  const originalLstatSync = fs.lstatSync;
+  let policyStatsReads = 0;
+  fs.lstatSync = (candidate, ...options) => {
+    const details = originalLstatSync(candidate, ...options);
+    if (candidate === policyFile && ++policyStatsReads === 2) {
+      return { ...details, mtimeMs: details.mtimeMs + 1 };
+    }
+    return details;
+  };
+  try {
+    assert.throws(() => readProtectedDeliveryPolicy(policyFile), /changed while reading/);
+  } finally {
+    fs.lstatSync = originalLstatSync;
+  }
 
   const environment = { BLUN_LANGUAGE_GUARD_RUNTIME: temporary };
   const previousRuntime = process.env.BLUN_LANGUAGE_GUARD_RUNTIME;

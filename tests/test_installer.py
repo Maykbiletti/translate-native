@@ -1517,6 +1517,41 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.SIGNING_KEY,
                 ) = originals
 
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_install_delivery_boundary_rejects_unsafe_policy_before_mutation(self) -> None:
+        originals = (
+            INSTALLER.DELIVERY_COMMAND,
+            INSTALLER.DELIVERY_POLICY,
+            INSTALLER.SIGNING_KEY,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            sentinel = temporary / "sentinel.json"
+            sentinel.write_text('{"do_not_replace": true}\n', encoding="utf-8")
+            sentinel.chmod(0o600)
+            INSTALLER.DELIVERY_COMMAND = temporary / "bin" / "blun-language-deliver"
+            INSTALLER.DELIVERY_POLICY = temporary / "config" / "delivery-policy.json"
+            INSTALLER.DELIVERY_POLICY.parent.mkdir(parents=True)
+            INSTALLER.DELIVERY_POLICY.symlink_to(sentinel)
+            INSTALLER.SIGNING_KEY = temporary / "config" / "signing.key"
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink") as command_install, \
+                     mock.patch.object(INSTALLER, "ensure_signing_key") as key_install:
+                    with self.assertRaisesRegex(RuntimeError, "file type"):
+                        INSTALLER.install_delivery_boundary(ROOT)
+                command_install.assert_not_called()
+                key_install.assert_not_called()
+                self.assertEqual(
+                    sentinel.read_text(encoding="utf-8"),
+                    '{"do_not_replace": true}\n',
+                )
+            finally:
+                (
+                    INSTALLER.DELIVERY_COMMAND,
+                    INSTALLER.DELIVERY_POLICY,
+                    INSTALLER.SIGNING_KEY,
+                ) = originals
+
     def test_guard_runtime_installs_command_and_owner_only_token(self) -> None:
         originals = (
             INSTALLER.SERVICE_COMMAND,

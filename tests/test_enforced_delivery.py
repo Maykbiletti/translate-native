@@ -174,6 +174,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
                 "token_file": str(Path(self.temporary.name) / "service.token"),
             },
         }), encoding="utf-8")
+        policy_path.chmod(0o600)
         isolated = MODULE.load_installed_service_policy(policy_path)
         self.assertTrue(isolated["required"])
         self.assertEqual(isolated["endpoint"], "tcp:127.0.0.1:47631")
@@ -181,8 +182,74 @@ class EnforcedDeliveryTests(unittest.TestCase):
     def test_invalid_installed_policy_blocks(self) -> None:
         policy_path = Path(self.temporary.name) / "delivery-policy.json"
         policy_path.write_text("{}", encoding="utf-8")
+        policy_path.chmod(0o600)
         with self.assertRaises(MODULE.DeliveryBlocked):
             MODULE.load_installed_service_policy(policy_path)
+
+    @unittest.skipIf(os.name == "nt", "POSIX policy security test")
+    def test_installed_policy_rejects_links_and_broad_permissions(self) -> None:
+        root = Path(self.temporary.name)
+        policy_path = root / "delivery-policy.json"
+        policy_path.write_text(json.dumps({
+            "mandatory": True,
+            "isolated_service": {
+                "required": True,
+                "endpoint": "tcp:127.0.0.1:47631",
+                "token_file": str(root / "service.token"),
+            },
+        }), encoding="utf-8")
+        policy_path.chmod(0o600)
+        linked = root / "linked-policy.json"
+        linked.symlink_to(policy_path)
+        with self.assertRaisesRegex(MODULE.DeliveryBlocked, "regular file"):
+            MODULE.load_installed_service_policy(linked)
+        policy_path.chmod(0o644)
+        with self.assertRaisesRegex(MODULE.DeliveryBlocked, "owner-only"):
+            MODULE.load_installed_service_policy(policy_path)
+
+    def test_installed_policy_rejects_oversized_and_unsafe_fields(self) -> None:
+        root = Path(self.temporary.name)
+        policy_path = root / "delivery-policy.json"
+        policy_path.write_bytes(b"{" + b" " * MODULE.MAX_POLICY_BYTES + b"}")
+        policy_path.chmod(0o600)
+        with self.assertRaisesRegex(MODULE.DeliveryBlocked, "size limit"):
+            MODULE.load_installed_service_policy(policy_path)
+        policy_path.write_text(json.dumps({
+            "mandatory": True,
+            "direct_delivery_allowed": True,
+            "isolated_service": {
+                "required": True,
+                "endpoint": "tcp:127.0.0.1:47631",
+                "token_file": str(root / "service.token"),
+            },
+        }), encoding="utf-8")
+        policy_path.chmod(0o600)
+        with self.assertRaisesRegex(MODULE.DeliveryBlocked, "invalid"):
+            MODULE.load_installed_service_policy(policy_path)
+
+    def test_installed_policy_rejects_path_exchange_during_read(self) -> None:
+        root = Path(self.temporary.name)
+        policy_path = root / "delivery-policy.json"
+        policy_path.write_text(json.dumps({
+            "mandatory": True,
+            "isolated_service": {
+                "required": True,
+                "endpoint": "tcp:127.0.0.1:47631",
+                "token_file": str(root / "service.token"),
+            },
+        }), encoding="utf-8")
+        policy_path.chmod(0o600)
+        before = policy_path.lstat()
+        exchanged = mock.Mock(
+            st_dev=before.st_dev,
+            st_ino=before.st_ino,
+            st_size=before.st_size,
+            st_ctime_ns=before.st_ctime_ns,
+            st_mtime_ns=before.st_mtime_ns + 1,
+        )
+        with mock.patch.object(Path, "lstat", side_effect=[before, exchanged]):
+            with self.assertRaisesRegex(MODULE.DeliveryBlocked, "changed while reading"):
+                MODULE.load_installed_service_policy(policy_path)
 
     def test_installed_service_policy_prevents_local_key_fallback(self) -> None:
         token_path = Path(self.temporary.name) / "service.token"
@@ -196,6 +263,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
                 "token_file": str(token_path),
             },
         }), encoding="utf-8")
+        policy_path.chmod(0o600)
         target = "Natürlich ist das möglich."
         result = self.run_delivery(
             self.envelope(target),
@@ -224,6 +292,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
                 "token_file": str(linked),
             },
         }), encoding="utf-8")
+        policy_path.chmod(0o600)
         target = "Natürlich bleibt die Zustellung geschlossen."
         result = self.run_delivery(
             self.envelope(target),
