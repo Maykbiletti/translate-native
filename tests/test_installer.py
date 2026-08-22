@@ -830,6 +830,128 @@ class InstallerTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Unsafe updater policy file type"):
                     INSTALLER._load_update_policy(fifo)
 
+    def test_update_state_loader_rejects_unsafe_files_and_invalid_schema(self) -> None:
+        original = INSTALLER.UPDATE_STATE
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            INSTALLER._atomic_json(target, {
+                "status": "ok",
+                "revision": "a" * 40,
+                "previous": "b" * 40,
+                "checked_at": 10,
+                "auto_update_paused": False,
+            })
+            linked = root / "linked.json"
+            try:
+                linked.symlink_to(target)
+            except OSError as error:
+                self.skipTest(f"symbolic links are unavailable: {error}")
+            INSTALLER.UPDATE_STATE = linked
+            try:
+                with self.assertRaisesRegex(RuntimeError, "Unsafe updater state file type"):
+                    INSTALLER._load_update_state()
+
+                INSTALLER.UPDATE_STATE = root / "oversized.json"
+                INSTALLER.UPDATE_STATE.write_bytes(
+                    b" " * (INSTALLER.MAX_UPDATE_STATE_BYTES + 1)
+                )
+                if os.name != "nt":
+                    INSTALLER.UPDATE_STATE.chmod(0o600)
+                with self.assertRaisesRegex(RuntimeError, "size limit"):
+                    INSTALLER._load_update_state()
+
+                invalid_values = (
+                    {"status": 1},
+                    {"revision": "short"},
+                    {"previous": True},
+                    {"checked_at": False},
+                    {"auto_update_paused": "false"},
+                    {"runtime_unchanged": 1},
+                    {"claude_plugin": []},
+                    {"health_monitor": "ok"},
+                )
+                INSTALLER.UPDATE_STATE = root / "invalid.json"
+                for payload in invalid_values:
+                    with self.subTest(payload=payload):
+                        INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, payload)
+                        with self.assertRaisesRegex(RuntimeError, "Invalid updater state field"):
+                            INSTALLER._load_update_state()
+
+                if os.name != "nt":
+                    INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, {"status": "ok"})
+                    INSTALLER.UPDATE_STATE.chmod(0o644)
+                    with self.assertRaisesRegex(RuntimeError, "owner-only"):
+                        INSTALLER._load_update_state()
+            finally:
+                INSTALLER.UPDATE_STATE = original
+
+    def test_update_state_loader_rejects_identity_change_while_reading(self) -> None:
+        original = INSTALLER.UPDATE_STATE
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_STATE = root / "update-state.json"
+            replacement = root / "replacement.json"
+            INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, {"status": "ok", "checked_at": 1})
+            INSTALLER._atomic_json(replacement, {"status": "degraded", "checked_at": 2})
+            opened = INSTALLER.UPDATE_STATE.stat()
+            changed = replacement.stat()
+            try:
+                with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                    with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                        INSTALLER._load_update_state()
+            finally:
+                INSTALLER.UPDATE_STATE = original
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_public_update_paths_reject_linked_state_before_commands(self) -> None:
+        originals = (
+            INSTALLER.UPDATE_CONFIG,
+            INSTALLER.UPDATE_PAUSED_CONFIG,
+            INSTALLER.UPDATE_STATE,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            payload = {
+                "status": "ok",
+                "revision": "a" * 40,
+                "previous": "b" * 40,
+                "checked_at": 1,
+            }
+            INSTALLER._atomic_json(target, payload)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "missing-paused.json"
+            INSTALLER.UPDATE_STATE = root / "update-state.json"
+            INSTALLER.UPDATE_STATE.symlink_to(target)
+            INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                "enabled": True,
+                "interval_hours": 1,
+                "require_signed_commits": False,
+            })
+            try:
+                with mock.patch.object(INSTALLER, "update") as updater, \
+                     contextlib.redirect_stdout(io.StringIO()), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("status"), 2)
+                    self.assertEqual(INSTALLER.auto_update("run"), 2)
+                updater.assert_not_called()
+
+                with mock.patch.object(INSTALLER, "_clean_checkout_revision", return_value="a" * 40), \
+                     mock.patch.object(INSTALLER, "_run") as runner, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER._update_unlocked(), 2)
+                    self.assertEqual(INSTALLER._rollback_unlocked(), 2)
+                runner.assert_not_called()
+                self.assertTrue(INSTALLER.UPDATE_STATE.is_symlink())
+                self.assertEqual(INSTALLER.json.loads(target.read_text(encoding="utf-8")), payload)
+            finally:
+                (
+                    INSTALLER.UPDATE_CONFIG,
+                    INSTALLER.UPDATE_PAUSED_CONFIG,
+                    INSTALLER.UPDATE_STATE,
+                ) = originals
+
     def test_auto_update_status_and_run_reject_linked_policy_without_worker_call(self) -> None:
         originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
         with tempfile.TemporaryDirectory() as directory:

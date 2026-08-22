@@ -53,6 +53,7 @@ MAX_OPERATION_LOCK_BYTES = 4 * 1024
 HEALTH_REPAIR_BACKOFF_SECONDS = (60, 120, 300, 900, 3600)
 MAX_UPDATE_POLICY_BYTES = 64 * 1024
 MAX_HEALTH_FILE_BYTES = 64 * 1024
+MAX_UPDATE_STATE_BYTES = 64 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -1121,10 +1122,10 @@ def doctor() -> int:
         updater_config = None
     if updater_config is not None:
         try:
-            state = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
+            state = _load_update_state() or {}
             maximum_age = int(updater_config.get("interval_hours", 24)) * 7200
             fresh = int(time.time()) - int(state.get("checked_at", 0)) <= maximum_age
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        except (RuntimeError, TypeError, ValueError):
             fresh = False
         checks.append(("automatic updater heartbeat", fresh, str(UPDATE_STATE)))
     try:
@@ -1245,8 +1246,8 @@ def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
     )
 
 
-def _load_protected_health_json(path: Path, label: str) -> dict | None:
-    """Read one bounded owner-only health file without following links."""
+def _load_protected_state_json(path: Path, label: str, maximum_bytes: int) -> dict | None:
+    """Read one bounded owner-only JSON state file without following links."""
     try:
         before = path.lstat()
     except FileNotFoundError:
@@ -1255,7 +1256,7 @@ def _load_protected_health_json(path: Path, label: str) -> dict | None:
         raise RuntimeError(f"Unreadable {label}: {path}") from error
     if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
         raise RuntimeError(f"Unsafe {label} file type: {path}")
-    if before.st_size > MAX_HEALTH_FILE_BYTES:
+    if before.st_size > maximum_bytes:
         raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
     if os.name != "nt" and stat.S_IMODE(before.st_mode) & 0o077:
         raise RuntimeError(f"{label.capitalize()} permissions must be owner-only: {path}")
@@ -1269,14 +1270,14 @@ def _load_protected_health_json(path: Path, label: str) -> dict | None:
             opened = os.fstat(handle.fileno())
             if not stat.S_ISREG(opened.st_mode) or not _same_file_identity(before, opened):
                 raise RuntimeError(f"{label.capitalize()} changed while opening: {path}")
-            raw = handle.read(MAX_HEALTH_FILE_BYTES + 1)
+            raw = handle.read(maximum_bytes + 1)
             after_read = os.fstat(handle.fileno())
         after_path = path.lstat()
     except (OSError, RuntimeError) as error:
         if isinstance(error, RuntimeError):
             raise
         raise RuntimeError(f"Unreadable {label}: {path}") from error
-    if len(raw) > MAX_HEALTH_FILE_BYTES:
+    if len(raw) > maximum_bytes:
         raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
     if (
         not _same_file_identity(opened, after_read)
@@ -1293,7 +1294,9 @@ def _load_protected_health_json(path: Path, label: str) -> dict | None:
 
 
 def _load_health_config() -> dict | None:
-    value = _load_protected_health_json(HEALTH_CONFIG, "health-monitor policy")
+    value = _load_protected_state_json(
+        HEALTH_CONFIG, "health-monitor policy", MAX_HEALTH_FILE_BYTES
+    )
     if value is None:
         return None
     for field in ("enabled", "plugin_required"):
@@ -1315,7 +1318,9 @@ def _load_health_config() -> dict | None:
 
 
 def _load_health_state() -> dict | None:
-    value = _load_protected_health_json(HEALTH_STATE, "health-monitor state")
+    value = _load_protected_state_json(
+        HEALTH_STATE, "health-monitor state", MAX_HEALTH_FILE_BYTES
+    )
     if value is None:
         return None
     integer_fields = ("checked_at", "consecutive_failures", "last_repair_at", "next_repair_at")
@@ -1339,6 +1344,36 @@ def _load_health_state() -> dict | None:
         or any(not isinstance(item, str) or len(item) > 128 for item in repairs)
     ):
         raise RuntimeError(f"Invalid health-monitor state field repairs: {HEALTH_STATE}")
+    return value
+
+
+def _load_update_state() -> dict | None:
+    value = _load_protected_state_json(
+        UPDATE_STATE, "updater state", MAX_UPDATE_STATE_BYTES
+    )
+    if value is None:
+        return None
+    for field in ("status", "runtime_version", "candidate_version", "paused_update_policy"):
+        if field in value and not isinstance(value[field], str):
+            raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
+    for field in ("revision", "previous", "candidate_revision", "rolled_back_from"):
+        if field in value and (
+            not isinstance(value[field], str)
+            or re.fullmatch(r"[0-9a-f]{40}", value[field]) is None
+        ):
+            raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
+    if "checked_at" in value and (
+        isinstance(value["checked_at"], bool)
+        or not isinstance(value["checked_at"], int)
+        or value["checked_at"] < 0
+    ):
+        raise RuntimeError(f"Invalid updater state field checked_at: {UPDATE_STATE}")
+    for field in ("auto_update_paused", "runtime_unchanged"):
+        if field in value and not isinstance(value[field], bool):
+            raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
+    for field in ("claude_plugin", "health_monitor"):
+        if field in value and not isinstance(value[field], dict):
+            raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
     return value
 
 
@@ -1646,6 +1681,14 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
     if previous is None:
         print(
             "Update requires a valid, completely clean checkout; local files are unchanged.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        _load_update_state()
+    except RuntimeError as error:
+        print(
+            f"Updater state is unsafe; update is blocked before candidate execution: {error}",
             file=sys.stderr,
         )
         return 2
@@ -2021,8 +2064,11 @@ def rollback(require_signed_commits: bool = False, claude_command: str | None = 
 def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     try:
-        state = json.loads(UPDATE_STATE.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
+        state = _load_update_state()
+    except RuntimeError:
+        print("Updater state is unsafe; rollback is blocked fail-closed.", file=sys.stderr)
+        return 2
+    if state is None:
         print("No valid updater state is available; refusing to guess a rollback target.", file=sys.stderr)
         return 2
     current = _clean_checkout_revision(root)
@@ -2646,10 +2692,19 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
             print("Updater policy is unreadable; status is blocked fail-closed.", file=sys.stderr)
             return 2
         print(json.dumps(config if config is not None else {"enabled": False}, indent=2))
-        if UPDATE_STATE.exists():
-            print(UPDATE_STATE.read_text(encoding="utf-8"))
+        try:
+            state = _load_update_state()
+        except RuntimeError:
+            print("Updater state is unsafe; status is blocked fail-closed.", file=sys.stderr)
+            return 2
+        if state is not None:
+            print(json.dumps(state, indent=2, sort_keys=True))
         return 0
-    last = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
+    try:
+        last = _load_update_state() or {}
+    except RuntimeError:
+        print("Updater state is unsafe; automatic update is blocked fail-closed.", file=sys.stderr)
+        return 2
     if last.get("status") == "rolled_back" and last.get("auto_update_paused") is True:
         print("Automatic updates are paused after rollback; update explicitly, then re-enable auto-update.")
         return 0

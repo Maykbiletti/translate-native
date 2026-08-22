@@ -437,6 +437,8 @@ The isolated service authentication token now uses the same protected-state cont
 
 Health-monitor policy and backoff state use the same protected-file discipline. The installer accepts only bounded owner-only regular JSON files, opens them without following links where supported, verifies stable identity across the complete read, and validates the persisted Boolean, integer, string, and repair-list fields. Unsafe health state blocks status, repair, and update candidate execution without restarting services, resetting backoff, replacing a linked path, or changing its target. Missing files retain the existing first-run migration behavior, valid owner-only files remain compatible, and POSIX permission checks remain disabled on Windows where those mode bits are not authoritative.
 
+The updater's recorded state is protected independently from its policy. `doctor`, `auto-update status`, scheduled checks, direct updates, and rollback now read `update-state.json` through a bounded owner-only regular-file path, reject links and exchanged identities, and validate commit hashes plus every security-relevant persisted type. Unsafe state blocks before Git commands or candidate code can run and is never printed or replaced through that read path. A missing state remains valid before the first successful update, while rollback continues to require a complete exact state record.
+
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:
 
 ```bash
