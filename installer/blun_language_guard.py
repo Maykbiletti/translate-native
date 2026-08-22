@@ -10,6 +10,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import stat
@@ -70,14 +71,60 @@ def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _installed_symlink_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _inspect_installed_symlink(destination: Path) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        details = destination.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Cannot inspect installation target: {destination}") from error
+    if not stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Refusing to overwrite existing non-symlink: {destination}")
+    return _installed_symlink_identity(details)
+
+
+def _assert_installed_symlink_unchanged(
+    destination: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    current = _inspect_installed_symlink(destination)
+    if expected is None and current is not None:
+        raise RuntimeError(f"Installation target appeared before replacement: {destination}")
+    if expected is not None and current != expected:
+        raise RuntimeError(f"Installation target changed before replacement: {destination}")
+
+
 def atomic_symlink(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and not destination.is_symlink():
-        raise RuntimeError(f"Refusing to overwrite existing non-symlink: {destination}")
-    temporary = destination.with_name(destination.name + ".new")
-    temporary.unlink(missing_ok=True)
-    temporary.symlink_to(source, target_is_directory=source.is_dir())
-    temporary.replace(destination)
+    expected = _inspect_installed_symlink(destination)
+    temporary = None
+    for _attempt in range(16):
+        candidate = destination.with_name(
+            f".{destination.name}.{secrets.token_hex(16)}.new"
+        )
+        try:
+            candidate.symlink_to(source, target_is_directory=source.is_dir())
+        except FileExistsError:
+            continue
+        temporary = candidate
+        break
+    if temporary is None:
+        raise RuntimeError(f"Cannot reserve temporary installation link: {destination}")
+    try:
+        _assert_installed_symlink_unchanged(destination, expected)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def ensure_signing_key(path: Path | None = None) -> None:

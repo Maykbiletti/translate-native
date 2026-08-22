@@ -160,6 +160,58 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 INSTALLER.atomic_symlink(source, destination)
 
+    def test_atomic_symlink_preserves_existing_staging_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            destination = root / "bin" / "guard"
+            destination.parent.mkdir()
+            legacy = destination.with_name(destination.name + ".new")
+            legacy.write_text("keep legacy staging path\n", encoding="utf-8")
+            collision = destination.with_name(f".{destination.name}.collision.new")
+            collision.write_text("keep random collision\n", encoding="utf-8")
+            with mock.patch.object(
+                INSTALLER.secrets, "token_hex", side_effect=("collision", "reserved")
+            ):
+                INSTALLER.atomic_symlink(source, destination)
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual(destination.resolve(), source.resolve())
+            self.assertEqual(legacy.read_text(encoding="utf-8"), "keep legacy staging path\n")
+            self.assertEqual(collision.read_text(encoding="utf-8"), "keep random collision\n")
+            self.assertFalse(destination.with_name(f".{destination.name}.reserved.new").exists())
+
+    def test_atomic_symlink_preserves_concurrently_replaced_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            original = root / "original"
+            original.mkdir()
+            destination = root / "bin" / "guard"
+            destination.parent.mkdir()
+            destination.symlink_to(original, target_is_directory=True)
+            real_assert = INSTALLER._assert_installed_symlink_unchanged
+
+            def exchange_then_recheck(path: Path, expected) -> None:
+                path.unlink()
+                path.write_text("concurrent user file\n", encoding="utf-8")
+                real_assert(path, expected)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_assert_installed_symlink_unchanged",
+                side_effect=exchange_then_recheck,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "non-symlink"):
+                    INSTALLER.atomic_symlink(source, destination)
+            self.assertFalse(destination.is_symlink())
+            self.assertEqual(destination.read_text(encoding="utf-8"), "concurrent user file\n")
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.new")),
+                [],
+            )
+
     def test_blun_mcp_merge_preserves_servers_and_protects_config_state(self) -> None:
         entry = {
             "command": "python3",
