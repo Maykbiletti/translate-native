@@ -58,6 +58,7 @@ MAX_MCP_HTTP_TOKEN_BYTES = 64 * 1024
 MAX_DELIVERY_POLICY_BYTES = 64 * 1024
 MAX_BLUN_MCP_CONFIG_BYTES = 1024 * 1024
 MAX_CLAUDE_CONFIG_BYTES = 16 * 1024 * 1024
+MAX_PROJECT_MCP_CONFIG_BYTES = 1024 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -588,6 +589,83 @@ def preflight_claude_config(path: Path | None = None) -> None:
         raise RuntimeError(f"Claude mcpServers must be an object: {path}")
 
 
+def _project_mcp_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_project_mcp_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Claude project MCP configuration is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(
+            f"Claude project MCP configuration has additional hard links: {path}"
+        )
+    if details.st_size > MAX_PROJECT_MCP_CONFIG_BYTES:
+        raise RuntimeError(f"Claude project MCP configuration exceeds the size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(
+            f"Claude project MCP configuration is writable outside its owner: {path}"
+        )
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Claude project MCP configuration owner is invalid: {path}")
+
+
+def _read_protected_project_mcp(path: Path) -> dict:
+    """Read a project-scoped Claude MCP file without following or racing links."""
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"Claude project MCP configuration is unreadable: {path}") from error
+    _validate_project_mcp_details(path, before)
+    expected = _project_mcp_identity(before)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            _validate_project_mcp_details(path, opened)
+            if _project_mcp_identity(opened) != expected:
+                raise RuntimeError(
+                    f"Claude project MCP configuration changed while opening: {path}"
+                )
+            raw = handle.read(MAX_PROJECT_MCP_CONFIG_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Claude project MCP configuration is unreadable: {path}") from error
+    if len(raw) > MAX_PROJECT_MCP_CONFIG_BYTES:
+        raise RuntimeError(f"Claude project MCP configuration exceeds the size limit: {path}")
+    if (
+        _project_mcp_identity(after_read) != expected
+        or _project_mcp_identity(after_path) != expected
+    ):
+        raise RuntimeError(f"Claude project MCP configuration changed while reading: {path}")
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Claude project MCP configuration is invalid: {path}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Claude project MCP configuration root must be an object: {path}")
+    servers = payload.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"Claude project mcpServers must be an object: {path}")
+    return payload
+
+
 def project_mcp_shadows(start: Path | None = None) -> list[Path]:
     """Return higher-precedence project MCP files that redefine the guard differently."""
     current = (start or Path.cwd()).resolve()
@@ -595,13 +673,14 @@ def project_mcp_shadows(start: Path | None = None) -> list[Path]:
     shadows: list[Path] = []
     for directory in candidates:
         path = directory / ".mcp.json"
-        if not path.is_file():
-            continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8-sig"))
-            entry = payload.get("mcpServers", {}).get(MCP_SERVER_NAME)
-        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+            path.lstat()
+        except FileNotFoundError:
             continue
+        except OSError as error:
+            raise RuntimeError(f"Claude project MCP configuration is unreadable: {path}") from error
+        payload = _read_protected_project_mcp(path)
+        entry = payload.get("mcpServers", {}).get(MCP_SERVER_NAME)
         if entry is not None and entry != claude_mcp_entry():
             shadows.append(path)
     return shadows
@@ -1117,11 +1196,20 @@ def doctor() -> int:
     except (OSError, RuntimeError, AttributeError, TypeError):
         claude_config_ok = False
     checks.append(("Claude user-scoped HTTP MCP", claude_config_ok, claude_config_detail))
-    project_shadows = project_mcp_shadows()
+    try:
+        project_shadows = project_mcp_shadows()
+        project_mcp_ok = not project_shadows
+        project_mcp_detail = (
+            "none" if not project_shadows else ", ".join(str(path) for path in project_shadows)
+        )
+    except RuntimeError as error:
+        project_shadows = []
+        project_mcp_ok = False
+        project_mcp_detail = str(error)
     checks.append((
         "Claude project MCP precedence",
-        not project_shadows,
-        "none" if not project_shadows else ", ".join(str(path) for path in project_shadows),
+        project_mcp_ok,
+        project_mcp_detail,
     ))
     try:
         policy_ok = _load_delivery_policy() is not None

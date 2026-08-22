@@ -2062,6 +2062,75 @@ class InstallerTests(unittest.TestCase):
             }), encoding="utf-8")
             self.assertEqual(INSTALLER.project_mcp_shadows(nested), [root / ".mcp.json"])
 
+    def test_project_mcp_shadow_scan_rejects_invalid_json_and_schema(self) -> None:
+        cases = (b"{broken", b"[]", b'{"mcpServers": []}')
+        for raw in cases:
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                nested = root / "nested"
+                nested.mkdir()
+                config = root / ".mcp.json"
+                config.write_bytes(raw)
+                with self.assertRaisesRegex(RuntimeError, "invalid|root must|must be an object"):
+                    INSTALLER.project_mcp_shadows(nested)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file-type and permission tests")
+    def test_project_mcp_shadow_scan_rejects_unsafe_files(self) -> None:
+        cases = ("symlink", "hardlink", "fifo", "permissions", "oversized")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                nested = root / "nested"
+                nested.mkdir()
+                config = root / ".mcp.json"
+                sentinel = root / "sentinel.json"
+                sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                sentinel.chmod(0o600)
+                if case == "symlink":
+                    config.symlink_to(sentinel)
+                    expected = "regular file"
+                elif case == "hardlink":
+                    os.link(sentinel, config)
+                    expected = "hard links"
+                elif case == "fifo":
+                    os.mkfifo(config)
+                    expected = "regular file"
+                elif case == "permissions":
+                    config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                    config.chmod(0o622)
+                    expected = "writable outside"
+                else:
+                    config.write_bytes(b"x" * (INSTALLER.MAX_PROJECT_MCP_CONFIG_BYTES + 1))
+                    config.chmod(0o600)
+                    expected = "size limit"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    INSTALLER.project_mcp_shadows(nested)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+
+    def test_project_mcp_shadow_scan_rejects_identity_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "nested"
+            nested.mkdir()
+            config = root / ".mcp.json"
+            config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            if os.name != "nt":
+                config.chmod(0o600)
+            details = config.stat()
+            fields = {
+                name: getattr(details, name)
+                for name in (
+                    "st_mode", "st_uid", "st_dev", "st_ino", "st_nlink", "st_size",
+                    "st_ctime_ns", "st_mtime_ns",
+                )
+            }
+            opened = SimpleNamespace(**fields)
+            changed = SimpleNamespace(**fields)
+            changed.st_ctime_ns += 1
+            with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER.project_mcp_shadows(nested)
+
     def test_operation_lock_excludes_overlap_and_releases_only_its_owner(self) -> None:
         original = INSTALLER.OPERATION_LOCK
         with tempfile.TemporaryDirectory() as directory:

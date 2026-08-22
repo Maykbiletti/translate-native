@@ -419,7 +419,7 @@ python3 installer/blun_language_guard.py mcp-service status
 python3 installer/blun_language_guard.py doctor
 ```
 
-Installation safely updates the top-level user entry in `~/.claude.json`, preserves unrelated settings and MCP servers, creates `~/.claude.json.bak`, and removes stale same-name local entries stored under individual projects in that file. This matters because Claude's local and project scopes take precedence over user scope; an old project-specific `stdio` definition can otherwise make the repaired server appear unreliable only in certain repositories. Checked-in `.mcp.json` files remain project-owned and must not define another server with the same name.
+Installation safely updates the top-level user entry in `~/.claude.json`, preserves unrelated settings and MCP servers, creates `~/.claude.json.bak`, and removes stale same-name local entries stored under individual projects in that file. This matters because Claude's local and project scopes take precedence over user scope; an old project-specific `stdio` definition can otherwise make the repaired server appear unreliable only in certain repositories. Checked-in `.mcp.json` files remain project-owned and must not define another server with the same name. `doctor` reads each candidate through a bounded no-follow check and fails closed on symbolic links, additional hard links, special files, unsafe permissions, malformed schemas, oversized content, or exchange races instead of silently treating an unreadable configuration as shadow-free.
 
 The exact generated shape is also available as [`claude-http.example.json`](mcp-server/claude-http.example.json) for inspection. Let the installer write the machine-specific absolute helper path instead of copying the example by hand.
 
