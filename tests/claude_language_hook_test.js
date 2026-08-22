@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
-const { readProtectedRecord, removeExactRecord } = require(HOOK);
+const { beginSessionEpoch, readProtectedRecord, readSessionEpoch, removeExactRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -161,6 +161,43 @@ async function main() {
   }));
 
   const environment = { BLUN_LANGUAGE_GUARD_RUNTIME: temporary };
+  const previousRuntime = process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
+  process.env.BLUN_LANGUAGE_GUARD_RUNTIME = temporary;
+  try {
+    const protectedInput = { session_id: "session-epoch-hardening", cwd: temporary };
+    const protectedEpoch = path.join(
+      temporary,
+      "claude-hooks",
+      `session-${crypto.createHash("sha256").update(protectedInput.session_id).digest("hex")}.epoch`
+    );
+    fs.mkdirSync(path.dirname(protectedEpoch), { recursive: true, mode: 0o700 });
+    const legacyTemporary = `${protectedEpoch}.${process.pid}.tmp`;
+    const sentinel = path.join(temporary, "epoch-temp-sentinel.txt");
+    fs.writeFileSync(sentinel, "do-not-overwrite\n", { mode: 0o600 });
+    fs.symlinkSync(sentinel, legacyTemporary);
+    await beginSessionEpoch(protectedInput);
+    assert.strictEqual(fs.readFileSync(sentinel, "utf8"), "do-not-overwrite\n");
+    assert(fs.lstatSync(legacyTemporary).isSymbolicLink(), "legacy predictable temp link must remain untouched");
+    fs.unlinkSync(legacyTemporary);
+
+    const inspectedEpoch = readSessionEpoch(protectedInput);
+    fs.renameSync(protectedEpoch, `${protectedEpoch}.old`);
+    fs.writeFileSync(protectedEpoch, `${"f".repeat(64)}\n`, { mode: 0o600 });
+    assert.throws(
+      () => removeExactRecord(protectedEpoch, inspectedEpoch.fileIdentity),
+      /changed before consumption/
+    );
+    assert.strictEqual(fs.readFileSync(protectedEpoch, "utf8"), `${"f".repeat(64)}\n`);
+    fs.unlinkSync(protectedEpoch);
+    fs.renameSync(`${protectedEpoch}.old`, protectedEpoch);
+
+    fs.writeFileSync(protectedEpoch, `${"a".repeat(129)}\n`, { mode: 0o600 });
+    assert.throws(() => readSessionEpoch(protectedInput), /invalid size/);
+    fs.unlinkSync(protectedEpoch);
+  } finally {
+    if (previousRuntime === undefined) delete process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
+    else process.env.BLUN_LANGUAGE_GUARD_RUNTIME = previousRuntime;
+  }
   const common = { session_id: "session-one", cwd: temporary };
   const clean = "Natürlich läuft die Prüfung für Claude zuverlässig.";
   const tool = {

@@ -12,6 +12,7 @@ const path = require("path");
 
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
+const MAX_EPOCH_BYTES = 128;
 const MAX_RECORD_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNTIME = path.join(os.homedir(), ".config", "blun-language-guard");
 const EXACT_LANGUAGE = /^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/;
@@ -155,14 +156,36 @@ function sessionEpochPath(input) {
 
 function readSessionEpoch(input) {
   const destination = sessionEpochPath(input);
-  const stats = fs.lstatSync(destination);
-  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("session epoch must be a regular file");
-  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+  const before = fs.lstatSync(destination);
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error("session epoch must be a regular file");
+  if (before.size < 1 || before.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
+  if (process.platform !== "win32" && (before.mode & 0o077) !== 0) {
     throw new Error("session epoch permissions are too broad");
   }
-  const epoch = fs.readFileSync(destination, "utf8").replace(/^\uFEFF/, "").trim();
-  if (!/^[a-f0-9]{64}$/.test(epoch)) throw new Error("session epoch is invalid");
-  return { destination, epoch };
+  if (typeof process.getuid === "function" && before.uid !== process.getuid()) {
+    throw new Error("session epoch has the wrong owner");
+  }
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    if (!opened.isFile() || opened.isSymbolicLink()) throw new Error("session epoch must be a regular file");
+    if (opened.size < 1 || opened.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
+    if (process.platform !== "win32" && (opened.mode & 0o077) !== 0) {
+      throw new Error("session epoch permissions are too broad");
+    }
+    if (typeof process.getuid === "function" && opened.uid !== process.getuid()) {
+      throw new Error("session epoch has the wrong owner");
+    }
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("session epoch changed while opening");
+    }
+    const epoch = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "").trim();
+    if (!/^[a-f0-9]{64}$/.test(epoch)) throw new Error("session epoch is invalid");
+    return { destination, epoch, fileIdentity: recordIdentity(opened) };
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 async function beginSessionEpoch(input) {
@@ -184,11 +207,17 @@ async function beginSessionEpoch(input) {
   if (registration.status !== "PASS" || registration.registered !== true) {
     throw new Error("isolated guard rejected the session epoch");
   }
-  const temporary = `${destination}.${process.pid}.tmp`;
+  const temporary = `${destination}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
+  let descriptor;
   try {
-    fs.writeFileSync(temporary, `${epoch}\n`, { encoding: "utf8", mode: 0o600 });
+    descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    fs.writeFileSync(descriptor, `${epoch}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
     fs.renameSync(temporary, destination);
   } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
     try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
   }
   try { fs.chmodSync(destination, 0o600); } catch (_) {}
@@ -525,10 +554,8 @@ async function sessionEnd(input) {
   try {
     const current = readSessionEpoch(input);
     previousEpoch = current.epoch;
-    fs.unlinkSync(current.destination);
-  } catch (_) {
-    try { fs.unlinkSync(sessionEpochPath(input)); } catch (_) {}
-  }
+    removeExactRecord(current.destination, current.fileIdentity);
+  } catch (_) {}
   try { invalidateSessionRecords(input); } catch (_) {}
   if (!previousEpoch) return;
   try {
