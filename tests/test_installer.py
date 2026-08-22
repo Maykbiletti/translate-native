@@ -1900,6 +1900,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn("keep", result["projects"]["/work/one"]["mcpServers"])
                 if os.name != "nt":
                     self.assertEqual(config.stat().st_mode & 0o077, 0)
+                    self.assertEqual(backup.stat().st_mode & 0o077, 0)
             finally:
                 INSTALLER.MCP_HEADERS_COMMAND = original_headers
 
@@ -1907,9 +1908,128 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / ".claude.json"
             config.write_text("{broken", encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "Refusing to modify"):
+            with self.assertRaisesRegex(RuntimeError, "configuration is invalid"):
                 INSTALLER.configure_claude_mcp(config)
             self.assertEqual(config.read_text(encoding="utf-8"), "{broken")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file-type and permission tests")
+    def test_claude_configuration_rejects_unsafe_files_without_changing_targets(self) -> None:
+        cases = ("symlink", "hardlink", "fifo", "permissions", "oversized")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / ".claude.json"
+                sentinel = root / "sentinel.json"
+                sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                sentinel.chmod(0o600)
+                if case == "symlink":
+                    config.symlink_to(sentinel)
+                    expected = "regular file"
+                elif case == "hardlink":
+                    os.link(sentinel, config)
+                    expected = "hard links"
+                elif case == "fifo":
+                    os.mkfifo(config)
+                    expected = "regular file"
+                elif case == "permissions":
+                    config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                    config.chmod(0o622)
+                    expected = "writable outside"
+                else:
+                    config.write_bytes(b"x" * (INSTALLER.MAX_CLAUDE_CONFIG_BYTES + 1))
+                    config.chmod(0o600)
+                    expected = "size limit"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    INSTALLER.configure_claude_mcp(config)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+                self.assertFalse(config.with_suffix(".json.bak").exists())
+
+    def test_claude_configuration_rejects_identity_exchange_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / ".claude.json"
+            config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            if os.name != "nt":
+                config.chmod(0o600)
+            details = config.stat()
+            fields = {
+                name: getattr(details, name)
+                for name in (
+                    "st_mode", "st_uid", "st_dev", "st_ino", "st_nlink", "st_size",
+                    "st_ctime_ns", "st_mtime_ns",
+                )
+            }
+            opened = SimpleNamespace(**fields)
+            changed = SimpleNamespace(**fields)
+            changed.st_ctime_ns += 1
+            with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER.configure_claude_mcp(config)
+            self.assertEqual(config.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+            self.assertFalse(config.with_suffix(".json.bak").exists())
+
+    def test_claude_configuration_preserves_concurrent_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / ".claude.json"
+            config.write_text('{"theme": "original", "mcpServers": {}}\n', encoding="utf-8")
+            if os.name != "nt":
+                config.chmod(0o600)
+            real_atomic_bytes = INSTALLER._atomic_bytes
+
+            def exchange_before_target_replace(path: Path, payload: bytes, *, before_replace=None) -> None:
+                if path != config:
+                    real_atomic_bytes(path, payload, before_replace=before_replace)
+                    return
+
+                def exchange_then_recheck() -> None:
+                    replacement = root / "concurrent.json"
+                    replacement.write_text(
+                        '{"theme": "concurrent", "mcpServers": {}}\n',
+                        encoding="utf-8",
+                    )
+                    if os.name != "nt":
+                        replacement.chmod(0o600)
+                    os.replace(replacement, config)
+                    assert before_replace is not None
+                    before_replace()
+
+                real_atomic_bytes(path, payload, before_replace=exchange_then_recheck)
+
+            with mock.patch.object(
+                INSTALLER, "_atomic_bytes", side_effect=exchange_before_target_replace
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed before replacement"):
+                    INSTALLER.configure_claude_mcp(config)
+            self.assertEqual(
+                config.read_text(encoding="utf-8"),
+                '{"theme": "concurrent", "mcpServers": {}}\n',
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX symbolic-link test")
+    def test_claude_install_preflights_config_before_runtime_mutation(self) -> None:
+        original = INSTALLER.CLAUDE_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "sentinel.json"
+            sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            sentinel.chmod(0o600)
+            INSTALLER.CLAUDE_CONFIG = root / ".claude.json"
+            INSTALLER.CLAUDE_CONFIG.symlink_to(sentinel)
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink") as link, \
+                     mock.patch.object(INSTALLER, "install_delivery_boundary") as delivery, \
+                     mock.patch.object(INSTALLER, "install_guard_runtime") as runtime, \
+                     mock.patch.object(INSTALLER, "install_mcp_http_runtime") as mcp_runtime:
+                    with self.assertRaisesRegex(RuntimeError, "regular file"):
+                        INSTALLER.install(["claude"], autostart_service=False)
+                link.assert_not_called()
+                delivery.assert_not_called()
+                runtime.assert_not_called()
+                mcp_runtime.assert_not_called()
+                self.assertTrue(INSTALLER.CLAUDE_CONFIG.is_symlink())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+            finally:
+                INSTALLER.CLAUDE_CONFIG = original
 
     def test_windows_task_requests_restart_on_failure(self) -> None:
         completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")

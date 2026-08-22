@@ -57,6 +57,7 @@ MAX_UPDATE_STATE_BYTES = 64 * 1024
 MAX_MCP_HTTP_TOKEN_BYTES = 64 * 1024
 MAX_DELIVERY_POLICY_BYTES = 64 * 1024
 MAX_BLUN_MCP_CONFIG_BYTES = 1024 * 1024
+MAX_CLAUDE_CONFIG_BYTES = 16 * 1024 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -548,15 +549,7 @@ def claude_mcp_entry() -> dict:
 def configure_claude_mcp(path: Path | None = None) -> tuple[Path | None, int]:
     """Atomically install the user-scoped HTTP MCP and remove stale local shadows."""
     path = path or CLAUDE_CONFIG
-    if path.exists():
-        try:
-            current = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"Refusing to modify unreadable Claude configuration: {path}: {error}") from error
-        if not isinstance(current, dict):
-            raise RuntimeError(f"Claude configuration root must be an object: {path}")
-    else:
-        current = {}
+    current, original, expected = _read_protected_claude_config(path)
     servers = current.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         raise RuntimeError(f"Claude mcpServers must be an object: {path}")
@@ -574,13 +567,25 @@ def configure_claude_mcp(path: Path | None = None) -> tuple[Path | None, int]:
                 removed_shadows += 1
 
     backup = None
-    if path.exists():
+    if original is not None:
         backup = path.with_suffix(path.suffix + ".bak")
-        shutil.copy2(path, backup)
-    _atomic_json(path, current)
-    if os.name != "nt":
-        os.chmod(path, 0o600)
+        _atomic_bytes(backup, original)
+    encoded = (json.dumps(current, indent=2) + "\n").encode("utf-8")
+    _atomic_bytes(
+        path,
+        encoded,
+        before_replace=lambda: _assert_claude_config_unchanged(path, expected),
+    )
     return backup, removed_shadows
+
+
+def preflight_claude_config(path: Path | None = None) -> None:
+    """Reject unsafe Claude user configuration before installation mutates runtime."""
+    path = path or CLAUDE_CONFIG
+    current, _original, _expected = _read_protected_claude_config(path)
+    servers = current.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"Claude mcpServers must be an object: {path}")
 
 
 def project_mcp_shadows(start: Path | None = None) -> list[Path]:
@@ -702,6 +707,8 @@ def install(targets: list[str], *, autostart_service: bool = True) -> int:
     blun_config = Path.home() / ".blun" / "mcp.json" if "blun" in targets else None
     if blun_config is not None:
         preflight_blun_mcp_config(blun_config)
+    if "claude" in targets:
+        preflight_claude_config()
     root = repository_root()
     skill = root / "translate-native"
     for target in targets:
@@ -1093,9 +1100,11 @@ def doctor() -> int:
     checks.append(("MCP HTTP access token", mcp_token_secure, str(MCP_HTTP_TOKEN)))
     claude_config_ok = False
     claude_config_detail = str(CLAUDE_CONFIG)
-    if CLAUDE_CONFIG.is_file():
-        try:
-            claude_config = json.loads(CLAUDE_CONFIG.read_text(encoding="utf-8-sig"))
+    try:
+        claude_config, original_claude_config, _identity = _read_protected_claude_config(
+            CLAUDE_CONFIG
+        )
+        if original_claude_config is not None:
             claude_entry = claude_config.get("mcpServers", {}).get(MCP_SERVER_NAME)
             local_shadows = sum(
                 1
@@ -1105,8 +1114,8 @@ def doctor() -> int:
             ) if isinstance(claude_config.get("projects", {}), dict) else 0
             claude_config_ok = claude_entry == claude_mcp_entry() and local_shadows == 0
             claude_config_detail += f"; stale local shadows={local_shadows}"
-        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
-            claude_config_ok = False
+    except (OSError, RuntimeError, AttributeError, TypeError):
+        claude_config_ok = False
     checks.append(("Claude user-scoped HTTP MCP", claude_config_ok, claude_config_detail))
     project_shadows = project_mcp_shadows()
     checks.append((
@@ -1219,6 +1228,91 @@ def _atomic_json(path: Path, payload: dict) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _claude_config_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_claude_config_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Claude configuration is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"Claude configuration has additional hard links: {path}")
+    if details.st_size > MAX_CLAUDE_CONFIG_BYTES:
+        raise RuntimeError(f"Claude configuration exceeds the size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"Claude configuration is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Claude configuration owner is invalid: {path}")
+
+
+def _read_protected_claude_config(
+    path: Path,
+) -> tuple[dict, bytes | None, tuple[int, int, int, int, int, int] | None]:
+    """Read Claude's user configuration without following links or racing replacement."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return {}, None, None
+    except OSError as error:
+        raise RuntimeError(f"Claude configuration is unreadable: {path}") from error
+    _validate_claude_config_details(path, before)
+    expected = _claude_config_identity(before)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            _validate_claude_config_details(path, opened)
+            if _claude_config_identity(opened) != expected:
+                raise RuntimeError(f"Claude configuration changed while opening: {path}")
+            raw = handle.read(MAX_CLAUDE_CONFIG_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Claude configuration is unreadable: {path}") from error
+    if len(raw) > MAX_CLAUDE_CONFIG_BYTES:
+        raise RuntimeError(f"Claude configuration exceeds the size limit: {path}")
+    if (
+        _claude_config_identity(after_read) != expected
+        or _claude_config_identity(after_path) != expected
+    ):
+        raise RuntimeError(f"Claude configuration changed while reading: {path}")
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Claude configuration is invalid: {path}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Claude configuration root must be an object: {path}")
+    return payload, raw, expected
+
+
+def _assert_claude_config_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"Claude configuration disappeared before replacement: {path}")
+    except OSError as error:
+        raise RuntimeError(f"Claude configuration cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"Claude configuration appeared during installation: {path}")
+    _validate_claude_config_details(path, current)
+    if _claude_config_identity(current) != expected:
+        raise RuntimeError(f"Claude configuration changed before replacement: {path}")
 
 
 def _blun_config_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
