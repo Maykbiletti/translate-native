@@ -288,6 +288,132 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(list(root.glob(".guard.service.*.tmp")), [])
 
+    def test_service_definition_removal_rejects_unsafe_or_foreign_state(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            units = home / ".config" / "systemd" / "user"
+            units.mkdir(parents=True)
+            sentinel = home / "sentinel.service"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            service = units / "blun-language-guard-health.service"
+            service.symlink_to(sentinel)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertTrue(service.is_symlink())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+            service.unlink()
+            service.write_text("unrelated user service\n", encoding="utf-8")
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "not managed by BLUN"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(service.read_text(encoding="utf-8"), "unrelated user service\n")
+
+            service.unlink()
+            os.link(sentinel, service)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "additional hard links"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+            if hasattr(os, "mkfifo"):
+                service.unlink()
+                os.mkfifo(service)
+                with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                     mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                    with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                        INSTALLER.remove_health_monitor(home)
+                runner.assert_not_called()
+
+    def test_service_definition_removal_preserves_concurrent_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            definition = root / "guard.service"
+            definition.write_text(
+                "[Unit]\nDescription=Verify and repair BLUN Language Guard\n"
+                "[Service]\nExecStart=python health-monitor run\n",
+                encoding="utf-8",
+            )
+            expected = INSTALLER._preflight_service_definition_removal(
+                definition,
+                ("Verify and repair BLUN Language Guard", "health-monitor"),
+            )
+            real_assert = INSTALLER._assert_service_definition_unchanged
+
+            def exchange_then_recheck(path: Path, identity) -> None:
+                path.unlink()
+                path.write_text("concurrent user file\n", encoding="utf-8")
+                real_assert(path, identity)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_assert_service_definition_unchanged",
+                side_effect=exchange_then_recheck,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed before replacement"):
+                    INSTALLER._remove_service_definition(definition, expected)
+            self.assertEqual(
+                definition.read_text(encoding="utf-8"),
+                "concurrent user file\n",
+            )
+
+    def test_health_service_definitions_install_and_remove_on_linux_and_macos(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_health_monitor(home)[0])
+                INSTALLER.remove_health_monitor(home)
+            units = home / ".config" / "systemd" / "user"
+            self.assertFalse((units / "blun-language-guard-health.service").exists())
+            self.assertFalse((units / "blun-language-guard-health.timer").exists())
+
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_health_monitor(home)[0])
+                INSTALLER.remove_health_monitor(home)
+            plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-health.plist"
+            self.assertFalse(plist.exists())
+
+    def test_updater_and_mcp_service_definitions_remove_when_managed(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.Path, "home", return_value=home), \
+                 mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_scheduler()[0])
+                self.assertTrue(INSTALLER.install_mcp_http_autostart(ROOT)[0])
+                INSTALLER.remove_scheduler()
+                INSTALLER.remove_mcp_http_autostart()
+            units = home / ".config" / "systemd" / "user"
+            for name in (
+                "blun-language-guard-update.service",
+                "blun-language-guard-update.timer",
+                "blun-language-guard-mcp.service",
+            ):
+                self.assertFalse((units / name).exists())
+
+            with mock.patch.object(INSTALLER.Path, "home", return_value=home), \
+                 mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_scheduler()[0])
+                self.assertTrue(INSTALLER.install_mcp_http_autostart(ROOT)[0])
+                INSTALLER.remove_scheduler()
+                INSTALLER.remove_mcp_http_autostart()
+            agents = home / "Library" / "LaunchAgents"
+            self.assertFalse((agents / "ai.blun.language-guard-updater.plist").exists())
+            self.assertFalse((agents / "ai.blun.language-guard-mcp.plist").exists())
+
     def test_blun_mcp_merge_preserves_servers_and_protects_config_state(self) -> None:
         entry = {
             "command": "python3",

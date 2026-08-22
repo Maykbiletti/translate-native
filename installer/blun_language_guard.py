@@ -186,6 +186,53 @@ def _write_service_definition(path: Path, content: str) -> None:
     )
 
 
+def _preflight_service_definition_removal(
+    path: Path,
+    required_markers: tuple[str, ...],
+) -> tuple[int, int, int, int, int, int] | None:
+    expected = _inspect_service_definition(path)
+    if expected is None:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if _service_definition_identity(opened) != expected:
+                raise RuntimeError(f"Service definition changed while opening: {path}")
+            raw = handle.read(MAX_SERVICE_DEFINITION_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Cannot read service definition: {path}") from error
+    if len(raw) > MAX_SERVICE_DEFINITION_BYTES:
+        raise RuntimeError(f"Service definition exceeds the size limit: {path}")
+    if (
+        _service_definition_identity(after_read) != expected
+        or _service_definition_identity(after_path) != expected
+    ):
+        raise RuntimeError(f"Service definition changed while reading: {path}")
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeError as error:
+        raise RuntimeError(f"Service definition is not valid UTF-8: {path}") from error
+    if not all(marker in content for marker in required_markers):
+        raise RuntimeError(f"Service definition is not managed by BLUN: {path}")
+    return expected
+
+
+def _remove_service_definition(
+    path: Path,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    if expected is None:
+        return
+    _assert_service_definition_unchanged(path, expected)
+    path.unlink()
+
+
 def ensure_signing_key(path: Path | None = None) -> None:
     """Create the local trust key once and never replace an existing key."""
     path = path or SIGNING_KEY
@@ -587,13 +634,22 @@ def restart_mcp_http_runtime() -> tuple[bool, str]:
 def remove_mcp_http_autostart() -> None:
     system = platform.system()
     if system == "Linux":
+        service = Path.home() / ".config" / "systemd" / "user" / "blun-language-guard-mcp.service"
+        expected = _preflight_service_definition_removal(
+            service,
+            ("BLUN persistent Streamable HTTP MCP", "mcp_http_gateway.py", "--port 47632"),
+        )
         _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-mcp.service"])
-        (Path.home() / ".config" / "systemd" / "user" / "blun-language-guard-mcp.service").unlink(missing_ok=True)
+        _remove_service_definition(service, expected)
         _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
         plist = Path.home() / "Library" / "LaunchAgents" / "ai.blun.language-guard-mcp.plist"
+        expected = _preflight_service_definition_removal(
+            plist,
+            ("ai.blun.language-guard-mcp", "mcp_http_gateway.py", "<string>47632</string>"),
+        )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        plist.unlink(missing_ok=True)
+        _remove_service_definition(plist, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard MCP"])
 
@@ -2800,14 +2856,33 @@ def install_scheduler() -> tuple[bool, str]:
 def remove_scheduler() -> None:
     system = platform.system()
     if system == "Linux":
+        units = Path.home() / ".config" / "systemd" / "user"
+        definitions = (
+            (
+                units / "blun-language-guard-update.service",
+                ("Update BLUN Language Guard safely", "auto-update run"),
+            ),
+            (
+                units / "blun-language-guard-update.timer",
+                ("Daily BLUN Language Guard update check", "OnUnitActiveSec=1h"),
+            ),
+        )
+        prepared = [
+            (path, _preflight_service_definition_removal(path, markers))
+            for path, markers in definitions
+        ]
         _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-update.timer"])
-        for name in ("blun-language-guard-update.service", "blun-language-guard-update.timer"):
-            (Path.home() / ".config" / "systemd" / "user" / name).unlink(missing_ok=True)
+        for path, expected in prepared:
+            _remove_service_definition(path, expected)
         _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
         plist = Path.home() / "Library" / "LaunchAgents" / "ai.blun.language-guard-updater.plist"
+        expected = _preflight_service_definition_removal(
+            plist,
+            ("ai.blun.language-guard-updater", "auto-update", "<string>run</string>"),
+        )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        plist.unlink(missing_ok=True)
+        _remove_service_definition(plist, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard Updater"])
 
@@ -2884,15 +2959,33 @@ def remove_health_monitor(home: Path | None = None) -> None:
     home = home or Path.home()
     system = platform.system()
     if system == "Linux":
-        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-health.timer"])
         units = home / ".config" / "systemd" / "user"
-        for name in ("blun-language-guard-health.service", "blun-language-guard-health.timer"):
-            (units / name).unlink(missing_ok=True)
+        definitions = (
+            (
+                units / "blun-language-guard-health.service",
+                ("Verify and repair BLUN Language Guard", "health-monitor"),
+            ),
+            (
+                units / "blun-language-guard-health.timer",
+                ("Monitor BLUN Language Guard every minute", "OnUnitActiveSec=1m"),
+            ),
+        )
+        prepared = [
+            (path, _preflight_service_definition_removal(path, markers))
+            for path, markers in definitions
+        ]
+        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-health.timer"])
+        for path, expected in prepared:
+            _remove_service_definition(path, expected)
         _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
         plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-health.plist"
+        expected = _preflight_service_definition_removal(
+            plist,
+            ("ai.blun.language-guard-health", "health-monitor", "<integer>60</integer>"),
+        )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        plist.unlink(missing_ok=True)
+        _remove_service_definition(plist, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard Health"])
 
