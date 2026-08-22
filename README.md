@@ -453,6 +453,8 @@ python3 installer/blun_language_guard.py service status
 python3 installer/blun_language_guard.py doctor
 ```
 
+Linux systemd units and macOS LaunchAgent definitions are installed through a protected atomic boundary before either service manager is called. Existing definitions must be bounded single-link regular files owned by the current user and not writable by another account; symbolic links, hard links, special files, and concurrent replacements block without altering their targets or activating a service. Newly written definitions use owner-only permissions. Windows Task Scheduler behavior is unchanged.
+
 Use `service start` or `service stop` for explicit lifecycle control. `install --no-service-autostart` exists for packaging and tests, but a production host must not deliver model output in that state. A per-user service prevents accidental key exposure to child processes; resisting a hostile same-user agent still requires a separate service account, container, or remote signer with filesystem and channel credentials denied to the agent.
 
 Two host adapters are included:

@@ -60,6 +60,7 @@ MAX_DELIVERY_POLICY_BYTES = 64 * 1024
 MAX_BLUN_MCP_CONFIG_BYTES = 1024 * 1024
 MAX_CLAUDE_CONFIG_BYTES = 16 * 1024 * 1024
 MAX_PROJECT_MCP_CONFIG_BYTES = 1024 * 1024
+MAX_SERVICE_DEFINITION_BYTES = 256 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -125,6 +126,64 @@ def atomic_symlink(source: Path, destination: Path) -> None:
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _service_definition_identity(
+    details: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _inspect_service_definition(
+    path: Path,
+) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Cannot inspect service definition: {path}") from error
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Service definition is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"Service definition has additional hard links: {path}")
+    if details.st_size > MAX_SERVICE_DEFINITION_BYTES:
+        raise RuntimeError(f"Service definition exceeds the size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"Service definition is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Service definition owner is invalid: {path}")
+    return _service_definition_identity(details)
+
+
+def _assert_service_definition_unchanged(
+    path: Path,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    current = _inspect_service_definition(path)
+    if expected is None and current is not None:
+        raise RuntimeError(f"Service definition appeared before replacement: {path}")
+    if expected is not None and current != expected:
+        raise RuntimeError(f"Service definition changed before replacement: {path}")
+
+
+def _write_service_definition(path: Path, content: str) -> None:
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_SERVICE_DEFINITION_BYTES:
+        raise RuntimeError(f"Service definition exceeds the size limit: {path}")
+    expected = _inspect_service_definition(path)
+    _atomic_bytes(
+        path,
+        encoded,
+        before_replace=lambda: _assert_service_definition_unchanged(path, expected),
+    )
 
 
 def ensure_signing_key(path: Path | None = None) -> None:
@@ -419,12 +478,12 @@ def install_guard_autostart(root: Path) -> tuple[bool, str]:
         units = Path.home() / ".config" / "systemd" / "user"
         units.mkdir(parents=True, exist_ok=True)
         service = units / "blun-language-guard.service"
-        service.write_text(
+        _write_service_definition(
+            service,
             "[Unit]\nDescription=BLUN isolated language release guard\n\n"
             "[Service]\nType=simple\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\nRestart=on-failure\nRestartSec=2\n\n"
             "[Install]\nWantedBy=default.target\n",
-            encoding="utf-8",
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", service.name])
@@ -434,14 +493,14 @@ def install_guard_autostart(root: Path) -> tuple[bool, str]:
         agents.mkdir(parents=True, exist_ok=True)
         plist = agents / "ai.blun.language-guard.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
-        plist.write_text(
+        _write_service_definition(
+            plist,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
             "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
             "<plist version=\"1.0\"><dict><key>Label</key><string>ai.blun.language-guard</string>"
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n",
-            encoding="utf-8",
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
@@ -460,13 +519,13 @@ def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
         units = Path.home() / ".config" / "systemd" / "user"
         units.mkdir(parents=True, exist_ok=True)
         service = units / "blun-language-guard-mcp.service"
-        service.write_text(
+        _write_service_definition(
+            service,
             "[Unit]\nDescription=BLUN persistent Streamable HTTP MCP\n"
             "After=blun-language-guard.service\nWants=blun-language-guard.service\n\n"
             "[Service]\nType=simple\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\nRestart=always\nRestartSec=1\n\n"
             "[Install]\nWantedBy=default.target\n",
-            encoding="utf-8",
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", service.name])
@@ -476,7 +535,8 @@ def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
         agents.mkdir(parents=True, exist_ok=True)
         plist = agents / "ai.blun.language-guard-mcp.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
-        plist.write_text(
+        _write_service_definition(
+            plist,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
             "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -484,7 +544,6 @@ def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>"
             "<key>ThrottleInterval</key><integer>1</integer></dict></plist>\n",
-            encoding="utf-8",
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
@@ -2707,8 +2766,17 @@ def install_scheduler() -> tuple[bool, str]:
         units.mkdir(parents=True, exist_ok=True)
         service = units / "blun-language-guard-update.service"
         timer = units / "blun-language-guard-update.timer"
-        service.write_text("[Unit]\nDescription=Update BLUN Language Guard safely\n\n[Service]\nType=oneshot\nExecStart=" + command + "\n", encoding="utf-8")
-        timer.write_text("[Unit]\nDescription=Daily BLUN Language Guard update check\n\n[Timer]\nOnBootSec=5m\nOnUnitActiveSec=1h\nPersistent=true\nRandomizedDelaySec=10m\n\n[Install]\nWantedBy=timers.target\n", encoding="utf-8")
+        _write_service_definition(
+            service,
+            "[Unit]\nDescription=Update BLUN Language Guard safely\n\n"
+            "[Service]\nType=oneshot\nExecStart=" + command + "\n",
+        )
+        _write_service_definition(
+            timer,
+            "[Unit]\nDescription=Daily BLUN Language Guard update check\n\n"
+            "[Timer]\nOnBootSec=5m\nOnUnitActiveSec=1h\nPersistent=true\n"
+            "RandomizedDelaySec=10m\n\n[Install]\nWantedBy=timers.target\n",
+        )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", timer.name])
         ok = reload_result.returncode == 0 and enable_result.returncode == 0
@@ -2717,10 +2785,10 @@ def install_scheduler() -> tuple[bool, str]:
         agents = Path.home() / "Library" / "LaunchAgents"
         agents.mkdir(parents=True, exist_ok=True)
         plist = agents / "ai.blun.language-guard-updater.plist"
-        plist.write_text("""<?xml version="1.0" encoding="UTF-8"?>
+        _write_service_definition(plist, """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>ai.blun.language-guard-updater</string>
-<key>ProgramArguments</key><array><string>""" + sys.executable + "</string><string>" + str(Path(__file__).resolve()) + "</string><string>auto-update</string><string>run</string></array>\n<key>StartInterval</key><integer>3600</integer><key>RunAtLoad</key><true/></dict></plist>\n", encoding="utf-8")
+<key>ProgramArguments</key><array><string>""" + sys.executable + "</string><string>" + str(Path(__file__).resolve()) + "</string><string>auto-update</string><string>run</string></array>\n<key>StartInterval</key><integer>3600</integer><key>RunAtLoad</key><true/></dict></plist>\n")
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
         return result.returncode == 0, str(plist)
     if system == "Windows":
@@ -2771,18 +2839,18 @@ def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
         units.mkdir(parents=True, exist_ok=True)
         service = units / "blun-language-guard-health.service"
         timer = units / "blun-language-guard-health.timer"
-        service.write_text(
+        _write_service_definition(
+            service,
             "[Unit]\nDescription=Verify and repair BLUN Language Guard\n"
             "After=blun-language-guard.service blun-language-guard-mcp.service\n\n"
             "[Service]\nType=oneshot\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\n",
-            encoding="utf-8",
         )
-        timer.write_text(
+        _write_service_definition(
+            timer,
             "[Unit]\nDescription=Monitor BLUN Language Guard every minute\n\n"
             "[Timer]\nOnBootSec=1m\nOnUnitActiveSec=1m\nAccuracySec=10s\nPersistent=true\n\n"
             "[Install]\nWantedBy=timers.target\n",
-            encoding="utf-8",
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", timer.name])
@@ -2792,7 +2860,8 @@ def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
         agents.mkdir(parents=True, exist_ok=True)
         plist = agents / "ai.blun.language-guard-health.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
-        plist.write_text(
+        _write_service_definition(
+            plist,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
             "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -2801,7 +2870,6 @@ def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer>"
             "<key>ThrottleInterval</key><integer>10</integer></dict></plist>\n",
-            encoding="utf-8",
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])

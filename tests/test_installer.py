@@ -212,6 +212,82 @@ class InstallerTests(unittest.TestCase):
                 [],
             )
 
+    def test_service_definition_rejects_links_before_starting_runtime(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            units = home / ".config" / "systemd" / "user"
+            units.mkdir(parents=True)
+            sentinel = home / "sentinel.service"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            service = units / "blun-language-guard-health.service"
+            service.symlink_to(sentinel)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                    INSTALLER.install_health_monitor(home)
+            runner.assert_not_called()
+            self.assertTrue(service.is_symlink())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_service_definition_rejects_hard_links_and_special_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "sentinel"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            linked = root / "linked.service"
+            os.link(sentinel, linked)
+            with self.assertRaisesRegex(RuntimeError, "additional hard links"):
+                INSTALLER._write_service_definition(linked, "replacement\n")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+            if hasattr(os, "mkfifo"):
+                fifo = root / "blocked.timer"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                    INSTALLER._write_service_definition(fifo, "replacement\n")
+
+    def test_service_definition_rejects_oversize_and_open_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            oversized = root / "oversized.service"
+            oversized.write_bytes(b"x" * (INSTALLER.MAX_SERVICE_DEFINITION_BYTES + 1))
+            with self.assertRaisesRegex(RuntimeError, "exceeds the size limit"):
+                INSTALLER._write_service_definition(oversized, "replacement\n")
+
+            if os.name != "nt":
+                broad = root / "broad.timer"
+                broad.write_text("original\n", encoding="utf-8")
+                broad.chmod(0o666)
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER._write_service_definition(broad, "replacement\n")
+                self.assertEqual(broad.read_text(encoding="utf-8"), "original\n")
+
+    def test_service_definition_preserves_concurrently_replaced_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            definition = root / "guard.service"
+            definition.write_text("original\n", encoding="utf-8")
+            real_assert = INSTALLER._assert_service_definition_unchanged
+
+            def exchange_then_recheck(path: Path, expected) -> None:
+                path.unlink()
+                path.write_text("concurrent user file\n", encoding="utf-8")
+                real_assert(path, expected)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_assert_service_definition_unchanged",
+                side_effect=exchange_then_recheck,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed before replacement"):
+                    INSTALLER._write_service_definition(definition, "replacement\n")
+            self.assertEqual(
+                definition.read_text(encoding="utf-8"),
+                "concurrent user file\n",
+            )
+            self.assertEqual(list(root.glob(".guard.service.*.tmp")), [])
+
     def test_blun_mcp_merge_preserves_servers_and_protects_config_state(self) -> None:
         entry = {
             "command": "python3",
@@ -2795,8 +2871,10 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(ok)
             timer = (home / ".config" / "systemd" / "user" / "blun-language-guard-health.timer").read_text()
             self.assertIn("OnUnitActiveSec=1m", timer)
-            service = (home / ".config" / "systemd" / "user" / "blun-language-guard-health.service").read_text()
-            self.assertIn("health-monitor", service)
+            service_path = home / ".config" / "systemd" / "user" / "blun-language-guard-health.service"
+            self.assertIn("health-monitor", service_path.read_text())
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(service_path.stat().st_mode), 0o600)
 
             with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
                  mock.patch.object(INSTALLER, "_run", return_value=completed):
