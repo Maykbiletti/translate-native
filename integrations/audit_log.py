@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,6 +14,117 @@ from typing import Any, Iterator
 
 
 SAFE_LABEL = re.compile(r"[^A-Za-z0-9_.:@/-]+")
+
+
+def _file_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_file(path: Path, details: os.stat_result, label: str) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"{label} must be a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"{label} must not have additional hard links: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"{label} must not be writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"{label} owner is invalid: {path}")
+
+
+def _path_matches_handle(path: Path, handle, label: str) -> None:
+    try:
+        opened = os.fstat(handle.fileno())
+        current = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"{label} is unreadable: {path}") from error
+    _validate_file(path, opened, label)
+    _validate_file(path, current, label)
+    if _file_identity(opened) != _file_identity(current):
+        raise RuntimeError(f"{label} changed while in use: {path}")
+
+
+@contextmanager
+def _protected_append(path: Path, label: str, encoding: str) -> Iterator[Any]:
+    """Open one append-only state file without following or replacing links."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = None
+    for _attempt in range(3):
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            flags = (
+                os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                descriptor = os.open(path, flags, 0o600)
+                before = None
+                break
+            except FileExistsError:
+                continue
+            except OSError as error:
+                raise RuntimeError(f"{label} cannot be created: {path}") from error
+        except OSError as error:
+            raise RuntimeError(f"{label} is unreadable: {path}") from error
+        _validate_file(path, before, label)
+        flags = (
+            os.O_RDWR | os.O_APPEND
+            | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as error:
+            raise RuntimeError(f"{label} cannot be opened safely: {path}") from error
+        try:
+            opened = os.fstat(descriptor)
+            _validate_file(path, opened, label)
+            if _file_identity(opened) != _file_identity(before):
+                raise RuntimeError(f"{label} changed while opening: {path}")
+        except (OSError, RuntimeError):
+            os.close(descriptor)
+            descriptor = None
+            raise
+        break
+    if descriptor is None:
+        raise RuntimeError(f"{label} could not be reserved safely: {path}")
+    try:
+        with os.fdopen(descriptor, "a+", encoding=encoding, newline="\n") as handle:
+            descriptor = None
+            _path_matches_handle(path, handle, label)
+            try:
+                yield handle
+            finally:
+                handle.flush()
+                os.fsync(handle.fileno())
+                _path_matches_handle(path, handle, label)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def audit_paths_healthy(path: Path) -> bool:
+    """Inspect existing audit state without creating or modifying it."""
+    for candidate, label in (
+        (path, "audit log"),
+        (path.with_suffix(path.suffix + ".lock"), "audit lock"),
+    ):
+        try:
+            details = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        try:
+            _validate_file(candidate, details, label)
+        except RuntimeError:
+            return False
+    return True
 
 
 def safe_label(value: Any, limit: int = 160) -> str:
@@ -82,12 +194,10 @@ def append_audit(path: Path, record: dict[str, Any]) -> None:
         "guard_version": safe_label(record.get("guard_version"), 32),
         "codes": [safe_label(value, 80) for value in record.get("codes", [])[:40]],
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
     lock_path = path.with_suffix(path.suffix + ".lock")
-    with lock_path.open("a+", encoding="ascii") as lock_handle:
+    with _protected_append(lock_path, "audit lock", "ascii") as lock_handle:
         with _exclusive_lock(lock_handle):
-            with path.open("a", encoding="utf-8", newline="\n") as handle:
+            _path_matches_handle(lock_path, lock_handle, "audit lock")
+            with _protected_append(path, "audit log", "utf-8") as handle:
                 handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())

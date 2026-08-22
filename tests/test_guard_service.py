@@ -140,6 +140,7 @@ class GuardServiceTests(unittest.TestCase):
             "release": True,
             "signature": True,
             "tamper_blocked": True,
+            "audit_paths": True,
         })
         self.assertFalse(self.audit_path.exists())
 
@@ -460,6 +461,110 @@ class GuardServiceTests(unittest.TestCase):
         record = json.loads(raw)
         self.assertEqual(record["target_sha256"], SERVICE.QUALITY.canonical_hash(target))
         self.assertEqual(record["agent_id"], "test-agent")
+        if os.name != "nt":
+            self.assertEqual(self.audit_path.stat().st_mode & 0o077, 0)
+            self.assertEqual(
+                self.audit_path.with_suffix(".jsonl.lock").stat().st_mode & 0o077,
+                0,
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX link, FIFO, and permission test")
+    def test_unsafe_audit_paths_block_without_altering_targets(self) -> None:
+        root = Path(self.temporary.name)
+        sentinel = root / "sentinel.txt"
+        sentinel.write_text("do-not-append\n", encoding="utf-8")
+        sentinel.chmod(0o600)
+
+        self.audit_path.symlink_to(sentinel)
+        with self.assertRaisesRegex(RuntimeError, "regular file"):
+            self.service.handle(self.release_request())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "do-not-append\n")
+        self.audit_path.unlink()
+
+        os.link(sentinel, self.audit_path)
+        with self.assertRaisesRegex(RuntimeError, "hard links"):
+            self.service.handle(self.release_request())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "do-not-append\n")
+        self.audit_path.unlink()
+
+        lock_path = self.audit_path.with_suffix(".jsonl.lock")
+        lock_path.unlink(missing_ok=True)
+        lock_path.symlink_to(sentinel)
+        with self.assertRaisesRegex(RuntimeError, "regular file"):
+            self.service.handle(self.release_request())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "do-not-append\n")
+        lock_path.unlink()
+
+        os.mkfifo(self.audit_path)
+        with self.assertRaisesRegex(RuntimeError, "regular file"):
+            self.service.handle(self.release_request())
+        self.audit_path.unlink()
+
+        self.audit_path.write_text("", encoding="utf-8")
+        self.audit_path.chmod(0o666)
+        with self.assertRaisesRegex(RuntimeError, "writable outside"):
+            self.service.handle(self.release_request())
+
+    @unittest.skipIf(os.name == "nt", "POSIX audit-path link test")
+    def test_health_blocks_on_unsafe_audit_state_without_writing_it(self) -> None:
+        sentinel = Path(self.temporary.name) / "health-sentinel.txt"
+        sentinel.write_text("unchanged\n", encoding="utf-8")
+        self.audit_path.symlink_to(sentinel)
+        health = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "health",
+        })
+        self.assertEqual(health["status"], "BLOCK", health)
+        self.assertFalse(health["isolated_key"])
+        self.assertFalse(health["self_test"]["audit_paths"])
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged\n")
+
+    def test_audit_path_exchange_blocks_after_append(self) -> None:
+        replacement = Path(self.temporary.name) / "replacement.jsonl"
+        old_path = Path(self.temporary.name) / "old-audit.jsonl"
+        real_fsync = SERVICE.AUDIT.os.fsync
+        exchanged = False
+
+        def exchange_after_write(descriptor: int) -> None:
+            nonlocal exchanged
+            real_fsync(descriptor)
+            if exchanged:
+                return
+            exchanged = True
+            self.audit_path.rename(old_path)
+            replacement.write_text("replacement\n", encoding="utf-8")
+            replacement.chmod(0o600)
+            replacement.rename(self.audit_path)
+
+        with mock.patch.object(SERVICE.AUDIT.os, "fsync", side_effect=exchange_after_write):
+            with self.assertRaisesRegex(RuntimeError, "changed while in use"):
+                SERVICE.AUDIT.append_audit(self.audit_path, {"event": "race-test"})
+        self.assertEqual(self.audit_path.read_text(encoding="utf-8"), "replacement\n")
+
+    def test_protected_audit_append_preserves_concurrent_records(self) -> None:
+        errors: list[Exception] = []
+
+        def append(index: int) -> None:
+            try:
+                SERVICE.AUDIT.append_audit(
+                    self.audit_path,
+                    {"event": f"parallel-{index}", "allowed": True},
+                )
+            except Exception as error:  # pragma: no cover - asserted below
+                errors.append(error)
+
+        workers = [threading.Thread(target=append, args=(index,)) for index in range(16)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        self.assertEqual(errors, [])
+        records = [json.loads(line) for line in self.audit_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(records), 16)
+        self.assertEqual(
+            {record["event"] for record in records},
+            {f"parallel-{index}" for index in range(16)},
+        )
 
     def test_ascii_folded_response_is_blocked_and_audited(self) -> None:
         result = self.service.handle(self.release_request("Das waere falsch."))

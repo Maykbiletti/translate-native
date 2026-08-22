@@ -244,6 +244,7 @@ class MCPHTTPGatewayTests(unittest.TestCase):
                     "release": True,
                     "signature": True,
                     "tamper_blocked": True,
+                    "audit_paths": True,
                 })
                 self.assertEqual(result["canary"], {"status": "PASS", "language": "sv-SE"})
                 self.assertFalse((root / "audit.jsonl").exists())

@@ -105,6 +105,7 @@ class GuardService:
     def _health_self_test(self) -> dict[str, bool]:
         """Exercise the real response gate and signer without writing a canary audit record."""
         target = "Hälsokontrollen är aktiv."
+        audit_paths = AUDIT.audit_paths_healthy(self.audit_path)
         try:
             released = GATEWAY.gate({
                 "task_kind": "response",
@@ -125,9 +126,15 @@ class GuardService:
                 "release": release_ok,
                 "signature": verified.get("valid") is True,
                 "tamper_blocked": tampered.get("valid") is False,
+                "audit_paths": audit_paths,
             }
         except Exception:
-            return {"release": False, "signature": False, "tamper_blocked": False}
+            return {
+                "release": False,
+                "signature": False,
+                "tamper_blocked": False,
+                "audit_paths": audit_paths,
+            }
 
     @staticmethod
     def _identity_hash(value: str) -> str:
