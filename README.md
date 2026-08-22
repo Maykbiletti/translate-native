@@ -460,6 +460,8 @@ Two host adapters are included:
 - [`node-language-guard.js`](integrations/adapters/node-language-guard.js) provides strict routing, envelope parsing, isolated verification, and verify-before-send Telegram delivery for Node.js hosts.
 - [`blun-code-language-guard.js`](integrations/adapters/blun-code-language-guard.js) migrates the installed BLUN MCP entry into BLUN Code's encrypted MCP store, buffers model text so an unsigned draft cannot leak through streaming, and releases only the verified target.
 
+The legacy BLUN MCP file is a security-relevant migration input because it selects the isolated endpoint and service-token path. Installer and BLUN Code therefore accept only a bounded, single-link regular `~/.blun/mcp.json` owned by the current user and not writable by another account. Both consumers open without following links where supported and verify stable identity across the complete read. The installer preserves unrelated servers, writes its backup and replacement atomically as owner-only files, and rechecks the original immediately before replacement. A symbolic link, hard link, special file, oversized or malformed document, unsafe permissions, or exchange race blocks before the encrypted store or configuration is changed; existing safe `0644` files remain compatible.
+
 The trusted router uses structured job metadata, never the agent's claim. A source-bearing or explicitly translated job takes `release_translation`; an ordinary reply takes `release_response`. Contradictory metadata, `auto`, `all`, missing translation source, raw prose, unknown envelope fields, an invalid receipt, an unavailable service, or a sender invocation before verification all block.
 
 Free-form text alone cannot provide non-bypassable task classification. A host that offers translation through chat must set `languageGuardTaskKind: translation`, capture the complete source independently as `languageGuardSourceText`, and set the exact target language. If that metadata is absent, the BLUN adapter instructs the agent not to perform a translation through the response route. See [`BLUN_CODE_INTEGRATION.md`](docs/BLUN_CODE_INTEGRATION.md) for the runtime contract and residual limits.
@@ -511,7 +513,7 @@ The authoritative plugin version lives only in `.claude-plugin/plugin.json`; the
 
 Third-party marketplace auto-update is disabled by default in Claude. Users may enable it in the marketplace UI as an additional startup check; the operating-system updater no longer depends on that optional setting. Other platform-native plugin stores remain controlled by their host platform.
 
-BLUN Code is supported explicitly. Installation creates the BLUN skill symlink and safely merges `blun-language-guard` into `~/.blun/mcp.json`, preserving the other MCP servers and writing `mcp.json.bak` before a change. BLUN Code must be restarted once after initial installation; subsequent repository updates are visible through the symlink automatically.
+BLUN Code is supported explicitly. Installation creates the BLUN skill symlink and safely merges `blun-language-guard` into the protected `~/.blun/mcp.json`, preserving the other MCP servers and writing `mcp.json.bak` atomically before a change. BLUN Code must be restarted once after initial installation; subsequent repository updates are visible through the symlink automatically.
 
 ### Production regressions fixed in Version 5
 

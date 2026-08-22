@@ -10,6 +10,7 @@ const {
 
 const SERVER_NAME = "blun-language-guard";
 const MAX_SERVICE_TOKEN_BYTES = 64 * 1024;
+const MAX_BLUN_MCP_CONFIG_BYTES = 1024 * 1024;
 
 function protectedFileIdentity(stats) {
   return {
@@ -61,31 +62,111 @@ function readProtectedServiceToken(destination) {
   }
 }
 
+function validateLegacyConfigStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("BLUN MCP configuration must be a regular file");
+  if (stats.nlink !== 1) throw new Error("BLUN MCP configuration must not have additional hard links");
+  if (stats.size > MAX_BLUN_MCP_CONFIG_BYTES) throw new Error("BLUN MCP configuration exceeds the size limit");
+  if (process.platform !== "win32" && (stats.mode & 0o022) !== 0) {
+    throw new Error("BLUN MCP configuration is writable outside its owner");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error("BLUN MCP configuration has the wrong owner");
+  }
+}
+
+function readProtectedLegacyConfig(destination) {
+  let before;
+  try { before = fs.lstatSync(destination); }
+  catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  validateLegacyConfigStats(before);
+  const expected = protectedFileIdentity(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validateLegacyConfigStats(opened);
+    if (!sameProtectedFile(opened, expected) || opened.nlink !== before.nlink) {
+      throw new Error("BLUN MCP configuration changed while opening");
+    }
+    const buffer = Buffer.alloc(MAX_BLUN_MCP_CONFIG_BYTES + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (count === 0) break;
+      size += count;
+    }
+    const after = fs.fstatSync(descriptor);
+    const afterPath = fs.lstatSync(destination);
+    if (
+      !sameProtectedFile(after, expected) || after.nlink !== before.nlink
+      || !sameProtectedFile(afterPath, expected) || afterPath.nlink !== before.nlink
+    ) throw new Error("BLUN MCP configuration changed while reading");
+    if (size > MAX_BLUN_MCP_CONFIG_BYTES) throw new Error("BLUN MCP configuration exceeds the size limit");
+    return new TextDecoder("utf-8", { fatal: true })
+      .decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "");
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function loadLegacyGuardConfig(userHome) {
   const file = path.join(userHome, ".blun", "mcp.json");
+  const raw = readProtectedLegacyConfig(file);
+  if (raw === null) return null;
   let parsed;
   try {
-    parsed = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+    parsed = JSON.parse(raw);
   } catch {
-    return null;
+    throw new Error("BLUN MCP configuration is not valid JSON");
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("BLUN MCP configuration root must be an object");
+  }
+  if (parsed.mcpServers !== undefined && (
+    !parsed.mcpServers || typeof parsed.mcpServers !== "object" || Array.isArray(parsed.mcpServers)
+  )) throw new Error("BLUN mcpServers must be an object");
   const server = parsed?.mcpServers?.[SERVER_NAME];
-  if (!server || typeof server !== "object") return null;
-  const env = server.env && typeof server.env === "object" ? server.env : {};
-  return {
-    name: SERVER_NAME,
+  if (server === undefined) return null;
+  if (!server || typeof server !== "object" || Array.isArray(server)) {
+    throw new Error("BLUN language-guard MCP entry must be an object");
+  }
+  if (server.env !== undefined && (
+    !server.env || typeof server.env !== "object" || Array.isArray(server.env)
+  )) throw new Error("BLUN language-guard MCP environment must be an object");
+  if (server.args !== undefined && !Array.isArray(server.args)) {
+    throw new Error("BLUN language-guard MCP arguments must be an array");
+  }
+  const env = server.env || {};
+  const values = {
     command: String(server.command || ""),
     args: Array.isArray(server.args) ? server.args.map(String) : [],
     cwd: String(server.cwd || ""),
     endpoint: String(env.BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT || ""),
     tokenFile: String(env.BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE || ""),
   };
+  if (
+    !values.command || !values.endpoint || !values.tokenFile
+    || values.command.length > 4096 || values.cwd.length > 4096
+    || values.endpoint.length > 4096 || values.tokenFile.length > 4096
+    || values.args.length > 128 || values.args.some(value => value.length > 4096)
+  ) throw new Error("BLUN language-guard MCP entry is invalid");
+  return {
+    name: SERVER_NAME,
+    ...values,
+  };
 }
 
 function bootstrapLanguageGuardMcp({ userHome, store }) {
   const current = store.getAllInternal().find(item => String(item.name || "").toLowerCase() === SERVER_NAME);
   if (current) return { installed: false, id: current.id, reason: "already-installed" };
-  const legacy = loadLegacyGuardConfig(userHome);
+  let legacy;
+  try { legacy = loadLegacyGuardConfig(userHome); }
+  catch {
+    throw new LanguageGuardBlocked("legacy BLUN MCP configuration is unsafe", "guard_unavailable");
+  }
   if (!legacy?.command || !legacy.endpoint || !legacy.tokenFile) {
     return { installed: false, reason: "legacy-config-missing" };
   }
@@ -269,6 +350,7 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
 module.exports = {
   SERVER_NAME,
   loadLegacyGuardConfig,
+  readProtectedLegacyConfig,
   readProtectedServiceToken,
   bootstrapLanguageGuardMcp,
   resolveGuardConnection,

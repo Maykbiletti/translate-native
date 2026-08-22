@@ -9,6 +9,7 @@ import unittest
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -158,6 +159,136 @@ class InstallerTests(unittest.TestCase):
             destination.mkdir()
             with self.assertRaises(RuntimeError):
                 INSTALLER.atomic_symlink(source, destination)
+
+    def test_blun_mcp_merge_preserves_servers_and_protects_config_state(self) -> None:
+        entry = {
+            "command": "python3",
+            "args": ["guard.py", "serve"],
+            "env": {
+                "BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT": "tcp:127.0.0.1:47631",
+                "BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE": "/private/service.token",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / ".blun" / "mcp.json"
+            config.parent.mkdir()
+            original = INSTALLER.json.dumps({
+                "theme": "dark",
+                "mcpServers": {"keep": {"command": "keep"}},
+            }).encode("utf-8")
+            config.write_bytes(original)
+            if os.name != "nt":
+                config.chmod(0o644)
+            backup = config.with_suffix(".json.bak")
+            sentinel = root / "sentinel"
+            sentinel.write_text("unchanged\n", encoding="utf-8")
+            try:
+                backup.symlink_to(sentinel)
+            except OSError:
+                backup = Path()
+
+            result = INSTALLER.merge_blun_mcp_config(config, entry)
+
+            self.assertEqual(result, config.with_suffix(".json.bak"))
+            merged = INSTALLER.json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(merged["theme"], "dark")
+            self.assertEqual(merged["mcpServers"]["keep"], {"command": "keep"})
+            self.assertEqual(merged["mcpServers"][INSTALLER.MCP_SERVER_NAME], entry)
+            self.assertEqual(config.with_suffix(".json.bak").read_bytes(), original)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged\n")
+            if os.name != "nt":
+                self.assertEqual(config.stat().st_mode & 0o077, 0)
+                self.assertEqual(config.with_suffix(".json.bak").stat().st_mode & 0o077, 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / ".blun" / "mcp.json"
+            result = INSTALLER.merge_blun_mcp_config(config, entry)
+            self.assertIsNone(result)
+            self.assertEqual(
+                INSTALLER.json.loads(config.read_text(encoding="utf-8"))["mcpServers"][INSTALLER.MCP_SERVER_NAME],
+                entry,
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX file-type and permission tests")
+    def test_blun_mcp_merge_rejects_unsafe_files_without_changing_targets(self) -> None:
+        entry = {"command": "python3"}
+        cases = ("symlink", "hardlink", "fifo", "permissions", "oversized")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / ".blun" / "mcp.json"
+                config.parent.mkdir()
+                sentinel = root / "sentinel"
+                sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                sentinel.chmod(0o600)
+                if case == "symlink":
+                    config.symlink_to(sentinel)
+                    expected = "regular file"
+                elif case == "hardlink":
+                    os.link(sentinel, config)
+                    expected = "hard links"
+                elif case == "fifo":
+                    os.mkfifo(config)
+                    expected = "regular file"
+                elif case == "permissions":
+                    config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                    config.chmod(0o622)
+                    expected = "writable outside"
+                else:
+                    config.write_bytes(b"x" * (INSTALLER.MAX_BLUN_MCP_CONFIG_BYTES + 1))
+                    config.chmod(0o600)
+                    expected = "size limit"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    INSTALLER.merge_blun_mcp_config(config, entry)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+                self.assertFalse(config.with_suffix(".json.bak").exists())
+
+    def test_blun_mcp_merge_rejects_identity_exchange_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / ".blun" / "mcp.json"
+            config.parent.mkdir()
+            config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            if os.name != "nt":
+                config.chmod(0o600)
+            details = config.stat()
+            fields = {
+                name: getattr(details, name)
+                for name in (
+                    "st_mode", "st_uid", "st_dev", "st_ino", "st_nlink", "st_size",
+                    "st_ctime_ns", "st_mtime_ns",
+                )
+            }
+            opened = SimpleNamespace(**fields)
+            changed = SimpleNamespace(**fields)
+            changed.st_mtime_ns += 1
+            with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER.merge_blun_mcp_config(config, {"command": "python3"})
+            self.assertEqual(config.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+            self.assertFalse(config.with_suffix(".json.bak").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX symbolic-link test")
+    def test_blun_install_preflights_config_before_runtime_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blun = root / ".blun"
+            blun.mkdir()
+            sentinel = root / "sentinel.json"
+            sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            sentinel.chmod(0o600)
+            (blun / "mcp.json").symlink_to(sentinel)
+            with mock.patch.object(INSTALLER.Path, "home", return_value=root), \
+                 mock.patch.object(INSTALLER, "atomic_symlink") as link, \
+                 mock.patch.object(INSTALLER, "install_delivery_boundary") as delivery, \
+                 mock.patch.object(INSTALLER, "install_guard_runtime") as runtime:
+                with self.assertRaisesRegex(RuntimeError, "regular file"):
+                    INSTALLER.install(["blun"], autostart_service=False)
+            link.assert_not_called()
+            delivery.assert_not_called()
+            runtime.assert_not_called()
+            self.assertTrue((blun / "mcp.json").is_symlink())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
 
     def test_update_refuses_non_git_installation(self) -> None:
         original = INSTALLER.repository_root

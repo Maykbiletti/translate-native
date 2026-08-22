@@ -8,6 +8,8 @@ const path = require("node:path");
 const {
   bootstrapLanguageGuardMcp,
   createBlunLanguageGuard,
+  loadLegacyGuardConfig,
+  readProtectedLegacyConfig,
   readProtectedServiceToken,
   resolveLanguage,
 } = require("../integrations/adapters/blun-code-language-guard");
@@ -21,6 +23,77 @@ if (process.platform !== "win32") {
   fs.symlinkSync(tokenFile, linkedToken);
   assert.throws(() => readProtectedServiceToken(linkedToken), /regular file/);
 }
+
+const protectedHome = path.join(temporary, "protected-home");
+const protectedDir = path.join(protectedHome, ".blun");
+const protectedConfig = path.join(protectedDir, "mcp.json");
+fs.mkdirSync(protectedDir, { recursive: true });
+const protectedPayload = JSON.stringify({
+  mcpServers: {
+    "blun-language-guard": {
+      command: "python3",
+      args: ["guard.py", "serve"],
+      env: {
+        BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT: "tcp:127.0.0.1:47631",
+        BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE: tokenFile,
+      },
+    },
+  },
+});
+fs.writeFileSync(protectedConfig, protectedPayload, { mode: 0o600 });
+assert.equal(loadLegacyGuardConfig(protectedHome).endpoint, "tcp:127.0.0.1:47631");
+
+const stableStats = fs.statSync(protectedConfig);
+const changedStats = new Proxy(stableStats, {
+  get(target, property) {
+    if (property === "mtimeMs") return target.mtimeMs + 1;
+    const value = Reflect.get(target, property);
+    return typeof value === "function" ? value.bind(target) : value;
+  },
+});
+const originalFstatSync = fs.fstatSync;
+let fstatCalls = 0;
+fs.fstatSync = (...args) => (++fstatCalls === 1 ? stableStats : changedStats);
+try {
+  assert.throws(() => readProtectedLegacyConfig(protectedConfig), /changed while reading/);
+} finally {
+  fs.fstatSync = originalFstatSync;
+}
+
+const oversizedHome = path.join(temporary, "oversized-home");
+fs.mkdirSync(path.join(oversizedHome, ".blun"), { recursive: true });
+fs.writeFileSync(path.join(oversizedHome, ".blun", "mcp.json"), "x".repeat(1024 * 1024 + 1), { mode: 0o600 });
+assert.throws(() => loadLegacyGuardConfig(oversizedHome), /size limit/);
+
+const malformedHome = path.join(temporary, "malformed-home");
+fs.mkdirSync(path.join(malformedHome, ".blun"), { recursive: true });
+fs.writeFileSync(
+  path.join(malformedHome, ".blun", "mcp.json"),
+  JSON.stringify({ mcpServers: [] }),
+  { mode: 0o600 },
+);
+assert.throws(() => loadLegacyGuardConfig(malformedHome), /mcpServers must be an object/);
+
+if (process.platform !== "win32") {
+  const linkedHome = path.join(temporary, "linked-home");
+  fs.mkdirSync(path.join(linkedHome, ".blun"), { recursive: true });
+  fs.symlinkSync(protectedConfig, path.join(linkedHome, ".blun", "mcp.json"));
+  assert.throws(() => loadLegacyGuardConfig(linkedHome), /regular file/);
+
+  const hardlinkedHome = path.join(temporary, "hardlinked-home");
+  fs.mkdirSync(path.join(hardlinkedHome, ".blun"), { recursive: true });
+  const hardlinkSource = path.join(temporary, "hardlink-source.json");
+  fs.writeFileSync(hardlinkSource, protectedPayload, { mode: 0o600 });
+  fs.linkSync(hardlinkSource, path.join(hardlinkedHome, ".blun", "mcp.json"));
+  assert.throws(() => loadLegacyGuardConfig(hardlinkedHome), /hard links/);
+
+  const writableHome = path.join(temporary, "writable-home");
+  fs.mkdirSync(path.join(writableHome, ".blun"), { recursive: true });
+  const writableConfig = path.join(writableHome, ".blun", "mcp.json");
+  fs.writeFileSync(writableConfig, protectedPayload, { mode: 0o622 });
+  fs.chmodSync(writableConfig, 0o622);
+  assert.throws(() => loadLegacyGuardConfig(writableHome), /writable outside/);
+}
 const records = [];
 const store = {
   servers: [],
@@ -33,6 +106,18 @@ const store = {
     return { ok: true, savedId: item.id };
   },
 };
+
+if (process.platform !== "win32") {
+  const unsafeHome = path.join(temporary, "unsafe-bootstrap-home");
+  fs.mkdirSync(path.join(unsafeHome, ".blun"), { recursive: true });
+  fs.symlinkSync(protectedConfig, path.join(unsafeHome, ".blun", "mcp.json"));
+  const unsafeStore = { ...store, servers: [] };
+  assert.throws(
+    () => bootstrapLanguageGuardMcp({ userHome: unsafeHome, store: unsafeStore }),
+    error => error instanceof Error && error.code === "guard_unavailable",
+  );
+  assert.equal(unsafeStore.servers.length, 0, "unsafe legacy state must block before store mutation");
+}
 
 const server = net.createServer(socket => {
   let raw = "";

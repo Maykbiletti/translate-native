@@ -56,6 +56,7 @@ MAX_HEALTH_FILE_BYTES = 64 * 1024
 MAX_UPDATE_STATE_BYTES = 64 * 1024
 MAX_MCP_HTTP_TOKEN_BYTES = 64 * 1024
 MAX_DELIVERY_POLICY_BYTES = 64 * 1024
+MAX_BLUN_MCP_CONFIG_BYTES = 1024 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -698,6 +699,9 @@ def mcp_service(action: str) -> int:
 
 
 def install(targets: list[str], *, autostart_service: bool = True) -> int:
+    blun_config = Path.home() / ".blun" / "mcp.json" if "blun" in targets else None
+    if blun_config is not None:
+        preflight_blun_mcp_config(blun_config)
     root = repository_root()
     skill = root / "translate-native"
     for target in targets:
@@ -720,19 +724,14 @@ def install(targets: list[str], *, autostart_service: bool = True) -> int:
         }
     }
     output = Path.home() / ".config" / "blun-language-guard" / "mcp-snippet.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    _atomic_json(output, config)
     print(f"MCP snippet written without modifying host configuration: {output}")
-    if "blun" in targets:
-        blun_config = Path.home() / ".blun" / "mcp.json"
-        current = json.loads(blun_config.read_text(encoding="utf-8-sig")) if blun_config.exists() else {}
-        servers = current.setdefault("mcpServers", {})
-        servers[MCP_SERVER_NAME] = config["mcpServers"][MCP_SERVER_NAME]
-        if blun_config.exists():
-            backup = blun_config.with_suffix(".json.bak")
-            shutil.copy2(blun_config, backup)
+    if blun_config is not None:
+        backup = merge_blun_mcp_config(
+            blun_config, config["mcpServers"][MCP_SERVER_NAME]
+        )
+        if backup:
             print(f"BLUN MCP backup: {backup}")
-        _atomic_json(blun_config, current)
         print(f"BLUN MCP configuration merged: {blun_config}")
     if autostart_service:
         ok, detail = install_guard_autostart(root)
@@ -1220,6 +1219,137 @@ def _atomic_json(path: Path, payload: dict) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _blun_config_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_blun_config_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"BLUN MCP configuration is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"BLUN MCP configuration has additional hard links: {path}")
+    if details.st_size > MAX_BLUN_MCP_CONFIG_BYTES:
+        raise RuntimeError(f"BLUN MCP configuration exceeds the size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"BLUN MCP configuration is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"BLUN MCP configuration owner is invalid: {path}")
+
+
+def _read_protected_blun_config(path: Path) -> tuple[dict, bytes | None, tuple[int, int, int, int, int, int] | None]:
+    """Read BLUN's security-relevant MCP config without following or racing links."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return {}, None, None
+    except OSError as error:
+        raise RuntimeError(f"BLUN MCP configuration is unreadable: {path}") from error
+    _validate_blun_config_details(path, before)
+    expected = _blun_config_identity(before)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            _validate_blun_config_details(path, opened)
+            if _blun_config_identity(opened) != expected:
+                raise RuntimeError(f"BLUN MCP configuration changed while opening: {path}")
+            raw = handle.read(MAX_BLUN_MCP_CONFIG_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"BLUN MCP configuration is unreadable: {path}") from error
+    if len(raw) > MAX_BLUN_MCP_CONFIG_BYTES:
+        raise RuntimeError(f"BLUN MCP configuration exceeds the size limit: {path}")
+    if (
+        _blun_config_identity(after_read) != expected
+        or _blun_config_identity(after_path) != expected
+    ):
+        raise RuntimeError(f"BLUN MCP configuration changed while reading: {path}")
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"BLUN MCP configuration is invalid: {path}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"BLUN MCP configuration root must be an object: {path}")
+    return payload, raw, expected
+
+
+def _assert_blun_config_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"BLUN MCP configuration disappeared before replacement: {path}")
+    except OSError as error:
+        raise RuntimeError(f"BLUN MCP configuration cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"BLUN MCP configuration appeared during installation: {path}")
+    _validate_blun_config_details(path, current)
+    if _blun_config_identity(current) != expected:
+        raise RuntimeError(f"BLUN MCP configuration changed before replacement: {path}")
+
+
+def _atomic_bytes(path: Path, payload: bytes, *, before_replace=None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            os.chmod(temporary, 0o600)
+        if before_replace is not None:
+            before_replace()
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def merge_blun_mcp_config(path: Path, entry: dict) -> Path | None:
+    """Preserve unrelated BLUN MCP servers while atomically installing the guard."""
+    current, original, expected = _read_protected_blun_config(path)
+    servers = current.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"BLUN mcpServers must be an object: {path}")
+    servers[MCP_SERVER_NAME] = entry
+    backup = None
+    if original is not None:
+        backup = path.with_suffix(".json.bak")
+        _atomic_bytes(backup, original)
+    encoded = (json.dumps(current, indent=2) + "\n").encode("utf-8")
+    _atomic_bytes(
+        path,
+        encoded,
+        before_replace=lambda: _assert_blun_config_unchanged(path, expected),
+    )
+    return backup
+
+
+def preflight_blun_mcp_config(path: Path) -> None:
+    """Reject unsafe BLUN configuration before installation mutates any runtime."""
+    current, _original, _expected = _read_protected_blun_config(path)
+    servers = current.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"BLUN mcpServers must be an object: {path}")
 
 
 def _load_update_policy(path: Path) -> dict | None:
