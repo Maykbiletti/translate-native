@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import signal
+import stat
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +26,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 47632
 DEFAULT_MCP_PATH = "/mcp"
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2025-06-18"}
+MAX_ACCESS_TOKEN_BYTES = 64 * 1024
 
 
 def _load_guard():
@@ -49,14 +51,55 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-def load_access_token(path: Path) -> str:
-    if not path.is_file():
-        raise RuntimeError(f"MCP access-token file does not exist: {path}")
-    if os.name != "nt" and path.stat().st_mode & 0o077:
+def _token_file_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_access_token_file(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"MCP access-token path is not a regular file: {path}")
+    if details.st_size < 32 or details.st_size > MAX_ACCESS_TOKEN_BYTES:
+        raise RuntimeError(f"MCP access token has an invalid size: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
         raise RuntimeError(f"MCP access-token permissions must be owner-only: {path}")
-    token = path.read_text(encoding="utf-8-sig").strip()
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"MCP access-token owner is invalid: {path}")
+
+
+def load_access_token(path: Path) -> str:
+    before = path.lstat()
+    _validate_access_token_file(path, before)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _validate_access_token_file(path, opened)
+        if _token_file_identity(opened) != _token_file_identity(before):
+            raise RuntimeError(f"MCP access token changed while opening: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_ACCESS_TOKEN_BYTES + 1)
+        after_read = os.fstat(descriptor)
+        after_path = path.lstat()
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_ACCESS_TOKEN_BYTES:
+        raise RuntimeError(f"MCP access token has an invalid size: {path}")
+    if (
+        _token_file_identity(after_read) != _token_file_identity(opened)
+        or _token_file_identity(after_path) != _token_file_identity(opened)
+    ):
+        raise RuntimeError(f"MCP access token changed while reading: {path}")
+    try:
+        token = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"MCP access token is not valid UTF-8: {path}") from error
     if len(token) < 32:
-        raise RuntimeError("MCP access token must contain at least 32 characters")
+        raise RuntimeError(f"MCP access token is invalid: {path}")
     return token
 
 

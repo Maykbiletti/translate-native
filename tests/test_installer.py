@@ -1600,6 +1600,94 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.MCP_HTTP_TOKEN,
                 ) = originals
 
+    def test_mcp_http_token_creation_rejects_links_and_legacy_temporary_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "mcp-http.token"
+            sentinel = root / "sentinel"
+            sentinel.write_text("s" * 64 + "\n", encoding="ascii")
+            legacy_temporary = token.with_suffix(".tmp")
+            try:
+                legacy_temporary.symlink_to(sentinel)
+            except OSError as error:
+                self.skipTest(f"symbolic links are unavailable: {error}")
+
+            INSTALLER.ensure_mcp_http_token(token)
+            self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
+            self.assertTrue(legacy_temporary.is_symlink())
+            self.assertFalse(token.is_symlink())
+            self.assertGreaterEqual(len(INSTALLER._read_protected_mcp_http_token(token)), 32)
+
+            token.unlink()
+            token.symlink_to(sentinel)
+            with self.assertRaisesRegex(RuntimeError, "regular file"):
+                INSTALLER.ensure_mcp_http_token(token)
+            self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
+
+    def test_installer_mcp_http_token_reader_is_bounded_and_identity_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "mcp-http.token"
+            token.write_bytes(b"x" * (INSTALLER.MAX_MCP_HTTP_TOKEN_BYTES + 1))
+            if os.name != "nt":
+                token.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER._read_protected_mcp_http_token(token)
+
+            token.write_text("a" * 64 + "\n", encoding="ascii")
+            replacement = root / "replacement.token"
+            replacement.write_text("b" * 64 + "\n", encoding="ascii")
+            if os.name != "nt":
+                token.chmod(0o600)
+                replacement.chmod(0o600)
+            opened = token.stat()
+            changed = replacement.stat()
+            with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER._read_protected_mcp_http_token(token)
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_mcp_probe_rejects_linked_access_token_before_network(self) -> None:
+        original = INSTALLER.MCP_HTTP_TOKEN
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.token"
+            target.write_text("known-token-" + "x" * 32 + "\n", encoding="ascii")
+            target.chmod(0o600)
+            INSTALLER.MCP_HTTP_TOKEN = root / "mcp-http.token"
+            INSTALLER.MCP_HTTP_TOKEN.symlink_to(target)
+            try:
+                with mock.patch.object(INSTALLER.urllib.request, "urlopen") as opener:
+                    with self.assertRaisesRegex(RuntimeError, "regular file"):
+                        INSTALLER._mcp_http_request("/healthz")
+                opener.assert_not_called()
+            finally:
+                INSTALLER.MCP_HTTP_TOKEN = original
+
+    def test_mcp_runtime_rejects_linked_token_before_command_mutation(self) -> None:
+        original = INSTALLER.MCP_HTTP_TOKEN
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.token"
+            target.write_text("known-token-" + "x" * 32 + "\n", encoding="ascii")
+            if os.name != "nt":
+                target.chmod(0o600)
+            INSTALLER.MCP_HTTP_TOKEN = root / "mcp-http.token"
+            try:
+                INSTALLER.MCP_HTTP_TOKEN.symlink_to(target)
+            except OSError as error:
+                INSTALLER.MCP_HTTP_TOKEN = original
+                self.skipTest(f"symbolic links are unavailable: {error}")
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink") as link:
+                    with self.assertRaisesRegex(RuntimeError, "regular file"):
+                        INSTALLER.install_mcp_http_runtime(ROOT)
+                link.assert_not_called()
+                self.assertTrue(INSTALLER.MCP_HTTP_TOKEN.is_symlink())
+                self.assertEqual(target.read_text(encoding="ascii"), "known-token-" + "x" * 32 + "\n")
+            finally:
+                INSTALLER.MCP_HTTP_TOKEN = original
+
     def test_claude_configuration_uses_http_helper_and_removes_local_shadows(self) -> None:
         original_headers = INSTALLER.MCP_HEADERS_COMMAND
         with tempfile.TemporaryDirectory() as directory:

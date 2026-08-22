@@ -54,6 +54,7 @@ HEALTH_REPAIR_BACKOFF_SECONDS = (60, 120, 300, 900, 3600)
 MAX_UPDATE_POLICY_BYTES = 64 * 1024
 MAX_HEALTH_FILE_BYTES = 64 * 1024
 MAX_UPDATE_STATE_BYTES = 64 * 1024
+MAX_MCP_HTTP_TOKEN_BYTES = 64 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -181,24 +182,81 @@ def ensure_service_token(path: Path | None = None) -> None:
         os.close(descriptor)
 
 
+def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_mcp_http_token_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"MCP access-token path is not a regular file: {path}")
+    if details.st_size < 32 or details.st_size > MAX_MCP_HTTP_TOKEN_BYTES:
+        raise RuntimeError(f"MCP access token has an invalid size: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise RuntimeError(f"MCP access-token permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"MCP access-token owner is invalid: {path}")
+
+
+def _read_protected_mcp_http_token(path: Path) -> str:
+    before = path.lstat()
+    _validate_mcp_http_token_details(path, before)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _validate_mcp_http_token_details(path, opened)
+        if _mcp_http_token_identity(opened) != _mcp_http_token_identity(before):
+            raise RuntimeError(f"MCP access token changed while opening: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_MCP_HTTP_TOKEN_BYTES + 1)
+        after_read = os.fstat(descriptor)
+        after_path = path.lstat()
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_MCP_HTTP_TOKEN_BYTES:
+        raise RuntimeError(f"MCP access token has an invalid size: {path}")
+    if (
+        _mcp_http_token_identity(after_read) != _mcp_http_token_identity(opened)
+        or _mcp_http_token_identity(after_path) != _mcp_http_token_identity(opened)
+    ):
+        raise RuntimeError(f"MCP access token changed while reading: {path}")
+    try:
+        token = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"MCP access token is not valid UTF-8: {path}") from error
+    if len(token) < 32:
+        raise RuntimeError(f"MCP access token is invalid: {path}")
+    return token
+
+
 def ensure_mcp_http_token(path: Path | None = None) -> None:
     """Create a stable bearer token for the loopback HTTP MCP endpoint."""
     path = path or MCP_HTTP_TOKEN
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if not path.is_file():
-            raise RuntimeError(f"MCP access-token path is not a file: {path}")
-        token = path.read_text(encoding="utf-8-sig").strip()
-        if len(token) < 32:
-            raise RuntimeError(f"MCP access token is invalid: {path}")
-        if os.name != "nt" and path.stat().st_mode & 0o077:
-            raise RuntimeError(f"MCP access-token permissions must be owner-only: {path}")
+    try:
+        _read_protected_mcp_http_token(path)
         return
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
-    if os.name != "nt":
-        os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    except FileNotFoundError:
+        pass
+    token = os.urandom(32).hex().encode("ascii") + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        _read_protected_mcp_http_token(path)
+        return
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(token)
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def install_delivery_boundary(root: Path) -> None:
@@ -238,10 +296,11 @@ def install_mcp_http_runtime(root: Path) -> None:
     for source in (gateway, headers):
         if not source.is_file():
             raise RuntimeError(f"Missing persistent MCP component: {source}")
+    ensure_mcp_http_token()
+    for source in (gateway, headers):
         source.chmod(source.stat().st_mode | 0o111)
     atomic_symlink(gateway, MCP_HTTP_COMMAND)
     atomic_symlink(headers, MCP_HEADERS_COMMAND)
-    ensure_mcp_http_token()
     print(f"Persistent MCP command: {MCP_HTTP_COMMAND}")
     print(f"Dynamic MCP headers command: {MCP_HEADERS_COMMAND}")
 
@@ -540,7 +599,7 @@ def project_mcp_shadows(start: Path | None = None) -> list[Path]:
 
 
 def _mcp_http_request(path: str, payload: dict | None = None, *, timeout: float = 4.0) -> tuple[int, dict]:
-    token = MCP_HTTP_TOKEN.read_text(encoding="utf-8-sig").strip()
+    token = _read_protected_mcp_http_token(MCP_HTTP_TOKEN)
     url = MCP_HTTP_URL.removesuffix("/mcp") + path
     headers = {"Authorization": f"Bearer {token}"}
     data = None
@@ -1024,7 +1083,11 @@ def doctor() -> int:
         MCP_HEADERS_COMMAND.is_symlink() and MCP_HEADERS_COMMAND.resolve() == mcp_headers_source.resolve(),
         str(MCP_HEADERS_COMMAND),
     ))
-    mcp_token_secure = MCP_HTTP_TOKEN.is_file() and (os.name == "nt" or MCP_HTTP_TOKEN.stat().st_mode & 0o077 == 0)
+    try:
+        _read_protected_mcp_http_token(MCP_HTTP_TOKEN)
+        mcp_token_secure = True
+    except (OSError, RuntimeError):
+        mcp_token_secure = False
     checks.append(("MCP HTTP access token", mcp_token_secure, str(MCP_HTTP_TOKEN)))
     claude_config_ok = False
     claude_config_detail = str(CLAUDE_CONFIG)
