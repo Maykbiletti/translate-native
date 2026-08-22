@@ -288,6 +288,75 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(list(root.glob(".guard.service.*.tmp")), [])
 
+    def test_service_definition_rejects_unsafe_parent_before_starting_runtime(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            redirected = home / "redirected"
+            redirected.mkdir()
+            systemd = home / ".config" / "systemd"
+            systemd.mkdir(parents=True)
+            units = systemd / "user"
+            units.symlink_to(redirected, target_is_directory=True)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "safely open service-definition directory"):
+                    INSTALLER.install_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(list(redirected.iterdir()), [])
+
+            units.unlink()
+            units.mkdir()
+            if os.name != "nt":
+                units.chmod(0o777)
+                with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                     mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                    with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                        INSTALLER.install_health_monitor(home)
+                runner.assert_not_called()
+                units.chmod(0o700)
+
+            library = home / "Library"
+            library.mkdir()
+            agents = library / "LaunchAgents"
+            agents.symlink_to(redirected, target_is_directory=True)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "safely open service-definition directory"):
+                    INSTALLER.install_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(list(redirected.iterdir()), [])
+
+    def test_service_definition_preserves_parent_exchanged_during_write(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            units = home / ".config" / "systemd" / "user"
+            units.mkdir(parents=True)
+            redirected = home / "redirected"
+            redirected.mkdir()
+            detached = home / "detached-units"
+            real_assert = INSTALLER._assert_service_directory_unchanged
+
+            def exchange_then_recheck(path: Path, expected) -> None:
+                path.rename(detached)
+                path.symlink_to(redirected, target_is_directory=True)
+                real_assert(path, expected)
+
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner, \
+                 mock.patch.object(
+                     INSTALLER,
+                     "_assert_service_directory_unchanged",
+                     side_effect=exchange_then_recheck,
+                 ):
+                with self.assertRaisesRegex(RuntimeError, "not a directory"):
+                    INSTALLER.install_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(list(redirected.iterdir()), [])
+            self.assertTrue((detached / "blun-language-guard-health.service").is_file())
+            self.assertEqual(list(detached.glob(".*.tmp")), [])
+
     def test_service_definition_removal_rejects_unsafe_or_foreign_state(self) -> None:
         completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
         with tempfile.TemporaryDirectory() as directory:

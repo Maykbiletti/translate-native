@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -141,15 +142,7 @@ def _service_definition_identity(
     )
 
 
-def _inspect_service_definition(
-    path: Path,
-) -> tuple[int, int, int, int, int, int] | None:
-    try:
-        details = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        raise RuntimeError(f"Cannot inspect service definition: {path}") from error
+def _validate_service_definition_details(path: Path, details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"Service definition is not a regular file: {path}")
     if details.st_nlink != 1:
@@ -160,6 +153,18 @@ def _inspect_service_definition(
         raise RuntimeError(f"Service definition is writable outside its owner: {path}")
     if hasattr(os, "getuid") and details.st_uid != os.getuid():
         raise RuntimeError(f"Service definition owner is invalid: {path}")
+
+
+def _inspect_service_definition(
+    path: Path,
+) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Cannot inspect service definition: {path}") from error
+    _validate_service_definition_details(path, details)
     return _service_definition_identity(details)
 
 
@@ -174,10 +179,153 @@ def _assert_service_definition_unchanged(
         raise RuntimeError(f"Service definition changed before replacement: {path}")
 
 
-def _write_service_definition(path: Path, content: str) -> None:
+def _service_directory_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_uid,
+        details.st_gid,
+    )
+
+
+def _validate_service_directory_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Service-definition directory is not a directory: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"Service-definition directory is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Service-definition directory owner is invalid: {path}")
+
+
+def _assert_service_directory_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int],
+) -> None:
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"Service-definition directory cannot be rechecked: {path}") from error
+    _validate_service_directory_details(path, current)
+    if _service_directory_identity(current) != expected:
+        raise RuntimeError(f"Service-definition directory changed during installation: {path}")
+
+
+@contextlib.contextmanager
+def _open_service_definition_directory(path: Path, home: Path):
+    try:
+        relative = path.relative_to(home)
+    except ValueError as error:
+        raise RuntimeError(f"Service-definition directory is outside the user home: {path}") from error
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = None
+    current_path = home
+    try:
+        descriptor = os.open(home, flags)
+        _validate_service_directory_details(home, os.fstat(descriptor))
+        for component in relative.parts:
+            current_path = current_path / component
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(component, flags, dir_fd=descriptor)
+            try:
+                _validate_service_directory_details(current_path, os.fstat(child))
+            except Exception:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        expected = _service_directory_identity(os.fstat(descriptor))
+        yield descriptor
+        _assert_service_directory_unchanged(path, expected)
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Cannot safely open service-definition directory: {current_path}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _inspect_service_definition_at(
+    directory: int, path: Path,
+) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        details = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Cannot inspect service definition: {path}") from error
+    _validate_service_definition_details(path, details)
+    return _service_definition_identity(details)
+
+
+def _assert_service_definition_at_unchanged(
+    directory: int,
+    path: Path,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    current = _inspect_service_definition_at(directory, path)
+    if expected is None and current is not None:
+        raise RuntimeError(f"Service definition appeared before replacement: {path}")
+    if expected is not None and current != expected:
+        raise RuntimeError(f"Service definition changed before replacement: {path}")
+
+
+def _write_service_definition(path: Path, content: str, *, home: Path | None = None) -> None:
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_SERVICE_DEFINITION_BYTES:
         raise RuntimeError(f"Service definition exceeds the size limit: {path}")
+    if home is not None:
+        with _open_service_definition_directory(path.parent, home) as directory:
+            expected = _inspect_service_definition_at(directory, path)
+            temporary_name = ""
+            for _attempt in range(16):
+                candidate = f".{path.name}.{secrets.token_hex(16)}.tmp"
+                flags = (
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                try:
+                    descriptor = os.open(candidate, flags, 0o600, dir_fd=directory)
+                except FileExistsError:
+                    continue
+                temporary_name = candidate
+                break
+            else:
+                raise RuntimeError(f"Cannot reserve temporary service definition: {path}")
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _assert_service_definition_at_unchanged(directory, path, expected)
+                os.replace(
+                    temporary_name,
+                    path.name,
+                    src_dir_fd=directory,
+                    dst_dir_fd=directory,
+                )
+                temporary_name = ""
+            finally:
+                if temporary_name:
+                    try:
+                        os.unlink(temporary_name, dir_fd=directory)
+                    except FileNotFoundError:
+                        pass
+        return
     expected = _inspect_service_definition(path)
     _atomic_bytes(
         path,
@@ -522,8 +670,8 @@ def install_guard_autostart(root: Path) -> tuple[bool, str]:
     arguments = _service_arguments(root)
     system = platform.system()
     if system == "Linux":
-        units = Path.home() / ".config" / "systemd" / "user"
-        units.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        units = home / ".config" / "systemd" / "user"
         service = units / "blun-language-guard.service"
         _write_service_definition(
             service,
@@ -531,13 +679,14 @@ def install_guard_autostart(root: Path) -> tuple[bool, str]:
             "[Service]\nType=simple\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\nRestart=on-failure\nRestartSec=2\n\n"
             "[Install]\nWantedBy=default.target\n",
+            home=home,
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", service.name])
         return reload_result.returncode == 0 and enable_result.returncode == 0, str(service)
     if system == "Darwin":
-        agents = Path.home() / "Library" / "LaunchAgents"
-        agents.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        agents = home / "Library" / "LaunchAgents"
         plist = agents / "ai.blun.language-guard.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
         _write_service_definition(
@@ -548,6 +697,7 @@ def install_guard_autostart(root: Path) -> tuple[bool, str]:
             "<plist version=\"1.0\"><dict><key>Label</key><string>ai.blun.language-guard</string>"
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n",
+            home=home,
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
@@ -563,8 +713,8 @@ def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
     arguments = _mcp_http_arguments(root)
     system = platform.system()
     if system == "Linux":
-        units = Path.home() / ".config" / "systemd" / "user"
-        units.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        units = home / ".config" / "systemd" / "user"
         service = units / "blun-language-guard-mcp.service"
         _write_service_definition(
             service,
@@ -573,13 +723,14 @@ def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
             "[Service]\nType=simple\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\nRestart=always\nRestartSec=1\n\n"
             "[Install]\nWantedBy=default.target\n",
+            home=home,
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", service.name])
         return reload_result.returncode == 0 and enable_result.returncode == 0, str(service)
     if system == "Darwin":
-        agents = Path.home() / "Library" / "LaunchAgents"
-        agents.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        agents = home / "Library" / "LaunchAgents"
         plist = agents / "ai.blun.language-guard-mcp.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
         _write_service_definition(
@@ -591,6 +742,7 @@ def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>"
             "<key>ThrottleInterval</key><integer>1</integer></dict></plist>\n",
+            home=home,
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
@@ -2818,33 +2970,35 @@ def install_scheduler() -> tuple[bool, str]:
     command = f'"{sys.executable}" "{Path(__file__).resolve()}" auto-update run'
     system = platform.system()
     if system == "Linux":
-        units = Path.home() / ".config" / "systemd" / "user"
-        units.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        units = home / ".config" / "systemd" / "user"
         service = units / "blun-language-guard-update.service"
         timer = units / "blun-language-guard-update.timer"
         _write_service_definition(
             service,
             "[Unit]\nDescription=Update BLUN Language Guard safely\n\n"
             "[Service]\nType=oneshot\nExecStart=" + command + "\n",
+            home=home,
         )
         _write_service_definition(
             timer,
             "[Unit]\nDescription=Daily BLUN Language Guard update check\n\n"
             "[Timer]\nOnBootSec=5m\nOnUnitActiveSec=1h\nPersistent=true\n"
             "RandomizedDelaySec=10m\n\n[Install]\nWantedBy=timers.target\n",
+            home=home,
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", timer.name])
         ok = reload_result.returncode == 0 and enable_result.returncode == 0
         return ok, str(timer)
     if system == "Darwin":
-        agents = Path.home() / "Library" / "LaunchAgents"
-        agents.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        agents = home / "Library" / "LaunchAgents"
         plist = agents / "ai.blun.language-guard-updater.plist"
         _write_service_definition(plist, """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>ai.blun.language-guard-updater</string>
-<key>ProgramArguments</key><array><string>""" + sys.executable + "</string><string>" + str(Path(__file__).resolve()) + "</string><string>auto-update</string><string>run</string></array>\n<key>StartInterval</key><integer>3600</integer><key>RunAtLoad</key><true/></dict></plist>\n")
+<key>ProgramArguments</key><array><string>""" + sys.executable + "</string><string>" + str(Path(__file__).resolve()) + "</string><string>auto-update</string><string>run</string></array>\n<key>StartInterval</key><integer>3600</integer><key>RunAtLoad</key><true/></dict></plist>\n", home=home)
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
         return result.returncode == 0, str(plist)
     if system == "Windows":
@@ -2911,7 +3065,6 @@ def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
     system = platform.system()
     if system == "Linux":
         units = home / ".config" / "systemd" / "user"
-        units.mkdir(parents=True, exist_ok=True)
         service = units / "blun-language-guard-health.service"
         timer = units / "blun-language-guard-health.timer"
         _write_service_definition(
@@ -2920,19 +3073,20 @@ def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
             "After=blun-language-guard.service blun-language-guard-mcp.service\n\n"
             "[Service]\nType=oneshot\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\n",
+            home=home,
         )
         _write_service_definition(
             timer,
             "[Unit]\nDescription=Monitor BLUN Language Guard every minute\n\n"
             "[Timer]\nOnBootSec=1m\nOnUnitActiveSec=1m\nAccuracySec=10s\nPersistent=true\n\n"
             "[Install]\nWantedBy=timers.target\n",
+            home=home,
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", timer.name])
         return reload_result.returncode == 0 and enable_result.returncode == 0, str(timer)
     if system == "Darwin":
         agents = home / "Library" / "LaunchAgents"
-        agents.mkdir(parents=True, exist_ok=True)
         plist = agents / "ai.blun.language-guard-health.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
         _write_service_definition(
@@ -2945,6 +3099,7 @@ def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer>"
             "<key>ThrottleInterval</key><integer>10</integer></dict></plist>\n",
+            home=home,
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
