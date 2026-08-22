@@ -7,7 +7,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 
@@ -25,17 +24,15 @@ def load_verification_key(path: Path) -> bytes:
     if environment_key:
         return hashlib.sha256(environment_key.encode("utf-8")).digest()
     try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if os.name != "nt" and mode & 0o077:
-            raise ValueError("signing key permissions are broader than owner-only")
-        key = path.read_bytes()
+        return QUALITY.load_existing_key(path)
     except FileNotFoundError as error:
         raise ValueError("signing key is missing; verification fails closed") from error
     except OSError as error:
         raise ValueError("signing key cannot be read") from error
-    if len(key) < 32:
-        raise ValueError("signing key is invalid")
-    return key
+    except ValueError as error:
+        if "permissions" in str(error):
+            raise ValueError("signing key permissions are broader than owner-only") from error
+        raise ValueError("signing key is invalid") from error
 
 
 def main() -> int:

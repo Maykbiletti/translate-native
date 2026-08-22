@@ -244,6 +244,7 @@ class MCPHTTPGatewayTests(unittest.TestCase):
                     "release": True,
                     "signature": True,
                     "tamper_blocked": True,
+                    "audit_paths": True,
                 })
                 self.assertEqual(result["canary"], {"status": "PASS", "language": "sv-SE"})
                 self.assertFalse((root / "audit.jsonl").exists())
@@ -305,6 +306,56 @@ class MCPAuthHeadersTests(unittest.TestCase):
             os.chmod(path, 0o644)
             with self.assertRaisesRegex(RuntimeError, "owner-only"):
                 HEADERS.load_token(path)
+
+    def test_gateway_and_header_helper_reject_links_and_oversized_tokens(self) -> None:
+        consumers = (GATEWAY.load_access_token, HEADERS.load_token)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.token"
+            target.write_text("known-token-" + "x" * 32 + "\n", encoding="ascii")
+            if os.name != "nt":
+                target.chmod(0o600)
+            linked = root / "linked.token"
+            try:
+                linked.symlink_to(target)
+            except OSError as error:
+                self.skipTest(f"symbolic links are unavailable: {error}")
+            for consumer in consumers:
+                with self.subTest(consumer=consumer.__module__, case="link"):
+                    with self.assertRaisesRegex(RuntimeError, "regular file"):
+                        consumer(linked)
+
+            oversized = root / "oversized.token"
+            oversized.write_bytes(b"x" * (HEADERS.MAX_TOKEN_BYTES + 1))
+            if os.name != "nt":
+                oversized.chmod(0o600)
+            for consumer in consumers:
+                with self.subTest(consumer=consumer.__module__, case="oversized"):
+                    with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                        consumer(oversized)
+
+    def test_gateway_and_header_helper_reject_token_identity_change(self) -> None:
+        consumers = (
+            (GATEWAY, GATEWAY.load_access_token),
+            (HEADERS, HEADERS.load_token),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, (module, consumer) in enumerate(consumers):
+                token = root / f"token-{index}"
+                replacement = root / f"replacement-{index}"
+                token.write_text("a" * 64 + "\n", encoding="ascii")
+                replacement.write_text("b" * 64 + "\n", encoding="ascii")
+                if os.name != "nt":
+                    token.chmod(0o600)
+                    replacement.chmod(0o600)
+                opened = token.stat()
+                changed = replacement.stat()
+                with self.subTest(consumer=consumer.__module__), mock.patch.object(
+                    module.os, "fstat", side_effect=(opened, changed)
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                        consumer(token)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,7 @@ CLIENT_SPEC.loader.exec_module(SERVICE_CLIENT)
 DEFAULT_KEY_PATH = Path.home() / ".config" / "blun-language-guard" / "signing.key"
 DEFAULT_POLICY_PATH = Path.home() / ".config" / "blun-language-guard" / "delivery-policy.json"
 DEFAULT_MAX_BYTES = 4 * 1024 * 1024
+MAX_POLICY_BYTES = 64 * 1024
 FORBIDDEN_AGENT_FIELDS = {
     "task_kind", "language", "source_text", "content_type",
     "short_text_reviewed", "key_path", "delivery_channel",
@@ -163,28 +164,93 @@ def load_verification_key(path: Path) -> bytes:
     if environment_key:
         return hashlib.sha256(environment_key.encode("utf-8")).digest()
     try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if os.name != "nt" and mode & 0o077:
-            raise DeliveryBlocked("signing key permissions are broader than owner-only")
-        key = path.read_bytes()
+        return QUALITY.load_existing_key(path)
     except FileNotFoundError as error:
         raise DeliveryBlocked("signing key is missing; delivery fails closed") from error
     except OSError as error:
         raise DeliveryBlocked("signing key cannot be read") from error
-    if len(key) < 32:
-        raise DeliveryBlocked("signing key is invalid")
-    return key
+    except ValueError as error:
+        if "permissions" in str(error):
+            raise DeliveryBlocked("signing key permissions are broader than owner-only") from error
+        raise DeliveryBlocked("signing key is invalid") from error
+
+
+def _policy_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _read_protected_policy(path: Path) -> dict[str, Any] | None:
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise DeliveryBlocked("installed delivery policy is unreadable") from error
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+        raise DeliveryBlocked("installed delivery policy must be a regular file")
+    if before.st_size > MAX_POLICY_BYTES:
+        raise DeliveryBlocked("installed delivery policy exceeds the size limit")
+    if os.name != "nt" and stat.S_IMODE(before.st_mode) & 0o077:
+        raise DeliveryBlocked("installed delivery policy permissions are broader than owner-only")
+    if hasattr(os, "getuid") and before.st_uid != os.getuid():
+        raise DeliveryBlocked("installed delivery policy owner is invalid")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode) or _policy_identity(opened) != _policy_identity(before):
+                raise DeliveryBlocked("installed delivery policy changed while opening")
+            raw = handle.read(MAX_POLICY_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except DeliveryBlocked:
+        raise
+    except OSError as error:
+        raise DeliveryBlocked("installed delivery policy is unreadable") from error
+    if len(raw) > MAX_POLICY_BYTES:
+        raise DeliveryBlocked("installed delivery policy exceeds the size limit")
+    if (
+        _policy_identity(after_read) != _policy_identity(opened)
+        or _policy_identity(after_path) != _policy_identity(opened)
+    ):
+        raise DeliveryBlocked("installed delivery policy changed while reading")
+    try:
+        policy = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise DeliveryBlocked("installed delivery policy is unreadable") from error
+    if not isinstance(policy, dict):
+        raise DeliveryBlocked("installed delivery policy is invalid")
+    return policy
 
 
 def load_installed_service_policy(path: Path = DEFAULT_POLICY_PATH) -> dict[str, Any]:
-    if not path.is_file():
+    policy = _read_protected_policy(path)
+    if policy is None:
         return {}
-    try:
-        policy = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise DeliveryBlocked("installed delivery policy is unreadable") from error
     isolated = policy.get("isolated_service")
-    if policy.get("mandatory") is not True or not isinstance(isolated, dict):
+    if (
+        policy.get("mandatory") is not True
+        or not isinstance(isolated, dict)
+        or isolated.get("required") is not True
+        or not isinstance(isolated.get("endpoint"), str)
+        or not isolated["endpoint"].strip()
+        or len(isolated["endpoint"]) > 4096
+        or not isinstance(isolated.get("token_file"), str)
+        or not isolated["token_file"].strip()
+        or len(isolated["token_file"]) > 4096
+        or ("fail_closed" in policy and policy["fail_closed"] is not True)
+        or ("direct_delivery_allowed" in policy and policy["direct_delivery_allowed"] is not False)
+        or ("raw_streaming_allowed" in policy and policy["raw_streaming_allowed"] is not False)
+        or ("on_guard_error" in policy and policy["on_guard_error"] != "block")
+    ):
         raise DeliveryBlocked("installed delivery policy is invalid")
     return isolated
 
@@ -313,9 +379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if service_endpoint:
             service_token = ""
             if token_file:
-                service_token = token_file.read_text(encoding="utf-8-sig").strip()
-                if len(service_token) < 32:
-                    raise DeliveryBlocked("service token is invalid")
+                service_token = SERVICE_CLIENT.load_service_token(token_file)
             target = verify_envelope_with_service(
                 envelope,
                 policy,
