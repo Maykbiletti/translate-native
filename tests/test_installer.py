@@ -3690,6 +3690,85 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.TARGETS,
                 ) = originals
 
+    def test_health_monitor_state_exchange_blocks_before_repair(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                "status": "blocked", "checked_at": 1, "consecutive_failures": 1,
+            })
+
+            def replace_state() -> tuple[bool, bool]:
+                INSTALLER.HEALTH_STATE.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                    "status": "replacement",
+                    "checked_at": 6501,
+                    "consecutive_failures": 9,
+                    "next_repair_at": 9999,
+                })
+                return False, False
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_guard_stack_status", side_effect=replace_state
+                ), mock.patch.object(
+                    INSTALLER,
+                    "_claude_plugin_monitor_status",
+                    return_value={"required": False, "healthy": True, "reason": "not-installed"},
+                ), mock.patch.object(INSTALLER, "restart_guard_runtime") as restart, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6500), 2)
+                restart.assert_not_called()
+                state = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_STATE.read_text(encoding="utf-8")
+                )
+                self.assertEqual(state["status"], "replacement")
+                self.assertEqual(state["next_repair_at"], 9999)
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_state_exchange_during_repair_is_not_overwritten(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                "status": "blocked", "checked_at": 1, "consecutive_failures": 1,
+            })
+
+            def replace_state() -> tuple[bool, str]:
+                INSTALLER.HEALTH_STATE.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                    "status": "replacement",
+                    "checked_at": 6601,
+                    "consecutive_failures": 7,
+                    "next_repair_at": 8888,
+                })
+                return False, "offline"
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_guard_stack_status", return_value=(False, False)
+                ), mock.patch.object(
+                    INSTALLER,
+                    "_claude_plugin_monitor_status",
+                    return_value={"required": False, "healthy": True, "reason": "not-installed"},
+                ), mock.patch.object(
+                    INSTALLER, "restart_guard_runtime", side_effect=replace_state
+                ) as restart, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6600), 2)
+                restart.assert_called_once_with()
+                state = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_STATE.read_text(encoding="utf-8")
+                )
+                self.assertEqual(state["status"], "replacement")
+                self.assertEqual(state["next_repair_at"], 8888)
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
     def test_health_monitor_never_installs_a_missing_enrolled_claude_plugin(self) -> None:
         originals = (
             INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.UPDATE_CONFIG,

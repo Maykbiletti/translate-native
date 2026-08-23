@@ -447,6 +447,8 @@ Health-monitor activation is also bound to the exact policy identity inspected a
 
 The minutely monitor applies the same identity binding when it first observes an installed Claude plugin and automatically enrolls that cache in mandatory health checks. A policy exchanged while Claude's status command is running survives unchanged; enrollment, plugin repair, and health-state publication stop fail-closed instead of replacing the operator's newer policy.
 
+Every minutely health-state transition is likewise bound to the exact backoff file inspected at run start. An exchange discovered after probing blocks before a service or plugin repair; an exchange during a repair preserves the replacement and prevents the stale result from being published. This keeps concurrent operator state and a newer backoff authoritative without weakening the existing one-repair-per-run limit.
+
 The updater's recorded state is protected independently from its policy. `doctor`, `auto-update status`, scheduled checks, direct updates, and rollback now read `update-state.json` through a bounded owner-only regular-file path, reject links and exchanged identities, and validate commit hashes plus every security-relevant persisted type. Unsafe state blocks before Git commands or candidate code can run and is never printed or replaced through that read path. A missing state remains valid before the first successful update, while rollback continues to require a complete exact state record.
 
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:

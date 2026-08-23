@@ -3659,7 +3659,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
         try:
             stored_config, config_identity = _read_health_config()
             config = dict(stored_config or {})
-            previous = _load_health_state() or {}
+            stored_state, state_identity = _read_health_state()
+            previous = dict(stored_state or {})
         except RuntimeError as error:
             print(json.dumps({
                 "status": "blocked",
@@ -3668,6 +3669,32 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 "detail": str(error),
             }, sort_keys=True), file=sys.stderr)
             return 2
+
+        def block_state_transition(error: RuntimeError | OSError) -> int:
+            print(json.dumps({
+                "status": "blocked",
+                "reason": "unsafe-health-state-transition",
+                "checked_at": timestamp,
+                "detail": str(error),
+            }, sort_keys=True), file=sys.stderr)
+            return 2
+
+        def persist_state(state: dict) -> bool:
+            try:
+                _atomic_json(
+                    HEALTH_STATE,
+                    state,
+                    before_replace=lambda: _assert_protected_state_unchanged(
+                        HEALTH_STATE,
+                        "health-monitor state",
+                        MAX_HEALTH_FILE_BYTES,
+                        state_identity,
+                    ),
+                )
+            except (OSError, RuntimeError) as error:
+                block_state_transition(error)
+                return False
+            return True
         guard_healthy, mcp_healthy = _guard_stack_status()
         try:
             plugin = _claude_plugin_monitor_status(
@@ -3710,7 +3737,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 "repairs": [],
                 **_plugin_health_fields(plugin),
             }
-            _atomic_json(HEALTH_STATE, state)
+            if not persist_state(state):
+                return 2
             print(json.dumps(state, sort_keys=True))
             return 0
         previous_failures = _state_integer(previous.get("consecutive_failures"))
@@ -3731,9 +3759,19 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 "repairs": [],
                 **_plugin_health_fields(plugin),
             }
-            _atomic_json(HEALTH_STATE, state)
+            if not persist_state(state):
+                return 2
             print(json.dumps(state, sort_keys=True), file=sys.stderr)
             return 1
+        try:
+            _assert_protected_state_unchanged(
+                HEALTH_STATE,
+                "health-monitor state",
+                MAX_HEALTH_FILE_BYTES,
+                state_identity,
+            )
+        except RuntimeError as error:
+            return block_state_transition(error)
         repairs: list[str] = []
         if not guard_healthy:
             restarted, _detail = restart_guard_runtime()
@@ -3777,7 +3815,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
             "repairs": repairs,
             **_plugin_health_fields(plugin),
         }
-        _atomic_json(HEALTH_STATE, state)
+        if not persist_state(state):
+            return 2
         print(json.dumps(state, sort_keys=True), file=sys.stdout if recovered else sys.stderr)
         return 0 if recovered else 1
     finally:
