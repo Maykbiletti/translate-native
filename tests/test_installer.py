@@ -3640,6 +3640,56 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.OPERATION_LOCK, INSTALLER.TARGETS,
                 ) = originals
 
+    def test_health_monitor_auto_enrollment_preserves_replaced_policy(self) -> None:
+        originals = (
+            INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK,
+            INSTALLER.TARGETS,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill = root / "skill"
+            skill.mkdir()
+            claude_target = root / "claude-skill"
+            claude_target.symlink_to(skill, target_is_directory=True)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER.TARGETS = {**INSTALLER.TARGETS, "claude": claude_target}
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": True, "interval_seconds": 60, "claude_command": "/bin/claude",
+            })
+
+            def replace_policy(_version: str, _command: str) -> dict:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                    "enabled": False,
+                    "interval_seconds": 300,
+                    "plugin_required": False,
+                    "claude_command": "replacement",
+                })
+                return {"installed": True, "healthy": True, "version": _version}
+
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)), \
+                     mock.patch.object(
+                         INSTALLER, "claude_plugin_status", side_effect=replace_policy
+                     ), mock.patch.object(INSTALLER, "update_claude_plugin") as updater, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6500), 2)
+                updater.assert_not_called()
+                self.assertFalse(INSTALLER.HEALTH_STATE.exists())
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertFalse(policy["enabled"])
+                self.assertEqual(policy["interval_seconds"], 300)
+                self.assertEqual(policy["claude_command"], "replacement")
+            finally:
+                (
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK,
+                    INSTALLER.TARGETS,
+                ) = originals
+
     def test_health_monitor_never_installs_a_missing_enrolled_claude_plugin(self) -> None:
         originals = (
             INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.UPDATE_CONFIG,

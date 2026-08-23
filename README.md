@@ -445,6 +445,8 @@ Health-monitor policy and backoff state use the same protected-file discipline. 
 
 Health-monitor activation is also bound to the exact policy identity inspected after its initial health probe. A policy that appears or changes before scheduler installation blocks without touching the scheduler. If an exchange races with scheduler activation, the replacement is preserved, the newly installed schedule is removed, and activation reports a fail-closed error instead of overwriting concurrent operator state.
 
+The minutely monitor applies the same identity binding when it first observes an installed Claude plugin and automatically enrolls that cache in mandatory health checks. A policy exchanged while Claude's status command is running survives unchanged; enrollment, plugin repair, and health-state publication stop fail-closed instead of replacing the operator's newer policy.
+
 The updater's recorded state is protected independently from its policy. `doctor`, `auto-update status`, scheduled checks, direct updates, and rollback now read `update-state.json` through a bounded owner-only regular-file path, reject links and exchanged identities, and validate commit hashes plus every security-relevant persisted type. Unsafe state blocks before Git commands or candidate code can run and is never printed or replaced through that read path. A missing state remains valid before the first successful update, while rollback continues to require a complete exact state record.
 
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:

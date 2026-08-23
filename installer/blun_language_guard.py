@@ -3534,9 +3534,19 @@ def _configured_claude_command(config: dict | None = None) -> str:
     return shutil.which("claude") or ""
 
 
-def _claude_plugin_monitor_status(config: dict | None = None) -> dict:
+def _claude_plugin_monitor_status(
+    config: dict | None = None,
+    *,
+    config_identity: tuple[int, int, int, int, int, int] | None = None,
+) -> dict:
     """Check an enrolled Claude plugin cache without installing a missing plugin."""
-    config = dict(config) if config is not None else _health_monitor_config()
+    if config is None:
+        stored_config, observed_identity = _read_health_config()
+        config = dict(stored_config or {})
+        if config_identity is None:
+            config_identity = observed_identity
+    else:
+        config = dict(config)
     required = config.get("plugin_required") is True
     if not TARGETS["claude"].is_symlink():
         return {"required": False, "healthy": True, "reason": "claude-skill-not-installed"}
@@ -3552,6 +3562,7 @@ def _claude_plugin_monitor_status(config: dict | None = None) -> dict:
     except OSError:
         return {"required": required, "healthy": False, "reason": "runtime-version-unavailable"}
     status = claude_plugin_status(expected_version, command)
+    policy_enrolled = False
     if status.get("installed") and not required:
         config.update({
             "enabled": config.get("enabled") is not False,
@@ -3559,8 +3570,18 @@ def _claude_plugin_monitor_status(config: dict | None = None) -> dict:
             "plugin_required": True,
             "claude_command": command,
         })
-        _atomic_json(HEALTH_CONFIG, config)
+        _atomic_json(
+            HEALTH_CONFIG,
+            config,
+            before_replace=lambda: _assert_protected_state_unchanged(
+                HEALTH_CONFIG,
+                "health-monitor policy",
+                MAX_HEALTH_FILE_BYTES,
+                config_identity,
+            ),
+        )
         required = True
+        policy_enrolled = True
     if not required:
         return {
             "required": False,
@@ -3576,6 +3597,7 @@ def _claude_plugin_monitor_status(config: dict | None = None) -> dict:
         "expected_version": expected_version,
         "command": command,
         "status": status,
+        "policy_enrolled": policy_enrolled,
     }
 
 
@@ -3635,7 +3657,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
         return 0
     try:
         try:
-            config = _health_monitor_config()
+            stored_config, config_identity = _read_health_config()
+            config = dict(stored_config or {})
             previous = _load_health_state() or {}
         except RuntimeError as error:
             print(json.dumps({
@@ -3646,7 +3669,35 @@ def health_monitor_run(*, now: int | None = None) -> int:
             }, sort_keys=True), file=sys.stderr)
             return 2
         guard_healthy, mcp_healthy = _guard_stack_status()
-        plugin = _claude_plugin_monitor_status(config)
+        try:
+            plugin = _claude_plugin_monitor_status(
+                config,
+                config_identity=config_identity,
+            )
+        except RuntimeError as error:
+            print(json.dumps({
+                "status": "blocked",
+                "reason": "unsafe-health-policy-transition",
+                "checked_at": timestamp,
+                "detail": str(error),
+            }, sort_keys=True), file=sys.stderr)
+            return 2
+        if plugin.get("policy_enrolled") is True:
+            try:
+                stored_config, config_identity = _read_health_config()
+                if stored_config is None or stored_config.get("plugin_required") is not True:
+                    raise RuntimeError(
+                        "Health-monitor policy changed after Claude plugin enrollment"
+                    )
+                config = dict(stored_config)
+            except RuntimeError as error:
+                print(json.dumps({
+                    "status": "blocked",
+                    "reason": "unsafe-health-policy-transition",
+                    "checked_at": timestamp,
+                    "detail": str(error),
+                }, sort_keys=True), file=sys.stderr)
+                return 2
         if guard_healthy and mcp_healthy and plugin.get("healthy") is True:
             state = {
                 "status": "ok",
@@ -3709,7 +3760,10 @@ def health_monitor_run(*, now: int | None = None) -> int:
             if plugin_update.get("attempted"):
                 repairs.append("claude-plugin-update")
         guard_healthy, mcp_healthy = _guard_stack_status()
-        plugin = _claude_plugin_monitor_status(config)
+        plugin = _claude_plugin_monitor_status(
+            config,
+            config_identity=config_identity,
+        )
         recovered = guard_healthy and mcp_healthy and plugin.get("healthy") is True
         failures = 0 if recovered else previous_failures + 1
         state = {
