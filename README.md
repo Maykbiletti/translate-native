@@ -373,7 +373,7 @@ python3 installer/blun_language_guard.py health-monitor status
 python3 installer/blun_language_guard.py health-monitor run
 ```
 
-`health-monitor remove` removes only the monitor schedule; it preserves both services, all secrets, and user configuration.
+`health-monitor remove` removes only the monitor schedule; it preserves both services, all secrets, and user configuration. Before changing the schedule or persisted opt-out, it validates the exact policy and state files and refuses linked, unsafe, malformed, or concurrently replaced state fail-closed.
 
 ### Version 6.5: service-owned one-time delivery grants
 

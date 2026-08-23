@@ -2144,6 +2144,65 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
 
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_health_monitor_remove_rejects_unsafe_files_before_schedule_change(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "sentinel.json"
+            INSTALLER._atomic_json(sentinel, {"enabled": True})
+            try:
+                for unsafe_name in ("health-config.json", "health-state.json"):
+                    with self.subTest(unsafe_name=unsafe_name):
+                        config = root / "health-config.json"
+                        state = root / "health-state.json"
+                        config.unlink(missing_ok=True)
+                        state.unlink(missing_ok=True)
+                        INSTALLER.HEALTH_CONFIG = config
+                        INSTALLER.HEALTH_STATE = state
+                        (config if unsafe_name == config.name else state).symlink_to(sentinel)
+                        with mock.patch.object(INSTALLER, "remove_health_monitor") as remover, \
+                             contextlib.redirect_stderr(io.StringIO()):
+                            self.assertEqual(INSTALLER.health_monitor("remove"), 2)
+                        remover.assert_not_called()
+                        self.assertTrue((config if unsafe_name == config.name else state).is_symlink())
+                        self.assertTrue(
+                            INSTALLER.json.loads(sentinel.read_text(encoding="utf-8"))["enabled"]
+                        )
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
+    def test_health_monitor_remove_preserves_state_replaced_after_preflight(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {"status": "ok", "checked_at": 1})
+
+            def replace_state() -> None:
+                INSTALLER.HEALTH_STATE.unlink()
+                INSTALLER._atomic_json(
+                    INSTALLER.HEALTH_STATE, {"status": "replacement", "checked_at": 2}
+                )
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "remove_health_monitor", side_effect=replace_state
+                ) as remover, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("remove"), 2)
+                remover.assert_called_once_with()
+                replacement = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_STATE.read_text(encoding="utf-8")
+                )
+                self.assertEqual(replacement["status"], "replacement")
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertFalse(policy["enabled"])
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
     def test_missing_or_uninstalled_claude_plugin_is_not_modified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

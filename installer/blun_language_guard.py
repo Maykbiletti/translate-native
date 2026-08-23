@@ -1676,7 +1676,7 @@ def doctor() -> int:
     return int(failed)
 
 
-def _atomic_json(path: Path, payload: dict) -> None:
+def _atomic_json(path: Path, payload: dict, *, before_replace=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -1687,6 +1687,8 @@ def _atomic_json(path: Path, payload: dict) -> None:
             handle.write(json.dumps(payload, indent=2) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -1990,29 +1992,51 @@ def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
     )
 
 
-def _load_protected_state_json(path: Path, label: str, maximum_bytes: int) -> dict | None:
+def _protected_state_identity(
+    details: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_protected_state_details(
+    path: Path, label: str, maximum_bytes: int, details: os.stat_result,
+) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Unsafe {label} file type: {path}")
+    if details.st_size > maximum_bytes:
+        raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise RuntimeError(f"{label.capitalize()} permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"{label.capitalize()} owner is invalid: {path}")
+
+
+def _read_protected_state_json(
+    path: Path, label: str, maximum_bytes: int,
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
     """Read one bounded owner-only JSON state file without following links."""
     try:
         before = path.lstat()
     except FileNotFoundError:
-        return None
+        return None, None
     except OSError as error:
         raise RuntimeError(f"Unreadable {label}: {path}") from error
-    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
-        raise RuntimeError(f"Unsafe {label} file type: {path}")
-    if before.st_size > maximum_bytes:
-        raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
-    if os.name != "nt" and stat.S_IMODE(before.st_mode) & 0o077:
-        raise RuntimeError(f"{label.capitalize()} permissions must be owner-only: {path}")
-    if hasattr(os, "getuid") and before.st_uid != os.getuid():
-        raise RuntimeError(f"{label.capitalize()} owner is invalid: {path}")
+    _validate_protected_state_details(path, label, maximum_bytes, before)
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode) or not _same_file_identity(before, opened):
+            _validate_protected_state_details(path, label, maximum_bytes, opened)
+            if not _same_file_identity(before, opened):
                 raise RuntimeError(f"{label.capitalize()} changed while opening: {path}")
             raw = handle.read(maximum_bytes + 1)
             after_read = os.fstat(handle.fileno())
@@ -2034,13 +2058,36 @@ def _load_protected_state_json(path: Path, label: str, maximum_bytes: int) -> di
         raise RuntimeError(f"Unreadable {label}: {path}") from error
     if not isinstance(value, dict):
         raise RuntimeError(f"Invalid {label}: {path}")
+    return value, _protected_state_identity(after_path)
+
+
+def _load_protected_state_json(path: Path, label: str, maximum_bytes: int) -> dict | None:
+    value, _identity = _read_protected_state_json(path, label, maximum_bytes)
     return value
 
 
-def _load_health_config() -> dict | None:
-    value = _load_protected_state_json(
-        HEALTH_CONFIG, "health-monitor policy", MAX_HEALTH_FILE_BYTES
-    )
+def _assert_protected_state_unchanged(
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"{label.capitalize()} disappeared before replacement: {path}")
+    except OSError as error:
+        raise RuntimeError(f"{label.capitalize()} cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"{label.capitalize()} appeared before replacement: {path}")
+    _validate_protected_state_details(path, label, maximum_bytes, current)
+    if _protected_state_identity(current) != expected:
+        raise RuntimeError(f"{label.capitalize()} changed before replacement: {path}")
+
+
+def _validate_health_config(value: dict | None) -> dict | None:
     if value is None:
         return None
     for field in ("enabled", "plugin_required"):
@@ -2058,6 +2105,19 @@ def _load_health_config() -> dict | None:
         raise RuntimeError(
             f"Invalid health-monitor policy field claude_command: {HEALTH_CONFIG}"
         )
+    return value
+
+
+def _read_health_config(
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
+    value, identity = _read_protected_state_json(
+        HEALTH_CONFIG, "health-monitor policy", MAX_HEALTH_FILE_BYTES
+    )
+    return _validate_health_config(value), identity
+
+
+def _load_health_config() -> dict | None:
+    value, _identity = _read_health_config()
     return value
 
 
@@ -2087,10 +2147,7 @@ def _load_delivery_policy() -> dict | None:
     return value
 
 
-def _load_health_state() -> dict | None:
-    value = _load_protected_state_json(
-        HEALTH_STATE, "health-monitor state", MAX_HEALTH_FILE_BYTES
-    )
+def _validate_health_state(value: dict | None) -> dict | None:
     if value is None:
         return None
     integer_fields = ("checked_at", "consecutive_failures", "last_repair_at", "next_repair_at")
@@ -2114,6 +2171,19 @@ def _load_health_state() -> dict | None:
         or any(not isinstance(item, str) or len(item) > 128 for item in repairs)
     ):
         raise RuntimeError(f"Invalid health-monitor state field repairs: {HEALTH_STATE}")
+    return value
+
+
+def _read_health_state(
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
+    value, identity = _read_protected_state_json(
+        HEALTH_STATE, "health-monitor state", MAX_HEALTH_FILE_BYTES
+    )
+    return _validate_health_state(value), identity
+
+
+def _load_health_state() -> dict | None:
+    value, _identity = _read_health_state()
     return value
 
 
@@ -3625,9 +3695,53 @@ def health_monitor(action: str) -> int:
         fresh = int(time.time()) - int(state.get("checked_at", 0)) <= 180
         return 0 if fresh and state.get("status") in {"ok", "recovered"} else 1
     if action == "remove":
+        try:
+            _config, config_identity = _read_health_config()
+            _state, state_identity = _read_health_state()
+            _assert_protected_state_unchanged(
+                HEALTH_CONFIG,
+                "health-monitor policy",
+                MAX_HEALTH_FILE_BYTES,
+                config_identity,
+            )
+            _assert_protected_state_unchanged(
+                HEALTH_STATE,
+                "health-monitor state",
+                MAX_HEALTH_FILE_BYTES,
+                state_identity,
+            )
+        except RuntimeError as error:
+            print(
+                f"Health-monitor reset is blocked fail-closed by unsafe state: {error}",
+                file=sys.stderr,
+            )
+            return 2
         remove_health_monitor()
-        _atomic_json(HEALTH_CONFIG, {"enabled": False, "interval_seconds": 60})
-        HEALTH_STATE.unlink(missing_ok=True)
+        try:
+            _atomic_json(
+                HEALTH_CONFIG,
+                {"enabled": False, "interval_seconds": 60},
+                before_replace=lambda: _assert_protected_state_unchanged(
+                    HEALTH_CONFIG,
+                    "health-monitor policy",
+                    MAX_HEALTH_FILE_BYTES,
+                    config_identity,
+                ),
+            )
+            _assert_protected_state_unchanged(
+                HEALTH_STATE,
+                "health-monitor state",
+                MAX_HEALTH_FILE_BYTES,
+                state_identity,
+            )
+            if state_identity is not None:
+                HEALTH_STATE.unlink()
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor reset stopped before unsafe state replacement: {error}",
+                file=sys.stderr,
+            )
+            return 2
         print("Health monitor removed; guard services and secrets were preserved.")
         return 0
     check = health_monitor_run()
