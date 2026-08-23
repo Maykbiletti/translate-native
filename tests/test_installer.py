@@ -1005,6 +1005,68 @@ class InstallerTests(unittest.TestCase):
             remove_autostart.assert_not_called()
             self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(), old)
 
+    def test_update_runtime_rollback_preserves_parallel_checkout_changes(self) -> None:
+        for change_kind in ("dirty", "new-head"):
+            with self.subTest(change_kind=change_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                upstream, active, _old, candidate = self._update_repository_pair(root)
+                service = root / "installed-service"
+                service.write_text("installed\n", encoding="utf-8")
+                parallel = active / "parallel-runtime-work.txt"
+                real_run = INSTALLER._run
+
+                def fail_after_parallel_change() -> tuple[bool, str]:
+                    parallel.write_text("operator work during runtime activation\n", encoding="utf-8")
+                    if change_kind == "new-head":
+                        self.assertEqual(real_run(["git", "add", parallel.name], active).returncode, 0)
+                        self.assertEqual(
+                            real_run(["git", "commit", "-m", "parallel runtime work"], active).returncode,
+                            0,
+                        )
+                    return False, "injected restart failure"
+
+                errors = io.StringIO()
+                with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                     mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                     mock.patch.object(INSTALLER, "UPDATE_STATE", root / "update-state.json"), \
+                     mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "updater.json"), \
+                     mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", root / "updater-paused.json"), \
+                     mock.patch.object(INSTALLER, "HEALTH_CONFIG", root / "health-monitor.json"), \
+                     mock.patch.object(INSTALLER, "HEALTH_STATE", root / "health-state.json"), \
+                     mock.patch.object(INSTALLER, "SERVICE_COMMAND", service), \
+                     mock.patch.object(
+                         INSTALLER,
+                         "TARGETS",
+                         {**INSTALLER.TARGETS, "claude": root / "missing-claude"},
+                     ), \
+                     mock.patch.object(
+                         INSTALLER,
+                         "restart_guard_runtime",
+                         side_effect=fail_after_parallel_change,
+                     ) as guard_restart, \
+                     mock.patch.object(INSTALLER, "restart_mcp_http_runtime") as mcp_restart, \
+                     contextlib.redirect_stderr(errors):
+                    self.assertEqual(INSTALLER._update_unlocked(), 1)
+
+                observed = real_run(["git", "rev-parse", "HEAD"], active).stdout.strip()
+                if change_kind == "dirty":
+                    self.assertEqual(observed, candidate)
+                    self.assertIn("checkout changed before runtime rollback", errors.getvalue())
+                else:
+                    self.assertNotEqual(observed, candidate)
+                    self.assertEqual(
+                        real_run(["git", "merge-base", "--is-ancestor", candidate, observed], active).returncode,
+                        0,
+                    )
+                    self.assertIn("HEAD changed independently before runtime rollback", errors.getvalue())
+                self.assertEqual(
+                    parallel.read_text(encoding="utf-8"),
+                    "operator work during runtime activation\n",
+                )
+                self.assertIn("rollback FAILED", errors.getvalue())
+                self.assertEqual(guard_restart.call_count, 1)
+                mcp_restart.assert_not_called()
+
     def test_update_rollback_helpers_preserve_exchanged_artifacts_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

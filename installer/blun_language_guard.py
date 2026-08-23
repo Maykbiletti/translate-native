@@ -2491,6 +2491,34 @@ def _restore_updated_claude_config(
     )
 
 
+def _rollback_activated_update(
+    root: Path,
+    previous: str,
+    activated: str,
+) -> subprocess.CompletedProcess[str]:
+    """Roll back only the exact, still-clean revision activated by this update."""
+    command = ["git", "reset", "--keep", previous]
+    if _clean_checkout_revision(root) != activated:
+        observed = _run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
+        ).stdout.strip()
+        detail = (
+            "HEAD changed independently before runtime rollback"
+            if observed != activated
+            else "the checkout changed before runtime rollback"
+        )
+        return subprocess.CompletedProcess(command, 1, "", detail)
+    rollback = _run(command, root)
+    if rollback.returncode == 0 and _clean_checkout_revision(root) == previous:
+        return rollback
+    return subprocess.CompletedProcess(
+        rollback.args,
+        1,
+        rollback.stdout,
+        ((rollback.stderr or "") + "\nruntime rollback did not restore the exact clean revision").strip(),
+    )
+
+
 def update(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     if not (root / ".git").exists():
@@ -2684,11 +2712,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             else ({}, None, None)
         )
     except RuntimeError as error:
-        rollback = _run(["git", "reset", "--keep", previous], root)
-        restored_head = _run(
-            ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
-        ).stdout.strip()
-        restored = rollback.returncode == 0 and restored_head == previous
+        rollback = _rollback_activated_update(root, previous, revision)
+        restored = rollback.returncode == 0
         print(
             f"Claude configuration is unsafe; runtime activation is blocked ({error}) and repository rollback "
             + ("succeeded." if restored else "FAILED."),
@@ -2702,7 +2727,13 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
     configured_claude_identity: tuple[int, int, int, int, int, int, int] | None = None
 
     def rollback_runtime() -> subprocess.CompletedProcess[str]:
-        rollback = _run(["git", "reset", "--keep", previous], root)
+        rollback = _rollback_activated_update(root, previous, revision)
+        if rollback.returncode != 0:
+            print(
+                f"Runtime repository rollback blocked fail-closed: {rollback.stderr}",
+                file=sys.stderr,
+            )
+            return rollback
         cleanup_error: OSError | RuntimeError | None = None
         if claude_installed:
             try:
