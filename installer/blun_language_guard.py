@@ -207,11 +207,17 @@ def _assert_service_directory_unchanged(
         raise RuntimeError(f"Service-definition directory cannot be rechecked: {path}") from error
     _validate_service_directory_details(path, current)
     if _service_directory_identity(current) != expected:
-        raise RuntimeError(f"Service-definition directory changed during installation: {path}")
+        raise RuntimeError(f"Service-definition directory changed during operation: {path}")
 
 
 @contextlib.contextmanager
-def _open_service_definition_directory(path: Path, home: Path):
+def _open_service_definition_directory(
+    path: Path,
+    home: Path,
+    *,
+    create: bool = True,
+    missing_ok: bool = False,
+):
     try:
         relative = path.relative_to(home)
     except ValueError as error:
@@ -232,11 +238,20 @@ def _open_service_definition_directory(path: Path, home: Path):
             try:
                 child = os.open(component, flags, dir_fd=descriptor)
             except FileNotFoundError:
-                try:
-                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
-                except FileExistsError:
-                    pass
-                child = os.open(component, flags, dir_fd=descriptor)
+                if not create:
+                    if not missing_ok:
+                        raise
+                    os.close(descriptor)
+                    descriptor = None
+                    break
+                else:
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
+                    child = os.open(component, flags, dir_fd=descriptor)
+            if descriptor is None:
+                break
             try:
                 _validate_service_directory_details(current_path, os.fstat(child))
             except Exception:
@@ -244,6 +259,9 @@ def _open_service_definition_directory(path: Path, home: Path):
                 raise
             os.close(descriptor)
             descriptor = child
+        if descriptor is None:
+            yield None
+            return
         expected = _service_directory_identity(os.fstat(descriptor))
         yield descriptor
         _assert_service_directory_unchanged(path, expected)
@@ -279,6 +297,89 @@ def _assert_service_definition_at_unchanged(
         raise RuntimeError(f"Service definition appeared before replacement: {path}")
     if expected is not None and current != expected:
         raise RuntimeError(f"Service definition changed before replacement: {path}")
+
+
+def _preflight_service_definition_removal_at(
+    directory: int,
+    path: Path,
+    required_markers: tuple[str, ...],
+) -> tuple[int, int, int, int, int, int] | None:
+    expected = _inspect_service_definition_at(directory, path)
+    if expected is None:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=directory)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if _service_definition_identity(opened) != expected:
+                raise RuntimeError(f"Service definition changed while opening: {path}")
+            raw = handle.read(MAX_SERVICE_DEFINITION_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = _inspect_service_definition_at(directory, path)
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Cannot read service definition: {path}") from error
+    if len(raw) > MAX_SERVICE_DEFINITION_BYTES:
+        raise RuntimeError(f"Service definition exceeds the size limit: {path}")
+    if _service_definition_identity(after_read) != expected or after_path != expected:
+        raise RuntimeError(f"Service definition changed while reading: {path}")
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeError as error:
+        raise RuntimeError(f"Service definition is not valid UTF-8: {path}") from error
+    if not all(marker in content for marker in required_markers):
+        raise RuntimeError(f"Service definition is not managed by BLUN: {path}")
+    return expected
+
+
+@contextlib.contextmanager
+def _prepare_service_definition_removals(
+    home: Path,
+    definitions: tuple[tuple[Path, tuple[str, ...]], ...],
+):
+    if not definitions:
+        yield []
+        return
+    parent = definitions[0][0].parent
+    if any(path.parent != parent for path, _markers in definitions):
+        raise RuntimeError("Service definitions do not share one protected directory")
+    with _open_service_definition_directory(
+        parent,
+        home,
+        create=False,
+        missing_ok=True,
+    ) as directory:
+        if directory is None:
+            yield [(None, path, None) for path, _markers in definitions]
+            return
+        prepared = [
+            (
+                directory,
+                path,
+                _preflight_service_definition_removal_at(directory, path, markers),
+            )
+            for path, markers in definitions
+        ]
+        _assert_service_directory_unchanged(
+            parent,
+            _service_directory_identity(os.fstat(directory)),
+        )
+        yield prepared
+
+
+def _remove_service_definition_at(
+    directory: int | None,
+    path: Path,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    if expected is None:
+        return
+    if directory is None:
+        raise RuntimeError(f"Service-definition directory disappeared before removal: {path.parent}")
+    _assert_service_definition_at_unchanged(directory, path, expected)
+    os.unlink(path.name, dir_fd=directory)
 
 
 def _write_service_definition(path: Path, content: str, *, home: Path | None = None) -> None:
@@ -332,53 +433,6 @@ def _write_service_definition(path: Path, content: str, *, home: Path | None = N
         encoded,
         before_replace=lambda: _assert_service_definition_unchanged(path, expected),
     )
-
-
-def _preflight_service_definition_removal(
-    path: Path,
-    required_markers: tuple[str, ...],
-) -> tuple[int, int, int, int, int, int] | None:
-    expected = _inspect_service_definition(path)
-    if expected is None:
-        return None
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-        with os.fdopen(descriptor, "rb") as handle:
-            opened = os.fstat(handle.fileno())
-            if _service_definition_identity(opened) != expected:
-                raise RuntimeError(f"Service definition changed while opening: {path}")
-            raw = handle.read(MAX_SERVICE_DEFINITION_BYTES + 1)
-            after_read = os.fstat(handle.fileno())
-        after_path = path.lstat()
-    except RuntimeError:
-        raise
-    except OSError as error:
-        raise RuntimeError(f"Cannot read service definition: {path}") from error
-    if len(raw) > MAX_SERVICE_DEFINITION_BYTES:
-        raise RuntimeError(f"Service definition exceeds the size limit: {path}")
-    if (
-        _service_definition_identity(after_read) != expected
-        or _service_definition_identity(after_path) != expected
-    ):
-        raise RuntimeError(f"Service definition changed while reading: {path}")
-    try:
-        content = raw.decode("utf-8-sig")
-    except UnicodeError as error:
-        raise RuntimeError(f"Service definition is not valid UTF-8: {path}") from error
-    if not all(marker in content for marker in required_markers):
-        raise RuntimeError(f"Service definition is not managed by BLUN: {path}")
-    return expected
-
-
-def _remove_service_definition(
-    path: Path,
-    expected: tuple[int, int, int, int, int, int] | None,
-) -> None:
-    if expected is None:
-        return
-    _assert_service_definition_unchanged(path, expected)
-    path.unlink()
 
 
 def ensure_signing_key(path: Path | None = None) -> None:
@@ -786,22 +840,28 @@ def restart_mcp_http_runtime() -> tuple[bool, str]:
 def remove_mcp_http_autostart() -> None:
     system = platform.system()
     if system == "Linux":
-        service = Path.home() / ".config" / "systemd" / "user" / "blun-language-guard-mcp.service"
-        expected = _preflight_service_definition_removal(
+        home = Path.home()
+        service = home / ".config" / "systemd" / "user" / "blun-language-guard-mcp.service"
+        definitions = ((
             service,
             ("BLUN persistent Streamable HTTP MCP", "mcp_http_gateway.py", "--port 47632"),
-        )
-        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-mcp.service"])
-        _remove_service_definition(service, expected)
-        _run(["systemctl", "--user", "daemon-reload"])
+        ),)
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-mcp.service"])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
+            _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
-        plist = Path.home() / "Library" / "LaunchAgents" / "ai.blun.language-guard-mcp.plist"
-        expected = _preflight_service_definition_removal(
+        home = Path.home()
+        plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-mcp.plist"
+        definitions = ((
             plist,
             ("ai.blun.language-guard-mcp", "mcp_http_gateway.py", "<string>47632</string>"),
-        )
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        _remove_service_definition(plist, expected)
+        ),)
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard MCP"])
 
@@ -3010,7 +3070,8 @@ def install_scheduler() -> tuple[bool, str]:
 def remove_scheduler() -> None:
     system = platform.system()
     if system == "Linux":
-        units = Path.home() / ".config" / "systemd" / "user"
+        home = Path.home()
+        units = home / ".config" / "systemd" / "user"
         definitions = (
             (
                 units / "blun-language-guard-update.service",
@@ -3021,22 +3082,22 @@ def remove_scheduler() -> None:
                 ("Daily BLUN Language Guard update check", "OnUnitActiveSec=1h"),
             ),
         )
-        prepared = [
-            (path, _preflight_service_definition_removal(path, markers))
-            for path, markers in definitions
-        ]
-        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-update.timer"])
-        for path, expected in prepared:
-            _remove_service_definition(path, expected)
-        _run(["systemctl", "--user", "daemon-reload"])
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-update.timer"])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
+            _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
-        plist = Path.home() / "Library" / "LaunchAgents" / "ai.blun.language-guard-updater.plist"
-        expected = _preflight_service_definition_removal(
+        home = Path.home()
+        plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-updater.plist"
+        definitions = ((
             plist,
             ("ai.blun.language-guard-updater", "auto-update", "<string>run</string>"),
-        )
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        _remove_service_definition(plist, expected)
+        ),)
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard Updater"])
 
@@ -3125,22 +3186,21 @@ def remove_health_monitor(home: Path | None = None) -> None:
                 ("Monitor BLUN Language Guard every minute", "OnUnitActiveSec=1m"),
             ),
         )
-        prepared = [
-            (path, _preflight_service_definition_removal(path, markers))
-            for path, markers in definitions
-        ]
-        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-health.timer"])
-        for path, expected in prepared:
-            _remove_service_definition(path, expected)
-        _run(["systemctl", "--user", "daemon-reload"])
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-health.timer"])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
+            _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
         plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-health.plist"
-        expected = _preflight_service_definition_removal(
+        definitions = ((
             plist,
             ("ai.blun.language-guard-health", "health-monitor", "<integer>60</integer>"),
-        )
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        _remove_service_definition(plist, expected)
+        ),)
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard Health"])
 

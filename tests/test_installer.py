@@ -411,28 +411,143 @@ class InstallerTests(unittest.TestCase):
                 "[Service]\nExecStart=python health-monitor run\n",
                 encoding="utf-8",
             )
-            expected = INSTALLER._preflight_service_definition_removal(
+            directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            expected = INSTALLER._preflight_service_definition_removal_at(
+                directory_fd,
                 definition,
                 ("Verify and repair BLUN Language Guard", "health-monitor"),
             )
-            real_assert = INSTALLER._assert_service_definition_unchanged
+            real_assert = INSTALLER._assert_service_definition_at_unchanged
 
-            def exchange_then_recheck(path: Path, identity) -> None:
+            def exchange_then_recheck(open_directory: int, path: Path, identity) -> None:
                 path.unlink()
                 path.write_text("concurrent user file\n", encoding="utf-8")
-                real_assert(path, identity)
+                real_assert(open_directory, path, identity)
 
-            with mock.patch.object(
-                INSTALLER,
-                "_assert_service_definition_unchanged",
-                side_effect=exchange_then_recheck,
-            ):
-                with self.assertRaisesRegex(RuntimeError, "changed before replacement"):
-                    INSTALLER._remove_service_definition(definition, expected)
+            try:
+                with mock.patch.object(
+                    INSTALLER,
+                    "_assert_service_definition_at_unchanged",
+                    side_effect=exchange_then_recheck,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "changed before replacement"):
+                        INSTALLER._remove_service_definition_at(
+                            directory_fd,
+                            definition,
+                            expected,
+                        )
+            finally:
+                os.close(directory_fd)
             self.assertEqual(
                 definition.read_text(encoding="utf-8"),
                 "concurrent user file\n",
             )
+
+    def test_service_definition_removal_rejects_unsafe_parent_before_commands(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            redirected = home / "redirected"
+            redirected.mkdir()
+            service = redirected / "blun-language-guard-health.service"
+            timer = redirected / "blun-language-guard-health.timer"
+            service.write_text(
+                "[Unit]\nDescription=Verify and repair BLUN Language Guard\n"
+                "[Service]\nExecStart=python health-monitor run\n",
+                encoding="utf-8",
+            )
+            timer.write_text(
+                "[Unit]\nDescription=Monitor BLUN Language Guard every minute\n"
+                "[Timer]\nOnUnitActiveSec=1m\n",
+                encoding="utf-8",
+            )
+            systemd = home / ".config" / "systemd"
+            systemd.mkdir(parents=True)
+            units = systemd / "user"
+            units.symlink_to(redirected, target_is_directory=True)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "safely open service-definition directory"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertTrue(service.is_file())
+            self.assertTrue(timer.is_file())
+
+            units.unlink()
+            units.mkdir()
+            local_service = units / service.name
+            local_service.write_text(service.read_text(encoding="utf-8"), encoding="utf-8")
+            local_timer = units / timer.name
+            local_timer.write_text(timer.read_text(encoding="utf-8"), encoding="utf-8")
+            if os.name != "nt":
+                units.chmod(0o777)
+                with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                     mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                    with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                        INSTALLER.remove_health_monitor(home)
+                runner.assert_not_called()
+                self.assertTrue(local_service.is_file())
+                self.assertTrue(local_timer.is_file())
+                units.chmod(0o700)
+
+            library = home / "Library"
+            library.mkdir()
+            agents = library / "LaunchAgents"
+            agents.symlink_to(redirected, target_is_directory=True)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "safely open service-definition directory"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+
+    def test_service_definition_removal_keeps_missing_directory_compatible(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                INSTALLER.remove_health_monitor(home)
+            self.assertEqual(runner.call_count, 2)
+            self.assertFalse((home / ".config").exists())
+
+    def test_service_definition_removal_blocks_parent_exchange_before_commands(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_health_monitor(home)[0])
+            units = home / ".config" / "systemd" / "user"
+            redirected = home / "redirected"
+            redirected.mkdir()
+            sentinel = redirected / "blun-language-guard-health.service"
+            sentinel.write_text("preserve redirected service\n", encoding="utf-8")
+            detached = home / "detached-units"
+            real_preflight = INSTALLER._preflight_service_definition_removal_at
+            exchanged = False
+
+            def exchange_parent(directory_fd: int, path: Path, markers: tuple[str, ...]):
+                nonlocal exchanged
+                expected = real_preflight(directory_fd, path, markers)
+                if not exchanged:
+                    exchanged = True
+                    units.rename(detached)
+                    units.symlink_to(redirected, target_is_directory=True)
+                return expected
+
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner, \
+                 mock.patch.object(
+                     INSTALLER,
+                     "_preflight_service_definition_removal_at",
+                     side_effect=exchange_parent,
+                 ):
+                with self.assertRaisesRegex(RuntimeError, "not a directory"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve redirected service\n")
+            self.assertTrue((detached / "blun-language-guard-health.service").is_file())
+            self.assertTrue((detached / "blun-language-guard-health.timer").is_file())
 
     def test_health_service_definitions_install_and_remove_on_linux_and_macos(self) -> None:
         completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
