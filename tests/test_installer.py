@@ -9,6 +9,7 @@ import unittest
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -158,6 +159,574 @@ class InstallerTests(unittest.TestCase):
             destination.mkdir()
             with self.assertRaises(RuntimeError):
                 INSTALLER.atomic_symlink(source, destination)
+
+    def test_atomic_symlink_preserves_existing_staging_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            destination = root / "bin" / "guard"
+            destination.parent.mkdir()
+            legacy = destination.with_name(destination.name + ".new")
+            legacy.write_text("keep legacy staging path\n", encoding="utf-8")
+            collision = destination.with_name(f".{destination.name}.collision.new")
+            collision.write_text("keep random collision\n", encoding="utf-8")
+            with mock.patch.object(
+                INSTALLER.secrets, "token_hex", side_effect=("collision", "reserved")
+            ):
+                INSTALLER.atomic_symlink(source, destination)
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual(destination.resolve(), source.resolve())
+            self.assertEqual(legacy.read_text(encoding="utf-8"), "keep legacy staging path\n")
+            self.assertEqual(collision.read_text(encoding="utf-8"), "keep random collision\n")
+            self.assertFalse(destination.with_name(f".{destination.name}.reserved.new").exists())
+
+    def test_atomic_symlink_preserves_concurrently_replaced_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            original = root / "original"
+            original.mkdir()
+            destination = root / "bin" / "guard"
+            destination.parent.mkdir()
+            destination.symlink_to(original, target_is_directory=True)
+            real_assert = INSTALLER._assert_installed_symlink_unchanged
+
+            def exchange_then_recheck(path: Path, expected) -> None:
+                path.unlink()
+                path.write_text("concurrent user file\n", encoding="utf-8")
+                real_assert(path, expected)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_assert_installed_symlink_unchanged",
+                side_effect=exchange_then_recheck,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "non-symlink"):
+                    INSTALLER.atomic_symlink(source, destination)
+            self.assertFalse(destination.is_symlink())
+            self.assertEqual(destination.read_text(encoding="utf-8"), "concurrent user file\n")
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.new")),
+                [],
+            )
+
+    def test_service_definition_rejects_links_before_starting_runtime(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            units = home / ".config" / "systemd" / "user"
+            units.mkdir(parents=True)
+            sentinel = home / "sentinel.service"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            service = units / "blun-language-guard-health.service"
+            service.symlink_to(sentinel)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                    INSTALLER.install_health_monitor(home)
+            runner.assert_not_called()
+            self.assertTrue(service.is_symlink())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_service_definition_rejects_hard_links_and_special_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "sentinel"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            linked = root / "linked.service"
+            os.link(sentinel, linked)
+            with self.assertRaisesRegex(RuntimeError, "additional hard links"):
+                INSTALLER._write_service_definition(linked, "replacement\n")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+            if hasattr(os, "mkfifo"):
+                fifo = root / "blocked.timer"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                    INSTALLER._write_service_definition(fifo, "replacement\n")
+
+    def test_service_definition_rejects_oversize_and_open_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            oversized = root / "oversized.service"
+            oversized.write_bytes(b"x" * (INSTALLER.MAX_SERVICE_DEFINITION_BYTES + 1))
+            with self.assertRaisesRegex(RuntimeError, "exceeds the size limit"):
+                INSTALLER._write_service_definition(oversized, "replacement\n")
+
+            if os.name != "nt":
+                broad = root / "broad.timer"
+                broad.write_text("original\n", encoding="utf-8")
+                broad.chmod(0o666)
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER._write_service_definition(broad, "replacement\n")
+                self.assertEqual(broad.read_text(encoding="utf-8"), "original\n")
+
+    def test_service_definition_preserves_concurrently_replaced_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            definition = root / "guard.service"
+            definition.write_text("original\n", encoding="utf-8")
+            real_assert = INSTALLER._assert_service_definition_unchanged
+
+            def exchange_then_recheck(path: Path, expected) -> None:
+                path.unlink()
+                path.write_text("concurrent user file\n", encoding="utf-8")
+                real_assert(path, expected)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_assert_service_definition_unchanged",
+                side_effect=exchange_then_recheck,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed before replacement"):
+                    INSTALLER._write_service_definition(definition, "replacement\n")
+            self.assertEqual(
+                definition.read_text(encoding="utf-8"),
+                "concurrent user file\n",
+            )
+            self.assertEqual(list(root.glob(".guard.service.*.tmp")), [])
+
+    def test_service_definition_rejects_unsafe_parent_before_starting_runtime(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            redirected = home / "redirected"
+            redirected.mkdir()
+            systemd = home / ".config" / "systemd"
+            systemd.mkdir(parents=True)
+            units = systemd / "user"
+            units.symlink_to(redirected, target_is_directory=True)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "safely open service-definition directory"):
+                    INSTALLER.install_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(list(redirected.iterdir()), [])
+
+            units.unlink()
+            units.mkdir()
+            if os.name != "nt":
+                units.chmod(0o777)
+                with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                     mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                    with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                        INSTALLER.install_health_monitor(home)
+                runner.assert_not_called()
+                units.chmod(0o700)
+
+            library = home / "Library"
+            library.mkdir()
+            agents = library / "LaunchAgents"
+            agents.symlink_to(redirected, target_is_directory=True)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "safely open service-definition directory"):
+                    INSTALLER.install_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(list(redirected.iterdir()), [])
+
+    def test_service_definition_preserves_parent_exchanged_during_write(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            units = home / ".config" / "systemd" / "user"
+            units.mkdir(parents=True)
+            redirected = home / "redirected"
+            redirected.mkdir()
+            detached = home / "detached-units"
+            real_assert = INSTALLER._assert_service_directory_unchanged
+
+            def exchange_then_recheck(path: Path, expected) -> None:
+                path.rename(detached)
+                path.symlink_to(redirected, target_is_directory=True)
+                real_assert(path, expected)
+
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner, \
+                 mock.patch.object(
+                     INSTALLER,
+                     "_assert_service_directory_unchanged",
+                     side_effect=exchange_then_recheck,
+                 ):
+                with self.assertRaisesRegex(RuntimeError, "not a directory"):
+                    INSTALLER.install_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(list(redirected.iterdir()), [])
+            self.assertTrue((detached / "blun-language-guard-health.service").is_file())
+            self.assertEqual(list(detached.glob(".*.tmp")), [])
+
+    def test_service_definition_removal_rejects_unsafe_or_foreign_state(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            units = home / ".config" / "systemd" / "user"
+            units.mkdir(parents=True)
+            sentinel = home / "sentinel.service"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            service = units / "blun-language-guard-health.service"
+            service.symlink_to(sentinel)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertTrue(service.is_symlink())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+            service.unlink()
+            service.write_text("unrelated user service\n", encoding="utf-8")
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "not managed by BLUN"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(service.read_text(encoding="utf-8"), "unrelated user service\n")
+
+            service.unlink()
+            os.link(sentinel, service)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "additional hard links"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+            if hasattr(os, "mkfifo"):
+                service.unlink()
+                os.mkfifo(service)
+                with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                     mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                    with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                        INSTALLER.remove_health_monitor(home)
+                runner.assert_not_called()
+
+    def test_service_definition_removal_preserves_concurrent_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            definition = root / "guard.service"
+            definition.write_text(
+                "[Unit]\nDescription=Verify and repair BLUN Language Guard\n"
+                "[Service]\nExecStart=python health-monitor run\n",
+                encoding="utf-8",
+            )
+            directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            expected = INSTALLER._preflight_service_definition_removal_at(
+                directory_fd,
+                definition,
+                ("Verify and repair BLUN Language Guard", "health-monitor"),
+            )
+            real_assert = INSTALLER._assert_service_definition_at_unchanged
+
+            def exchange_then_recheck(open_directory: int, path: Path, identity) -> None:
+                path.unlink()
+                path.write_text("concurrent user file\n", encoding="utf-8")
+                real_assert(open_directory, path, identity)
+
+            try:
+                with mock.patch.object(
+                    INSTALLER,
+                    "_assert_service_definition_at_unchanged",
+                    side_effect=exchange_then_recheck,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "changed before replacement"):
+                        INSTALLER._remove_service_definition_at(
+                            directory_fd,
+                            definition,
+                            expected,
+                        )
+            finally:
+                os.close(directory_fd)
+            self.assertEqual(
+                definition.read_text(encoding="utf-8"),
+                "concurrent user file\n",
+            )
+
+    def test_service_definition_removal_rejects_unsafe_parent_before_commands(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            redirected = home / "redirected"
+            redirected.mkdir()
+            service = redirected / "blun-language-guard-health.service"
+            timer = redirected / "blun-language-guard-health.timer"
+            service.write_text(
+                "[Unit]\nDescription=Verify and repair BLUN Language Guard\n"
+                "[Service]\nExecStart=python health-monitor run\n",
+                encoding="utf-8",
+            )
+            timer.write_text(
+                "[Unit]\nDescription=Monitor BLUN Language Guard every minute\n"
+                "[Timer]\nOnUnitActiveSec=1m\n",
+                encoding="utf-8",
+            )
+            systemd = home / ".config" / "systemd"
+            systemd.mkdir(parents=True)
+            units = systemd / "user"
+            units.symlink_to(redirected, target_is_directory=True)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "safely open service-definition directory"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertTrue(service.is_file())
+            self.assertTrue(timer.is_file())
+
+            units.unlink()
+            units.mkdir()
+            local_service = units / service.name
+            local_service.write_text(service.read_text(encoding="utf-8"), encoding="utf-8")
+            local_timer = units / timer.name
+            local_timer.write_text(timer.read_text(encoding="utf-8"), encoding="utf-8")
+            if os.name != "nt":
+                units.chmod(0o777)
+                with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                     mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                    with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                        INSTALLER.remove_health_monitor(home)
+                runner.assert_not_called()
+                self.assertTrue(local_service.is_file())
+                self.assertTrue(local_timer.is_file())
+                units.chmod(0o700)
+
+            library = home / "Library"
+            library.mkdir()
+            agents = library / "LaunchAgents"
+            agents.symlink_to(redirected, target_is_directory=True)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                with self.assertRaisesRegex(RuntimeError, "safely open service-definition directory"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+
+    def test_service_definition_removal_keeps_missing_directory_compatible(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner:
+                INSTALLER.remove_health_monitor(home)
+            self.assertEqual(runner.call_count, 2)
+            self.assertFalse((home / ".config").exists())
+
+    def test_service_definition_removal_blocks_parent_exchange_before_commands(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_health_monitor(home)[0])
+            units = home / ".config" / "systemd" / "user"
+            redirected = home / "redirected"
+            redirected.mkdir()
+            sentinel = redirected / "blun-language-guard-health.service"
+            sentinel.write_text("preserve redirected service\n", encoding="utf-8")
+            detached = home / "detached-units"
+            real_preflight = INSTALLER._preflight_service_definition_removal_at
+            exchanged = False
+
+            def exchange_parent(directory_fd: int, path: Path, markers: tuple[str, ...]):
+                nonlocal exchanged
+                expected = real_preflight(directory_fd, path, markers)
+                if not exchanged:
+                    exchanged = True
+                    units.rename(detached)
+                    units.symlink_to(redirected, target_is_directory=True)
+                return expected
+
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed) as runner, \
+                 mock.patch.object(
+                     INSTALLER,
+                     "_preflight_service_definition_removal_at",
+                     side_effect=exchange_parent,
+                 ):
+                with self.assertRaisesRegex(RuntimeError, "not a directory"):
+                    INSTALLER.remove_health_monitor(home)
+            runner.assert_not_called()
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve redirected service\n")
+            self.assertTrue((detached / "blun-language-guard-health.service").is_file())
+            self.assertTrue((detached / "blun-language-guard-health.timer").is_file())
+
+    def test_health_service_definitions_install_and_remove_on_linux_and_macos(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_health_monitor(home)[0])
+                INSTALLER.remove_health_monitor(home)
+            units = home / ".config" / "systemd" / "user"
+            self.assertFalse((units / "blun-language-guard-health.service").exists())
+            self.assertFalse((units / "blun-language-guard-health.timer").exists())
+
+            with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_health_monitor(home)[0])
+                INSTALLER.remove_health_monitor(home)
+            plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-health.plist"
+            self.assertFalse(plist.exists())
+
+    def test_updater_and_mcp_service_definitions_remove_when_managed(self) -> None:
+        completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(INSTALLER.Path, "home", return_value=home), \
+                 mock.patch.object(INSTALLER.platform, "system", return_value="Linux"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_scheduler()[0])
+                self.assertTrue(INSTALLER.install_mcp_http_autostart(ROOT)[0])
+                INSTALLER.remove_scheduler()
+                INSTALLER.remove_mcp_http_autostart()
+            units = home / ".config" / "systemd" / "user"
+            for name in (
+                "blun-language-guard-update.service",
+                "blun-language-guard-update.timer",
+                "blun-language-guard-mcp.service",
+            ):
+                self.assertFalse((units / name).exists())
+
+            with mock.patch.object(INSTALLER.Path, "home", return_value=home), \
+                 mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(INSTALLER, "_run", return_value=completed):
+                self.assertTrue(INSTALLER.install_scheduler()[0])
+                self.assertTrue(INSTALLER.install_mcp_http_autostart(ROOT)[0])
+                INSTALLER.remove_scheduler()
+                INSTALLER.remove_mcp_http_autostart()
+            agents = home / "Library" / "LaunchAgents"
+            self.assertFalse((agents / "ai.blun.language-guard-updater.plist").exists())
+            self.assertFalse((agents / "ai.blun.language-guard-mcp.plist").exists())
+
+    def test_blun_mcp_merge_preserves_servers_and_protects_config_state(self) -> None:
+        entry = {
+            "command": "python3",
+            "args": ["guard.py", "serve"],
+            "env": {
+                "BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT": "tcp:127.0.0.1:47631",
+                "BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE": "/private/service.token",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / ".blun" / "mcp.json"
+            config.parent.mkdir()
+            original = INSTALLER.json.dumps({
+                "theme": "dark",
+                "mcpServers": {"keep": {"command": "keep"}},
+            }).encode("utf-8")
+            config.write_bytes(original)
+            if os.name != "nt":
+                config.chmod(0o644)
+            backup = config.with_suffix(".json.bak")
+            sentinel = root / "sentinel"
+            sentinel.write_text("unchanged\n", encoding="utf-8")
+            try:
+                backup.symlink_to(sentinel)
+            except OSError:
+                backup = Path()
+
+            result = INSTALLER.merge_blun_mcp_config(config, entry)
+
+            self.assertEqual(result, config.with_suffix(".json.bak"))
+            merged = INSTALLER.json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(merged["theme"], "dark")
+            self.assertEqual(merged["mcpServers"]["keep"], {"command": "keep"})
+            self.assertEqual(merged["mcpServers"][INSTALLER.MCP_SERVER_NAME], entry)
+            self.assertEqual(config.with_suffix(".json.bak").read_bytes(), original)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged\n")
+            if os.name != "nt":
+                self.assertEqual(config.stat().st_mode & 0o077, 0)
+                self.assertEqual(config.with_suffix(".json.bak").stat().st_mode & 0o077, 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / ".blun" / "mcp.json"
+            result = INSTALLER.merge_blun_mcp_config(config, entry)
+            self.assertIsNone(result)
+            self.assertEqual(
+                INSTALLER.json.loads(config.read_text(encoding="utf-8"))["mcpServers"][INSTALLER.MCP_SERVER_NAME],
+                entry,
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX file-type and permission tests")
+    def test_blun_mcp_merge_rejects_unsafe_files_without_changing_targets(self) -> None:
+        entry = {"command": "python3"}
+        cases = ("symlink", "hardlink", "fifo", "permissions", "oversized")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / ".blun" / "mcp.json"
+                config.parent.mkdir()
+                sentinel = root / "sentinel"
+                sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                sentinel.chmod(0o600)
+                if case == "symlink":
+                    config.symlink_to(sentinel)
+                    expected = "regular file"
+                elif case == "hardlink":
+                    os.link(sentinel, config)
+                    expected = "hard links"
+                elif case == "fifo":
+                    os.mkfifo(config)
+                    expected = "regular file"
+                elif case == "permissions":
+                    config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                    config.chmod(0o622)
+                    expected = "writable outside"
+                else:
+                    config.write_bytes(b"x" * (INSTALLER.MAX_BLUN_MCP_CONFIG_BYTES + 1))
+                    config.chmod(0o600)
+                    expected = "size limit"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    INSTALLER.merge_blun_mcp_config(config, entry)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+                self.assertFalse(config.with_suffix(".json.bak").exists())
+
+    def test_blun_mcp_merge_rejects_identity_exchange_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / ".blun" / "mcp.json"
+            config.parent.mkdir()
+            config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            if os.name != "nt":
+                config.chmod(0o600)
+            details = config.stat()
+            fields = {
+                name: getattr(details, name)
+                for name in (
+                    "st_mode", "st_uid", "st_dev", "st_ino", "st_nlink", "st_size",
+                    "st_ctime_ns", "st_mtime_ns",
+                )
+            }
+            opened = SimpleNamespace(**fields)
+            changed = SimpleNamespace(**fields)
+            changed.st_mtime_ns += 1
+            with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER.merge_blun_mcp_config(config, {"command": "python3"})
+            self.assertEqual(config.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+            self.assertFalse(config.with_suffix(".json.bak").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX symbolic-link test")
+    def test_blun_install_preflights_config_before_runtime_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blun = root / ".blun"
+            blun.mkdir()
+            sentinel = root / "sentinel.json"
+            sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            sentinel.chmod(0o600)
+            (blun / "mcp.json").symlink_to(sentinel)
+            with mock.patch.object(INSTALLER.Path, "home", return_value=root), \
+                 mock.patch.object(INSTALLER, "atomic_symlink") as link, \
+                 mock.patch.object(INSTALLER, "install_delivery_boundary") as delivery, \
+                 mock.patch.object(INSTALLER, "install_guard_runtime") as runtime:
+                with self.assertRaisesRegex(RuntimeError, "regular file"):
+                    INSTALLER.install(["blun"], autostart_service=False)
+            link.assert_not_called()
+            delivery.assert_not_called()
+            runtime.assert_not_called()
+            self.assertTrue((blun / "mcp.json").is_symlink())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
 
     def test_update_refuses_non_git_installation(self) -> None:
         original = INSTALLER.repository_root
@@ -365,6 +934,183 @@ class InstallerTests(unittest.TestCase):
                     guard_restart.assert_not_called()
                     mcp_restart.assert_not_called()
 
+    def test_update_runtime_rollback_preserves_exchanged_created_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, active, old, _candidate = self._update_repository_pair(root)
+            claude_skill = root / "claude-skill"
+            claude_skill.symlink_to(active / "translate-native", target_is_directory=True)
+            mcp_command = root / "bin" / "blun-language-guard-mcp"
+            mcp_headers = root / "bin" / "blun-language-guard-mcp-headers"
+            mcp_token = root / "config" / "mcp-http.token"
+            claude_config = root / ".claude.json"
+
+            def install_runtime_artifacts(_repository: Path) -> None:
+                mcp_command.parent.mkdir(parents=True, exist_ok=True)
+                mcp_token.parent.mkdir(parents=True, exist_ok=True)
+                mcp_command.symlink_to(root / "gateway.py")
+                mcp_headers.symlink_to(root / "headers.py")
+                mcp_token.write_text("t" * 64 + "\n", encoding="ascii")
+                if os.name != "nt":
+                    mcp_token.chmod(0o600)
+
+            def exchange_command_before_failure(_repository: Path) -> tuple[bool, str]:
+                replacement = root / "foreign-command"
+                replacement.write_text("operator-owned replacement\n", encoding="utf-8")
+                os.replace(replacement, mcp_command)
+                return False, "injected activation failure"
+
+            errors = io.StringIO()
+            with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                 mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", root / "update-state.json"), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "updater.json"), \
+                 mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", root / "updater-paused.json"), \
+                 mock.patch.object(INSTALLER, "HEALTH_CONFIG", root / "health-monitor.json"), \
+                 mock.patch.object(INSTALLER, "HEALTH_STATE", root / "health-state.json"), \
+                 mock.patch.object(INSTALLER, "MCP_HTTP_COMMAND", mcp_command), \
+                 mock.patch.object(INSTALLER, "MCP_HEADERS_COMMAND", mcp_headers), \
+                 mock.patch.object(INSTALLER, "MCP_HTTP_TOKEN", mcp_token), \
+                 mock.patch.object(INSTALLER, "CLAUDE_CONFIG", claude_config), \
+                 mock.patch.object(INSTALLER, "SERVICE_COMMAND", root / "missing-service"), \
+                 mock.patch.object(INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": claude_skill}), \
+                 mock.patch.object(INSTALLER, "preflight_claude_plugin_update", return_value={"ready": True}), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "install_mcp_http_runtime",
+                     side_effect=install_runtime_artifacts,
+                 ), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "install_mcp_http_autostart",
+                     side_effect=exchange_command_before_failure,
+                 ), \
+                 mock.patch.object(INSTALLER, "remove_mcp_http_autostart") as remove_autostart, \
+                 mock.patch.object(INSTALLER, "restart_guard_runtime"), \
+                 contextlib.redirect_stderr(errors):
+                self.assertEqual(INSTALLER._update_unlocked(), 1)
+
+            self.assertTrue(
+                mcp_command.exists() or mcp_command.is_symlink(),
+                errors.getvalue(),
+            )
+            self.assertEqual(
+                mcp_command.read_text(encoding="utf-8"),
+                "operator-owned replacement\n",
+            )
+            self.assertTrue(mcp_headers.is_symlink())
+            self.assertTrue(mcp_token.is_file())
+            self.assertIn("cleanup blocked fail-closed", errors.getvalue())
+            self.assertIn("rollback FAILED", errors.getvalue())
+            remove_autostart.assert_not_called()
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(), old)
+
+    def test_update_runtime_rollback_preserves_parallel_checkout_changes(self) -> None:
+        for change_kind in ("dirty", "new-head"):
+            with self.subTest(change_kind=change_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                upstream, active, _old, candidate = self._update_repository_pair(root)
+                service = root / "installed-service"
+                service.write_text("installed\n", encoding="utf-8")
+                parallel = active / "parallel-runtime-work.txt"
+                real_run = INSTALLER._run
+
+                def fail_after_parallel_change() -> tuple[bool, str]:
+                    parallel.write_text("operator work during runtime activation\n", encoding="utf-8")
+                    if change_kind == "new-head":
+                        self.assertEqual(real_run(["git", "add", parallel.name], active).returncode, 0)
+                        self.assertEqual(
+                            real_run(["git", "commit", "-m", "parallel runtime work"], active).returncode,
+                            0,
+                        )
+                    return False, "injected restart failure"
+
+                errors = io.StringIO()
+                with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                     mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                     mock.patch.object(INSTALLER, "UPDATE_STATE", root / "update-state.json"), \
+                     mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "updater.json"), \
+                     mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", root / "updater-paused.json"), \
+                     mock.patch.object(INSTALLER, "HEALTH_CONFIG", root / "health-monitor.json"), \
+                     mock.patch.object(INSTALLER, "HEALTH_STATE", root / "health-state.json"), \
+                     mock.patch.object(INSTALLER, "SERVICE_COMMAND", service), \
+                     mock.patch.object(
+                         INSTALLER,
+                         "TARGETS",
+                         {**INSTALLER.TARGETS, "claude": root / "missing-claude"},
+                     ), \
+                     mock.patch.object(
+                         INSTALLER,
+                         "restart_guard_runtime",
+                         side_effect=fail_after_parallel_change,
+                     ) as guard_restart, \
+                     mock.patch.object(INSTALLER, "restart_mcp_http_runtime") as mcp_restart, \
+                     contextlib.redirect_stderr(errors):
+                    self.assertEqual(INSTALLER._update_unlocked(), 1)
+
+                observed = real_run(["git", "rev-parse", "HEAD"], active).stdout.strip()
+                if change_kind == "dirty":
+                    self.assertEqual(observed, candidate)
+                    self.assertIn("checkout changed before runtime rollback", errors.getvalue())
+                else:
+                    self.assertNotEqual(observed, candidate)
+                    self.assertEqual(
+                        real_run(["git", "merge-base", "--is-ancestor", candidate, observed], active).returncode,
+                        0,
+                    )
+                    self.assertIn("HEAD changed independently before runtime rollback", errors.getvalue())
+                self.assertEqual(
+                    parallel.read_text(encoding="utf-8"),
+                    "operator work during runtime activation\n",
+                )
+                self.assertIn("rollback FAILED", errors.getvalue())
+                self.assertEqual(guard_restart.call_count, 1)
+                mcp_restart.assert_not_called()
+
+    def test_update_rollback_helpers_preserve_exchanged_artifacts_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, install_as_link in (
+                ("mcp-command", True),
+                ("mcp-headers", True),
+                ("mcp-token", False),
+                ("claude-config", False),
+            ):
+                with self.subTest(name=name):
+                    path = root / name
+                    if install_as_link:
+                        path.symlink_to(root / f"{name}-source")
+                    else:
+                        path.write_text("installer-created\n", encoding="utf-8")
+                    expected = INSTALLER._capture_update_artifact(path)
+                    replacement = root / f"{name}-replacement"
+                    replacement.write_text("operator-owned\n", encoding="utf-8")
+                    os.replace(replacement, path)
+                    with self.assertRaisesRegex(RuntimeError, "changed before rollback"):
+                        INSTALLER._remove_created_update_artifact(path, expected)
+                    self.assertEqual(path.read_text(encoding="utf-8"), "operator-owned\n")
+
+            config = root / "restore-config"
+            config.write_text("updated\n", encoding="utf-8")
+            expected = INSTALLER._capture_update_artifact(config)
+            replacement = root / "restore-config-replacement"
+            replacement.write_text("concurrent configuration\n", encoding="utf-8")
+            os.replace(replacement, config)
+            with self.assertRaisesRegex(RuntimeError, "changed before rollback"):
+                INSTALLER._restore_updated_claude_config(config, b"original\n", expected)
+            self.assertEqual(config.read_text(encoding="utf-8"), "concurrent configuration\n")
+
+            owned = root / "owned-artifact"
+            owned.write_text("created by updater\n", encoding="utf-8")
+            expected = INSTALLER._capture_update_artifact(owned)
+            INSTALLER._remove_created_update_artifact(owned, expected)
+            self.assertFalse(owned.exists())
+
+            config.write_text("updated by updater\n", encoding="utf-8")
+            expected = INSTALLER._capture_update_artifact(config)
+            INSTALLER._restore_updated_claude_config(config, b"original\n", expected)
+            self.assertEqual(config.read_bytes(), b"original\n")
+
     def test_rollback_tests_target_pauses_updater_and_records_exact_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -402,6 +1148,131 @@ class InstallerTests(unittest.TestCase):
                 with mock.patch.object(INSTALLER, "update") as updater:
                     self.assertEqual(INSTALLER.auto_update("run"), 0)
                     updater.assert_not_called()
+
+    def test_rollback_preserves_policies_replaced_during_runtime_verification(self) -> None:
+        for replaced_name in ("active", "paused"):
+            with self.subTest(replaced_name=replaced_name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repository, target, current = self._rollback_repository(root)
+                state_path = root / "update-state.json"
+                active_path = root / "updater.json"
+                paused_path = root / "updater.rollback-paused.json"
+                INSTALLER._atomic_json(state_path, {
+                    "status": "ok", "revision": current, "previous": target, "checked_at": 1,
+                })
+                INSTALLER._atomic_json(active_path, {
+                    "enabled": True, "interval_hours": 24, "require_signed_commits": False,
+                })
+                if replaced_name == "paused":
+                    INSTALLER._atomic_json(paused_path, {"require_signed_commits": False})
+                restart_calls = 0
+
+                def replace_policy_on_first_restart() -> tuple[bool, str]:
+                    nonlocal restart_calls
+                    restart_calls += 1
+                    if restart_calls == 1:
+                        path = active_path if replaced_name == "active" else paused_path
+                        path.unlink()
+                        INSTALLER._atomic_json(path, {
+                            "enabled": True,
+                            "interval_hours": 9,
+                            "require_signed_commits": False,
+                        })
+                    return True, "ok"
+
+                with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                     mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                     mock.patch.object(INSTALLER, "UPDATE_CONFIG", active_path), \
+                     mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", paused_path), \
+                     mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                     mock.patch.object(INSTALLER, "SERVICE_COMMAND", root / "missing-service"), \
+                     mock.patch.object(INSTALLER, "MCP_HTTP_COMMAND", root / "missing-mcp"), \
+                     mock.patch.object(
+                         INSTALLER,
+                         "TARGETS",
+                         {**INSTALLER.TARGETS, "claude": root / "missing-claude"},
+                     ), \
+                     mock.patch.object(
+                         INSTALLER,
+                         "_restart_installed_runtimes",
+                         side_effect=replace_policy_on_first_restart,
+                     ) as restarter, \
+                     mock.patch.object(INSTALLER, "remove_scheduler") as scheduler_removal, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.rollback(), 1)
+                self.assertEqual(restarter.call_count, 2)
+                scheduler_removal.assert_not_called()
+                self.assertEqual(
+                    INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(),
+                    current,
+                )
+                replacement_path = active_path if replaced_name == "active" else paused_path
+                replacement = INSTALLER.json.loads(
+                    replacement_path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(replacement["interval_hours"], 9)
+
+    def test_rollback_state_exchange_during_verification_restores_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root)
+            state_path = root / "update-state.json"
+            active_path = root / "updater.json"
+            paused_path = root / "updater.rollback-paused.json"
+            INSTALLER._atomic_json(state_path, {
+                "status": "ok", "revision": current, "previous": target, "checked_at": 1,
+            })
+            INSTALLER._atomic_json(active_path, {
+                "enabled": True, "interval_hours": 24, "require_signed_commits": False,
+            })
+            restart_calls = 0
+
+            def replace_state_on_first_restart() -> tuple[bool, str]:
+                nonlocal restart_calls
+                restart_calls += 1
+                if restart_calls == 1:
+                    state_path.unlink()
+                    INSTALLER._atomic_json(state_path, {
+                        "status": "degraded",
+                        "revision": current,
+                        "previous": target,
+                        "checked_at": 777,
+                        "runtime_unchanged": True,
+                    })
+                return True, "ok"
+
+            errors = io.StringIO()
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", active_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", paused_path), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 mock.patch.object(INSTALLER, "SERVICE_COMMAND", root / "missing-service"), \
+                 mock.patch.object(INSTALLER, "MCP_HTTP_COMMAND", root / "missing-mcp"), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "TARGETS",
+                     {**INSTALLER.TARGETS, "claude": root / "missing-claude"},
+                 ), mock.patch.object(
+                     INSTALLER,
+                     "_restart_installed_runtimes",
+                     side_effect=replace_state_on_first_restart,
+                 ) as restarter, mock.patch.object(
+                     INSTALLER, "remove_scheduler"
+                 ) as scheduler_removal, contextlib.redirect_stderr(errors):
+                self.assertEqual(INSTALLER.rollback(), 2)
+            self.assertEqual(restarter.call_count, 2)
+            scheduler_removal.assert_not_called()
+            self.assertEqual(
+                INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(),
+                current,
+            )
+            self.assertTrue(active_path.exists())
+            self.assertFalse(paused_path.exists())
+            replacement = INSTALLER.json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(replacement["checked_at"], 777)
+            self.assertTrue(replacement["runtime_unchanged"])
+            self.assertIn("forward restoration succeeded", errors.getvalue())
 
     def test_rollback_refuses_dirty_worktree_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -830,6 +1701,128 @@ class InstallerTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Unsafe updater policy file type"):
                     INSTALLER._load_update_policy(fifo)
 
+    def test_update_state_loader_rejects_unsafe_files_and_invalid_schema(self) -> None:
+        original = INSTALLER.UPDATE_STATE
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            INSTALLER._atomic_json(target, {
+                "status": "ok",
+                "revision": "a" * 40,
+                "previous": "b" * 40,
+                "checked_at": 10,
+                "auto_update_paused": False,
+            })
+            linked = root / "linked.json"
+            try:
+                linked.symlink_to(target)
+            except OSError as error:
+                self.skipTest(f"symbolic links are unavailable: {error}")
+            INSTALLER.UPDATE_STATE = linked
+            try:
+                with self.assertRaisesRegex(RuntimeError, "Unsafe updater state file type"):
+                    INSTALLER._load_update_state()
+
+                INSTALLER.UPDATE_STATE = root / "oversized.json"
+                INSTALLER.UPDATE_STATE.write_bytes(
+                    b" " * (INSTALLER.MAX_UPDATE_STATE_BYTES + 1)
+                )
+                if os.name != "nt":
+                    INSTALLER.UPDATE_STATE.chmod(0o600)
+                with self.assertRaisesRegex(RuntimeError, "size limit"):
+                    INSTALLER._load_update_state()
+
+                invalid_values = (
+                    {"status": 1},
+                    {"revision": "short"},
+                    {"previous": True},
+                    {"checked_at": False},
+                    {"auto_update_paused": "false"},
+                    {"runtime_unchanged": 1},
+                    {"claude_plugin": []},
+                    {"health_monitor": "ok"},
+                )
+                INSTALLER.UPDATE_STATE = root / "invalid.json"
+                for payload in invalid_values:
+                    with self.subTest(payload=payload):
+                        INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, payload)
+                        with self.assertRaisesRegex(RuntimeError, "Invalid updater state field"):
+                            INSTALLER._load_update_state()
+
+                if os.name != "nt":
+                    INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, {"status": "ok"})
+                    INSTALLER.UPDATE_STATE.chmod(0o644)
+                    with self.assertRaisesRegex(RuntimeError, "owner-only"):
+                        INSTALLER._load_update_state()
+            finally:
+                INSTALLER.UPDATE_STATE = original
+
+    def test_update_state_loader_rejects_identity_change_while_reading(self) -> None:
+        original = INSTALLER.UPDATE_STATE
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_STATE = root / "update-state.json"
+            replacement = root / "replacement.json"
+            INSTALLER._atomic_json(INSTALLER.UPDATE_STATE, {"status": "ok", "checked_at": 1})
+            INSTALLER._atomic_json(replacement, {"status": "degraded", "checked_at": 2})
+            opened = INSTALLER.UPDATE_STATE.stat()
+            changed = replacement.stat()
+            try:
+                with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                    with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                        INSTALLER._load_update_state()
+            finally:
+                INSTALLER.UPDATE_STATE = original
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_public_update_paths_reject_linked_state_before_commands(self) -> None:
+        originals = (
+            INSTALLER.UPDATE_CONFIG,
+            INSTALLER.UPDATE_PAUSED_CONFIG,
+            INSTALLER.UPDATE_STATE,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            payload = {
+                "status": "ok",
+                "revision": "a" * 40,
+                "previous": "b" * 40,
+                "checked_at": 1,
+            }
+            INSTALLER._atomic_json(target, payload)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "missing-paused.json"
+            INSTALLER.UPDATE_STATE = root / "update-state.json"
+            INSTALLER.UPDATE_STATE.symlink_to(target)
+            INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                "enabled": True,
+                "interval_hours": 1,
+                "require_signed_commits": False,
+            })
+            try:
+                with mock.patch.object(INSTALLER, "update") as updater, \
+                     contextlib.redirect_stdout(io.StringIO()), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("status"), 2)
+                    self.assertEqual(INSTALLER.auto_update("run"), 2)
+                updater.assert_not_called()
+
+                with mock.patch.object(INSTALLER, "_clean_checkout_revision", return_value="a" * 40), \
+                     mock.patch.object(INSTALLER, "_run") as runner, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER._update_unlocked(), 2)
+                    self.assertEqual(INSTALLER._rollback_unlocked(), 2)
+                runner.assert_not_called()
+                self.assertTrue(INSTALLER.UPDATE_STATE.is_symlink())
+                self.assertEqual(INSTALLER.json.loads(target.read_text(encoding="utf-8")), payload)
+            finally:
+                (
+                    INSTALLER.UPDATE_CONFIG,
+                    INSTALLER.UPDATE_PAUSED_CONFIG,
+                    INSTALLER.UPDATE_STATE,
+                ) = originals
+
     def test_auto_update_status_and_run_reject_linked_policy_without_worker_call(self) -> None:
         originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
         with tempfile.TemporaryDirectory() as directory:
@@ -897,6 +1890,148 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(reset["require_signed_commits"])
             finally:
                 INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_auto_update_disable_rejects_linked_policy_before_scheduler_change(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            INSTALLER._atomic_json(target, {
+                "enabled": True, "interval_hours": 24, "require_signed_commits": True,
+            })
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_CONFIG.symlink_to(target)
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "missing-paused.json"
+            try:
+                with mock.patch.object(INSTALLER, "remove_scheduler") as scheduler_removal, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("disable"), 2)
+                scheduler_removal.assert_not_called()
+                self.assertTrue(INSTALLER.UPDATE_CONFIG.is_symlink())
+                self.assertTrue(
+                    INSTALLER.json.loads(target.read_text(encoding="utf-8"))[
+                        "require_signed_commits"
+                    ]
+                )
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG = originals
+
+    def test_auto_update_disable_preserves_policy_replaced_after_preflight(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "missing-paused.json"
+            INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                "enabled": True, "interval_hours": 24, "require_signed_commits": True,
+            })
+
+            def replace_policy() -> None:
+                INSTALLER.UPDATE_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                    "enabled": True, "interval_hours": 1, "require_signed_commits": True,
+                })
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "remove_scheduler", side_effect=replace_policy
+                ) as scheduler_removal, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("disable"), 2)
+                scheduler_removal.assert_called_once_with()
+                replacement = INSTALLER.json.loads(
+                    INSTALLER.UPDATE_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertEqual(replacement["interval_hours"], 1)
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_auto_update_enable_rejects_linked_paused_policy_before_active_write(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            INSTALLER._atomic_json(target, {"require_signed_commits": True})
+            INSTALLER.UPDATE_CONFIG = root / "missing-active.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "updater.rollback-paused.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG.symlink_to(target)
+            try:
+                with mock.patch.object(INSTALLER, "install_scheduler") as scheduler_install, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("enable"), 2)
+                scheduler_install.assert_not_called()
+                self.assertFalse(INSTALLER.UPDATE_CONFIG.exists())
+                self.assertTrue(INSTALLER.UPDATE_PAUSED_CONFIG.is_symlink())
+                self.assertTrue(
+                    INSTALLER.json.loads(target.read_text(encoding="utf-8"))[
+                        "require_signed_commits"
+                    ]
+                )
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG = originals
+
+    def test_auto_update_enable_preserves_active_policy_replaced_after_preflight(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "missing-paused.json"
+            INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                "enabled": True, "interval_hours": 24, "require_signed_commits": True,
+            })
+
+            def replace_active(_command: str) -> str | None:
+                INSTALLER.UPDATE_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                    "enabled": True, "interval_hours": 1, "require_signed_commits": True,
+                })
+                return None
+
+            try:
+                with mock.patch.object(INSTALLER.shutil, "which", side_effect=replace_active), \
+                     mock.patch.object(INSTALLER, "install_scheduler") as scheduler_install, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("enable"), 2)
+                scheduler_install.assert_not_called()
+                replacement = INSTALLER.json.loads(
+                    INSTALLER.UPDATE_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertEqual(replacement["interval_hours"], 1)
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG = originals
+
+    def test_auto_update_enable_preserves_paused_policy_replaced_after_active_write(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_CONFIG = root / "missing-active.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "updater.rollback-paused.json"
+            INSTALLER._atomic_json(
+                INSTALLER.UPDATE_PAUSED_CONFIG, {"require_signed_commits": True}
+            )
+            atomic_json = INSTALLER._atomic_json
+
+            def replace_paused(path: Path, payload: dict, **kwargs) -> None:
+                atomic_json(path, payload, **kwargs)
+                INSTALLER.UPDATE_PAUSED_CONFIG.unlink()
+                atomic_json(
+                    INSTALLER.UPDATE_PAUSED_CONFIG,
+                    {"require_signed_commits": True, "interval_hours": 1},
+                )
+
+            try:
+                with mock.patch.object(INSTALLER, "_atomic_json", side_effect=replace_paused), \
+                     mock.patch.object(INSTALLER, "install_scheduler") as scheduler_install, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("enable"), 2)
+                scheduler_install.assert_not_called()
+                replacement = INSTALLER.json.loads(
+                    INSTALLER.UPDATE_PAUSED_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertEqual(replacement["interval_hours"], 1)
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG = originals
 
     def test_reenable_refuses_to_replace_invalid_saved_policy(self) -> None:
         originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
@@ -1074,6 +2209,163 @@ class InstallerTests(unittest.TestCase):
             ]
             self.assertEqual(len(calls), 2)
             self.assertFalse(any(call[:2] == ["plugin", "update"] for call in calls))
+
+    def test_update_state_exchange_during_candidate_preflight_blocks_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, active, old, _candidate = self._update_repository_pair(root)
+            claude_skill = root / "claude-skill"
+            claude_skill.symlink_to(active / "translate-native", target_is_directory=True)
+            update_state = root / "update-state.json"
+            INSTALLER._atomic_json(update_state, {
+                "status": "ok", "revision": old, "previous": old, "checked_at": 1,
+            })
+
+            def replace_state(*_arguments: object) -> dict:
+                update_state.unlink()
+                INSTALLER._atomic_json(update_state, {
+                    "status": "degraded",
+                    "revision": old,
+                    "previous": old,
+                    "checked_at": 999,
+                    "runtime_unchanged": True,
+                })
+                return {"ready": True}
+
+            errors = io.StringIO()
+            with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                 mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", update_state), \
+                 mock.patch.object(INSTALLER, "HEALTH_CONFIG", root / "missing-health-config.json"), \
+                 mock.patch.object(INSTALLER, "HEALTH_STATE", root / "missing-health-state.json"), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "TARGETS",
+                     {**INSTALLER.TARGETS, "claude": claude_skill},
+                 ), mock.patch.object(
+                     INSTALLER, "preflight_claude_plugin_update", side_effect=replace_state
+                 ), mock.patch.object(INSTALLER, "restart_guard_runtime") as guard_restart, \
+                 contextlib.redirect_stderr(errors):
+                self.assertEqual(INSTALLER._update_unlocked(), 2)
+            self.assertEqual(
+                INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(),
+                old,
+            )
+            self.assertFalse((active / "new-runtime.txt").exists())
+            replacement = INSTALLER.json.loads(update_state.read_text(encoding="utf-8"))
+            self.assertEqual(replacement["checked_at"], 999)
+            self.assertTrue(replacement["runtime_unchanged"])
+            self.assertIn("activation is blocked", errors.getvalue())
+            guard_restart.assert_not_called()
+
+    def test_update_health_publication_preserves_exchanged_policy_and_state(self) -> None:
+        for exchanged in ("policy", "state"):
+            with self.subTest(exchanged=exchanged), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                upstream, active, _old, candidate = self._update_repository_pair(root)
+                claude_skill = root / "claude-skill"
+                claude_skill.symlink_to(active / "translate-native", target_is_directory=True)
+                health_config = root / "health-monitor.json"
+                health_state = root / "health-state.json"
+                update_state = root / "update-state.json"
+                INSTALLER._atomic_json(health_config, {
+                    "enabled": True,
+                    "interval_seconds": 60,
+                    "plugin_required": True,
+                })
+                INSTALLER._atomic_json(health_state, {
+                    "status": "ok",
+                    "checked_at": 1,
+                    "consecutive_failures": 0,
+                })
+
+                def install_and_exchange() -> tuple[bool, str]:
+                    target = health_config if exchanged == "policy" else health_state
+                    target.unlink()
+                    if exchanged == "policy":
+                        INSTALLER._atomic_json(target, {
+                            "enabled": False,
+                            "interval_seconds": 300,
+                            "plugin_required": False,
+                            "claude_command": "replacement",
+                        })
+                    else:
+                        INSTALLER._atomic_json(target, {
+                            "status": "replacement",
+                            "checked_at": 999,
+                            "consecutive_failures": 7,
+                            "next_repair_at": 9999,
+                        })
+                    return True, "test schedule"
+
+                errors = io.StringIO()
+                with contextlib.ExitStack() as stack:
+                    for name, value in (
+                        ("repository_root", mock.Mock(return_value=active)),
+                        ("REPO_URL", str(upstream)),
+                        ("UPDATE_STATE", update_state),
+                        ("HEALTH_CONFIG", health_config),
+                        ("HEALTH_STATE", health_state),
+                        ("MCP_HTTP_COMMAND", root / "missing-mcp"),
+                        ("MCP_HEADERS_COMMAND", root / "missing-headers"),
+                        ("MCP_HTTP_TOKEN", root / "missing-token"),
+                        ("CLAUDE_CONFIG", root / "missing-claude.json"),
+                        ("SERVICE_COMMAND", root / "missing-service"),
+                        ("TARGETS", {**INSTALLER.TARGETS, "claude": claude_skill}),
+                    ):
+                        stack.enter_context(mock.patch.object(INSTALLER, name, value))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "preflight_claude_plugin_update", return_value={"ready": True}
+                    ))
+                    stack.enter_context(mock.patch.object(INSTALLER, "install_mcp_http_runtime"))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "install_mcp_http_autostart", return_value=(True, "test")
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "configure_claude_mcp", return_value=(None, [])
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "_capture_update_artifact", return_value=(1, 1, 1, 1, 1, 1, 1)
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "install_health_monitor", side_effect=install_and_exchange
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "_guard_stack_status", return_value=(True, True)
+                    ))
+                    remove_monitor = stack.enter_context(mock.patch.object(
+                        INSTALLER, "remove_health_monitor"
+                    ))
+                    plugin_update = stack.enter_context(mock.patch.object(
+                        INSTALLER, "_apply_claude_plugin_update"
+                    ))
+                    stack.enter_context(contextlib.redirect_stderr(errors))
+                    self.assertEqual(INSTALLER._update_unlocked(), 1)
+
+                plugin_update.assert_not_called()
+                self.assertEqual(
+                    INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(),
+                    candidate,
+                )
+                recorded = INSTALLER.json.loads(update_state.read_text(encoding="utf-8"))
+                self.assertEqual(recorded["status"], "degraded")
+                self.assertEqual(
+                    recorded["health_monitor"]["detail"],
+                    "protected-health-state-changed",
+                )
+                self.assertIn("replacement was preserved", errors.getvalue())
+                policy = INSTALLER.json.loads(health_config.read_text(encoding="utf-8"))
+                state = INSTALLER.json.loads(health_state.read_text(encoding="utf-8"))
+                if exchanged == "policy":
+                    self.assertFalse(policy["enabled"])
+                    self.assertEqual(policy["claude_command"], "replacement")
+                    self.assertEqual(state["checked_at"], 1)
+                    remove_monitor.assert_called_once_with()
+                else:
+                    self.assertTrue(policy["enabled"])
+                    self.assertEqual(state["status"], "replacement")
+                    self.assertEqual(state["next_repair_at"], 9999)
+                    remove_monitor.assert_not_called()
 
     def test_preflight_process_loss_is_structured_and_fail_closed(self) -> None:
         listed = INSTALLER.subprocess.CompletedProcess(
@@ -1276,6 +2568,148 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
 
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_health_monitor_remove_rejects_unsafe_files_before_schedule_change(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "sentinel.json"
+            INSTALLER._atomic_json(sentinel, {"enabled": True})
+            try:
+                for unsafe_name in ("health-config.json", "health-state.json"):
+                    with self.subTest(unsafe_name=unsafe_name):
+                        config = root / "health-config.json"
+                        state = root / "health-state.json"
+                        config.unlink(missing_ok=True)
+                        state.unlink(missing_ok=True)
+                        INSTALLER.HEALTH_CONFIG = config
+                        INSTALLER.HEALTH_STATE = state
+                        (config if unsafe_name == config.name else state).symlink_to(sentinel)
+                        with mock.patch.object(INSTALLER, "remove_health_monitor") as remover, \
+                             contextlib.redirect_stderr(io.StringIO()):
+                            self.assertEqual(INSTALLER.health_monitor("remove"), 2)
+                        remover.assert_not_called()
+                        self.assertTrue((config if unsafe_name == config.name else state).is_symlink())
+                        self.assertTrue(
+                            INSTALLER.json.loads(sentinel.read_text(encoding="utf-8"))["enabled"]
+                        )
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
+    def test_health_monitor_remove_preserves_state_replaced_after_preflight(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {"status": "ok", "checked_at": 1})
+
+            def replace_state() -> None:
+                INSTALLER.HEALTH_STATE.unlink()
+                INSTALLER._atomic_json(
+                    INSTALLER.HEALTH_STATE, {"status": "replacement", "checked_at": 2}
+                )
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "remove_health_monitor", side_effect=replace_state
+                ) as remover, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("remove"), 2)
+                remover.assert_called_once_with()
+                replacement = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_STATE.read_text(encoding="utf-8")
+                )
+                self.assertEqual(replacement["status"], "replacement")
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertFalse(policy["enabled"])
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
+    def test_health_monitor_install_persists_the_inspected_policy(self) -> None:
+        original = INSTALLER.HEALTH_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.HEALTH_CONFIG = Path(directory) / "health-config.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": False, "plugin_required": True, "claude_command": "/bin/claude",
+            })
+            try:
+                with mock.patch.object(INSTALLER, "health_monitor_run", return_value=0), \
+                     mock.patch.object(
+                         INSTALLER, "install_health_monitor", return_value=(True, "test schedule")
+                     ), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("install"), 0)
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertTrue(policy["enabled"])
+                self.assertTrue(policy["plugin_required"])
+                self.assertEqual(policy["interval_seconds"], 60)
+                self.assertEqual(policy["claude_command"], "/bin/claude")
+            finally:
+                INSTALLER.HEALTH_CONFIG = original
+
+    def test_health_monitor_install_blocks_policy_exchange_before_scheduler_change(self) -> None:
+        original = INSTALLER.HEALTH_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.HEALTH_CONFIG = Path(directory) / "health-config.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {"enabled": False})
+
+            def replace_policy(_config: dict | None = None) -> str:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(
+                    INSTALLER.HEALTH_CONFIG, {"enabled": False, "claude_command": "replacement"}
+                )
+                return "/bin/claude"
+
+            try:
+                with mock.patch.object(INSTALLER, "health_monitor_run", return_value=0), \
+                     mock.patch.object(
+                         INSTALLER, "_configured_claude_command", side_effect=replace_policy
+                     ), mock.patch.object(INSTALLER, "install_health_monitor") as installer, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("install"), 2)
+                installer.assert_not_called()
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertEqual(policy["claude_command"], "replacement")
+            finally:
+                INSTALLER.HEALTH_CONFIG = original
+
+    def test_health_monitor_install_rolls_back_after_policy_exchange(self) -> None:
+        original = INSTALLER.HEALTH_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.HEALTH_CONFIG = Path(directory) / "health-config.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {"enabled": False})
+
+            def install_and_replace() -> tuple[bool, str]:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(
+                    INSTALLER.HEALTH_CONFIG, {"enabled": False, "claude_command": "replacement"}
+                )
+                return True, "test schedule"
+
+            try:
+                with mock.patch.object(INSTALLER, "health_monitor_run", return_value=0), \
+                     mock.patch.object(
+                         INSTALLER, "_configured_claude_command", return_value="/bin/claude"
+                     ), mock.patch.object(
+                         INSTALLER, "install_health_monitor", side_effect=install_and_replace
+                     ) as installer, mock.patch.object(
+                         INSTALLER, "remove_health_monitor"
+                     ) as remover, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("install"), 2)
+                installer.assert_called_once_with()
+                remover.assert_called_once_with()
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertEqual(policy["claude_command"], "replacement")
+            finally:
+                INSTALLER.HEALTH_CONFIG = original
+
     def test_missing_or_uninstalled_claude_plugin_is_not_modified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1340,6 +2774,35 @@ class InstallerTests(unittest.TestCase):
             if INSTALLER.os.name != "nt":
                 self.assertEqual(key.stat().st_mode & 0o077, 0)
 
+    def test_signing_key_rejects_invalid_existing_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "signing.key"
+            key.write_bytes(b"short")
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER.ensure_signing_key(key)
+            key.write_bytes(b"x" * (64 * 1024 + 1))
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER.ensure_signing_key(key)
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_signing_key_does_not_follow_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key = root / "signing.key"
+            sentinel = root / "sentinel"
+            sentinel.write_bytes(b"s" * 32)
+            key.with_suffix(".tmp").symlink_to(sentinel)
+
+            INSTALLER.ensure_signing_key(key)
+            self.assertEqual(sentinel.read_bytes(), b"s" * 32)
+            self.assertTrue(key.with_suffix(".tmp").is_symlink())
+
+            key.unlink()
+            key.symlink_to(sentinel)
+            with self.assertRaisesRegex(RuntimeError, "regular file"):
+                INSTALLER.ensure_signing_key(key)
+            self.assertEqual(sentinel.read_bytes(), b"s" * 32)
+
     def test_install_delivery_boundary_creates_command_policy_and_key(self) -> None:
         originals = (
             INSTALLER.DELIVERY_COMMAND,
@@ -1359,6 +2822,41 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue(policy["mandatory"])
                 self.assertFalse(policy["direct_delivery_allowed"])
                 self.assertTrue(policy["isolated_service"]["required"])
+            finally:
+                (
+                    INSTALLER.DELIVERY_COMMAND,
+                    INSTALLER.DELIVERY_POLICY,
+                    INSTALLER.SIGNING_KEY,
+                ) = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_install_delivery_boundary_rejects_unsafe_policy_before_mutation(self) -> None:
+        originals = (
+            INSTALLER.DELIVERY_COMMAND,
+            INSTALLER.DELIVERY_POLICY,
+            INSTALLER.SIGNING_KEY,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            sentinel = temporary / "sentinel.json"
+            sentinel.write_text('{"do_not_replace": true}\n', encoding="utf-8")
+            sentinel.chmod(0o600)
+            INSTALLER.DELIVERY_COMMAND = temporary / "bin" / "blun-language-deliver"
+            INSTALLER.DELIVERY_POLICY = temporary / "config" / "delivery-policy.json"
+            INSTALLER.DELIVERY_POLICY.parent.mkdir(parents=True)
+            INSTALLER.DELIVERY_POLICY.symlink_to(sentinel)
+            INSTALLER.SIGNING_KEY = temporary / "config" / "signing.key"
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink") as command_install, \
+                     mock.patch.object(INSTALLER, "ensure_signing_key") as key_install:
+                    with self.assertRaisesRegex(RuntimeError, "file type"):
+                        INSTALLER.install_delivery_boundary(ROOT)
+                command_install.assert_not_called()
+                key_install.assert_not_called()
+                self.assertEqual(
+                    sentinel.read_text(encoding="utf-8"),
+                    '{"do_not_replace": true}\n',
+                )
             finally:
                 (
                     INSTALLER.DELIVERY_COMMAND,
@@ -1394,6 +2892,35 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.AUDIT_LOG,
                 ) = originals
 
+    def test_service_token_rejects_invalid_existing_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            token = Path(directory) / "service.token"
+            token.write_bytes(b"short")
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER.ensure_service_token(token)
+            token.write_bytes(b"x" * (64 * 1024 + 1))
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER.ensure_service_token(token)
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_service_token_does_not_follow_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "service.token"
+            sentinel = root / "sentinel"
+            sentinel.write_text("s" * 64 + "\n", encoding="ascii")
+            token.with_suffix(".tmp").symlink_to(sentinel)
+
+            INSTALLER.ensure_service_token(token)
+            self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
+            self.assertTrue(token.with_suffix(".tmp").is_symlink())
+
+            token.unlink()
+            token.symlink_to(sentinel)
+            with self.assertRaisesRegex(RuntimeError, "regular file"):
+                INSTALLER.ensure_service_token(token)
+            self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
+
     def test_mcp_http_runtime_installs_commands_and_owner_only_token(self) -> None:
         originals = (
             INSTALLER.MCP_HTTP_COMMAND,
@@ -1419,6 +2946,94 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.MCP_HEADERS_COMMAND,
                     INSTALLER.MCP_HTTP_TOKEN,
                 ) = originals
+
+    def test_mcp_http_token_creation_rejects_links_and_legacy_temporary_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "mcp-http.token"
+            sentinel = root / "sentinel"
+            sentinel.write_text("s" * 64 + "\n", encoding="ascii")
+            legacy_temporary = token.with_suffix(".tmp")
+            try:
+                legacy_temporary.symlink_to(sentinel)
+            except OSError as error:
+                self.skipTest(f"symbolic links are unavailable: {error}")
+
+            INSTALLER.ensure_mcp_http_token(token)
+            self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
+            self.assertTrue(legacy_temporary.is_symlink())
+            self.assertFalse(token.is_symlink())
+            self.assertGreaterEqual(len(INSTALLER._read_protected_mcp_http_token(token)), 32)
+
+            token.unlink()
+            token.symlink_to(sentinel)
+            with self.assertRaisesRegex(RuntimeError, "regular file"):
+                INSTALLER.ensure_mcp_http_token(token)
+            self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
+
+    def test_installer_mcp_http_token_reader_is_bounded_and_identity_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "mcp-http.token"
+            token.write_bytes(b"x" * (INSTALLER.MAX_MCP_HTTP_TOKEN_BYTES + 1))
+            if os.name != "nt":
+                token.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError, "invalid size"):
+                INSTALLER._read_protected_mcp_http_token(token)
+
+            token.write_text("a" * 64 + "\n", encoding="ascii")
+            replacement = root / "replacement.token"
+            replacement.write_text("b" * 64 + "\n", encoding="ascii")
+            if os.name != "nt":
+                token.chmod(0o600)
+                replacement.chmod(0o600)
+            opened = token.stat()
+            changed = replacement.stat()
+            with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER._read_protected_mcp_http_token(token)
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_mcp_probe_rejects_linked_access_token_before_network(self) -> None:
+        original = INSTALLER.MCP_HTTP_TOKEN
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.token"
+            target.write_text("known-token-" + "x" * 32 + "\n", encoding="ascii")
+            target.chmod(0o600)
+            INSTALLER.MCP_HTTP_TOKEN = root / "mcp-http.token"
+            INSTALLER.MCP_HTTP_TOKEN.symlink_to(target)
+            try:
+                with mock.patch.object(INSTALLER.urllib.request, "urlopen") as opener:
+                    with self.assertRaisesRegex(RuntimeError, "regular file"):
+                        INSTALLER._mcp_http_request("/healthz")
+                opener.assert_not_called()
+            finally:
+                INSTALLER.MCP_HTTP_TOKEN = original
+
+    def test_mcp_runtime_rejects_linked_token_before_command_mutation(self) -> None:
+        original = INSTALLER.MCP_HTTP_TOKEN
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.token"
+            target.write_text("known-token-" + "x" * 32 + "\n", encoding="ascii")
+            if os.name != "nt":
+                target.chmod(0o600)
+            INSTALLER.MCP_HTTP_TOKEN = root / "mcp-http.token"
+            try:
+                INSTALLER.MCP_HTTP_TOKEN.symlink_to(target)
+            except OSError as error:
+                INSTALLER.MCP_HTTP_TOKEN = original
+                self.skipTest(f"symbolic links are unavailable: {error}")
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink") as link:
+                    with self.assertRaisesRegex(RuntimeError, "regular file"):
+                        INSTALLER.install_mcp_http_runtime(ROOT)
+                link.assert_not_called()
+                self.assertTrue(INSTALLER.MCP_HTTP_TOKEN.is_symlink())
+                self.assertEqual(target.read_text(encoding="ascii"), "known-token-" + "x" * 32 + "\n")
+            finally:
+                INSTALLER.MCP_HTTP_TOKEN = original
 
     def test_claude_configuration_uses_http_helper_and_removes_local_shadows(self) -> None:
         original_headers = INSTALLER.MCP_HEADERS_COMMAND
@@ -1466,6 +3081,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn("keep", result["projects"]["/work/one"]["mcpServers"])
                 if os.name != "nt":
                     self.assertEqual(config.stat().st_mode & 0o077, 0)
+                    self.assertEqual(backup.stat().st_mode & 0o077, 0)
             finally:
                 INSTALLER.MCP_HEADERS_COMMAND = original_headers
 
@@ -1473,9 +3089,128 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / ".claude.json"
             config.write_text("{broken", encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "Refusing to modify"):
+            with self.assertRaisesRegex(RuntimeError, "configuration is invalid"):
                 INSTALLER.configure_claude_mcp(config)
             self.assertEqual(config.read_text(encoding="utf-8"), "{broken")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file-type and permission tests")
+    def test_claude_configuration_rejects_unsafe_files_without_changing_targets(self) -> None:
+        cases = ("symlink", "hardlink", "fifo", "permissions", "oversized")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / ".claude.json"
+                sentinel = root / "sentinel.json"
+                sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                sentinel.chmod(0o600)
+                if case == "symlink":
+                    config.symlink_to(sentinel)
+                    expected = "regular file"
+                elif case == "hardlink":
+                    os.link(sentinel, config)
+                    expected = "hard links"
+                elif case == "fifo":
+                    os.mkfifo(config)
+                    expected = "regular file"
+                elif case == "permissions":
+                    config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                    config.chmod(0o622)
+                    expected = "writable outside"
+                else:
+                    config.write_bytes(b"x" * (INSTALLER.MAX_CLAUDE_CONFIG_BYTES + 1))
+                    config.chmod(0o600)
+                    expected = "size limit"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    INSTALLER.configure_claude_mcp(config)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+                self.assertFalse(config.with_suffix(".json.bak").exists())
+
+    def test_claude_configuration_rejects_identity_exchange_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / ".claude.json"
+            config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            if os.name != "nt":
+                config.chmod(0o600)
+            details = config.stat()
+            fields = {
+                name: getattr(details, name)
+                for name in (
+                    "st_mode", "st_uid", "st_dev", "st_ino", "st_nlink", "st_size",
+                    "st_ctime_ns", "st_mtime_ns",
+                )
+            }
+            opened = SimpleNamespace(**fields)
+            changed = SimpleNamespace(**fields)
+            changed.st_ctime_ns += 1
+            with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER.configure_claude_mcp(config)
+            self.assertEqual(config.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+            self.assertFalse(config.with_suffix(".json.bak").exists())
+
+    def test_claude_configuration_preserves_concurrent_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / ".claude.json"
+            config.write_text('{"theme": "original", "mcpServers": {}}\n', encoding="utf-8")
+            if os.name != "nt":
+                config.chmod(0o600)
+            real_atomic_bytes = INSTALLER._atomic_bytes
+
+            def exchange_before_target_replace(path: Path, payload: bytes, *, before_replace=None) -> None:
+                if path != config:
+                    real_atomic_bytes(path, payload, before_replace=before_replace)
+                    return
+
+                def exchange_then_recheck() -> None:
+                    replacement = root / "concurrent.json"
+                    replacement.write_text(
+                        '{"theme": "concurrent", "mcpServers": {}}\n',
+                        encoding="utf-8",
+                    )
+                    if os.name != "nt":
+                        replacement.chmod(0o600)
+                    os.replace(replacement, config)
+                    assert before_replace is not None
+                    before_replace()
+
+                real_atomic_bytes(path, payload, before_replace=exchange_then_recheck)
+
+            with mock.patch.object(
+                INSTALLER, "_atomic_bytes", side_effect=exchange_before_target_replace
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed before replacement"):
+                    INSTALLER.configure_claude_mcp(config)
+            self.assertEqual(
+                config.read_text(encoding="utf-8"),
+                '{"theme": "concurrent", "mcpServers": {}}\n',
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX symbolic-link test")
+    def test_claude_install_preflights_config_before_runtime_mutation(self) -> None:
+        original = INSTALLER.CLAUDE_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "sentinel.json"
+            sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            sentinel.chmod(0o600)
+            INSTALLER.CLAUDE_CONFIG = root / ".claude.json"
+            INSTALLER.CLAUDE_CONFIG.symlink_to(sentinel)
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink") as link, \
+                     mock.patch.object(INSTALLER, "install_delivery_boundary") as delivery, \
+                     mock.patch.object(INSTALLER, "install_guard_runtime") as runtime, \
+                     mock.patch.object(INSTALLER, "install_mcp_http_runtime") as mcp_runtime:
+                    with self.assertRaisesRegex(RuntimeError, "regular file"):
+                        INSTALLER.install(["claude"], autostart_service=False)
+                link.assert_not_called()
+                delivery.assert_not_called()
+                runtime.assert_not_called()
+                mcp_runtime.assert_not_called()
+                self.assertTrue(INSTALLER.CLAUDE_CONFIG.is_symlink())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+            finally:
+                INSTALLER.CLAUDE_CONFIG = original
 
     def test_windows_task_requests_restart_on_failure(self) -> None:
         completed = INSTALLER.subprocess.CompletedProcess([], 0, "", "")
@@ -1507,6 +3242,75 @@ class InstallerTests(unittest.TestCase):
                 }
             }), encoding="utf-8")
             self.assertEqual(INSTALLER.project_mcp_shadows(nested), [root / ".mcp.json"])
+
+    def test_project_mcp_shadow_scan_rejects_invalid_json_and_schema(self) -> None:
+        cases = (b"{broken", b"[]", b'{"mcpServers": []}')
+        for raw in cases:
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                nested = root / "nested"
+                nested.mkdir()
+                config = root / ".mcp.json"
+                config.write_bytes(raw)
+                with self.assertRaisesRegex(RuntimeError, "invalid|root must|must be an object"):
+                    INSTALLER.project_mcp_shadows(nested)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file-type and permission tests")
+    def test_project_mcp_shadow_scan_rejects_unsafe_files(self) -> None:
+        cases = ("symlink", "hardlink", "fifo", "permissions", "oversized")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                nested = root / "nested"
+                nested.mkdir()
+                config = root / ".mcp.json"
+                sentinel = root / "sentinel.json"
+                sentinel.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                sentinel.chmod(0o600)
+                if case == "symlink":
+                    config.symlink_to(sentinel)
+                    expected = "regular file"
+                elif case == "hardlink":
+                    os.link(sentinel, config)
+                    expected = "hard links"
+                elif case == "fifo":
+                    os.mkfifo(config)
+                    expected = "regular file"
+                elif case == "permissions":
+                    config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+                    config.chmod(0o622)
+                    expected = "writable outside"
+                else:
+                    config.write_bytes(b"x" * (INSTALLER.MAX_PROJECT_MCP_CONFIG_BYTES + 1))
+                    config.chmod(0o600)
+                    expected = "size limit"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    INSTALLER.project_mcp_shadows(nested)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+
+    def test_project_mcp_shadow_scan_rejects_identity_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "nested"
+            nested.mkdir()
+            config = root / ".mcp.json"
+            config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+            if os.name != "nt":
+                config.chmod(0o600)
+            details = config.stat()
+            fields = {
+                name: getattr(details, name)
+                for name in (
+                    "st_mode", "st_uid", "st_dev", "st_ino", "st_nlink", "st_size",
+                    "st_ctime_ns", "st_mtime_ns",
+                )
+            }
+            opened = SimpleNamespace(**fields)
+            changed = SimpleNamespace(**fields)
+            changed.st_ctime_ns += 1
+            with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER.project_mcp_shadows(nested)
 
     def test_operation_lock_excludes_overlap_and_releases_only_its_owner(self) -> None:
         original = INSTALLER.OPERATION_LOCK
@@ -1792,6 +3596,119 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
 
+    def test_health_monitor_files_are_bounded_and_schema_validated(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            try:
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                    "enabled": True,
+                    "interval_seconds": 60,
+                    "plugin_required": False,
+                    "claude_command": "claude",
+                })
+                self.assertTrue(INSTALLER.health_monitor_enabled())
+
+                INSTALLER.HEALTH_CONFIG.write_bytes(
+                    b"x" * (INSTALLER.MAX_HEALTH_FILE_BYTES + 1)
+                )
+                if os.name != "nt":
+                    INSTALLER.HEALTH_CONFIG.chmod(0o600)
+                with self.assertRaisesRegex(RuntimeError, "size limit"):
+                    INSTALLER._load_health_config()
+
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {"enabled": "false"})
+                with self.assertRaisesRegex(RuntimeError, "field enabled"):
+                    INSTALLER._load_health_config()
+
+                INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                    "status": "blocked",
+                    "checked_at": 10,
+                    "consecutive_failures": True,
+                })
+                with self.assertRaisesRegex(RuntimeError, "consecutive_failures"):
+                    INSTALLER._load_health_state()
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX link and permission test")
+    def test_health_monitor_rejects_links_and_open_permissions_without_repair(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            sentinel = root / "sentinel.json"
+            INSTALLER._atomic_json(sentinel, {
+                "status": "blocked",
+                "checked_at": 100,
+                "consecutive_failures": 5,
+                "last_repair_at": 100,
+                "next_repair_at": 3700,
+            })
+            INSTALLER.HEALTH_STATE.symlink_to(sentinel)
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status") as probe, \
+                     mock.patch.object(INSTALLER, "restart_guard_runtime") as restart, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=200), 2)
+                probe.assert_not_called()
+                restart.assert_not_called()
+                self.assertTrue(INSTALLER.HEALTH_STATE.is_symlink())
+                self.assertEqual(
+                    INSTALLER.json.loads(sentinel.read_text(encoding="utf-8"))["next_repair_at"],
+                    3700,
+                )
+
+                INSTALLER.HEALTH_STATE.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {"status": "ok", "checked_at": 200})
+                INSTALLER.HEALTH_STATE.chmod(0o644)
+                with self.assertRaisesRegex(RuntimeError, "owner-only"):
+                    INSTALLER._load_health_state()
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_rejects_state_identity_change_while_reading(self) -> None:
+        original = INSTALLER.HEALTH_STATE
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            replacement = root / "replacement.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {"status": "ok", "checked_at": 1})
+            INSTALLER._atomic_json(replacement, {"status": "ok", "checked_at": 2})
+            opened = INSTALLER.HEALTH_STATE.stat()
+            changed = replacement.stat()
+            try:
+                with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
+                    with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                        INSTALLER._load_health_state()
+            finally:
+                INSTALLER.HEALTH_STATE = original
+
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_update_blocks_unsafe_health_policy_before_candidate_execution(self) -> None:
+        originals = (INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "sentinel.json"
+            INSTALLER._atomic_json(sentinel, {"enabled": False})
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_CONFIG.symlink_to(sentinel)
+            INSTALLER.HEALTH_STATE = root / "missing-state.json"
+            try:
+                with mock.patch.object(INSTALLER, "_clean_checkout_revision", return_value="a" * 40), \
+                     mock.patch.object(INSTALLER, "_run") as runner, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER._update_unlocked(), 2)
+                runner.assert_not_called()
+                self.assertTrue(INSTALLER.HEALTH_CONFIG.is_symlink())
+                self.assertFalse(INSTALLER.json.loads(sentinel.read_text(encoding="utf-8"))["enabled"])
+            finally:
+                INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
+
     def test_health_monitor_skips_dependent_mcp_probe_when_signer_is_down(self) -> None:
         with mock.patch.object(INSTALLER, "probe_guard_service", side_effect=OSError("offline")), \
              mock.patch.object(INSTALLER, "probe_mcp_http") as mcp_probe:
@@ -1942,6 +3859,236 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.OPERATION_LOCK, INSTALLER.TARGETS,
                 ) = originals
 
+    def test_health_monitor_auto_enrollment_preserves_replaced_policy(self) -> None:
+        originals = (
+            INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK,
+            INSTALLER.TARGETS,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            skill = root / "skill"
+            skill.mkdir()
+            claude_target = root / "claude-skill"
+            claude_target.symlink_to(skill, target_is_directory=True)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER.TARGETS = {**INSTALLER.TARGETS, "claude": claude_target}
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": True, "interval_seconds": 60, "claude_command": "/bin/claude",
+            })
+
+            def replace_policy(_version: str, _command: str) -> dict:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                    "enabled": False,
+                    "interval_seconds": 300,
+                    "plugin_required": False,
+                    "claude_command": "replacement",
+                })
+                return {"installed": True, "healthy": True, "version": _version}
+
+            try:
+                with mock.patch.object(INSTALLER, "_guard_stack_status", return_value=(True, True)), \
+                     mock.patch.object(
+                         INSTALLER, "claude_plugin_status", side_effect=replace_policy
+                     ), mock.patch.object(INSTALLER, "update_claude_plugin") as updater, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6500), 2)
+                updater.assert_not_called()
+                self.assertFalse(INSTALLER.HEALTH_STATE.exists())
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertFalse(policy["enabled"])
+                self.assertEqual(policy["interval_seconds"], 300)
+                self.assertEqual(policy["claude_command"], "replacement")
+            finally:
+                (
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK,
+                    INSTALLER.TARGETS,
+                ) = originals
+
+    def test_health_monitor_state_exchange_blocks_before_repair(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                "status": "blocked", "checked_at": 1, "consecutive_failures": 1,
+            })
+
+            def replace_state() -> tuple[bool, bool]:
+                INSTALLER.HEALTH_STATE.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                    "status": "replacement",
+                    "checked_at": 6501,
+                    "consecutive_failures": 9,
+                    "next_repair_at": 9999,
+                })
+                return False, False
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_guard_stack_status", side_effect=replace_state
+                ), mock.patch.object(
+                    INSTALLER,
+                    "_claude_plugin_monitor_status",
+                    return_value={"required": False, "healthy": True, "reason": "not-installed"},
+                ), mock.patch.object(INSTALLER, "restart_guard_runtime") as restart, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6500), 2)
+                restart.assert_not_called()
+                state = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_STATE.read_text(encoding="utf-8")
+                )
+                self.assertEqual(state["status"], "replacement")
+                self.assertEqual(state["next_repair_at"], 9999)
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_state_exchange_during_repair_is_not_overwritten(self) -> None:
+        originals = (INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                "status": "blocked", "checked_at": 1, "consecutive_failures": 1,
+            })
+
+            def replace_state() -> tuple[bool, str]:
+                INSTALLER.HEALTH_STATE.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_STATE, {
+                    "status": "replacement",
+                    "checked_at": 6601,
+                    "consecutive_failures": 7,
+                    "next_repair_at": 8888,
+                })
+                return False, "offline"
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_guard_stack_status", return_value=(False, False)
+                ), mock.patch.object(
+                    INSTALLER,
+                    "_claude_plugin_monitor_status",
+                    return_value={"required": False, "healthy": True, "reason": "not-installed"},
+                ), mock.patch.object(
+                    INSTALLER, "restart_guard_runtime", side_effect=replace_state
+                ) as restart, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6600), 2)
+                restart.assert_called_once_with()
+                state = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_STATE.read_text(encoding="utf-8")
+                )
+                self.assertEqual(state["status"], "replacement")
+                self.assertEqual(state["next_repair_at"], 8888)
+            finally:
+                INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
+
+    def test_health_monitor_policy_exchange_during_probe_blocks_before_repair(self) -> None:
+        originals = (
+            INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": True, "interval_seconds": 60, "plugin_required": False,
+            })
+
+            def replace_policy() -> tuple[bool, bool]:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                    "enabled": False,
+                    "interval_seconds": 300,
+                    "plugin_required": False,
+                    "claude_command": "replacement",
+                })
+                return False, False
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_guard_stack_status", side_effect=replace_policy
+                ), mock.patch.object(
+                    INSTALLER,
+                    "_claude_plugin_monitor_status",
+                    return_value={"required": False, "healthy": True, "reason": "not-installed"},
+                ), mock.patch.object(INSTALLER, "restart_guard_runtime") as restart, \
+                     mock.patch.object(INSTALLER, "update_claude_plugin") as updater, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6700), 2)
+                restart.assert_not_called()
+                updater.assert_not_called()
+                self.assertFalse(INSTALLER.HEALTH_STATE.exists())
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertFalse(policy["enabled"])
+                self.assertEqual(policy["interval_seconds"], 300)
+                self.assertEqual(policy["claude_command"], "replacement")
+            finally:
+                (
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE,
+                    INSTALLER.OPERATION_LOCK,
+                ) = originals
+
+    def test_health_monitor_policy_exchange_during_repair_blocks_publication(self) -> None:
+        originals = (
+            INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": True, "interval_seconds": 60, "plugin_required": False,
+            })
+
+            def replace_policy() -> tuple[bool, str]:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                    "enabled": False,
+                    "interval_seconds": 600,
+                    "plugin_required": False,
+                })
+                return True, "restarted"
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_guard_stack_status", return_value=(False, False)
+                ), mock.patch.object(
+                    INSTALLER,
+                    "_claude_plugin_monitor_status",
+                    return_value={"required": False, "healthy": True, "reason": "not-installed"},
+                ), mock.patch.object(
+                    INSTALLER, "restart_guard_runtime", side_effect=replace_policy
+                ) as restart, mock.patch.object(
+                    INSTALLER, "_wait_for_stack", return_value=True
+                ) as waiter, mock.patch.object(
+                    INSTALLER, "restart_mcp_http_runtime"
+                ) as mcp_restart, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6800), 2)
+                restart.assert_called_once_with()
+                waiter.assert_called_once_with(guard=True)
+                mcp_restart.assert_not_called()
+                self.assertFalse(INSTALLER.HEALTH_STATE.exists())
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertFalse(policy["enabled"])
+                self.assertEqual(policy["interval_seconds"], 600)
+            finally:
+                (
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE,
+                    INSTALLER.OPERATION_LOCK,
+                ) = originals
+
     def test_health_monitor_never_installs_a_missing_enrolled_claude_plugin(self) -> None:
         originals = (
             INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.UPDATE_CONFIG,
@@ -2007,8 +4154,10 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(ok)
             timer = (home / ".config" / "systemd" / "user" / "blun-language-guard-health.timer").read_text()
             self.assertIn("OnUnitActiveSec=1m", timer)
-            service = (home / ".config" / "systemd" / "user" / "blun-language-guard-health.service").read_text()
-            self.assertIn("health-monitor", service)
+            service_path = home / ".config" / "systemd" / "user" / "blun-language-guard-health.service"
+            self.assertIn("health-monitor", service_path.read_text())
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(service_path.stat().st_mode), 0o600)
 
             with mock.patch.object(INSTALLER.platform, "system", return_value="Darwin"), \
                  mock.patch.object(INSTALLER, "_run", return_value=completed):

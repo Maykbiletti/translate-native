@@ -4,15 +4,68 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import stat
+from pathlib import Path
 from typing import Any
 
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_SERVICE_TOKEN_BYTES = 64 * 1024
 
 
 class GuardServiceError(RuntimeError):
     """Raised when the isolated guard cannot evaluate a request safely."""
+
+
+def _token_file_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_token_file(details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise GuardServiceError("guard service token must be a regular file")
+    if details.st_size < 32 or details.st_size > MAX_SERVICE_TOKEN_BYTES:
+        raise GuardServiceError("guard service token has an invalid size")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise GuardServiceError("guard service token permissions must be owner-only")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise GuardServiceError("guard service token has the wrong owner")
+
+
+def load_service_token(path: Path) -> str:
+    """Read a bounded owner-only service token without following a replaced file."""
+    before = os.lstat(path)
+    _validate_token_file(before)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _validate_token_file(opened)
+        if _token_file_identity(opened) != _token_file_identity(before):
+            raise GuardServiceError("guard service token changed while opening")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_SERVICE_TOKEN_BYTES + 1)
+        after = os.fstat(descriptor)
+        if _token_file_identity(after) != _token_file_identity(opened):
+            raise GuardServiceError("guard service token changed while reading")
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_SERVICE_TOKEN_BYTES:
+        raise GuardServiceError("guard service token has an invalid size")
+    try:
+        token = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError as error:
+        raise GuardServiceError("guard service token is not valid UTF-8") from error
+    if len(token) < 32:
+        raise GuardServiceError("guard service token is invalid")
+    return token
 
 
 def parse_endpoint(endpoint: str) -> tuple[str, str | tuple[str, int]]:

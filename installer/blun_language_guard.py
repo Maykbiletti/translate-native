@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import stat
@@ -52,6 +54,14 @@ OPERATION_LOCK_STALE_SECONDS = 30 * 60
 MAX_OPERATION_LOCK_BYTES = 4 * 1024
 HEALTH_REPAIR_BACKOFF_SECONDS = (60, 120, 300, 900, 3600)
 MAX_UPDATE_POLICY_BYTES = 64 * 1024
+MAX_HEALTH_FILE_BYTES = 64 * 1024
+MAX_UPDATE_STATE_BYTES = 64 * 1024
+MAX_MCP_HTTP_TOKEN_BYTES = 64 * 1024
+MAX_DELIVERY_POLICY_BYTES = 64 * 1024
+MAX_BLUN_MCP_CONFIG_BYTES = 1024 * 1024
+MAX_CLAUDE_CONFIG_BYTES = 16 * 1024 * 1024
+MAX_PROJECT_MCP_CONFIG_BYTES = 1024 * 1024
+MAX_SERVICE_DEFINITION_BYTES = 256 * 1024
 SERVICE_ENDPOINT = (
     "tcp:127.0.0.1:47631"
     if os.name == "nt"
@@ -63,77 +73,557 @@ def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _installed_symlink_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _inspect_installed_symlink(destination: Path) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        details = destination.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Cannot inspect installation target: {destination}") from error
+    if not stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Refusing to overwrite existing non-symlink: {destination}")
+    return _installed_symlink_identity(details)
+
+
+def _assert_installed_symlink_unchanged(
+    destination: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    current = _inspect_installed_symlink(destination)
+    if expected is None and current is not None:
+        raise RuntimeError(f"Installation target appeared before replacement: {destination}")
+    if expected is not None and current != expected:
+        raise RuntimeError(f"Installation target changed before replacement: {destination}")
+
+
 def atomic_symlink(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and not destination.is_symlink():
-        raise RuntimeError(f"Refusing to overwrite existing non-symlink: {destination}")
-    temporary = destination.with_name(destination.name + ".new")
-    temporary.unlink(missing_ok=True)
-    temporary.symlink_to(source, target_is_directory=source.is_dir())
-    temporary.replace(destination)
+    expected = _inspect_installed_symlink(destination)
+    temporary = None
+    for _attempt in range(16):
+        candidate = destination.with_name(
+            f".{destination.name}.{secrets.token_hex(16)}.new"
+        )
+        try:
+            candidate.symlink_to(source, target_is_directory=source.is_dir())
+        except FileExistsError:
+            continue
+        temporary = candidate
+        break
+    if temporary is None:
+        raise RuntimeError(f"Cannot reserve temporary installation link: {destination}")
+    try:
+        _assert_installed_symlink_unchanged(destination, expected)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _service_definition_identity(
+    details: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_service_definition_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Service definition is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"Service definition has additional hard links: {path}")
+    if details.st_size > MAX_SERVICE_DEFINITION_BYTES:
+        raise RuntimeError(f"Service definition exceeds the size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"Service definition is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Service definition owner is invalid: {path}")
+
+
+def _inspect_service_definition(
+    path: Path,
+) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Cannot inspect service definition: {path}") from error
+    _validate_service_definition_details(path, details)
+    return _service_definition_identity(details)
+
+
+def _assert_service_definition_unchanged(
+    path: Path,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    current = _inspect_service_definition(path)
+    if expected is None and current is not None:
+        raise RuntimeError(f"Service definition appeared before replacement: {path}")
+    if expected is not None and current != expected:
+        raise RuntimeError(f"Service definition changed before replacement: {path}")
+
+
+def _service_directory_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_uid,
+        details.st_gid,
+    )
+
+
+def _validate_service_directory_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Service-definition directory is not a directory: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"Service-definition directory is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Service-definition directory owner is invalid: {path}")
+
+
+def _assert_service_directory_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int],
+) -> None:
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"Service-definition directory cannot be rechecked: {path}") from error
+    _validate_service_directory_details(path, current)
+    if _service_directory_identity(current) != expected:
+        raise RuntimeError(f"Service-definition directory changed during operation: {path}")
+
+
+@contextlib.contextmanager
+def _open_service_definition_directory(
+    path: Path,
+    home: Path,
+    *,
+    create: bool = True,
+    missing_ok: bool = False,
+):
+    try:
+        relative = path.relative_to(home)
+    except ValueError as error:
+        raise RuntimeError(f"Service-definition directory is outside the user home: {path}") from error
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = None
+    current_path = home
+    try:
+        descriptor = os.open(home, flags)
+        _validate_service_directory_details(home, os.fstat(descriptor))
+        for component in relative.parts:
+            current_path = current_path / component
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    if not missing_ok:
+                        raise
+                    os.close(descriptor)
+                    descriptor = None
+                    break
+                else:
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
+                    child = os.open(component, flags, dir_fd=descriptor)
+            if descriptor is None:
+                break
+            try:
+                _validate_service_directory_details(current_path, os.fstat(child))
+            except Exception:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        if descriptor is None:
+            yield None
+            return
+        expected = _service_directory_identity(os.fstat(descriptor))
+        yield descriptor
+        _assert_service_directory_unchanged(path, expected)
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Cannot safely open service-definition directory: {current_path}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _inspect_service_definition_at(
+    directory: int, path: Path,
+) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        details = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Cannot inspect service definition: {path}") from error
+    _validate_service_definition_details(path, details)
+    return _service_definition_identity(details)
+
+
+def _assert_service_definition_at_unchanged(
+    directory: int,
+    path: Path,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    current = _inspect_service_definition_at(directory, path)
+    if expected is None and current is not None:
+        raise RuntimeError(f"Service definition appeared before replacement: {path}")
+    if expected is not None and current != expected:
+        raise RuntimeError(f"Service definition changed before replacement: {path}")
+
+
+def _preflight_service_definition_removal_at(
+    directory: int,
+    path: Path,
+    required_markers: tuple[str, ...],
+) -> tuple[int, int, int, int, int, int] | None:
+    expected = _inspect_service_definition_at(directory, path)
+    if expected is None:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=directory)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if _service_definition_identity(opened) != expected:
+                raise RuntimeError(f"Service definition changed while opening: {path}")
+            raw = handle.read(MAX_SERVICE_DEFINITION_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = _inspect_service_definition_at(directory, path)
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Cannot read service definition: {path}") from error
+    if len(raw) > MAX_SERVICE_DEFINITION_BYTES:
+        raise RuntimeError(f"Service definition exceeds the size limit: {path}")
+    if _service_definition_identity(after_read) != expected or after_path != expected:
+        raise RuntimeError(f"Service definition changed while reading: {path}")
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeError as error:
+        raise RuntimeError(f"Service definition is not valid UTF-8: {path}") from error
+    if not all(marker in content for marker in required_markers):
+        raise RuntimeError(f"Service definition is not managed by BLUN: {path}")
+    return expected
+
+
+@contextlib.contextmanager
+def _prepare_service_definition_removals(
+    home: Path,
+    definitions: tuple[tuple[Path, tuple[str, ...]], ...],
+):
+    if not definitions:
+        yield []
+        return
+    parent = definitions[0][0].parent
+    if any(path.parent != parent for path, _markers in definitions):
+        raise RuntimeError("Service definitions do not share one protected directory")
+    with _open_service_definition_directory(
+        parent,
+        home,
+        create=False,
+        missing_ok=True,
+    ) as directory:
+        if directory is None:
+            yield [(None, path, None) for path, _markers in definitions]
+            return
+        prepared = [
+            (
+                directory,
+                path,
+                _preflight_service_definition_removal_at(directory, path, markers),
+            )
+            for path, markers in definitions
+        ]
+        _assert_service_directory_unchanged(
+            parent,
+            _service_directory_identity(os.fstat(directory)),
+        )
+        yield prepared
+
+
+def _remove_service_definition_at(
+    directory: int | None,
+    path: Path,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    if expected is None:
+        return
+    if directory is None:
+        raise RuntimeError(f"Service-definition directory disappeared before removal: {path.parent}")
+    _assert_service_definition_at_unchanged(directory, path, expected)
+    os.unlink(path.name, dir_fd=directory)
+
+
+def _write_service_definition(path: Path, content: str, *, home: Path | None = None) -> None:
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_SERVICE_DEFINITION_BYTES:
+        raise RuntimeError(f"Service definition exceeds the size limit: {path}")
+    if home is not None:
+        with _open_service_definition_directory(path.parent, home) as directory:
+            expected = _inspect_service_definition_at(directory, path)
+            temporary_name = ""
+            for _attempt in range(16):
+                candidate = f".{path.name}.{secrets.token_hex(16)}.tmp"
+                flags = (
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                try:
+                    descriptor = os.open(candidate, flags, 0o600, dir_fd=directory)
+                except FileExistsError:
+                    continue
+                temporary_name = candidate
+                break
+            else:
+                raise RuntimeError(f"Cannot reserve temporary service definition: {path}")
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _assert_service_definition_at_unchanged(directory, path, expected)
+                os.replace(
+                    temporary_name,
+                    path.name,
+                    src_dir_fd=directory,
+                    dst_dir_fd=directory,
+                )
+                temporary_name = ""
+            finally:
+                if temporary_name:
+                    try:
+                        os.unlink(temporary_name, dir_fd=directory)
+                    except FileNotFoundError:
+                        pass
+        return
+    expected = _inspect_service_definition(path)
+    _atomic_bytes(
+        path,
+        encoded,
+        before_replace=lambda: _assert_service_definition_unchanged(path, expected),
+    )
 
 
 def ensure_signing_key(path: Path | None = None) -> None:
     """Create the local trust key once and never replace an existing key."""
     path = path or SIGNING_KEY
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if not path.is_file():
-            raise RuntimeError(f"Signing-key path is not a file: {path}")
-        if os.name != "nt" and path.stat().st_mode & 0o077:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        details = None
+    if details is not None:
+        if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+            raise RuntimeError(f"Signing-key path is not a regular file: {path}")
+        if details.st_size < 32 or details.st_size > 64 * 1024:
+            raise RuntimeError(f"Signing key has an invalid size: {path}")
+        if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
             raise RuntimeError(f"Signing-key permissions must be owner-only: {path}")
+        if hasattr(os, "getuid") and details.st_uid != os.getuid():
+            raise RuntimeError(f"Signing-key owner is invalid: {path}")
         return
-    temporary = path.with_suffix(".tmp")
-    temporary.write_bytes(os.urandom(32))
-    if os.name != "nt":
-        os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        ensure_signing_key(path)
+        return
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(os.urandom(32))
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_service_token_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Service-token path is not a regular file: {path}")
+    if details.st_size < 32 or details.st_size > 64 * 1024:
+        raise RuntimeError(f"Service token has an invalid size: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise RuntimeError(f"Service-token permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Service-token owner is invalid: {path}")
+
+
+def _read_protected_service_token(path: Path) -> str:
+    before = path.lstat()
+    _validate_service_token_details(path, before)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _validate_service_token_details(path, opened)
+        if _service_token_identity(opened) != _service_token_identity(before):
+            raise RuntimeError(f"Service token changed while opening: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(64 * 1024 + 1)
+        after = os.fstat(descriptor)
+        if _service_token_identity(after) != _service_token_identity(opened):
+            raise RuntimeError(f"Service token changed while reading: {path}")
+    finally:
+        os.close(descriptor)
+    if len(raw) > 64 * 1024:
+        raise RuntimeError(f"Service token has an invalid size: {path}")
+    try:
+        token = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"Service token is not valid UTF-8: {path}") from error
+    if len(token) < 32:
+        raise RuntimeError(f"Service token is invalid: {path}")
+    return token
 
 
 def ensure_service_token(path: Path | None = None) -> None:
     """Create a stable text token used only by host adapters and the MCP process."""
     path = path or SERVICE_TOKEN
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if not path.is_file():
-            raise RuntimeError(f"Service-token path is not a file: {path}")
-        token = path.read_text(encoding="utf-8-sig").strip()
-        if len(token) < 32:
-            raise RuntimeError(f"Service token is invalid: {path}")
-        if os.name != "nt" and path.stat().st_mode & 0o077:
-            raise RuntimeError(f"Service-token permissions must be owner-only: {path}")
+    try:
+        _read_protected_service_token(path)
         return
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
-    if os.name != "nt":
-        os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    except FileNotFoundError:
+        pass
+    token = os.urandom(32).hex().encode("ascii") + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        _read_protected_service_token(path)
+        return
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(token)
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_mcp_http_token_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"MCP access-token path is not a regular file: {path}")
+    if details.st_size < 32 or details.st_size > MAX_MCP_HTTP_TOKEN_BYTES:
+        raise RuntimeError(f"MCP access token has an invalid size: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise RuntimeError(f"MCP access-token permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"MCP access-token owner is invalid: {path}")
+
+
+def _read_protected_mcp_http_token(path: Path) -> str:
+    before = path.lstat()
+    _validate_mcp_http_token_details(path, before)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _validate_mcp_http_token_details(path, opened)
+        if _mcp_http_token_identity(opened) != _mcp_http_token_identity(before):
+            raise RuntimeError(f"MCP access token changed while opening: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_MCP_HTTP_TOKEN_BYTES + 1)
+        after_read = os.fstat(descriptor)
+        after_path = path.lstat()
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_MCP_HTTP_TOKEN_BYTES:
+        raise RuntimeError(f"MCP access token has an invalid size: {path}")
+    if (
+        _mcp_http_token_identity(after_read) != _mcp_http_token_identity(opened)
+        or _mcp_http_token_identity(after_path) != _mcp_http_token_identity(opened)
+    ):
+        raise RuntimeError(f"MCP access token changed while reading: {path}")
+    try:
+        token = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"MCP access token is not valid UTF-8: {path}") from error
+    if len(token) < 32:
+        raise RuntimeError(f"MCP access token is invalid: {path}")
+    return token
 
 
 def ensure_mcp_http_token(path: Path | None = None) -> None:
     """Create a stable bearer token for the loopback HTTP MCP endpoint."""
     path = path or MCP_HTTP_TOKEN
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if not path.is_file():
-            raise RuntimeError(f"MCP access-token path is not a file: {path}")
-        token = path.read_text(encoding="utf-8-sig").strip()
-        if len(token) < 32:
-            raise RuntimeError(f"MCP access token is invalid: {path}")
-        if os.name != "nt" and path.stat().st_mode & 0o077:
-            raise RuntimeError(f"MCP access-token permissions must be owner-only: {path}")
+    try:
+        _read_protected_mcp_http_token(path)
         return
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(os.urandom(32).hex() + "\n", encoding="ascii")
-    if os.name != "nt":
-        os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    except FileNotFoundError:
+        pass
+    token = os.urandom(32).hex().encode("ascii") + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        _read_protected_mcp_http_token(path)
+        return
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(token)
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def install_delivery_boundary(root: Path) -> None:
     source = root / "integrations" / "enforced_delivery.py"
     if not source.is_file():
         raise RuntimeError(f"Missing delivery boundary: {source}")
+    if DELIVERY_POLICY.exists() or DELIVERY_POLICY.is_symlink():
+        _load_delivery_policy()
     source.chmod(source.stat().st_mode | 0o111)
     atomic_symlink(source, DELIVERY_COMMAND)
     ensure_signing_key()
@@ -167,10 +657,11 @@ def install_mcp_http_runtime(root: Path) -> None:
     for source in (gateway, headers):
         if not source.is_file():
             raise RuntimeError(f"Missing persistent MCP component: {source}")
+    ensure_mcp_http_token()
+    for source in (gateway, headers):
         source.chmod(source.stat().st_mode | 0o111)
     atomic_symlink(gateway, MCP_HTTP_COMMAND)
     atomic_symlink(headers, MCP_HEADERS_COMMAND)
-    ensure_mcp_http_token()
     print(f"Persistent MCP command: {MCP_HTTP_COMMAND}")
     print(f"Dynamic MCP headers command: {MCP_HEADERS_COMMAND}")
 
@@ -233,32 +724,34 @@ def install_guard_autostart(root: Path) -> tuple[bool, str]:
     arguments = _service_arguments(root)
     system = platform.system()
     if system == "Linux":
-        units = Path.home() / ".config" / "systemd" / "user"
-        units.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        units = home / ".config" / "systemd" / "user"
         service = units / "blun-language-guard.service"
-        service.write_text(
+        _write_service_definition(
+            service,
             "[Unit]\nDescription=BLUN isolated language release guard\n\n"
             "[Service]\nType=simple\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\nRestart=on-failure\nRestartSec=2\n\n"
             "[Install]\nWantedBy=default.target\n",
-            encoding="utf-8",
+            home=home,
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", service.name])
         return reload_result.returncode == 0 and enable_result.returncode == 0, str(service)
     if system == "Darwin":
-        agents = Path.home() / "Library" / "LaunchAgents"
-        agents.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        agents = home / "Library" / "LaunchAgents"
         plist = agents / "ai.blun.language-guard.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
-        plist.write_text(
+        _write_service_definition(
+            plist,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
             "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
             "<plist version=\"1.0\"><dict><key>Label</key><string>ai.blun.language-guard</string>"
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n",
-            encoding="utf-8",
+            home=home,
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
@@ -274,26 +767,28 @@ def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
     arguments = _mcp_http_arguments(root)
     system = platform.system()
     if system == "Linux":
-        units = Path.home() / ".config" / "systemd" / "user"
-        units.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        units = home / ".config" / "systemd" / "user"
         service = units / "blun-language-guard-mcp.service"
-        service.write_text(
+        _write_service_definition(
+            service,
             "[Unit]\nDescription=BLUN persistent Streamable HTTP MCP\n"
             "After=blun-language-guard.service\nWants=blun-language-guard.service\n\n"
             "[Service]\nType=simple\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\nRestart=always\nRestartSec=1\n\n"
             "[Install]\nWantedBy=default.target\n",
-            encoding="utf-8",
+            home=home,
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", service.name])
         return reload_result.returncode == 0 and enable_result.returncode == 0, str(service)
     if system == "Darwin":
-        agents = Path.home() / "Library" / "LaunchAgents"
-        agents.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        agents = home / "Library" / "LaunchAgents"
         plist = agents / "ai.blun.language-guard-mcp.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
-        plist.write_text(
+        _write_service_definition(
+            plist,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
             "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -301,7 +796,7 @@ def install_mcp_http_autostart(root: Path) -> tuple[bool, str]:
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>"
             "<key>ThrottleInterval</key><integer>1</integer></dict></plist>\n",
-            encoding="utf-8",
+            home=home,
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
@@ -345,13 +840,28 @@ def restart_mcp_http_runtime() -> tuple[bool, str]:
 def remove_mcp_http_autostart() -> None:
     system = platform.system()
     if system == "Linux":
-        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-mcp.service"])
-        (Path.home() / ".config" / "systemd" / "user" / "blun-language-guard-mcp.service").unlink(missing_ok=True)
-        _run(["systemctl", "--user", "daemon-reload"])
+        home = Path.home()
+        service = home / ".config" / "systemd" / "user" / "blun-language-guard-mcp.service"
+        definitions = ((
+            service,
+            ("BLUN persistent Streamable HTTP MCP", "mcp_http_gateway.py", "--port 47632"),
+        ),)
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-mcp.service"])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
+            _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
-        plist = Path.home() / "Library" / "LaunchAgents" / "ai.blun.language-guard-mcp.plist"
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        plist.unlink(missing_ok=True)
+        home = Path.home()
+        plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-mcp.plist"
+        definitions = ((
+            plist,
+            ("ai.blun.language-guard-mcp", "mcp_http_gateway.py", "<string>47632</string>"),
+        ),)
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard MCP"])
 
@@ -367,7 +877,7 @@ def probe_guard_service(timeout: float = 3.0) -> dict:
     assert spec and spec.loader
     client = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(client)
-    token = SERVICE_TOKEN.read_text(encoding="utf-8-sig").strip()
+    token = client.load_service_token(SERVICE_TOKEN)
     return client.call_guard_service(
         SERVICE_ENDPOINT,
         {"operation": "health"},
@@ -414,15 +924,7 @@ def claude_mcp_entry() -> dict:
 def configure_claude_mcp(path: Path | None = None) -> tuple[Path | None, int]:
     """Atomically install the user-scoped HTTP MCP and remove stale local shadows."""
     path = path or CLAUDE_CONFIG
-    if path.exists():
-        try:
-            current = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"Refusing to modify unreadable Claude configuration: {path}: {error}") from error
-        if not isinstance(current, dict):
-            raise RuntimeError(f"Claude configuration root must be an object: {path}")
-    else:
-        current = {}
+    current, original, expected = _read_protected_claude_config(path)
     servers = current.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         raise RuntimeError(f"Claude mcpServers must be an object: {path}")
@@ -440,13 +942,102 @@ def configure_claude_mcp(path: Path | None = None) -> tuple[Path | None, int]:
                 removed_shadows += 1
 
     backup = None
-    if path.exists():
+    if original is not None:
         backup = path.with_suffix(path.suffix + ".bak")
-        shutil.copy2(path, backup)
-    _atomic_json(path, current)
-    if os.name != "nt":
-        os.chmod(path, 0o600)
+        _atomic_bytes(backup, original)
+    encoded = (json.dumps(current, indent=2) + "\n").encode("utf-8")
+    _atomic_bytes(
+        path,
+        encoded,
+        before_replace=lambda: _assert_claude_config_unchanged(path, expected),
+    )
     return backup, removed_shadows
+
+
+def preflight_claude_config(path: Path | None = None) -> None:
+    """Reject unsafe Claude user configuration before installation mutates runtime."""
+    path = path or CLAUDE_CONFIG
+    current, _original, _expected = _read_protected_claude_config(path)
+    servers = current.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"Claude mcpServers must be an object: {path}")
+
+
+def _project_mcp_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_project_mcp_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Claude project MCP configuration is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(
+            f"Claude project MCP configuration has additional hard links: {path}"
+        )
+    if details.st_size > MAX_PROJECT_MCP_CONFIG_BYTES:
+        raise RuntimeError(f"Claude project MCP configuration exceeds the size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(
+            f"Claude project MCP configuration is writable outside its owner: {path}"
+        )
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Claude project MCP configuration owner is invalid: {path}")
+
+
+def _read_protected_project_mcp(path: Path) -> dict:
+    """Read a project-scoped Claude MCP file without following or racing links."""
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"Claude project MCP configuration is unreadable: {path}") from error
+    _validate_project_mcp_details(path, before)
+    expected = _project_mcp_identity(before)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            _validate_project_mcp_details(path, opened)
+            if _project_mcp_identity(opened) != expected:
+                raise RuntimeError(
+                    f"Claude project MCP configuration changed while opening: {path}"
+                )
+            raw = handle.read(MAX_PROJECT_MCP_CONFIG_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Claude project MCP configuration is unreadable: {path}") from error
+    if len(raw) > MAX_PROJECT_MCP_CONFIG_BYTES:
+        raise RuntimeError(f"Claude project MCP configuration exceeds the size limit: {path}")
+    if (
+        _project_mcp_identity(after_read) != expected
+        or _project_mcp_identity(after_path) != expected
+    ):
+        raise RuntimeError(f"Claude project MCP configuration changed while reading: {path}")
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Claude project MCP configuration is invalid: {path}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Claude project MCP configuration root must be an object: {path}")
+    servers = payload.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"Claude project mcpServers must be an object: {path}")
+    return payload
 
 
 def project_mcp_shadows(start: Path | None = None) -> list[Path]:
@@ -456,20 +1047,21 @@ def project_mcp_shadows(start: Path | None = None) -> list[Path]:
     shadows: list[Path] = []
     for directory in candidates:
         path = directory / ".mcp.json"
-        if not path.is_file():
-            continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8-sig"))
-            entry = payload.get("mcpServers", {}).get(MCP_SERVER_NAME)
-        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+            path.lstat()
+        except FileNotFoundError:
             continue
+        except OSError as error:
+            raise RuntimeError(f"Claude project MCP configuration is unreadable: {path}") from error
+        payload = _read_protected_project_mcp(path)
+        entry = payload.get("mcpServers", {}).get(MCP_SERVER_NAME)
         if entry is not None and entry != claude_mcp_entry():
             shadows.append(path)
     return shadows
 
 
 def _mcp_http_request(path: str, payload: dict | None = None, *, timeout: float = 4.0) -> tuple[int, dict]:
-    token = MCP_HTTP_TOKEN.read_text(encoding="utf-8-sig").strip()
+    token = _read_protected_mcp_http_token(MCP_HTTP_TOKEN)
     url = MCP_HTTP_URL.removesuffix("/mcp") + path
     headers = {"Authorization": f"Bearer {token}"}
     data = None
@@ -565,6 +1157,11 @@ def mcp_service(action: str) -> int:
 
 
 def install(targets: list[str], *, autostart_service: bool = True) -> int:
+    blun_config = Path.home() / ".blun" / "mcp.json" if "blun" in targets else None
+    if blun_config is not None:
+        preflight_blun_mcp_config(blun_config)
+    if "claude" in targets:
+        preflight_claude_config()
     root = repository_root()
     skill = root / "translate-native"
     for target in targets:
@@ -587,19 +1184,14 @@ def install(targets: list[str], *, autostart_service: bool = True) -> int:
         }
     }
     output = Path.home() / ".config" / "blun-language-guard" / "mcp-snippet.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    _atomic_json(output, config)
     print(f"MCP snippet written without modifying host configuration: {output}")
-    if "blun" in targets:
-        blun_config = Path.home() / ".blun" / "mcp.json"
-        current = json.loads(blun_config.read_text(encoding="utf-8-sig")) if blun_config.exists() else {}
-        servers = current.setdefault("mcpServers", {})
-        servers[MCP_SERVER_NAME] = config["mcpServers"][MCP_SERVER_NAME]
-        if blun_config.exists():
-            backup = blun_config.with_suffix(".json.bak")
-            shutil.copy2(blun_config, backup)
+    if blun_config is not None:
+        backup = merge_blun_mcp_config(
+            blun_config, config["mcpServers"][MCP_SERVER_NAME]
+        )
+        if backup:
             print(f"BLUN MCP backup: {backup}")
-        _atomic_json(blun_config, current)
         print(f"BLUN MCP configuration merged: {blun_config}")
     if autostart_service:
         ok, detail = install_guard_autostart(root)
@@ -935,7 +1527,11 @@ def doctor() -> int:
         SERVICE_COMMAND.is_symlink() and SERVICE_COMMAND.resolve() == service_source.resolve(),
         str(SERVICE_COMMAND),
     ))
-    token_secure = SERVICE_TOKEN.is_file() and (os.name == "nt" or SERVICE_TOKEN.stat().st_mode & 0o077 == 0)
+    try:
+        _read_protected_service_token(SERVICE_TOKEN)
+        token_secure = True
+    except (OSError, RuntimeError):
+        token_secure = False
     checks.append(("service authentication token", token_secure, str(SERVICE_TOKEN)))
     mcp_gateway_source = root / "integrations" / "mcp_http_gateway.py"
     mcp_headers_source = root / "integrations" / "mcp_auth_headers.py"
@@ -949,13 +1545,19 @@ def doctor() -> int:
         MCP_HEADERS_COMMAND.is_symlink() and MCP_HEADERS_COMMAND.resolve() == mcp_headers_source.resolve(),
         str(MCP_HEADERS_COMMAND),
     ))
-    mcp_token_secure = MCP_HTTP_TOKEN.is_file() and (os.name == "nt" or MCP_HTTP_TOKEN.stat().st_mode & 0o077 == 0)
+    try:
+        _read_protected_mcp_http_token(MCP_HTTP_TOKEN)
+        mcp_token_secure = True
+    except (OSError, RuntimeError):
+        mcp_token_secure = False
     checks.append(("MCP HTTP access token", mcp_token_secure, str(MCP_HTTP_TOKEN)))
     claude_config_ok = False
     claude_config_detail = str(CLAUDE_CONFIG)
-    if CLAUDE_CONFIG.is_file():
-        try:
-            claude_config = json.loads(CLAUDE_CONFIG.read_text(encoding="utf-8-sig"))
+    try:
+        claude_config, original_claude_config, _identity = _read_protected_claude_config(
+            CLAUDE_CONFIG
+        )
+        if original_claude_config is not None:
             claude_entry = claude_config.get("mcpServers", {}).get(MCP_SERVER_NAME)
             local_shadows = sum(
                 1
@@ -965,27 +1567,28 @@ def doctor() -> int:
             ) if isinstance(claude_config.get("projects", {}), dict) else 0
             claude_config_ok = claude_entry == claude_mcp_entry() and local_shadows == 0
             claude_config_detail += f"; stale local shadows={local_shadows}"
-        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
-            claude_config_ok = False
+    except (OSError, RuntimeError, AttributeError, TypeError):
+        claude_config_ok = False
     checks.append(("Claude user-scoped HTTP MCP", claude_config_ok, claude_config_detail))
-    project_shadows = project_mcp_shadows()
+    try:
+        project_shadows = project_mcp_shadows()
+        project_mcp_ok = not project_shadows
+        project_mcp_detail = (
+            "none" if not project_shadows else ", ".join(str(path) for path in project_shadows)
+        )
+    except RuntimeError as error:
+        project_shadows = []
+        project_mcp_ok = False
+        project_mcp_detail = str(error)
     checks.append((
         "Claude project MCP precedence",
-        not project_shadows,
-        "none" if not project_shadows else ", ".join(str(path) for path in project_shadows),
+        project_mcp_ok,
+        project_mcp_detail,
     ))
-    policy_ok = False
-    if DELIVERY_POLICY.is_file():
-        try:
-            policy = json.loads(DELIVERY_POLICY.read_text(encoding="utf-8-sig"))
-            policy_ok = (
-                policy.get("mandatory") is True
-                and policy.get("direct_delivery_allowed") is False
-                and policy.get("raw_streaming_allowed") is False
-                and policy.get("isolated_service", {}).get("required") is True
-            )
-        except (OSError, json.JSONDecodeError):
-            policy_ok = False
+    try:
+        policy_ok = _load_delivery_policy() is not None
+    except RuntimeError:
+        policy_ok = False
     checks.append(("fail-closed delivery policy", policy_ok, str(DELIVERY_POLICY)))
     service_live = guard_service("status") == 0
     checks.append(("isolated guard health", service_live, SERVICE_ENDPOINT))
@@ -1047,18 +1650,23 @@ def doctor() -> int:
         updater_config = None
     if updater_config is not None:
         try:
-            state = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
+            state = _load_update_state() or {}
             maximum_age = int(updater_config.get("interval_hours", 24)) * 7200
             fresh = int(time.time()) - int(state.get("checked_at", 0)) <= maximum_age
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        except (RuntimeError, TypeError, ValueError):
             fresh = False
         checks.append(("automatic updater heartbeat", fresh, str(UPDATE_STATE)))
-    if TARGETS["claude"].is_symlink() and health_monitor_enabled():
+    try:
+        monitor_enabled = health_monitor_enabled()
+    except RuntimeError:
+        checks.append(("automatic health monitor policy", False, str(HEALTH_CONFIG)))
+        monitor_enabled = False
+    if TARGETS["claude"].is_symlink() and monitor_enabled:
         try:
-            health_state = json.loads(HEALTH_STATE.read_text(encoding="utf-8"))
+            health_state = _load_health_state() or {}
             health_fresh = int(time.time()) - int(health_state.get("checked_at", 0)) <= 180
             monitor_ok = health_fresh and health_state.get("status") in {"ok", "recovered"}
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        except (RuntimeError, TypeError, ValueError):
             monitor_ok = False
         checks.append(("automatic health monitor", monitor_ok, str(HEALTH_STATE)))
     failed = False
@@ -1068,7 +1676,7 @@ def doctor() -> int:
     return int(failed)
 
 
-def _atomic_json(path: Path, payload: dict) -> None:
+def _atomic_json(path: Path, payload: dict, *, before_replace=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -1079,44 +1687,270 @@ def _atomic_json(path: Path, payload: dict) -> None:
             handle.write(json.dumps(payload, indent=2) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _load_update_policy(path: Path) -> dict | None:
+def _claude_config_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_claude_config_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Claude configuration is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"Claude configuration has additional hard links: {path}")
+    if details.st_size > MAX_CLAUDE_CONFIG_BYTES:
+        raise RuntimeError(f"Claude configuration exceeds the size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"Claude configuration is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Claude configuration owner is invalid: {path}")
+
+
+def _read_protected_claude_config(
+    path: Path,
+) -> tuple[dict, bytes | None, tuple[int, int, int, int, int, int] | None]:
+    """Read Claude's user configuration without following links or racing replacement."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return {}, None, None
+    except OSError as error:
+        raise RuntimeError(f"Claude configuration is unreadable: {path}") from error
+    _validate_claude_config_details(path, before)
+    expected = _claude_config_identity(before)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            _validate_claude_config_details(path, opened)
+            if _claude_config_identity(opened) != expected:
+                raise RuntimeError(f"Claude configuration changed while opening: {path}")
+            raw = handle.read(MAX_CLAUDE_CONFIG_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"Claude configuration is unreadable: {path}") from error
+    if len(raw) > MAX_CLAUDE_CONFIG_BYTES:
+        raise RuntimeError(f"Claude configuration exceeds the size limit: {path}")
+    if (
+        _claude_config_identity(after_read) != expected
+        or _claude_config_identity(after_path) != expected
+    ):
+        raise RuntimeError(f"Claude configuration changed while reading: {path}")
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Claude configuration is invalid: {path}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Claude configuration root must be an object: {path}")
+    return payload, raw, expected
+
+
+def _assert_claude_config_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"Claude configuration disappeared before replacement: {path}")
+    except OSError as error:
+        raise RuntimeError(f"Claude configuration cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"Claude configuration appeared during installation: {path}")
+    _validate_claude_config_details(path, current)
+    if _claude_config_identity(current) != expected:
+        raise RuntimeError(f"Claude configuration changed before replacement: {path}")
+
+
+def _blun_config_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_blun_config_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"BLUN MCP configuration is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"BLUN MCP configuration has additional hard links: {path}")
+    if details.st_size > MAX_BLUN_MCP_CONFIG_BYTES:
+        raise RuntimeError(f"BLUN MCP configuration exceeds the size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o022:
+        raise RuntimeError(f"BLUN MCP configuration is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"BLUN MCP configuration owner is invalid: {path}")
+
+
+def _read_protected_blun_config(path: Path) -> tuple[dict, bytes | None, tuple[int, int, int, int, int, int] | None]:
+    """Read BLUN's security-relevant MCP config without following or racing links."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return {}, None, None
+    except OSError as error:
+        raise RuntimeError(f"BLUN MCP configuration is unreadable: {path}") from error
+    _validate_blun_config_details(path, before)
+    expected = _blun_config_identity(before)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            _validate_blun_config_details(path, opened)
+            if _blun_config_identity(opened) != expected:
+                raise RuntimeError(f"BLUN MCP configuration changed while opening: {path}")
+            raw = handle.read(MAX_BLUN_MCP_CONFIG_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(f"BLUN MCP configuration is unreadable: {path}") from error
+    if len(raw) > MAX_BLUN_MCP_CONFIG_BYTES:
+        raise RuntimeError(f"BLUN MCP configuration exceeds the size limit: {path}")
+    if (
+        _blun_config_identity(after_read) != expected
+        or _blun_config_identity(after_path) != expected
+    ):
+        raise RuntimeError(f"BLUN MCP configuration changed while reading: {path}")
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"BLUN MCP configuration is invalid: {path}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"BLUN MCP configuration root must be an object: {path}")
+    return payload, raw, expected
+
+
+def _assert_blun_config_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"BLUN MCP configuration disappeared before replacement: {path}")
+    except OSError as error:
+        raise RuntimeError(f"BLUN MCP configuration cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"BLUN MCP configuration appeared during installation: {path}")
+    _validate_blun_config_details(path, current)
+    if _blun_config_identity(current) != expected:
+        raise RuntimeError(f"BLUN MCP configuration changed before replacement: {path}")
+
+
+def _atomic_bytes(path: Path, payload: bytes, *, before_replace=None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            os.chmod(temporary, 0o600)
+        if before_replace is not None:
+            before_replace()
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def merge_blun_mcp_config(path: Path, entry: dict) -> Path | None:
+    """Preserve unrelated BLUN MCP servers while atomically installing the guard."""
+    current, original, expected = _read_protected_blun_config(path)
+    servers = current.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"BLUN mcpServers must be an object: {path}")
+    servers[MCP_SERVER_NAME] = entry
+    backup = None
+    if original is not None:
+        backup = path.with_suffix(".json.bak")
+        _atomic_bytes(backup, original)
+    encoded = (json.dumps(current, indent=2) + "\n").encode("utf-8")
+    _atomic_bytes(
+        path,
+        encoded,
+        before_replace=lambda: _assert_blun_config_unchanged(path, expected),
+    )
+    return backup
+
+
+def preflight_blun_mcp_config(path: Path) -> None:
+    """Reject unsafe BLUN configuration before installation mutates any runtime."""
+    current, _original, _expected = _read_protected_blun_config(path)
+    servers = current.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"BLUN mcpServers must be an object: {path}")
+
+
+def _validate_update_policy_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Unsafe updater policy file type: {path}")
+    if details.st_size > MAX_UPDATE_POLICY_BYTES:
+        raise RuntimeError(f"Updater policy exceeds size limit: {path}")
+
+
+def _read_update_policy(
+    path: Path,
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
     """Read one bounded regular policy file without following symbolic links."""
     try:
         metadata = path.lstat()
     except FileNotFoundError:
-        return None
+        return None, None
     except OSError as error:
         raise RuntimeError(f"Unreadable updater policy: {path}") from error
-    if not stat.S_ISREG(metadata.st_mode):
-        raise RuntimeError(f"Unsafe updater policy file type: {path}")
-    if metadata.st_size > MAX_UPDATE_POLICY_BYTES:
-        raise RuntimeError(f"Updater policy exceeds size limit: {path}")
+    _validate_update_policy_details(path, metadata)
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode):
-                raise RuntimeError(f"Unsafe updater policy file type: {path}")
-            if (
-                metadata.st_ino
-                and opened.st_ino
-                and (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino)
-            ):
+            _validate_update_policy_details(path, opened)
+            if _protected_state_identity(metadata) != _protected_state_identity(opened):
                 raise RuntimeError(f"Updater policy changed while opening: {path}")
             raw = handle.read(MAX_UPDATE_POLICY_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
     except (OSError, RuntimeError) as error:
         if isinstance(error, RuntimeError):
             raise
         raise RuntimeError(f"Unreadable updater policy: {path}") from error
     if len(raw) > MAX_UPDATE_POLICY_BYTES:
         raise RuntimeError(f"Updater policy exceeds size limit: {path}")
+    if (
+        _protected_state_identity(opened) != _protected_state_identity(after_read)
+        or _protected_state_identity(opened) != _protected_state_identity(after_path)
+    ):
+        raise RuntimeError(f"Updater policy changed while reading: {path}")
     try:
         policy = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -1137,7 +1971,38 @@ def _load_update_policy(path: Path) -> dict | None:
     for field in ("repository", "claude_command"):
         if field in policy and not isinstance(policy[field], str):
             raise RuntimeError(f"Invalid updater policy field {field}: {path}")
+    return policy, _protected_state_identity(after_path)
+
+
+def _load_update_policy(path: Path) -> dict | None:
+    policy, _identity = _read_update_policy(path)
     return policy
+
+
+def _assert_update_policy_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"Updater policy disappeared before removal: {path}")
+    except OSError as error:
+        raise RuntimeError(f"Updater policy cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"Updater policy appeared before removal: {path}")
+    _validate_update_policy_details(path, current)
+    if _protected_state_identity(current) != expected:
+        raise RuntimeError(f"Updater policy changed before removal: {path}")
+
+
+def _remove_update_policy(
+    path: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    _assert_update_policy_unchanged(path, expected)
+    if expected is not None:
+        path.unlink()
 
 
 def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
@@ -1163,6 +2028,257 @@ def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
         second.st_mode,
         second.st_size,
         second.st_mtime_ns,
+    )
+
+
+def _protected_state_identity(
+    details: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _validate_protected_state_details(
+    path: Path, label: str, maximum_bytes: int, details: os.stat_result,
+) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Unsafe {label} file type: {path}")
+    if details.st_size > maximum_bytes:
+        raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise RuntimeError(f"{label.capitalize()} permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"{label.capitalize()} owner is invalid: {path}")
+
+
+def _read_protected_state_json(
+    path: Path, label: str, maximum_bytes: int,
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
+    """Read one bounded owner-only JSON state file without following links."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None, None
+    except OSError as error:
+        raise RuntimeError(f"Unreadable {label}: {path}") from error
+    _validate_protected_state_details(path, label, maximum_bytes, before)
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            _validate_protected_state_details(path, label, maximum_bytes, opened)
+            if not _same_file_identity(before, opened):
+                raise RuntimeError(f"{label.capitalize()} changed while opening: {path}")
+            raw = handle.read(maximum_bytes + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
+    except (OSError, RuntimeError) as error:
+        if isinstance(error, RuntimeError):
+            raise
+        raise RuntimeError(f"Unreadable {label}: {path}") from error
+    if len(raw) > maximum_bytes:
+        raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
+    if (
+        not _same_file_identity(opened, after_read)
+        or not _same_file_identity(opened, after_path)
+    ):
+        raise RuntimeError(f"{label.capitalize()} changed while reading: {path}")
+    try:
+        value = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Unreadable {label}: {path}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Invalid {label}: {path}")
+    return value, _protected_state_identity(after_path)
+
+
+def _load_protected_state_json(path: Path, label: str, maximum_bytes: int) -> dict | None:
+    value, _identity = _read_protected_state_json(path, label, maximum_bytes)
+    return value
+
+
+def _assert_protected_state_unchanged(
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"{label.capitalize()} disappeared before replacement: {path}")
+    except OSError as error:
+        raise RuntimeError(f"{label.capitalize()} cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"{label.capitalize()} appeared before replacement: {path}")
+    _validate_protected_state_details(path, label, maximum_bytes, current)
+    if _protected_state_identity(current) != expected:
+        raise RuntimeError(f"{label.capitalize()} changed before replacement: {path}")
+
+
+def _validate_health_config(value: dict | None) -> dict | None:
+    if value is None:
+        return None
+    for field in ("enabled", "plugin_required"):
+        if field in value and not isinstance(value[field], bool):
+            raise RuntimeError(f"Invalid health-monitor policy field {field}: {HEALTH_CONFIG}")
+    if "interval_seconds" in value and (
+        isinstance(value["interval_seconds"], bool)
+        or not isinstance(value["interval_seconds"], int)
+        or value["interval_seconds"] < 1
+    ):
+        raise RuntimeError(
+            f"Invalid health-monitor policy field interval_seconds: {HEALTH_CONFIG}"
+        )
+    if "claude_command" in value and not isinstance(value["claude_command"], str):
+        raise RuntimeError(
+            f"Invalid health-monitor policy field claude_command: {HEALTH_CONFIG}"
+        )
+    return value
+
+
+def _read_health_config(
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
+    value, identity = _read_protected_state_json(
+        HEALTH_CONFIG, "health-monitor policy", MAX_HEALTH_FILE_BYTES
+    )
+    return _validate_health_config(value), identity
+
+
+def _load_health_config() -> dict | None:
+    value, _identity = _read_health_config()
+    return value
+
+
+def _load_delivery_policy() -> dict | None:
+    value = _load_protected_state_json(
+        DELIVERY_POLICY, "delivery policy", MAX_DELIVERY_POLICY_BYTES
+    )
+    if value is None:
+        return None
+    isolated = value.get("isolated_service")
+    if (
+        value.get("mandatory") is not True
+        or value.get("fail_closed") is not True
+        or value.get("direct_delivery_allowed") is not False
+        or value.get("raw_streaming_allowed") is not False
+        or value.get("on_guard_error") != "block"
+        or not isinstance(isolated, dict)
+        or isolated.get("required") is not True
+    ):
+        raise RuntimeError(f"Invalid delivery policy: {DELIVERY_POLICY}")
+    for field in ("endpoint", "token_file", "audit_file"):
+        candidate = isolated.get(field)
+        if not isinstance(candidate, str) or not candidate.strip() or len(candidate) > 4096:
+            raise RuntimeError(
+                f"Invalid delivery policy field isolated_service.{field}: {DELIVERY_POLICY}"
+            )
+    return value
+
+
+def _validate_health_state(value: dict | None) -> dict | None:
+    if value is None:
+        return None
+    integer_fields = ("checked_at", "consecutive_failures", "last_repair_at", "next_repair_at")
+    for field in integer_fields:
+        if field in value and (
+            isinstance(value[field], bool)
+            or not isinstance(value[field], int)
+            or value[field] < 0
+        ):
+            raise RuntimeError(f"Invalid health-monitor state field {field}: {HEALTH_STATE}")
+    for field in ("guard_healthy", "mcp_healthy", "plugin_required", "plugin_cache_healthy"):
+        if field in value and not isinstance(value[field], bool):
+            raise RuntimeError(f"Invalid health-monitor state field {field}: {HEALTH_STATE}")
+    for field in ("status", "reason", "plugin_cache_version", "plugin_cache_reason"):
+        if field in value and not isinstance(value[field], str):
+            raise RuntimeError(f"Invalid health-monitor state field {field}: {HEALTH_STATE}")
+    repairs = value.get("repairs")
+    if repairs is not None and (
+        not isinstance(repairs, list)
+        or len(repairs) > 32
+        or any(not isinstance(item, str) or len(item) > 128 for item in repairs)
+    ):
+        raise RuntimeError(f"Invalid health-monitor state field repairs: {HEALTH_STATE}")
+    return value
+
+
+def _read_health_state(
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
+    value, identity = _read_protected_state_json(
+        HEALTH_STATE, "health-monitor state", MAX_HEALTH_FILE_BYTES
+    )
+    return _validate_health_state(value), identity
+
+
+def _load_health_state() -> dict | None:
+    value, _identity = _read_health_state()
+    return value
+
+
+def _validate_update_state(value: dict | None) -> dict | None:
+    if value is None:
+        return None
+    for field in ("status", "runtime_version", "candidate_version", "paused_update_policy"):
+        if field in value and not isinstance(value[field], str):
+            raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
+    for field in ("revision", "previous", "candidate_revision", "rolled_back_from"):
+        if field in value and (
+            not isinstance(value[field], str)
+            or re.fullmatch(r"[0-9a-f]{40}", value[field]) is None
+        ):
+            raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
+    if "checked_at" in value and (
+        isinstance(value["checked_at"], bool)
+        or not isinstance(value["checked_at"], int)
+        or value["checked_at"] < 0
+    ):
+        raise RuntimeError(f"Invalid updater state field checked_at: {UPDATE_STATE}")
+    for field in ("auto_update_paused", "runtime_unchanged"):
+        if field in value and not isinstance(value[field], bool):
+            raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
+    for field in ("claude_plugin", "health_monitor"):
+        if field in value and not isinstance(value[field], dict):
+            raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
+    return value
+
+
+def _read_update_state(
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
+    value, identity = _read_protected_state_json(
+        UPDATE_STATE, "updater state", MAX_UPDATE_STATE_BYTES
+    )
+    return _validate_update_state(value), identity
+
+
+def _load_update_state() -> dict | None:
+    value, _identity = _read_update_state()
+    return value
+
+
+def _write_update_state(
+    value: dict,
+    expected_identity: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    _atomic_json(
+        UPDATE_STATE,
+        value,
+        before_replace=lambda: _assert_protected_state_unchanged(
+            UPDATE_STATE,
+            "updater state",
+            MAX_UPDATE_STATE_BYTES,
+            expected_identity,
+        ),
     )
 
 
@@ -1444,6 +2560,100 @@ def _clean_checkout_revision(root: Path) -> str | None:
     return revision
 
 
+def _update_artifact_identity(
+    details: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    """Bind rollback cleanup to the exact artifact created by this update."""
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _capture_update_artifact(
+    path: Path,
+) -> tuple[int, int, int, int, int, int, int]:
+    try:
+        details = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"Updated runtime artifact cannot be inspected: {path}") from error
+    return _update_artifact_identity(details)
+
+
+def _assert_update_artifact_unchanged(
+    path: Path,
+    expected: tuple[int, int, int, int, int, int, int],
+    *,
+    missing_ok: bool = False,
+) -> bool:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if missing_ok:
+            return False
+        raise RuntimeError(f"Updated runtime artifact disappeared before rollback: {path}")
+    except OSError as error:
+        raise RuntimeError(f"Updated runtime artifact cannot be rechecked: {path}") from error
+    if _update_artifact_identity(current) != expected:
+        raise RuntimeError(f"Updated runtime artifact changed before rollback: {path}")
+    return True
+
+
+def _remove_created_update_artifact(
+    path: Path,
+    expected: tuple[int, int, int, int, int, int, int],
+) -> None:
+    if not _assert_update_artifact_unchanged(path, expected, missing_ok=True):
+        return
+    _assert_update_artifact_unchanged(path, expected)
+    path.unlink()
+
+
+def _restore_updated_claude_config(
+    path: Path,
+    payload: bytes,
+    expected: tuple[int, int, int, int, int, int, int],
+) -> None:
+    _atomic_bytes(
+        path,
+        payload,
+        before_replace=lambda: _assert_update_artifact_unchanged(path, expected),
+    )
+
+
+def _rollback_activated_update(
+    root: Path,
+    previous: str,
+    activated: str,
+) -> subprocess.CompletedProcess[str]:
+    """Roll back only the exact, still-clean revision activated by this update."""
+    command = ["git", "reset", "--keep", previous]
+    if _clean_checkout_revision(root) != activated:
+        observed = _run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
+        ).stdout.strip()
+        detail = (
+            "HEAD changed independently before runtime rollback"
+            if observed != activated
+            else "the checkout changed before runtime rollback"
+        )
+        return subprocess.CompletedProcess(command, 1, "", detail)
+    rollback = _run(command, root)
+    if rollback.returncode == 0 and _clean_checkout_revision(root) == previous:
+        return rollback
+    return subprocess.CompletedProcess(
+        rollback.args,
+        1,
+        rollback.stdout,
+        ((rollback.stderr or "") + "\nruntime rollback did not restore the exact clean revision").strip(),
+    )
+
+
 def update(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     if not (root / ".git").exists():
@@ -1473,7 +2683,155 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             file=sys.stderr,
         )
         return 2
+    try:
+        _stored_update_state, update_state_identity = _read_update_state()
+    except RuntimeError as error:
+        print(
+            f"Updater state is unsafe; update is blocked before candidate execution: {error}",
+            file=sys.stderr,
+        )
+        return 2
+
+    def persist_update_state(value: dict) -> bool:
+        try:
+            _write_update_state(value, update_state_identity)
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Updater state changed before publication; the replacement was preserved: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def update_state_unchanged(stage: str) -> bool:
+        try:
+            _assert_protected_state_unchanged(
+                UPDATE_STATE,
+                "updater state",
+                MAX_UPDATE_STATE_BYTES,
+                update_state_identity,
+            )
+        except RuntimeError as error:
+            print(
+                f"Updater state changed {stage}; activation is blocked: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
     claude_installed = TARGETS["claude"].is_symlink()
+    try:
+        stored_monitor_config, monitor_config_identity = _read_health_config()
+        initial_monitor_config = dict(stored_monitor_config or {})
+        _stored_health_state, health_state_identity = _read_health_state()
+    except RuntimeError as error:
+        print(
+            f"Health-monitor protected state is unsafe; update is blocked before candidate execution: {error}",
+            file=sys.stderr,
+        )
+        return 2
+
+    def health_state_unchanged(stage: str) -> bool:
+        try:
+            _assert_protected_state_unchanged(
+                HEALTH_CONFIG,
+                "health-monitor policy",
+                MAX_HEALTH_FILE_BYTES,
+                monitor_config_identity,
+            )
+            _assert_protected_state_unchanged(
+                HEALTH_STATE,
+                "health-monitor state",
+                MAX_HEALTH_FILE_BYTES,
+                health_state_identity,
+            )
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor protected state changed {stage}; stale maintenance is blocked: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def persist_health_config(value: dict) -> bool:
+        nonlocal monitor_config_identity
+        try:
+            _atomic_json(
+                HEALTH_CONFIG,
+                value,
+                before_replace=lambda: (
+                    _assert_protected_state_unchanged(
+                        HEALTH_CONFIG,
+                        "health-monitor policy",
+                        MAX_HEALTH_FILE_BYTES,
+                        monitor_config_identity,
+                    ),
+                    _assert_protected_state_unchanged(
+                        HEALTH_STATE,
+                        "health-monitor state",
+                        MAX_HEALTH_FILE_BYTES,
+                        health_state_identity,
+                    ),
+                ),
+            )
+            stored_config, monitor_config_identity = _read_health_config()
+            if stored_config != value:
+                raise RuntimeError(
+                    "Health-monitor policy changed after updater replacement"
+                )
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor policy changed before updater publication; the replacement was preserved: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def persist_health_state(value: dict) -> bool:
+        nonlocal health_state_identity
+        try:
+            _atomic_json(
+                HEALTH_STATE,
+                value,
+                before_replace=lambda: (
+                    _assert_protected_state_unchanged(
+                        HEALTH_CONFIG,
+                        "health-monitor policy",
+                        MAX_HEALTH_FILE_BYTES,
+                        monitor_config_identity,
+                    ),
+                    _assert_protected_state_unchanged(
+                        HEALTH_STATE,
+                        "health-monitor state",
+                        MAX_HEALTH_FILE_BYTES,
+                        health_state_identity,
+                    ),
+                ),
+            )
+            stored_state, health_state_identity = _read_health_state()
+            if stored_state != value:
+                raise RuntimeError(
+                    "Health-monitor state changed after updater replacement"
+                )
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor state changed before updater publication; the replacement was preserved: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def remove_monitor_after_opt_out() -> None:
+        try:
+            replacement, _identity = _read_health_config()
+            if replacement is not None and replacement.get("enabled") is False:
+                remove_health_monitor()
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor scheduler cleanup was blocked by unsafe replacement policy: {error}",
+                file=sys.stderr,
+            )
+
+    monitor_enabled = initial_monitor_config.get("enabled") is not False
     claude_preflight: dict | None = None
     with tempfile.TemporaryDirectory(prefix="blun-language-guard-") as directory:
         candidate = Path(directory) / "repo"
@@ -1503,7 +2861,7 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
                 candidate,
             )
             if claude_preflight.get("ready") is not True:
-                _atomic_json(UPDATE_STATE, {
+                if not persist_update_state({
                     "status": "degraded",
                     "revision": previous,
                     "previous": previous,
@@ -1513,7 +2871,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
                     "candidate_version": expected_version,
                     "claude_plugin": claude_preflight,
                     "runtime_unchanged": True,
-                })
+                }):
+                    return 2
                 print(
                     "Claude plugin preflight failed; current repository and runtimes are unchanged. "
                     "The updater remains degraded and will retry safely.",
@@ -1526,6 +2885,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             file=sys.stderr,
         )
         return 2
+    if not update_state_unchanged("during candidate preflight"):
+        return 2
     fetch = _run(["git", "fetch", "origin", revision], root)
     if fetch.returncode:
         print(fetch.stderr, file=sys.stderr)
@@ -1535,6 +2896,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             "The active checkout changed while fetching the tested update; candidate activation is blocked.",
             file=sys.stderr,
         )
+        return 2
+    if not update_state_unchanged("while fetching the tested update"):
         return 2
     merge = _run(["git", "merge", "--ff-only", revision], root)
     if merge.returncode:
@@ -1609,43 +2972,124 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             file=sys.stderr,
         )
         return 1 if post_tests.returncode else 2
+    if not update_state_unchanged("while running post-update tests"):
+        rollback = _rollback_activated_update(root, previous, revision)
+        return 2 if rollback.returncode == 0 else 1
     mcp_runtime_preexisting = MCP_HTTP_COMMAND.exists() or MCP_HTTP_COMMAND.is_symlink()
     mcp_headers_preexisting = MCP_HEADERS_COMMAND.exists() or MCP_HEADERS_COMMAND.is_symlink()
-    mcp_token_preexisting = MCP_HTTP_TOKEN.exists()
-    claude_config_preexisting = CLAUDE_CONFIG.exists()
-    claude_config_bytes = CLAUDE_CONFIG.read_bytes() if claude_config_preexisting else b""
-    claude_config_mode = CLAUDE_CONFIG.stat().st_mode & 0o777 if claude_config_preexisting else None
+    mcp_token_preexisting = MCP_HTTP_TOKEN.exists() or MCP_HTTP_TOKEN.is_symlink()
+    try:
+        _claude_config, preflight_claude_config, _claude_config_identity_before = (
+            _read_protected_claude_config(CLAUDE_CONFIG)
+            if claude_installed
+            else ({}, None, None)
+        )
+    except RuntimeError as error:
+        rollback = _rollback_activated_update(root, previous, revision)
+        restored = rollback.returncode == 0
+        print(
+            f"Claude configuration is unsafe; runtime activation is blocked ({error}) and repository rollback "
+            + ("succeeded." if restored else "FAILED."),
+            file=sys.stderr,
+        )
+        return 2 if restored else 1
+    claude_config_preexisting = preflight_claude_config is not None
+    claude_config_bytes: bytes | None = None
+    installed_artifacts: dict[Path, tuple[int, int, int, int, int, int, int]] = {}
+    created_artifacts: set[Path] = set()
+    configured_claude_identity: tuple[int, int, int, int, int, int, int] | None = None
 
     def rollback_runtime() -> subprocess.CompletedProcess[str]:
-        rollback = _run(["git", "reset", "--keep", previous], root)
+        rollback = _rollback_activated_update(root, previous, revision)
+        if rollback.returncode != 0:
+            print(
+                f"Runtime repository rollback blocked fail-closed: {rollback.stderr}",
+                file=sys.stderr,
+            )
+            return rollback
+        cleanup_error: OSError | RuntimeError | None = None
         if claude_installed:
-            if not mcp_runtime_preexisting:
-                remove_mcp_http_autostart()
-                MCP_HTTP_COMMAND.unlink(missing_ok=True)
-            if not mcp_headers_preexisting:
-                MCP_HEADERS_COMMAND.unlink(missing_ok=True)
-            if not mcp_token_preexisting:
-                MCP_HTTP_TOKEN.unlink(missing_ok=True)
-            if claude_config_preexisting:
-                temporary = CLAUDE_CONFIG.with_suffix(CLAUDE_CONFIG.suffix + ".restore")
-                temporary.write_bytes(claude_config_bytes)
-                if claude_config_mode is not None and os.name != "nt":
-                    os.chmod(temporary, claude_config_mode)
-                temporary.replace(CLAUDE_CONFIG)
-            else:
-                CLAUDE_CONFIG.unlink(missing_ok=True)
+            try:
+                for artifact, identity in installed_artifacts.items():
+                    _assert_update_artifact_unchanged(
+                        artifact,
+                        identity,
+                        missing_ok=artifact in created_artifacts,
+                    )
+                if configured_claude_identity is not None:
+                    _assert_update_artifact_unchanged(
+                        CLAUDE_CONFIG,
+                        configured_claude_identity,
+                        missing_ok=not claude_config_preexisting,
+                    )
+                if MCP_HTTP_COMMAND in created_artifacts:
+                    remove_mcp_http_autostart()
+                for artifact in created_artifacts:
+                    _remove_created_update_artifact(
+                        artifact,
+                        installed_artifacts[artifact],
+                    )
+                if configured_claude_identity is not None:
+                    if claude_config_preexisting:
+                        if claude_config_bytes is None:
+                            raise RuntimeError(
+                                "Claude configuration rollback backup is unavailable"
+                            )
+                        _restore_updated_claude_config(
+                            CLAUDE_CONFIG,
+                            claude_config_bytes,
+                            configured_claude_identity,
+                        )
+                    else:
+                        _remove_created_update_artifact(
+                            CLAUDE_CONFIG,
+                            configured_claude_identity,
+                        )
+            except (OSError, RuntimeError) as error:
+                cleanup_error = error
         restart_guard_runtime()
-        if mcp_runtime_preexisting:
+        if mcp_runtime_preexisting and cleanup_error is None:
             restart_mcp_http_runtime()
+        if cleanup_error is not None:
+            print(
+                f"Runtime rollback cleanup blocked fail-closed: {cleanup_error}",
+                file=sys.stderr,
+            )
+            return subprocess.CompletedProcess(
+                rollback.args,
+                1,
+                rollback.stdout,
+                ((rollback.stderr or "") + f"\n{cleanup_error}").strip(),
+            )
         return rollback
 
     if claude_installed:
         try:
             install_mcp_http_runtime(root)
+            installed_artifacts[MCP_HTTP_COMMAND] = _capture_update_artifact(MCP_HTTP_COMMAND)
+            installed_artifacts[MCP_HEADERS_COMMAND] = _capture_update_artifact(MCP_HEADERS_COMMAND)
+            installed_artifacts[MCP_HTTP_TOKEN] = _capture_update_artifact(MCP_HTTP_TOKEN)
+            if not mcp_runtime_preexisting:
+                created_artifacts.add(MCP_HTTP_COMMAND)
+            if not mcp_headers_preexisting:
+                created_artifacts.add(MCP_HEADERS_COMMAND)
+            if not mcp_token_preexisting:
+                created_artifacts.add(MCP_HTTP_TOKEN)
             installed, detail = install_mcp_http_autostart(root)
             if not installed:
                 raise RuntimeError(f"persistent MCP autostart failed: {detail}")
-            configure_claude_mcp()
+            claude_backup, _removed_shadows = configure_claude_mcp()
+            configured_claude_identity = _capture_update_artifact(CLAUDE_CONFIG)
+            if claude_backup is None:
+                claude_config_preexisting = False
+                claude_config_bytes = b""
+            else:
+                _backup_config, claude_config_bytes, _backup_identity = (
+                    _read_protected_claude_config(claude_backup)
+                )
+                if claude_config_bytes is None:
+                    raise RuntimeError("Claude configuration rollback backup disappeared")
+                claude_config_preexisting = True
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
             rollback = rollback_runtime()
             print(
@@ -1696,46 +3140,63 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             )
             return 1
         print(f"Restarted persistent MCP through {runtime}.")
-    monitor_expected = claude_installed and health_monitor_enabled()
+    monitor_expected = claude_installed and monitor_enabled
     monitor_install = {
         "attempted": False,
         "installed": not monitor_expected,
         "detail": "explicitly-disabled" if claude_installed else "claude-skill-not-installed",
     }
+    health_transition_blocked = False
     if monitor_expected:
-        monitor_ok, monitor_detail = install_health_monitor()
-        guard_now, mcp_now = _guard_stack_status(timeout=4.0)
-        monitor_ok = monitor_ok and guard_now and mcp_now
-        if monitor_ok:
-            monitor_config = _health_monitor_config()
-            monitor_config.update({"enabled": True, "interval_seconds": 60})
-            configured_claude = claude_command or _configured_claude_command(monitor_config)
-            if configured_claude:
-                monitor_config["claude_command"] = configured_claude
-            _atomic_json(HEALTH_CONFIG, monitor_config)
-            _atomic_json(HEALTH_STATE, {
-                "status": "ok",
-                "checked_at": int(time.time()),
-                "guard_healthy": True,
-                "mcp_healthy": True,
-                "consecutive_failures": 0,
-                "last_repair_at": 0,
-                "next_repair_at": 0,
-                "repairs": [],
-            })
+        if not health_state_unchanged("before scheduler activation"):
+            monitor_ok = False
+            monitor_detail = "protected-health-state-changed"
+            health_transition_blocked = True
+        else:
+            monitor_ok, monitor_detail = install_health_monitor()
+            guard_now, mcp_now = _guard_stack_status(timeout=4.0)
+            monitor_ok = monitor_ok and guard_now and mcp_now
+            if monitor_ok:
+                monitor_config = dict(initial_monitor_config)
+                monitor_config.update({"enabled": True, "interval_seconds": 60})
+                configured_claude = claude_command or _configured_claude_command(monitor_config)
+                if configured_claude:
+                    monitor_config["claude_command"] = configured_claude
+                monitor_ok = persist_health_config(monitor_config)
+                if monitor_ok:
+                    monitor_ok = persist_health_state({
+                        "status": "ok",
+                        "checked_at": int(time.time()),
+                        "guard_healthy": True,
+                        "mcp_healthy": True,
+                        "consecutive_failures": 0,
+                        "last_repair_at": 0,
+                        "next_repair_at": 0,
+                        "repairs": [],
+                    })
+                if not monitor_ok:
+                    monitor_detail = "protected-health-state-changed"
+                    health_transition_blocked = True
+                    remove_monitor_after_opt_out()
         monitor_install = {"attempted": True, "installed": monitor_ok, "detail": monitor_detail}
     expected_version = (root / "VERSION").read_text(encoding="utf-8-sig").strip()
     plugin_update = _apply_claude_plugin_update(
         expected_version,
         claude_command,
         claude_preflight or {},
-    ) if claude_installed else {
+    ) if claude_installed and not health_transition_blocked else {
         "attempted": False,
         "updated": False,
-        "status": {"reason": "claude-skill-not-installed"},
+        "status": {
+            "reason": (
+                "protected-health-state-changed"
+                if health_transition_blocked
+                else "claude-skill-not-installed"
+            )
+        },
     }
     if monitor_expected and plugin_update.get("status", {}).get("installed"):
-        monitor_config = _health_monitor_config()
+        monitor_config = dict(initial_monitor_config)
         monitor_config.update({
             "enabled": True,
             "interval_seconds": 60,
@@ -1744,7 +3205,14 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         configured_claude = claude_command or _configured_claude_command(monitor_config)
         if configured_claude:
             monitor_config["claude_command"] = configured_claude
-        _atomic_json(HEALTH_CONFIG, monitor_config)
+        if not persist_health_config(monitor_config):
+            monitor_install = {
+                "attempted": True,
+                "installed": False,
+                "detail": "protected-health-state-changed",
+            }
+            health_transition_blocked = True
+            remove_monitor_after_opt_out()
     plugin_reason = plugin_update.get("status", {}).get("reason")
     plugin_failed = claude_installed and not plugin_update.get("updated") and plugin_reason != "plugin-not-installed"
     monitor_failed = monitor_expected and not monitor_install["installed"]
@@ -1755,7 +3223,7 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             "repairing the reported plugin or health-monitor adapter.",
             file=sys.stderr,
         )
-        _atomic_json(UPDATE_STATE, {
+        if not persist_update_state({
             "status": "degraded",
             "revision": revision,
             "previous": previous,
@@ -1763,9 +3231,10 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             "runtime_version": expected_version,
             "claude_plugin": plugin_update,
             "health_monitor": monitor_install,
-        })
+        }):
+            return 2
         return 1
-    _atomic_json(UPDATE_STATE, {
+    if not persist_update_state({
         "status": "ok",
         "revision": revision,
         "previous": previous,
@@ -1773,7 +3242,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         "runtime_version": expected_version,
         "claude_plugin": plugin_update,
         "health_monitor": monitor_install,
-    })
+    }):
+        return 2
     print(f"Updated to tested revision {revision}; rollback revision is {previous}")
     if plugin_update.get("reload_required"):
         print("Claude plugin cache updated. Existing sessions still use their loaded hooks; run /reload-plugins or start a new session.")
@@ -1835,14 +3305,26 @@ def rollback(require_signed_commits: bool = False, claude_command: str | None = 
 def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     try:
-        state = json.loads(UPDATE_STATE.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
+        state, update_state_identity = _read_update_state()
+    except RuntimeError:
+        print("Updater state is unsafe; rollback is blocked fail-closed.", file=sys.stderr)
+        return 2
+    if state is None:
         print("No valid updater state is available; refusing to guess a rollback target.", file=sys.stderr)
         return 2
     current = _clean_checkout_revision(root)
     if current is None:
         print(
             "Rollback requires a valid, completely clean checkout; current files are unchanged.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        rollback_monitor_config = _health_monitor_config()
+        _load_health_state()
+    except RuntimeError as error:
+        print(
+            f"Health-monitor protected state is unsafe; rollback is blocked before candidate execution: {error}",
             file=sys.stderr,
         )
         return 2
@@ -1867,7 +3349,14 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         print("Recorded rollback target is not an ancestor; current files are unchanged.", file=sys.stderr)
         return 2
     try:
-        signed_required = _effective_signed_commit_policy(require_signed_commits)
+        active_policy, active_policy_identity = _read_update_policy(UPDATE_CONFIG)
+        paused_policy, paused_policy_identity = _read_update_policy(UPDATE_PAUSED_CONFIG)
+        signed_required = require_signed_commits
+        for policy in (active_policy, paused_policy):
+            if policy is not None:
+                signed_required = signed_required or policy.get(
+                    "require_signed_commits", False
+                )
     except RuntimeError:
         print("Updater signature policy is unreadable; rollback is blocked fail-closed.", file=sys.stderr)
         return 2
@@ -1895,7 +3384,7 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
     claude_installed = TARGETS["claude"].is_symlink()
     plugin_status: dict = {"installed": False, "reason": "claude-skill-not-installed"}
     if claude_installed:
-        configured = claude_command or _configured_claude_command(_health_monitor_config())
+        configured = claude_command or _configured_claude_command(rollback_monitor_config)
         plugin_status = claude_plugin_status(target_version, configured)
         if plugin_status.get("reason") != "plugin-not-installed" and plugin_status.get("healthy") is not True:
             print(
@@ -1964,7 +3453,7 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         return block_changed_cutover("while running post-rollback tests")
     runtime_ok, runtime_detail = _restart_installed_runtimes() if not post_tests.returncode else (False, "post-rollback tests failed")
     if claude_installed and runtime_ok:
-        configured = claude_command or _configured_claude_command(_health_monitor_config())
+        configured = claude_command or _configured_claude_command(rollback_monitor_config)
         plugin_status = claude_plugin_status(target_version, configured)
         runtime_ok = plugin_status.get("healthy") is True or plugin_status.get("reason") == "plugin-not-installed"
         if not runtime_ok:
@@ -1982,30 +3471,73 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
             file=sys.stderr,
         )
         return 1
-    remove_scheduler()
-    if UPDATE_CONFIG.exists():
-        try:
-            UPDATE_PAUSED_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-            UPDATE_CONFIG.replace(UPDATE_PAUSED_CONFIG)
-        except OSError as error:
-            restored = _run(["git", "reset", "--keep", current], root)
-            _restart_installed_runtimes()
-            print(
-                f"Rollback could not pause automatic updates ({error}); forward restoration "
-                + ("succeeded." if restored.returncode == 0 else "FAILED."),
-                file=sys.stderr,
+    try:
+        _assert_protected_state_unchanged(
+            UPDATE_STATE,
+            "updater state",
+            MAX_UPDATE_STATE_BYTES,
+            update_state_identity,
+        )
+    except RuntimeError as error:
+        restored = _run(["git", "reset", "--keep", current], root)
+        _restart_installed_runtimes()
+        print(
+            f"Updater state changed during rollback verification ({error}); forward restoration "
+            + ("succeeded." if restored.returncode == 0 else "FAILED."),
+            file=sys.stderr,
+        )
+        return 2 if restored.returncode == 0 else 1
+    try:
+        _assert_update_policy_unchanged(UPDATE_CONFIG, active_policy_identity)
+        _assert_update_policy_unchanged(UPDATE_PAUSED_CONFIG, paused_policy_identity)
+        if active_policy is not None:
+            _atomic_json(
+                UPDATE_PAUSED_CONFIG,
+                active_policy,
+                before_replace=lambda: (
+                    _assert_update_policy_unchanged(
+                        UPDATE_CONFIG, active_policy_identity
+                    ),
+                    _assert_update_policy_unchanged(
+                        UPDATE_PAUSED_CONFIG, paused_policy_identity
+                    ),
+                ),
             )
-            return 1
-    _atomic_json(UPDATE_STATE, {
-        "status": "rolled_back",
-        "revision": target,
-        "rolled_back_from": current,
-        "checked_at": int(time.time()),
-        "runtime_version": target_version,
-        "auto_update_paused": True,
-        "paused_update_policy": str(UPDATE_PAUSED_CONFIG) if UPDATE_PAUSED_CONFIG.exists() else "not-enabled",
-        "claude_plugin": plugin_status,
-    })
+            _remove_update_policy(UPDATE_CONFIG, active_policy_identity)
+    except (OSError, RuntimeError) as error:
+        restored = _run(["git", "reset", "--keep", current], root)
+        _restart_installed_runtimes()
+        print(
+            f"Rollback could not pause automatic updates ({error}); forward restoration "
+            + ("succeeded." if restored.returncode == 0 else "FAILED."),
+            file=sys.stderr,
+        )
+        return 1
+    remove_scheduler()
+    try:
+        _write_update_state(
+            {
+                "status": "rolled_back",
+                "revision": target,
+                "rolled_back_from": current,
+                "checked_at": int(time.time()),
+                "runtime_version": target_version,
+                "auto_update_paused": True,
+                "paused_update_policy": (
+                    str(UPDATE_PAUSED_CONFIG)
+                    if UPDATE_PAUSED_CONFIG.exists()
+                    else "not-enabled"
+                ),
+                "claude_plugin": plugin_status,
+            },
+            update_state_identity,
+        )
+    except (OSError, RuntimeError) as error:
+        print(
+            f"Updater state changed before rollback publication; the replacement was preserved: {error}",
+            file=sys.stderr,
+        )
+        return 2
     print(
         f"Rolled back to tested revision {target}; automatic updates are paused. "
         "After inspection, run an explicit update and re-enable auto-update deliberately."
@@ -2019,24 +3551,35 @@ def install_scheduler() -> tuple[bool, str]:
     command = f'"{sys.executable}" "{Path(__file__).resolve()}" auto-update run'
     system = platform.system()
     if system == "Linux":
-        units = Path.home() / ".config" / "systemd" / "user"
-        units.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        units = home / ".config" / "systemd" / "user"
         service = units / "blun-language-guard-update.service"
         timer = units / "blun-language-guard-update.timer"
-        service.write_text("[Unit]\nDescription=Update BLUN Language Guard safely\n\n[Service]\nType=oneshot\nExecStart=" + command + "\n", encoding="utf-8")
-        timer.write_text("[Unit]\nDescription=Daily BLUN Language Guard update check\n\n[Timer]\nOnBootSec=5m\nOnUnitActiveSec=1h\nPersistent=true\nRandomizedDelaySec=10m\n\n[Install]\nWantedBy=timers.target\n", encoding="utf-8")
+        _write_service_definition(
+            service,
+            "[Unit]\nDescription=Update BLUN Language Guard safely\n\n"
+            "[Service]\nType=oneshot\nExecStart=" + command + "\n",
+            home=home,
+        )
+        _write_service_definition(
+            timer,
+            "[Unit]\nDescription=Daily BLUN Language Guard update check\n\n"
+            "[Timer]\nOnBootSec=5m\nOnUnitActiveSec=1h\nPersistent=true\n"
+            "RandomizedDelaySec=10m\n\n[Install]\nWantedBy=timers.target\n",
+            home=home,
+        )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", timer.name])
         ok = reload_result.returncode == 0 and enable_result.returncode == 0
         return ok, str(timer)
     if system == "Darwin":
-        agents = Path.home() / "Library" / "LaunchAgents"
-        agents.mkdir(parents=True, exist_ok=True)
+        home = Path.home()
+        agents = home / "Library" / "LaunchAgents"
         plist = agents / "ai.blun.language-guard-updater.plist"
-        plist.write_text("""<?xml version="1.0" encoding="UTF-8"?>
+        _write_service_definition(plist, """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>ai.blun.language-guard-updater</string>
-<key>ProgramArguments</key><array><string>""" + sys.executable + "</string><string>" + str(Path(__file__).resolve()) + "</string><string>auto-update</string><string>run</string></array>\n<key>StartInterval</key><integer>3600</integer><key>RunAtLoad</key><true/></dict></plist>\n", encoding="utf-8")
+<key>ProgramArguments</key><array><string>""" + sys.executable + "</string><string>" + str(Path(__file__).resolve()) + "</string><string>auto-update</string><string>run</string></array>\n<key>StartInterval</key><integer>3600</integer><key>RunAtLoad</key><true/></dict></plist>\n", home=home)
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
         return result.returncode == 0, str(plist)
     if system == "Windows":
@@ -2048,14 +3591,34 @@ def install_scheduler() -> tuple[bool, str]:
 def remove_scheduler() -> None:
     system = platform.system()
     if system == "Linux":
-        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-update.timer"])
-        for name in ("blun-language-guard-update.service", "blun-language-guard-update.timer"):
-            (Path.home() / ".config" / "systemd" / "user" / name).unlink(missing_ok=True)
-        _run(["systemctl", "--user", "daemon-reload"])
+        home = Path.home()
+        units = home / ".config" / "systemd" / "user"
+        definitions = (
+            (
+                units / "blun-language-guard-update.service",
+                ("Update BLUN Language Guard safely", "auto-update run"),
+            ),
+            (
+                units / "blun-language-guard-update.timer",
+                ("Daily BLUN Language Guard update check", "OnUnitActiveSec=1h"),
+            ),
+        )
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-update.timer"])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
+            _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
-        plist = Path.home() / "Library" / "LaunchAgents" / "ai.blun.language-guard-updater.plist"
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        plist.unlink(missing_ok=True)
+        home = Path.home()
+        plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-updater.plist"
+        definitions = ((
+            plist,
+            ("ai.blun.language-guard-updater", "auto-update", "<string>run</string>"),
+        ),)
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard Updater"])
 
@@ -2084,31 +3647,32 @@ def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
     system = platform.system()
     if system == "Linux":
         units = home / ".config" / "systemd" / "user"
-        units.mkdir(parents=True, exist_ok=True)
         service = units / "blun-language-guard-health.service"
         timer = units / "blun-language-guard-health.timer"
-        service.write_text(
+        _write_service_definition(
+            service,
             "[Unit]\nDescription=Verify and repair BLUN Language Guard\n"
             "After=blun-language-guard.service blun-language-guard-mcp.service\n\n"
             "[Service]\nType=oneshot\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n"
             f"ExecStart={_shell_command(arguments)}\n",
-            encoding="utf-8",
+            home=home,
         )
-        timer.write_text(
+        _write_service_definition(
+            timer,
             "[Unit]\nDescription=Monitor BLUN Language Guard every minute\n\n"
             "[Timer]\nOnBootSec=1m\nOnUnitActiveSec=1m\nAccuracySec=10s\nPersistent=true\n\n"
             "[Install]\nWantedBy=timers.target\n",
-            encoding="utf-8",
+            home=home,
         )
         reload_result = _run(["systemctl", "--user", "daemon-reload"])
         enable_result = _run(["systemctl", "--user", "enable", "--now", timer.name])
         return reload_result.returncode == 0 and enable_result.returncode == 0, str(timer)
     if system == "Darwin":
         agents = home / "Library" / "LaunchAgents"
-        agents.mkdir(parents=True, exist_ok=True)
         plist = agents / "ai.blun.language-guard-health.plist"
         program_arguments = "".join(f"<string>{_xml_escape(value)}</string>" for value in arguments)
-        plist.write_text(
+        _write_service_definition(
+            plist,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
             "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -2117,7 +3681,7 @@ def install_health_monitor(home: Path | None = None) -> tuple[bool, str]:
             f"<key>ProgramArguments</key><array>{program_arguments}</array>"
             "<key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer>"
             "<key>ThrottleInterval</key><integer>10</integer></dict></plist>\n",
-            encoding="utf-8",
+            home=home,
         )
         _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
         result = _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)])
@@ -2132,36 +3696,46 @@ def remove_health_monitor(home: Path | None = None) -> None:
     home = home or Path.home()
     system = platform.system()
     if system == "Linux":
-        _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-health.timer"])
         units = home / ".config" / "systemd" / "user"
-        for name in ("blun-language-guard-health.service", "blun-language-guard-health.timer"):
-            (units / name).unlink(missing_ok=True)
-        _run(["systemctl", "--user", "daemon-reload"])
+        definitions = (
+            (
+                units / "blun-language-guard-health.service",
+                ("Verify and repair BLUN Language Guard", "health-monitor"),
+            ),
+            (
+                units / "blun-language-guard-health.timer",
+                ("Monitor BLUN Language Guard every minute", "OnUnitActiveSec=1m"),
+            ),
+        )
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["systemctl", "--user", "disable", "--now", "blun-language-guard-health.timer"])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
+            _run(["systemctl", "--user", "daemon-reload"])
     elif system == "Darwin":
         plist = home / "Library" / "LaunchAgents" / "ai.blun.language-guard-health.plist"
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
-        plist.unlink(missing_ok=True)
+        definitions = ((
+            plist,
+            ("ai.blun.language-guard-health", "health-monitor", "<integer>60</integer>"),
+        ),)
+        with _prepare_service_definition_removals(home, definitions) as prepared:
+            _run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)])
+            for directory, path, expected in prepared:
+                _remove_service_definition_at(directory, path, expected)
     elif system == "Windows":
         _run(["schtasks", "/Delete", "/F", "/TN", "BLUN Language Guard Health"])
 
 
 def health_monitor_enabled() -> bool:
     """Default existing Claude installations into the safe one-time migration."""
-    if not HEALTH_CONFIG.exists():
-        return True
-    try:
-        value = json.loads(HEALTH_CONFIG.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    value = _load_health_config()
+    if value is None:
         return True
     return value.get("enabled") is not False
 
 
 def _health_monitor_config() -> dict:
-    try:
-        value = json.loads(HEALTH_CONFIG.read_text(encoding="utf-8")) if HEALTH_CONFIG.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    return _load_health_config() or {}
 
 
 def _configured_claude_command(config: dict | None = None) -> str:
@@ -2180,9 +3754,19 @@ def _configured_claude_command(config: dict | None = None) -> str:
     return shutil.which("claude") or ""
 
 
-def _claude_plugin_monitor_status() -> dict:
+def _claude_plugin_monitor_status(
+    config: dict | None = None,
+    *,
+    config_identity: tuple[int, int, int, int, int, int] | None = None,
+) -> dict:
     """Check an enrolled Claude plugin cache without installing a missing plugin."""
-    config = _health_monitor_config()
+    if config is None:
+        stored_config, observed_identity = _read_health_config()
+        config = dict(stored_config or {})
+        if config_identity is None:
+            config_identity = observed_identity
+    else:
+        config = dict(config)
     required = config.get("plugin_required") is True
     if not TARGETS["claude"].is_symlink():
         return {"required": False, "healthy": True, "reason": "claude-skill-not-installed"}
@@ -2198,6 +3782,7 @@ def _claude_plugin_monitor_status() -> dict:
     except OSError:
         return {"required": required, "healthy": False, "reason": "runtime-version-unavailable"}
     status = claude_plugin_status(expected_version, command)
+    policy_enrolled = False
     if status.get("installed") and not required:
         config.update({
             "enabled": config.get("enabled") is not False,
@@ -2205,8 +3790,18 @@ def _claude_plugin_monitor_status() -> dict:
             "plugin_required": True,
             "claude_command": command,
         })
-        _atomic_json(HEALTH_CONFIG, config)
+        _atomic_json(
+            HEALTH_CONFIG,
+            config,
+            before_replace=lambda: _assert_protected_state_unchanged(
+                HEALTH_CONFIG,
+                "health-monitor policy",
+                MAX_HEALTH_FILE_BYTES,
+                config_identity,
+            ),
+        )
         required = True
+        policy_enrolled = True
     if not required:
         return {
             "required": False,
@@ -2222,6 +3817,7 @@ def _claude_plugin_monitor_status() -> dict:
         "expected_version": expected_version,
         "command": command,
         "status": status,
+        "policy_enrolled": policy_enrolled,
     }
 
 
@@ -2281,11 +3877,111 @@ def health_monitor_run(*, now: int | None = None) -> int:
         return 0
     try:
         try:
-            previous = json.loads(HEALTH_STATE.read_text(encoding="utf-8")) if HEALTH_STATE.exists() else {}
-        except (OSError, json.JSONDecodeError):
-            previous = {}
+            stored_config, config_identity = _read_health_config()
+            config = dict(stored_config or {})
+            stored_state, state_identity = _read_health_state()
+            previous = dict(stored_state or {})
+        except RuntimeError as error:
+            print(json.dumps({
+                "status": "blocked",
+                "reason": "unsafe-health-state",
+                "checked_at": timestamp,
+                "detail": str(error),
+            }, sort_keys=True), file=sys.stderr)
+            return 2
+
+        def block_state_transition(error: RuntimeError | OSError) -> int:
+            print(json.dumps({
+                "status": "blocked",
+                "reason": "unsafe-health-state-transition",
+                "checked_at": timestamp,
+                "detail": str(error),
+            }, sort_keys=True), file=sys.stderr)
+            return 2
+
+        def block_policy_transition(error: RuntimeError | OSError) -> int:
+            print(json.dumps({
+                "status": "blocked",
+                "reason": "unsafe-health-policy-transition",
+                "checked_at": timestamp,
+                "detail": str(error),
+            }, sort_keys=True), file=sys.stderr)
+            return 2
+
+        def policy_unchanged() -> bool:
+            try:
+                _assert_protected_state_unchanged(
+                    HEALTH_CONFIG,
+                    "health-monitor policy",
+                    MAX_HEALTH_FILE_BYTES,
+                    config_identity,
+                )
+            except (OSError, RuntimeError) as error:
+                block_policy_transition(error)
+                return False
+            return True
+
+        def persist_state(state: dict) -> bool:
+            if not policy_unchanged():
+                return False
+            try:
+                _atomic_json(
+                    HEALTH_STATE,
+                    state,
+                    before_replace=lambda: (
+                        _assert_protected_state_unchanged(
+                            HEALTH_CONFIG,
+                            "health-monitor policy",
+                            MAX_HEALTH_FILE_BYTES,
+                            config_identity,
+                        ),
+                        _assert_protected_state_unchanged(
+                            HEALTH_STATE,
+                            "health-monitor state",
+                            MAX_HEALTH_FILE_BYTES,
+                            state_identity,
+                        ),
+                    ),
+                )
+            except (OSError, RuntimeError) as error:
+                if "health-monitor policy" in str(error).lower():
+                    block_policy_transition(error)
+                else:
+                    block_state_transition(error)
+                return False
+            return True
         guard_healthy, mcp_healthy = _guard_stack_status()
-        plugin = _claude_plugin_monitor_status()
+        try:
+            plugin = _claude_plugin_monitor_status(
+                config,
+                config_identity=config_identity,
+            )
+        except RuntimeError as error:
+            print(json.dumps({
+                "status": "blocked",
+                "reason": "unsafe-health-policy-transition",
+                "checked_at": timestamp,
+                "detail": str(error),
+            }, sort_keys=True), file=sys.stderr)
+            return 2
+        if plugin.get("policy_enrolled") is True:
+            try:
+                stored_config, config_identity = _read_health_config()
+                if stored_config is None or stored_config.get("plugin_required") is not True:
+                    raise RuntimeError(
+                        "Health-monitor policy changed after Claude plugin enrollment"
+                    )
+                config = dict(stored_config)
+            except RuntimeError as error:
+                print(json.dumps({
+                    "status": "blocked",
+                    "reason": "unsafe-health-policy-transition",
+                    "checked_at": timestamp,
+                    "detail": str(error),
+                }, sort_keys=True), file=sys.stderr)
+                return 2
+        if not policy_unchanged():
+            return 2
         if guard_healthy and mcp_healthy and plugin.get("healthy") is True:
             state = {
                 "status": "ok",
@@ -2298,7 +3994,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 "repairs": [],
                 **_plugin_health_fields(plugin),
             }
-            _atomic_json(HEALTH_STATE, state)
+            if not persist_state(state):
+                return 2
             print(json.dumps(state, sort_keys=True))
             return 0
         previous_failures = _state_integer(previous.get("consecutive_failures"))
@@ -2319,9 +4016,21 @@ def health_monitor_run(*, now: int | None = None) -> int:
                 "repairs": [],
                 **_plugin_health_fields(plugin),
             }
-            _atomic_json(HEALTH_STATE, state)
+            if not persist_state(state):
+                return 2
             print(json.dumps(state, sort_keys=True), file=sys.stderr)
             return 1
+        try:
+            _assert_protected_state_unchanged(
+                HEALTH_STATE,
+                "health-monitor state",
+                MAX_HEALTH_FILE_BYTES,
+                state_identity,
+            )
+        except RuntimeError as error:
+            return block_state_transition(error)
+        if not policy_unchanged():
+            return 2
         repairs: list[str] = []
         if not guard_healthy:
             restarted, _detail = restart_guard_runtime()
@@ -2330,6 +4039,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
         if guard_healthy:
             _guard_now, mcp_healthy = _guard_stack_status()
             if not mcp_healthy:
+                if not policy_unchanged():
+                    return 2
                 restarted, _detail = restart_mcp_http_runtime()
                 repairs.append("mcp-restart")
                 mcp_healthy = restarted and _wait_for_stack(guard=True, mcp=True)
@@ -2341,6 +4052,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
             and plugin.get("expected_version")
             and plugin.get("command")
         ):
+            if not policy_unchanged():
+                return 2
             plugin_update = update_claude_plugin(
                 str(plugin.get("expected_version", "")),
                 str(plugin.get("command", "")) or None,
@@ -2348,7 +4061,13 @@ def health_monitor_run(*, now: int | None = None) -> int:
             if plugin_update.get("attempted"):
                 repairs.append("claude-plugin-update")
         guard_healthy, mcp_healthy = _guard_stack_status()
-        plugin = _claude_plugin_monitor_status()
+        try:
+            plugin = _claude_plugin_monitor_status(
+                config,
+                config_identity=config_identity,
+            )
+        except RuntimeError as error:
+            return block_policy_transition(error)
         recovered = guard_healthy and mcp_healthy and plugin.get("healthy") is True
         failures = 0 if recovered else previous_failures + 1
         state = {
@@ -2362,7 +4081,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
             "repairs": repairs,
             **_plugin_health_fields(plugin),
         }
-        _atomic_json(HEALTH_STATE, state)
+        if not persist_state(state):
+            return 2
         print(json.dumps(state, sort_keys=True), file=sys.stdout if recovered else sys.stderr)
         return 0 if recovered else 1
     finally:
@@ -2373,35 +4093,123 @@ def health_monitor(action: str) -> int:
     if action == "run":
         return health_monitor_run()
     if action == "status":
-        if not health_monitor_enabled():
+        try:
+            enabled = health_monitor_enabled()
+        except RuntimeError as error:
+            print(f"Health-monitor policy is unsafe; status is blocked fail-closed: {error}", file=sys.stderr)
+            return 2
+        if not enabled:
             print(json.dumps({"status": "disabled"}))
             return 0
-        if not HEALTH_STATE.exists():
+        try:
+            state = _load_health_state()
+        except RuntimeError as error:
+            print(f"Health-monitor state is unsafe; status is blocked fail-closed: {error}", file=sys.stderr)
+            return 2
+        if state is None:
             print(json.dumps({"status": "not-run"}))
             return 1
-        print(HEALTH_STATE.read_text(encoding="utf-8"), end="")
-        try:
-            state = json.loads(HEALTH_STATE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return 1
+        print(json.dumps(state, indent=2, sort_keys=True))
         fresh = int(time.time()) - int(state.get("checked_at", 0)) <= 180
         return 0 if fresh and state.get("status") in {"ok", "recovered"} else 1
     if action == "remove":
+        try:
+            _config, config_identity = _read_health_config()
+            _state, state_identity = _read_health_state()
+            _assert_protected_state_unchanged(
+                HEALTH_CONFIG,
+                "health-monitor policy",
+                MAX_HEALTH_FILE_BYTES,
+                config_identity,
+            )
+            _assert_protected_state_unchanged(
+                HEALTH_STATE,
+                "health-monitor state",
+                MAX_HEALTH_FILE_BYTES,
+                state_identity,
+            )
+        except RuntimeError as error:
+            print(
+                f"Health-monitor reset is blocked fail-closed by unsafe state: {error}",
+                file=sys.stderr,
+            )
+            return 2
         remove_health_monitor()
-        _atomic_json(HEALTH_CONFIG, {"enabled": False, "interval_seconds": 60})
-        HEALTH_STATE.unlink(missing_ok=True)
+        try:
+            _atomic_json(
+                HEALTH_CONFIG,
+                {"enabled": False, "interval_seconds": 60},
+                before_replace=lambda: _assert_protected_state_unchanged(
+                    HEALTH_CONFIG,
+                    "health-monitor policy",
+                    MAX_HEALTH_FILE_BYTES,
+                    config_identity,
+                ),
+            )
+            _assert_protected_state_unchanged(
+                HEALTH_STATE,
+                "health-monitor state",
+                MAX_HEALTH_FILE_BYTES,
+                state_identity,
+            )
+            if state_identity is not None:
+                HEALTH_STATE.unlink()
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor reset stopped before unsafe state replacement: {error}",
+                file=sys.stderr,
+            )
+            return 2
         print("Health monitor removed; guard services and secrets were preserved.")
         return 0
     check = health_monitor_run()
-    ok, detail = install_health_monitor()
-    if ok:
-        config = _health_monitor_config()
+    if check == 2:
+        return 2
+    try:
+        stored_config, config_identity = _read_health_config()
+        config = dict(stored_config or {})
         config.update({
             "enabled": True,
             "interval_seconds": 60,
             "claude_command": _configured_claude_command(config),
         })
-        _atomic_json(HEALTH_CONFIG, config)
+        _assert_protected_state_unchanged(
+            HEALTH_CONFIG,
+            "health-monitor policy",
+            MAX_HEALTH_FILE_BYTES,
+            config_identity,
+        )
+    except RuntimeError as error:
+        print(
+            f"Health-monitor installation is blocked fail-closed by unsafe policy: {error}",
+            file=sys.stderr,
+        )
+        return 2
+    ok, detail = install_health_monitor()
+    if ok:
+        try:
+            _atomic_json(
+                HEALTH_CONFIG,
+                config,
+                before_replace=lambda: _assert_protected_state_unchanged(
+                    HEALTH_CONFIG,
+                    "health-monitor policy",
+                    MAX_HEALTH_FILE_BYTES,
+                    config_identity,
+                ),
+            )
+        except (OSError, RuntimeError) as error:
+            cleanup = "scheduler rollback completed"
+            try:
+                remove_health_monitor()
+            except (OSError, RuntimeError) as cleanup_error:
+                cleanup = f"scheduler rollback failed: {cleanup_error}"
+            print(
+                "Health-monitor installation stopped before unsafe policy replacement; "
+                f"{cleanup}: {error}",
+                file=sys.stderr,
+            )
+            return 2
     print(f"{'Health monitor installed' if ok else 'Health monitor installation failed'}: {detail}")
     return 0 if ok and check == 0 else 1
 
@@ -2409,21 +4217,36 @@ def health_monitor(action: str) -> int:
 def auto_update(action: str, interval_hours: int = 24, require_signed_commits: bool = False, scheduler: bool = True) -> int:
     if action == "enable":
         try:
-            signed_required = _effective_signed_commit_policy(require_signed_commits)
-            _atomic_json(UPDATE_CONFIG, {
-                "enabled": True,
-                "interval_hours": max(1, interval_hours),
-                "require_signed_commits": signed_required,
-                "repository": REPO_URL,
-                "claude_command": shutil.which("claude") or "",
-            })
-        except (OSError, RuntimeError):
+            active_policy, active_identity = _read_update_policy(UPDATE_CONFIG)
+            paused_policy, paused_identity = _read_update_policy(UPDATE_PAUSED_CONFIG)
+            signed_required = require_signed_commits
+            for policy in (active_policy, paused_policy):
+                if policy is not None:
+                    signed_required = signed_required or policy.get(
+                        "require_signed_commits", False
+                    )
+            _assert_update_policy_unchanged(UPDATE_CONFIG, active_identity)
+            _assert_update_policy_unchanged(UPDATE_PAUSED_CONFIG, paused_identity)
+            _atomic_json(
+                UPDATE_CONFIG,
+                {
+                    "enabled": True,
+                    "interval_hours": max(1, interval_hours),
+                    "require_signed_commits": signed_required,
+                    "repository": REPO_URL,
+                    "claude_command": shutil.which("claude") or "",
+                },
+                before_replace=lambda: _assert_update_policy_unchanged(
+                    UPDATE_CONFIG, active_identity
+                ),
+            )
+            _remove_update_policy(UPDATE_PAUSED_CONFIG, paused_identity)
+        except (OSError, RuntimeError) as error:
             print(
-                "Updater signature policy is unreadable; automatic updates were not reconfigured.",
+                f"Updater policy state changed or is unreadable; automatic updates were not reconfigured: {error}",
                 file=sys.stderr,
             )
             return 2
-        UPDATE_PAUSED_CONFIG.unlink(missing_ok=True)
         print(f"Automatic updates enabled every {max(1, interval_hours)} hour(s).")
         if scheduler:
             ok, detail = install_scheduler()
@@ -2431,9 +4254,27 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
             return 0 if ok else 1
         return 0
     if action == "disable":
+        try:
+            _active, active_identity = _read_update_policy(UPDATE_CONFIG)
+            _paused, paused_identity = _read_update_policy(UPDATE_PAUSED_CONFIG)
+            _assert_update_policy_unchanged(UPDATE_CONFIG, active_identity)
+            _assert_update_policy_unchanged(UPDATE_PAUSED_CONFIG, paused_identity)
+        except RuntimeError as error:
+            print(
+                f"Updater reset is blocked fail-closed by unsafe policy state: {error}",
+                file=sys.stderr,
+            )
+            return 2
         remove_scheduler()
-        UPDATE_CONFIG.unlink(missing_ok=True)
-        UPDATE_PAUSED_CONFIG.unlink(missing_ok=True)
+        try:
+            _remove_update_policy(UPDATE_CONFIG, active_identity)
+            _remove_update_policy(UPDATE_PAUSED_CONFIG, paused_identity)
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Updater reset stopped before unsafe policy removal: {error}",
+                file=sys.stderr,
+            )
+            return 2
         print("Automatic updates disabled.")
         return 0
     if action == "status":
@@ -2443,10 +4284,19 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
             print("Updater policy is unreadable; status is blocked fail-closed.", file=sys.stderr)
             return 2
         print(json.dumps(config if config is not None else {"enabled": False}, indent=2))
-        if UPDATE_STATE.exists():
-            print(UPDATE_STATE.read_text(encoding="utf-8"))
+        try:
+            state = _load_update_state()
+        except RuntimeError:
+            print("Updater state is unsafe; status is blocked fail-closed.", file=sys.stderr)
+            return 2
+        if state is not None:
+            print(json.dumps(state, indent=2, sort_keys=True))
         return 0
-    last = json.loads(UPDATE_STATE.read_text(encoding="utf-8")) if UPDATE_STATE.exists() else {}
+    try:
+        last = _load_update_state() or {}
+    except RuntimeError:
+        print("Updater state is unsafe; automatic update is blocked fail-closed.", file=sys.stderr)
+        return 2
     if last.get("status") == "rolled_back" and last.get("auto_update_paused") is True:
         print("Automatic updates are paused after rollback; update explicitly, then re-enable auto-update.")
         return 0
@@ -2461,10 +4311,19 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
     if config.get("enabled") is not True:
         print("Automatic update policy is not enabled; update is blocked fail-closed.", file=sys.stderr)
         return 2
+    try:
+        monitor_enabled = health_monitor_enabled()
+        _load_health_state()
+    except RuntimeError as error:
+        print(
+            f"Health-monitor protected state is unsafe; automatic update is blocked fail-closed: {error}",
+            file=sys.stderr,
+        )
+        return 2
     due = (
         (
             TARGETS["claude"].is_symlink()
-            and health_monitor_enabled()
+            and monitor_enabled
             and (not HEALTH_CONFIG.exists() or not HEALTH_STATE.exists())
         )
         or

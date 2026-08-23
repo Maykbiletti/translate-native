@@ -11,6 +11,10 @@ const os = require("os");
 const path = require("path");
 
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_RECORD_BYTES = 64 * 1024;
+const MAX_EPOCH_BYTES = 128;
+const MAX_SERVICE_TOKEN_BYTES = 64 * 1024;
+const MAX_POLICY_BYTES = 64 * 1024;
 const MAX_RECORD_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNTIME = path.join(os.homedir(), ".config", "blun-language-guard");
 const EXACT_LANGUAGE = /^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/;
@@ -31,26 +35,120 @@ function hasNaturalLanguage(value) {
   return /\p{L}/u.test(String(value || ""));
 }
 
-function safeReadJson(file) {
-  const raw = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+function validatePolicyStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("delivery policy must be a regular file");
+  if (stats.size < 2 || stats.size > MAX_POLICY_BYTES) throw new Error("delivery policy has an invalid size");
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("delivery policy permissions are too broad");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error("delivery policy has the wrong owner");
+  }
+}
+
+function readProtectedDeliveryPolicy(file) {
+  const before = fs.lstatSync(file);
+  validatePolicyStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
+  let raw;
+  let opened;
+  try {
+    opened = fs.fstatSync(descriptor);
+    validatePolicyStats(opened);
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("delivery policy changed while opening");
+    }
+    const buffer = Buffer.alloc(MAX_POLICY_BYTES + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (count === 0) break;
+      size += count;
+    }
+    const afterRead = fs.fstatSync(descriptor);
+    if (!sameRecordIdentity(afterRead, recordIdentity(opened))) {
+      throw new Error("delivery policy changed while reading");
+    }
+    if (size > MAX_POLICY_BYTES) throw new Error("delivery policy has an invalid size");
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "");
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  if (!sameRecordIdentity(fs.lstatSync(file), recordIdentity(opened))) {
+    throw new Error("delivery policy changed while reading");
+  }
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("JSON root must be an object");
+    throw new Error("delivery policy root must be an object");
+  }
+  const isolated = parsed.isolated_service;
+  if (parsed.mandatory !== true || !isolated || typeof isolated !== "object" || Array.isArray(isolated)
+      || isolated.required !== true || typeof isolated.endpoint !== "string" || !isolated.endpoint.trim()
+      || isolated.endpoint.length > 4096 || typeof isolated.token_file !== "string" || !isolated.token_file.trim()
+      || isolated.token_file.length > 4096
+      || (Object.hasOwn(parsed, "fail_closed") && parsed.fail_closed !== true)
+      || (Object.hasOwn(parsed, "direct_delivery_allowed") && parsed.direct_delivery_allowed !== false)
+      || (Object.hasOwn(parsed, "raw_streaming_allowed") && parsed.raw_streaming_allowed !== false)
+      || (Object.hasOwn(parsed, "on_guard_error") && parsed.on_guard_error !== "block")) {
+    throw new Error("mandatory isolated-service policy is invalid");
   }
   return parsed;
+}
+
+function validateServiceTokenStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("service token must be a regular file");
+  if (stats.size < 32 || stats.size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("service token permissions are too broad");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error("service token has the wrong owner");
+  }
+}
+
+function readProtectedServiceToken(destination) {
+  const before = fs.lstatSync(destination);
+  validateServiceTokenStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validateServiceTokenStats(opened);
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("service token changed while opening");
+    }
+    const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (count === 0) break;
+      size += count;
+    }
+    const after = fs.fstatSync(descriptor);
+    if (!sameRecordIdentity(after, recordIdentity(opened))) {
+      throw new Error("service token changed while reading");
+    }
+    if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
+    const token = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "").trim();
+    if (token.length < 32) throw new Error("service token is invalid");
+    return token;
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 function runtimeConfig() {
   const runtime = process.env.BLUN_LANGUAGE_GUARD_RUNTIME || DEFAULT_RUNTIME;
   const policyPath = process.env.BLUN_LANGUAGE_GUARD_POLICY || path.join(runtime, "delivery-policy.json");
-  const policy = safeReadJson(policyPath);
+  const policy = readProtectedDeliveryPolicy(policyPath);
   const isolated = policy.isolated_service;
   if (policy.mandatory !== true || !isolated || isolated.required !== true) {
     throw new Error("mandatory isolated-service policy is missing");
   }
   const endpoint = process.env.BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT || isolated.endpoint;
   const tokenFile = process.env.BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE || isolated.token_file;
-  const token = process.env.BLUN_LANGUAGE_GUARD_SERVICE_TOKEN || fs.readFileSync(tokenFile, "utf8").replace(/^\uFEFF/, "").trim();
+  const token = process.env.BLUN_LANGUAGE_GUARD_SERVICE_TOKEN || readProtectedServiceToken(tokenFile);
   if (!endpoint || token.length < 32) {
     throw new Error("isolated service endpoint or token is invalid");
   }
@@ -154,14 +252,36 @@ function sessionEpochPath(input) {
 
 function readSessionEpoch(input) {
   const destination = sessionEpochPath(input);
-  const stats = fs.lstatSync(destination);
-  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("session epoch must be a regular file");
-  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+  const before = fs.lstatSync(destination);
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error("session epoch must be a regular file");
+  if (before.size < 1 || before.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
+  if (process.platform !== "win32" && (before.mode & 0o077) !== 0) {
     throw new Error("session epoch permissions are too broad");
   }
-  const epoch = fs.readFileSync(destination, "utf8").replace(/^\uFEFF/, "").trim();
-  if (!/^[a-f0-9]{64}$/.test(epoch)) throw new Error("session epoch is invalid");
-  return { destination, epoch };
+  if (typeof process.getuid === "function" && before.uid !== process.getuid()) {
+    throw new Error("session epoch has the wrong owner");
+  }
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    if (!opened.isFile() || opened.isSymbolicLink()) throw new Error("session epoch must be a regular file");
+    if (opened.size < 1 || opened.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
+    if (process.platform !== "win32" && (opened.mode & 0o077) !== 0) {
+      throw new Error("session epoch permissions are too broad");
+    }
+    if (typeof process.getuid === "function" && opened.uid !== process.getuid()) {
+      throw new Error("session epoch has the wrong owner");
+    }
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("session epoch changed while opening");
+    }
+    const epoch = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "").trim();
+    if (!/^[a-f0-9]{64}$/.test(epoch)) throw new Error("session epoch is invalid");
+    return { destination, epoch, fileIdentity: recordIdentity(opened) };
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 async function beginSessionEpoch(input) {
@@ -183,11 +303,17 @@ async function beginSessionEpoch(input) {
   if (registration.status !== "PASS" || registration.registered !== true) {
     throw new Error("isolated guard rejected the session epoch");
   }
-  const temporary = `${destination}.${process.pid}.tmp`;
+  const temporary = `${destination}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
+  let descriptor;
   try {
-    fs.writeFileSync(temporary, `${epoch}\n`, { encoding: "utf8", mode: 0o600 });
+    descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    fs.writeFileSync(descriptor, `${epoch}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
     fs.renameSync(temporary, destination);
   } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
     try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
   }
   try { fs.chmodSync(destination, 0o600); } catch (_) {}
@@ -198,22 +324,94 @@ function statePath(input) {
   return path.join(stateDirectory(), `${identity(input)}.json`);
 }
 
+function validateRecordStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    throw new Error("delivery grant state must be a regular file");
+  }
+  if (stats.size < 1 || stats.size > MAX_RECORD_BYTES) {
+    throw new Error("delivery grant state has an invalid size");
+  }
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("delivery grant state permissions are too broad");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error("delivery grant state has the wrong owner");
+  }
+}
+
+function recordIdentity(stats) {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    ctimeMs: stats.ctimeMs,
+    mtimeMs: stats.mtimeMs
+  };
+}
+
+function sameRecordIdentity(stats, expected) {
+  return expected && stats.dev === expected.dev && stats.ino === expected.ino
+    && stats.size === expected.size && stats.ctimeMs === expected.ctimeMs
+    && stats.mtimeMs === expected.mtimeMs;
+}
+
+function readProtectedRecord(destination) {
+  const before = fs.lstatSync(destination);
+  validateRecordStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validateRecordStats(opened);
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("delivery grant state changed while opening");
+    }
+    const raw = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("delivery grant state root must be an object");
+    }
+    return { record: parsed, fileIdentity: recordIdentity(opened) };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function removeExactRecord(destination, expected) {
+  const current = fs.lstatSync(destination);
+  validateRecordStats(current);
+  if (!sameRecordIdentity(current, expected)) {
+    throw new Error("delivery grant state changed before consumption");
+  }
+  fs.unlinkSync(destination);
+}
+
 function writeRecord(input, record) {
   const directory = stateDirectory();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const destination = statePath(input);
-  const temporary = `${destination}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-  fs.renameSync(temporary, destination);
-  try { fs.chmodSync(destination, 0o600); } catch (_) {}
+  const temporary = `${destination}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+    fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, destination);
+    try { fs.chmodSync(destination, 0o600); } catch (_) {}
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+  }
 }
 
 function readRecord(input) {
   const destination = statePath(input);
   try {
-    return { destination, record: safeReadJson(destination) };
+    return { destination, ...readProtectedRecord(destination) };
   } catch (error) {
-    if (error && error.code === "ENOENT") return { destination, record: null };
+    if (error && error.code === "ENOENT") return { destination, record: null, fileIdentity: null };
     throw error;
   }
 }
@@ -244,7 +442,7 @@ function invalidateSessionRecords(input) {
     let belongsToSession = candidate === legacyMainRecord;
     if (!belongsToSession) {
       try {
-        const record = safeReadJson(candidate);
+        const { record } = readProtectedRecord(candidate);
         const legacyGrant = typeof record.session_sha256 !== "string"
           && typeof record.delivery_grant === "string"
           && Number.isFinite(record.authorized_at);
@@ -452,10 +650,8 @@ async function sessionEnd(input) {
   try {
     const current = readSessionEpoch(input);
     previousEpoch = current.epoch;
-    fs.unlinkSync(current.destination);
-  } catch (_) {
-    try { fs.unlinkSync(sessionEpochPath(input)); } catch (_) {}
-  }
+    removeExactRecord(current.destination, current.fileIdentity);
+  } catch (_) {}
   try { invalidateSessionRecords(input); } catch (_) {}
   if (!previousEpoch) return;
   try {
@@ -586,17 +782,21 @@ function postToolFailure(input) {
 }
 
 async function stop(input) {
-  const target = typeof input.last_assistant_message === "string" ? input.last_assistant_message : "";
+  if (!input || typeof input.last_assistant_message !== "string") {
+    emit(blockedStop(input, "The BLUN hook received no valid last_assistant_message and cannot verify the actual final response. Fail closed and retry after Claude supplies the documented Stop output field."));
+    return;
+  }
+  const target = input.last_assistant_message;
   const naturalLanguage = hasNaturalLanguage(target);
   try {
-    const { destination, record } = readRecord(input);
+    const { destination, record, fileIdentity } = readRecord(input);
     const { epoch: sessionEpoch } = readSessionEpoch(input);
     const fresh = record && Number.isFinite(record.authorized_at)
       && Date.now() - record.authorized_at >= 0
       && Date.now() - record.authorized_at <= MAX_RECORD_AGE_MS;
     const usable = fresh && typeof record.delivery_grant === "string"
       && record.session_epoch_sha256 === textHash(sessionEpoch);
-    try { fs.unlinkSync(destination); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+    if (record) removeExactRecord(destination, fileIdentity);
     if (usable) {
       try {
         const result = await callGuard({
@@ -666,4 +866,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readSessionEpoch, sessionEnd, sessionHash, stopFailure, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash };

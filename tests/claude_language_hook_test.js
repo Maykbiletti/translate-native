@@ -10,6 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
+const { beginSessionEpoch, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -29,8 +30,27 @@ function runHook(mode, input, environment) {
 
 async function main() {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "blun-claude-hook-"));
+  const replacedRecord = path.join(temporary, "replaced-record.json");
+  fs.writeFileSync(replacedRecord, '{"grant":"first"}\n', { mode: 0o600 });
+  const inspectedRecord = readProtectedRecord(replacedRecord);
+  fs.renameSync(replacedRecord, `${replacedRecord}.old`);
+  fs.writeFileSync(replacedRecord, '{"grant":"other"}\n', { mode: 0o600 });
+  assert.throws(
+    () => removeExactRecord(replacedRecord, inspectedRecord.fileIdentity),
+    /changed before consumption/
+  );
+  assert(fs.existsSync(replacedRecord), "a replacement record must not be removed");
+  fs.unlinkSync(replacedRecord);
+  fs.unlinkSync(`${replacedRecord}.old`);
   const token = "a".repeat(64);
-  fs.writeFileSync(path.join(temporary, "service.token"), `${token}\n`, { mode: 0o600 });
+  const serviceTokenFile = path.join(temporary, "service.token");
+  fs.writeFileSync(serviceTokenFile, `${token}\n`, { mode: 0o600 });
+  assert.strictEqual(readProtectedServiceToken(serviceTokenFile), token);
+  if (process.platform !== "win32") {
+    const linkedToken = path.join(temporary, "linked-service.token");
+    fs.symlinkSync(serviceTokenFile, linkedToken);
+    assert.throws(() => readProtectedServiceToken(linkedToken), /regular file/);
+  }
   const grants = new Map();
   const sessionEpochs = new Map();
   const sessionEpochHistory = new Map();
@@ -138,16 +158,80 @@ async function main() {
   });
   const address = server.address();
   assert(address && typeof address === "object");
-  fs.writeFileSync(path.join(temporary, "delivery-policy.json"), JSON.stringify({
+  const policyFile = path.join(temporary, "delivery-policy.json");
+  fs.writeFileSync(policyFile, JSON.stringify({
     mandatory: true,
     isolated_service: {
       required: true,
       endpoint: `tcp:127.0.0.1:${address.port}`,
       token_file: path.join(temporary, "service.token")
     }
-  }));
+  }), { mode: 0o600 });
+  assert.strictEqual(readProtectedDeliveryPolicy(policyFile).mandatory, true);
+  if (process.platform !== "win32") {
+    const linkedPolicy = path.join(temporary, "linked-policy.json");
+    fs.symlinkSync(policyFile, linkedPolicy);
+    assert.throws(() => readProtectedDeliveryPolicy(linkedPolicy), /regular file/);
+    fs.chmodSync(policyFile, 0o644);
+    assert.throws(() => readProtectedDeliveryPolicy(policyFile), /permissions/);
+    fs.chmodSync(policyFile, 0o600);
+  }
+  const oversizedPolicy = path.join(temporary, "oversized-policy.json");
+  fs.writeFileSync(oversizedPolicy, "{" + " ".repeat(64 * 1024) + "}", { mode: 0o600 });
+  assert.throws(() => readProtectedDeliveryPolicy(oversizedPolicy), /invalid size/);
+  const originalLstatSync = fs.lstatSync;
+  let policyStatsReads = 0;
+  fs.lstatSync = (candidate, ...options) => {
+    const details = originalLstatSync(candidate, ...options);
+    if (candidate === policyFile && ++policyStatsReads === 2) {
+      return { ...details, mtimeMs: details.mtimeMs + 1 };
+    }
+    return details;
+  };
+  try {
+    assert.throws(() => readProtectedDeliveryPolicy(policyFile), /changed while reading/);
+  } finally {
+    fs.lstatSync = originalLstatSync;
+  }
 
   const environment = { BLUN_LANGUAGE_GUARD_RUNTIME: temporary };
+  const previousRuntime = process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
+  process.env.BLUN_LANGUAGE_GUARD_RUNTIME = temporary;
+  try {
+    const protectedInput = { session_id: "session-epoch-hardening", cwd: temporary };
+    const protectedEpoch = path.join(
+      temporary,
+      "claude-hooks",
+      `session-${crypto.createHash("sha256").update(protectedInput.session_id).digest("hex")}.epoch`
+    );
+    fs.mkdirSync(path.dirname(protectedEpoch), { recursive: true, mode: 0o700 });
+    const legacyTemporary = `${protectedEpoch}.${process.pid}.tmp`;
+    const sentinel = path.join(temporary, "epoch-temp-sentinel.txt");
+    fs.writeFileSync(sentinel, "do-not-overwrite\n", { mode: 0o600 });
+    fs.symlinkSync(sentinel, legacyTemporary);
+    await beginSessionEpoch(protectedInput);
+    assert.strictEqual(fs.readFileSync(sentinel, "utf8"), "do-not-overwrite\n");
+    assert(fs.lstatSync(legacyTemporary).isSymbolicLink(), "legacy predictable temp link must remain untouched");
+    fs.unlinkSync(legacyTemporary);
+
+    const inspectedEpoch = readSessionEpoch(protectedInput);
+    fs.renameSync(protectedEpoch, `${protectedEpoch}.old`);
+    fs.writeFileSync(protectedEpoch, `${"f".repeat(64)}\n`, { mode: 0o600 });
+    assert.throws(
+      () => removeExactRecord(protectedEpoch, inspectedEpoch.fileIdentity),
+      /changed before consumption/
+    );
+    assert.strictEqual(fs.readFileSync(protectedEpoch, "utf8"), `${"f".repeat(64)}\n`);
+    fs.unlinkSync(protectedEpoch);
+    fs.renameSync(`${protectedEpoch}.old`, protectedEpoch);
+
+    fs.writeFileSync(protectedEpoch, `${"a".repeat(129)}\n`, { mode: 0o600 });
+    assert.throws(() => readSessionEpoch(protectedInput), /invalid size/);
+    fs.unlinkSync(protectedEpoch);
+  } finally {
+    if (previousRuntime === undefined) delete process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
+    else process.env.BLUN_LANGUAGE_GUARD_RUNTIME = previousRuntime;
+  }
   const common = { session_id: "session-one", cwd: temporary };
   const clean = "Natürlich läuft die Prüfung für Claude zuverlässig.";
   const tool = {
@@ -169,6 +253,30 @@ async function main() {
   assert.strictEqual(started.code, 0, started.stderr);
   assert.match(started.stdout, /SessionStart/);
   assert.match(started.stdout, /mandatory/);
+
+  for (const invalidMessage of [undefined, null, { text: clean }]) {
+    const malformedInput = {
+      ...common,
+      hook_event_name: "Stop",
+      stop_hook_active: false
+    };
+    if (invalidMessage !== undefined) malformedInput.last_assistant_message = invalidMessage;
+    const malformedStop = await runHook("stop", malformedInput, environment);
+    const malformedBlock = JSON.parse(malformedStop.stdout);
+    assert.strictEqual(malformedBlock.decision, "block");
+    assert.match(malformedBlock.reason, /last_assistant_message/);
+  }
+
+  const malformedRepeatedSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-invalid-output",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: [clean],
+    stop_hook_active: true
+  }, environment);
+  const malformedSubagentHardStop = JSON.parse(malformedRepeatedSubagentStop.stdout);
+  assert.strictEqual(malformedSubagentHardStop.continue, false);
+  assert.match(malformedSubagentHardStop.stopReason, /stopped an unverified response/);
 
   const policyEnvironment = {
     ...environment,
@@ -421,6 +529,58 @@ async function main() {
   assert.strictEqual(parsedRecord.session_epoch_sha256, crypto.createHash("sha256").update(secondEpoch).digest("hex"));
   assert.strictEqual(parsedRecord.source_sha256, crypto.createHash("sha256").update("").digest("hex"));
   assert.strictEqual(parsedRecord.channel, "claude-hook");
+
+  if (process.platform !== "win32") {
+    fs.chmodSync(stateFile, 0o644);
+    const broadPermissions = await runHook("stop", {
+      ...common,
+      hook_event_name: "Stop",
+      last_assistant_message: clean,
+      stop_hook_active: false
+    }, environment);
+    assert.strictEqual(JSON.parse(broadPermissions.stdout).decision, "block");
+    assert(fs.existsSync(stateFile), "an unsafe record must not be consumed");
+    fs.chmodSync(stateFile, 0o600);
+    const recoveredPermissions = await runHook("stop", {
+      ...common,
+      hook_event_name: "Stop",
+      last_assistant_message: clean,
+      stop_hook_active: false
+    }, environment);
+    assert.strictEqual(recoveredPermissions.stdout, "");
+
+    await runHook("post-tool", { ...tool, tool_use_id: "tool-symlink-record" }, environment);
+    const externalRecord = path.join(temporary, "external-grant-record.json");
+    const externalBytes = fs.readFileSync(stateFile);
+    fs.writeFileSync(externalRecord, externalBytes, { mode: 0o600 });
+    fs.unlinkSync(stateFile);
+    fs.symlinkSync(externalRecord, stateFile);
+    const symlinkRecord = await runHook("stop", {
+      ...common,
+      hook_event_name: "Stop",
+      last_assistant_message: clean,
+      stop_hook_active: false
+    }, environment);
+    assert.strictEqual(JSON.parse(symlinkRecord.stdout).decision, "block");
+    assert(fs.lstatSync(stateFile).isSymbolicLink(), "the hook must not consume a symlink as protected state");
+    assert.deepStrictEqual(fs.readFileSync(externalRecord), externalBytes, "symlink rejection must not alter its target");
+    fs.unlinkSync(stateFile);
+    fs.unlinkSync(externalRecord);
+  } else {
+    fs.unlinkSync(stateFile);
+  }
+
+  await runHook("post-tool", { ...tool, tool_use_id: "tool-oversized-record" }, environment);
+  fs.writeFileSync(stateFile, `${"x".repeat(64 * 1024)}\n`, { mode: 0o600 });
+  const oversizedRecord = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(oversizedRecord.stdout).decision, "block");
+  assert(fs.statSync(stateFile).size > 64 * 1024, "oversized state must remain unconsumed");
+  fs.unlinkSync(stateFile);
 
   const childTool = { ...tool, agent_id: "child-agent", tool_use_id: "tool-child" };
   const otherSessionTool = { ...tool, session_id: "session-two", tool_use_id: "tool-other-session" };

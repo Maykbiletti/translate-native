@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import time
 import unicodedata
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any
 
 
 VERSION = "6.20.0"
+MAX_SIGNING_KEY_BYTES = 64 * 1024
 DANGEROUS_BIDI = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e"}
 ISOLATE_OPENERS = {"\u2066", "\u2067", "\u2068"}
 ISOLATE_CLOSER = "\u2069"
@@ -53,18 +55,70 @@ def _b64decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
+def _validate_signing_key_stat(details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise ValueError("signing key must be a regular file")
+    if details.st_size < 32 or details.st_size > MAX_SIGNING_KEY_BYTES:
+        raise ValueError("signing key has an invalid size")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise ValueError("signing key permissions must be owner-only")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise ValueError("signing key has the wrong owner")
+
+
+def _signing_key_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def load_existing_key(path: Path) -> bytes:
+    before = os.lstat(path)
+    _validate_signing_key_stat(before)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _validate_signing_key_stat(opened)
+        if _signing_key_identity(opened) != _signing_key_identity(before):
+            raise ValueError("signing key changed while opening")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            key = handle.read(MAX_SIGNING_KEY_BYTES + 1)
+        after = os.fstat(descriptor)
+        if _signing_key_identity(after) != _signing_key_identity(opened):
+            raise ValueError("signing key changed while reading")
+    finally:
+        os.close(descriptor)
+    if len(key) < 32 or len(key) > MAX_SIGNING_KEY_BYTES:
+        raise ValueError("signing key has an invalid size")
+    return key
+
+
 def load_or_create_key(path: Path) -> bytes:
     env_key = os.environ.get("BLUN_LANGUAGE_GUARD_KEY")
     if env_key:
         return hashlib.sha256(env_key.encode("utf-8")).digest()
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        return path.read_bytes()
+    try:
+        return load_existing_key(path)
+    except FileNotFoundError:
+        pass
     key = os.urandom(32)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_bytes(key)
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return load_existing_key(path)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(key)
+            handle.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     return key
 
 
