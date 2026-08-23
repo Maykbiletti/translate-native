@@ -3679,20 +3679,55 @@ def health_monitor_run(*, now: int | None = None) -> int:
             }, sort_keys=True), file=sys.stderr)
             return 2
 
+        def block_policy_transition(error: RuntimeError | OSError) -> int:
+            print(json.dumps({
+                "status": "blocked",
+                "reason": "unsafe-health-policy-transition",
+                "checked_at": timestamp,
+                "detail": str(error),
+            }, sort_keys=True), file=sys.stderr)
+            return 2
+
+        def policy_unchanged() -> bool:
+            try:
+                _assert_protected_state_unchanged(
+                    HEALTH_CONFIG,
+                    "health-monitor policy",
+                    MAX_HEALTH_FILE_BYTES,
+                    config_identity,
+                )
+            except (OSError, RuntimeError) as error:
+                block_policy_transition(error)
+                return False
+            return True
+
         def persist_state(state: dict) -> bool:
+            if not policy_unchanged():
+                return False
             try:
                 _atomic_json(
                     HEALTH_STATE,
                     state,
-                    before_replace=lambda: _assert_protected_state_unchanged(
-                        HEALTH_STATE,
-                        "health-monitor state",
-                        MAX_HEALTH_FILE_BYTES,
-                        state_identity,
+                    before_replace=lambda: (
+                        _assert_protected_state_unchanged(
+                            HEALTH_CONFIG,
+                            "health-monitor policy",
+                            MAX_HEALTH_FILE_BYTES,
+                            config_identity,
+                        ),
+                        _assert_protected_state_unchanged(
+                            HEALTH_STATE,
+                            "health-monitor state",
+                            MAX_HEALTH_FILE_BYTES,
+                            state_identity,
+                        ),
                     ),
                 )
             except (OSError, RuntimeError) as error:
-                block_state_transition(error)
+                if "health-monitor policy" in str(error).lower():
+                    block_policy_transition(error)
+                else:
+                    block_state_transition(error)
                 return False
             return True
         guard_healthy, mcp_healthy = _guard_stack_status()
@@ -3725,6 +3760,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
                     "detail": str(error),
                 }, sort_keys=True), file=sys.stderr)
                 return 2
+        if not policy_unchanged():
+            return 2
         if guard_healthy and mcp_healthy and plugin.get("healthy") is True:
             state = {
                 "status": "ok",
@@ -3772,6 +3809,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
             )
         except RuntimeError as error:
             return block_state_transition(error)
+        if not policy_unchanged():
+            return 2
         repairs: list[str] = []
         if not guard_healthy:
             restarted, _detail = restart_guard_runtime()
@@ -3780,6 +3819,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
         if guard_healthy:
             _guard_now, mcp_healthy = _guard_stack_status()
             if not mcp_healthy:
+                if not policy_unchanged():
+                    return 2
                 restarted, _detail = restart_mcp_http_runtime()
                 repairs.append("mcp-restart")
                 mcp_healthy = restarted and _wait_for_stack(guard=True, mcp=True)
@@ -3791,6 +3832,8 @@ def health_monitor_run(*, now: int | None = None) -> int:
             and plugin.get("expected_version")
             and plugin.get("command")
         ):
+            if not policy_unchanged():
+                return 2
             plugin_update = update_claude_plugin(
                 str(plugin.get("expected_version", "")),
                 str(plugin.get("command", "")) or None,
@@ -3798,10 +3841,13 @@ def health_monitor_run(*, now: int | None = None) -> int:
             if plugin_update.get("attempted"):
                 repairs.append("claude-plugin-update")
         guard_healthy, mcp_healthy = _guard_stack_status()
-        plugin = _claude_plugin_monitor_status(
-            config,
-            config_identity=config_identity,
-        )
+        try:
+            plugin = _claude_plugin_monitor_status(
+                config,
+                config_identity=config_identity,
+            )
+        except RuntimeError as error:
+            return block_policy_transition(error)
         recovered = guard_healthy and mcp_healthy and plugin.get("healthy") is True
         failures = 0 if recovered else previous_failures + 1
         state = {

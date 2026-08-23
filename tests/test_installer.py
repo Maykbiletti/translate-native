@@ -3769,6 +3769,107 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK = originals
 
+    def test_health_monitor_policy_exchange_during_probe_blocks_before_repair(self) -> None:
+        originals = (
+            INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": True, "interval_seconds": 60, "plugin_required": False,
+            })
+
+            def replace_policy() -> tuple[bool, bool]:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                    "enabled": False,
+                    "interval_seconds": 300,
+                    "plugin_required": False,
+                    "claude_command": "replacement",
+                })
+                return False, False
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_guard_stack_status", side_effect=replace_policy
+                ), mock.patch.object(
+                    INSTALLER,
+                    "_claude_plugin_monitor_status",
+                    return_value={"required": False, "healthy": True, "reason": "not-installed"},
+                ), mock.patch.object(INSTALLER, "restart_guard_runtime") as restart, \
+                     mock.patch.object(INSTALLER, "update_claude_plugin") as updater, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6700), 2)
+                restart.assert_not_called()
+                updater.assert_not_called()
+                self.assertFalse(INSTALLER.HEALTH_STATE.exists())
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertFalse(policy["enabled"])
+                self.assertEqual(policy["interval_seconds"], 300)
+                self.assertEqual(policy["claude_command"], "replacement")
+            finally:
+                (
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE,
+                    INSTALLER.OPERATION_LOCK,
+                ) = originals
+
+    def test_health_monitor_policy_exchange_during_repair_blocks_publication(self) -> None:
+        originals = (
+            INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.OPERATION_LOCK,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.HEALTH_CONFIG = root / "health-config.json"
+            INSTALLER.HEALTH_STATE = root / "health-state.json"
+            INSTALLER.OPERATION_LOCK = root / "operation.lock"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": True, "interval_seconds": 60, "plugin_required": False,
+            })
+
+            def replace_policy() -> tuple[bool, str]:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                    "enabled": False,
+                    "interval_seconds": 600,
+                    "plugin_required": False,
+                })
+                return True, "restarted"
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_guard_stack_status", return_value=(False, False)
+                ), mock.patch.object(
+                    INSTALLER,
+                    "_claude_plugin_monitor_status",
+                    return_value={"required": False, "healthy": True, "reason": "not-installed"},
+                ), mock.patch.object(
+                    INSTALLER, "restart_guard_runtime", side_effect=replace_policy
+                ) as restart, mock.patch.object(
+                    INSTALLER, "_wait_for_stack", return_value=True
+                ) as waiter, mock.patch.object(
+                    INSTALLER, "restart_mcp_http_runtime"
+                ) as mcp_restart, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor_run(now=6800), 2)
+                restart.assert_called_once_with()
+                waiter.assert_called_once_with(guard=True)
+                mcp_restart.assert_not_called()
+                self.assertFalse(INSTALLER.HEALTH_STATE.exists())
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertFalse(policy["enabled"])
+                self.assertEqual(policy["interval_seconds"], 600)
+            finally:
+                (
+                    INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE,
+                    INSTALLER.OPERATION_LOCK,
+                ) = originals
+
     def test_health_monitor_never_installs_a_missing_enrolled_claude_plugin(self) -> None:
         originals = (
             INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE, INSTALLER.UPDATE_CONFIG,

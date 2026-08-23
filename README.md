@@ -449,6 +449,8 @@ The minutely monitor applies the same identity binding when it first observes an
 
 Every minutely health-state transition is likewise bound to the exact backoff file inspected at run start. An exchange discovered after probing blocks before a service or plugin repair; an exchange during a repair preserves the replacement and prevents the stale result from being published. This keeps concurrent operator state and a newer backoff authoritative without weakening the existing one-repair-per-run limit.
 
+The monitor also keeps its initially inspected health-policy identity authoritative for the complete run. A policy exchanged during signer, MCP, or Claude probing blocks before any repair; an exchange during a repair prevents later dependent repairs and stale health-state publication. Automatic Claude enrollment refreshes the expected identity only after its own protected policy replacement, so the compatible first-enrollment path remains available while concurrent operator changes remain authoritative.
+
 The updater's recorded state is protected independently from its policy. `doctor`, `auto-update status`, scheduled checks, direct updates, and rollback now read `update-state.json` through a bounded owner-only regular-file path, reject links and exchanged identities, and validate commit hashes plus every security-relevant persisted type. Unsafe state blocks before Git commands or candidate code can run and is never printed or replaced through that read path. A missing state remains valid before the first successful update, while rollback continues to require a complete exact state record.
 
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:
