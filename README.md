@@ -217,7 +217,7 @@ Recovery still works after a crash: only an old lock with a confirmed dead owner
 
 Version 6.30 treats both active and rollback-paused updater policies as security-sensitive input at every public updater path. Policy reads now reject symbolic links, directories, FIFOs and other special files before opening them; cap input at 64 KiB; and validate the stored Boolean, interval, repository and Claude-command field types. `status`, scheduled `run`, direct update, rollback, reconfiguration and the doctor therefore fail closed instead of following a redirected file, hanging on a pipe or crashing on malformed schema.
 
-Atomic JSON writes now use an unpredictable owner-only temporary file in the destination directory, flush it before replacement and always clean it up. A pre-created legacy `updater.json.tmp` link can no longer redirect policy output into another file. Existing regular policy files remain compatible, and `auto-update disable` remains the explicit way to remove a policy deliberately.
+Atomic JSON writes now use an unpredictable owner-only temporary file in the destination directory, flush it before replacement and always clean it up. A pre-created legacy `updater.json.tmp` link can no longer redirect policy output into another file. Existing regular policy files remain compatible. `auto-update disable` preflights both active and rollback-paused policies before scheduler mutation, then removes only the exact file identities it inspected; unsafe or concurrently exchanged policy state blocks fail-closed.
 
 ### Version 6.29.0: reconfiguration preserves signed-update enforcement
 

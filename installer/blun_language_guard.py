@@ -1910,39 +1910,47 @@ def preflight_blun_mcp_config(path: Path) -> None:
         raise RuntimeError(f"BLUN mcpServers must be an object: {path}")
 
 
-def _load_update_policy(path: Path) -> dict | None:
+def _validate_update_policy_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Unsafe updater policy file type: {path}")
+    if details.st_size > MAX_UPDATE_POLICY_BYTES:
+        raise RuntimeError(f"Updater policy exceeds size limit: {path}")
+
+
+def _read_update_policy(
+    path: Path,
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
     """Read one bounded regular policy file without following symbolic links."""
     try:
         metadata = path.lstat()
     except FileNotFoundError:
-        return None
+        return None, None
     except OSError as error:
         raise RuntimeError(f"Unreadable updater policy: {path}") from error
-    if not stat.S_ISREG(metadata.st_mode):
-        raise RuntimeError(f"Unsafe updater policy file type: {path}")
-    if metadata.st_size > MAX_UPDATE_POLICY_BYTES:
-        raise RuntimeError(f"Updater policy exceeds size limit: {path}")
+    _validate_update_policy_details(path, metadata)
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode):
-                raise RuntimeError(f"Unsafe updater policy file type: {path}")
-            if (
-                metadata.st_ino
-                and opened.st_ino
-                and (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino)
-            ):
+            _validate_update_policy_details(path, opened)
+            if _protected_state_identity(metadata) != _protected_state_identity(opened):
                 raise RuntimeError(f"Updater policy changed while opening: {path}")
             raw = handle.read(MAX_UPDATE_POLICY_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = path.lstat()
     except (OSError, RuntimeError) as error:
         if isinstance(error, RuntimeError):
             raise
         raise RuntimeError(f"Unreadable updater policy: {path}") from error
     if len(raw) > MAX_UPDATE_POLICY_BYTES:
         raise RuntimeError(f"Updater policy exceeds size limit: {path}")
+    if (
+        _protected_state_identity(opened) != _protected_state_identity(after_read)
+        or _protected_state_identity(opened) != _protected_state_identity(after_path)
+    ):
+        raise RuntimeError(f"Updater policy changed while reading: {path}")
     try:
         policy = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -1963,7 +1971,38 @@ def _load_update_policy(path: Path) -> dict | None:
     for field in ("repository", "claude_command"):
         if field in policy and not isinstance(policy[field], str):
             raise RuntimeError(f"Invalid updater policy field {field}: {path}")
+    return policy, _protected_state_identity(after_path)
+
+
+def _load_update_policy(path: Path) -> dict | None:
+    policy, _identity = _read_update_policy(path)
     return policy
+
+
+def _assert_update_policy_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"Updater policy disappeared before removal: {path}")
+    except OSError as error:
+        raise RuntimeError(f"Updater policy cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"Updater policy appeared before removal: {path}")
+    _validate_update_policy_details(path, current)
+    if _protected_state_identity(current) != expected:
+        raise RuntimeError(f"Updater policy changed before removal: {path}")
+
+
+def _remove_update_policy(
+    path: Path, expected: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    _assert_update_policy_unchanged(path, expected)
+    if expected is not None:
+        path.unlink()
 
 
 def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
@@ -3785,9 +3824,27 @@ def auto_update(action: str, interval_hours: int = 24, require_signed_commits: b
             return 0 if ok else 1
         return 0
     if action == "disable":
+        try:
+            _active, active_identity = _read_update_policy(UPDATE_CONFIG)
+            _paused, paused_identity = _read_update_policy(UPDATE_PAUSED_CONFIG)
+            _assert_update_policy_unchanged(UPDATE_CONFIG, active_identity)
+            _assert_update_policy_unchanged(UPDATE_PAUSED_CONFIG, paused_identity)
+        except RuntimeError as error:
+            print(
+                f"Updater reset is blocked fail-closed by unsafe policy state: {error}",
+                file=sys.stderr,
+            )
+            return 2
         remove_scheduler()
-        UPDATE_CONFIG.unlink(missing_ok=True)
-        UPDATE_PAUSED_CONFIG.unlink(missing_ok=True)
+        try:
+            _remove_update_policy(UPDATE_CONFIG, active_identity)
+            _remove_update_policy(UPDATE_PAUSED_CONFIG, paused_identity)
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Updater reset stopped before unsafe policy removal: {error}",
+                file=sys.stderr,
+            )
+            return 2
         print("Automatic updates disabled.")
         return 0
     if action == "status":

@@ -1766,6 +1766,61 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE = originals
 
+    @unittest.skipIf(os.name == "nt", "POSIX link test")
+    def test_auto_update_disable_rejects_linked_policy_before_scheduler_change(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            INSTALLER._atomic_json(target, {
+                "enabled": True, "interval_hours": 24, "require_signed_commits": True,
+            })
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_CONFIG.symlink_to(target)
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "missing-paused.json"
+            try:
+                with mock.patch.object(INSTALLER, "remove_scheduler") as scheduler_removal, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("disable"), 2)
+                scheduler_removal.assert_not_called()
+                self.assertTrue(INSTALLER.UPDATE_CONFIG.is_symlink())
+                self.assertTrue(
+                    INSTALLER.json.loads(target.read_text(encoding="utf-8"))[
+                        "require_signed_commits"
+                    ]
+                )
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG = originals
+
+    def test_auto_update_disable_preserves_policy_replaced_after_preflight(self) -> None:
+        originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            INSTALLER.UPDATE_CONFIG = root / "updater.json"
+            INSTALLER.UPDATE_PAUSED_CONFIG = root / "missing-paused.json"
+            INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                "enabled": True, "interval_hours": 24, "require_signed_commits": True,
+            })
+
+            def replace_policy() -> None:
+                INSTALLER.UPDATE_CONFIG.unlink()
+                INSTALLER._atomic_json(INSTALLER.UPDATE_CONFIG, {
+                    "enabled": True, "interval_hours": 1, "require_signed_commits": True,
+                })
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "remove_scheduler", side_effect=replace_policy
+                ) as scheduler_removal, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.auto_update("disable"), 2)
+                scheduler_removal.assert_called_once_with()
+                replacement = INSTALLER.json.loads(
+                    INSTALLER.UPDATE_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertEqual(replacement["interval_hours"], 1)
+            finally:
+                INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG = originals
+
     def test_reenable_refuses_to_replace_invalid_saved_policy(self) -> None:
         originals = (INSTALLER.UPDATE_CONFIG, INSTALLER.UPDATE_PAUSED_CONFIG, INSTALLER.UPDATE_STATE)
         with tempfile.TemporaryDirectory() as directory:
