@@ -3359,6 +3359,8 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
             INSTALLER.OPERATION_LOCK.write_text("stale", encoding="utf-8")
+            if os.name != "nt":
+                INSTALLER.OPERATION_LOCK.chmod(0o600)
             os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
             try:
                 token = INSTALLER._acquire_operation_lock(
@@ -3369,6 +3371,46 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(value["operation"], "health-monitor")
                 assert token is not None
                 INSTALLER._release_operation_lock(token)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    @unittest.skipUnless(os.name != "nt", "POSIX ownership and link semantics")
+    def test_unsafe_operation_lock_paths_block_without_removal(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = root / "operation.lock"
+            sentinel = root / "sentinel"
+            payload = b'{"operation":"update","pid":999999,"started_at":1,"token":"' + b"a" * 32 + b'"}\n'
+            sentinel.write_bytes(payload)
+            sentinel.chmod(0o600)
+            try:
+                for unsafe in ("symlink", "hardlink", "permissions"):
+                    lock.unlink(missing_ok=True)
+                    if unsafe == "symlink":
+                        lock.symlink_to(sentinel)
+                    elif unsafe == "hardlink":
+                        os.link(sentinel, lock)
+                    else:
+                        lock.write_bytes(payload)
+                        lock.chmod(0o644)
+                    os.utime(lock, (100, 100), follow_symlinks=False)
+                    INSTALLER.OPERATION_LOCK = lock
+
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor",
+                        now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1,
+                    )
+
+                    self.assertIsNone(token, unsafe)
+                    self.assertTrue(lock.exists() or lock.is_symlink(), unsafe)
+                    self.assertEqual(sentinel.read_bytes(), payload, unsafe)
+                    if unsafe == "symlink":
+                        self.assertTrue(lock.is_symlink())
+                    elif unsafe == "hardlink":
+                        self.assertEqual(lock.stat().st_ino, sentinel.stat().st_ino)
+                    else:
+                        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o644)
             finally:
                 INSTALLER.OPERATION_LOCK = original
 
@@ -3529,6 +3571,8 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
             INSTALLER.OPERATION_LOCK.write_text("stale", encoding="utf-8")
+            if os.name != "nt":
+                INSTALLER.OPERATION_LOCK.chmod(0o600)
             os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
 
             def replace_lock(_metadata: os.stat_result) -> bool:
@@ -3573,6 +3617,70 @@ class InstallerTests(unittest.TestCase):
                 value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
                 self.assertEqual(value["operation"], "rollback")
                 self.assertEqual(value["token"], "replacement")
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_operation_lock_changed_while_reading_is_preserved(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = root / "operation.lock"
+            INSTALLER.OPERATION_LOCK = lock
+            INSTALLER._atomic_json(lock, {
+                "operation": "update", "pid": 999999, "started_at": 100, "token": "a" * 32,
+            })
+            os.utime(lock, (100, 100))
+            replacement = {
+                "operation": "rollback", "pid": os.getpid(), "started_at": 200,
+                "token": "b" * 32,
+            }
+            real_fstat = INSTALLER.os.fstat
+            stat_calls = 0
+
+            def exchange_during_read(descriptor: int) -> os.stat_result:
+                nonlocal stat_calls
+                stat_calls += 1
+                if stat_calls == 2:
+                    lock.write_text(INSTALLER.json.dumps(replacement) + "\n", encoding="utf-8")
+                    if os.name != "nt":
+                        lock.chmod(0o600)
+                return real_fstat(descriptor)
+
+            try:
+                with mock.patch.object(INSTALLER.os, "fstat", side_effect=exchange_during_read):
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor",
+                        now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1,
+                    )
+                self.assertIsNone(token)
+                self.assertEqual(INSTALLER.json.loads(lock.read_text(encoding="utf-8")), replacement)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_operation_lock_replaced_during_creation_is_not_claimed(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            lock = Path(directory) / "operation.lock"
+            INSTALLER.OPERATION_LOCK = lock
+            replacement = b"replacement-lock\n"
+            real_lstat = type(lock).lstat
+            exchanged = False
+
+            def exchange_before_install_check(candidate: Path) -> os.stat_result:
+                nonlocal exchanged
+                if candidate == lock and not exchanged:
+                    exchanged = True
+                    candidate.unlink()
+                    candidate.write_bytes(replacement)
+                    if os.name != "nt":
+                        candidate.chmod(0o600)
+                return real_lstat(candidate)
+
+            try:
+                with mock.patch.object(type(lock), "lstat", new=exchange_before_install_check):
+                    token = INSTALLER._acquire_operation_lock("update", now=100)
+                self.assertIsNone(token)
+                self.assertEqual(lock.read_bytes(), replacement)
             finally:
                 INSTALLER.OPERATION_LOCK = original
 

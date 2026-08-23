@@ -2420,19 +2420,27 @@ def _process_start_identity(pid: int) -> str | None:
 
 def _read_operation_lock(metadata: os.stat_result) -> dict | None:
     """Read the exact bounded lock instance described by metadata."""
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_OPERATION_LOCK_BYTES:
+    if not _operation_lock_details_safe(metadata):
         return None
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(OPERATION_LOCK, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode) or not _same_file_identity(metadata, opened):
+            if not _operation_lock_details_safe(opened) or not _same_file_identity(metadata, opened):
                 return None
             raw = handle.read(MAX_OPERATION_LOCK_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = OPERATION_LOCK.lstat()
     except OSError:
         return None
-    if len(raw) > MAX_OPERATION_LOCK_BYTES:
+    if (
+        len(raw) > MAX_OPERATION_LOCK_BYTES
+        or not _operation_lock_details_safe(after_read)
+        or not _operation_lock_details_safe(after_path)
+        or not _same_file_identity(opened, after_read)
+        or not _same_file_identity(opened, after_path)
+    ):
         return None
     try:
         value = json.loads(raw.decode("utf-8"))
@@ -2441,6 +2449,19 @@ def _read_operation_lock(metadata: os.stat_result) -> dict | None:
     if not isinstance(value, dict):
         return None
     return value
+
+
+def _operation_lock_details_safe(details: os.stat_result) -> bool:
+    """Accept only one owner-controlled regular maintenance-lock inode."""
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        return False
+    if details.st_nlink != 1 or details.st_size > MAX_OPERATION_LOCK_BYTES:
+        return False
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        return False
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        return False
+    return True
 
 
 def _operation_lock_owner_alive(metadata: os.stat_result) -> bool | None:
@@ -2490,6 +2511,8 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
         except FileExistsError:
             try:
                 metadata = OPERATION_LOCK.lstat()
+                if not _operation_lock_details_safe(metadata):
+                    return None
                 stale = timestamp - int(metadata.st_mtime) > OPERATION_LOCK_STALE_SECONDS
             except OSError:
                 stale = False
@@ -2499,7 +2522,10 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
                 return None
             try:
                 current = OPERATION_LOCK.lstat()
-                if not _same_file_identity(metadata, current):
+                if (
+                    not _operation_lock_details_safe(current)
+                    or not _same_file_identity(metadata, current)
+                ):
                     return None
                 OPERATION_LOCK.unlink()
             except OSError:
@@ -2509,9 +2535,24 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
         process_start_id = _process_start_identity(os.getpid())
         if process_start_id is not None:
             lock_value["process_start_id"] = process_start_id
+        created = os.fstat(descriptor)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(lock_value, handle)
             handle.write("\n")
+            handle.flush()
+            written = os.fstat(handle.fileno())
+        try:
+            installed = OPERATION_LOCK.lstat()
+        except OSError:
+            return None
+        if (
+            not _operation_lock_details_safe(created)
+            or not _operation_lock_details_safe(written)
+            or not _operation_lock_details_safe(installed)
+            or (created.st_dev, created.st_ino) != (written.st_dev, written.st_ino)
+            or not _same_file_identity(written, installed)
+        ):
+            return None
         return token
     return None
 
@@ -2522,12 +2563,14 @@ def _release_operation_lock(token: str) -> None:
         metadata = OPERATION_LOCK.lstat()
     except OSError:
         return
+    if not _operation_lock_details_safe(metadata):
+        return
     value = _read_operation_lock(metadata)
     if value is None or value.get("token") != token:
         return
     try:
         current = OPERATION_LOCK.lstat()
-        if _same_file_identity(metadata, current):
+        if _operation_lock_details_safe(current) and _same_file_identity(metadata, current):
             OPERATION_LOCK.unlink()
     except OSError:
         return
