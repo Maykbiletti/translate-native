@@ -19,8 +19,16 @@ class ClaudePluginTests(unittest.TestCase):
 
         self.assertEqual(plugin["name"], "translate-native")
         self.assertEqual(plugin["version"], (ROOT / "VERSION").read_text(encoding="utf-8").strip())
-        self.assertIn("./translate-native/SKILL.md", plugin["skills"])
-        self.assertEqual(marketplace["plugins"][0]["source"], ".")
+        self.assertIn("./translate-native", plugin["skills"])
+        for skill_path in plugin["skills"]:
+            self.assertTrue(skill_path.startswith("./"), skill_path)
+            skill_directory = ROOT / skill_path
+            self.assertTrue(skill_directory.is_dir(), skill_path)
+            self.assertTrue((skill_directory / "SKILL.md").is_file(), skill_path)
+
+        marketplace_source = marketplace["plugins"][0]["source"]
+        self.assertTrue(marketplace_source.startswith("./"), marketplace_source)
+        self.assertEqual((ROOT / marketplace_source).resolve(), ROOT.resolve())
         self.assertNotIn("version", marketplace["plugins"][0])
         self.assertIn("guard", mcp["mcpServers"])
         self.assertEqual(mcp["mcpServers"]["guard"]["type"], "http")
