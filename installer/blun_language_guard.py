@@ -2226,10 +2226,7 @@ def _load_health_state() -> dict | None:
     return value
 
 
-def _load_update_state() -> dict | None:
-    value = _load_protected_state_json(
-        UPDATE_STATE, "updater state", MAX_UPDATE_STATE_BYTES
-    )
+def _validate_update_state(value: dict | None) -> dict | None:
     if value is None:
         return None
     for field in ("status", "runtime_version", "candidate_version", "paused_update_policy"):
@@ -2254,6 +2251,35 @@ def _load_update_state() -> dict | None:
         if field in value and not isinstance(value[field], dict):
             raise RuntimeError(f"Invalid updater state field {field}: {UPDATE_STATE}")
     return value
+
+
+def _read_update_state(
+) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
+    value, identity = _read_protected_state_json(
+        UPDATE_STATE, "updater state", MAX_UPDATE_STATE_BYTES
+    )
+    return _validate_update_state(value), identity
+
+
+def _load_update_state() -> dict | None:
+    value, _identity = _read_update_state()
+    return value
+
+
+def _write_update_state(
+    value: dict,
+    expected_identity: tuple[int, int, int, int, int, int] | None,
+) -> None:
+    _atomic_json(
+        UPDATE_STATE,
+        value,
+        before_replace=lambda: _assert_protected_state_unchanged(
+            UPDATE_STATE,
+            "updater state",
+            MAX_UPDATE_STATE_BYTES,
+            expected_identity,
+        ),
+    )
 
 
 def _windows_process_is_alive(pid: int) -> bool:
@@ -2658,13 +2684,40 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         )
         return 2
     try:
-        _load_update_state()
+        _stored_update_state, update_state_identity = _read_update_state()
     except RuntimeError as error:
         print(
             f"Updater state is unsafe; update is blocked before candidate execution: {error}",
             file=sys.stderr,
         )
         return 2
+
+    def persist_update_state(value: dict) -> bool:
+        try:
+            _write_update_state(value, update_state_identity)
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Updater state changed before publication; the replacement was preserved: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def update_state_unchanged(stage: str) -> bool:
+        try:
+            _assert_protected_state_unchanged(
+                UPDATE_STATE,
+                "updater state",
+                MAX_UPDATE_STATE_BYTES,
+                update_state_identity,
+            )
+        except RuntimeError as error:
+            print(
+                f"Updater state changed {stage}; activation is blocked: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
     claude_installed = TARGETS["claude"].is_symlink()
     try:
         initial_monitor_config = _health_monitor_config()
@@ -2705,7 +2758,7 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
                 candidate,
             )
             if claude_preflight.get("ready") is not True:
-                _atomic_json(UPDATE_STATE, {
+                if not persist_update_state({
                     "status": "degraded",
                     "revision": previous,
                     "previous": previous,
@@ -2715,7 +2768,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
                     "candidate_version": expected_version,
                     "claude_plugin": claude_preflight,
                     "runtime_unchanged": True,
-                })
+                }):
+                    return 2
                 print(
                     "Claude plugin preflight failed; current repository and runtimes are unchanged. "
                     "The updater remains degraded and will retry safely.",
@@ -2728,6 +2782,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             file=sys.stderr,
         )
         return 2
+    if not update_state_unchanged("during candidate preflight"):
+        return 2
     fetch = _run(["git", "fetch", "origin", revision], root)
     if fetch.returncode:
         print(fetch.stderr, file=sys.stderr)
@@ -2737,6 +2793,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             "The active checkout changed while fetching the tested update; candidate activation is blocked.",
             file=sys.stderr,
         )
+        return 2
+    if not update_state_unchanged("while fetching the tested update"):
         return 2
     merge = _run(["git", "merge", "--ff-only", revision], root)
     if merge.returncode:
@@ -2811,6 +2869,9 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             file=sys.stderr,
         )
         return 1 if post_tests.returncode else 2
+    if not update_state_unchanged("while running post-update tests"):
+        rollback = _rollback_activated_update(root, previous, revision)
+        return 2 if rollback.returncode == 0 else 1
     mcp_runtime_preexisting = MCP_HTTP_COMMAND.exists() or MCP_HTTP_COMMAND.is_symlink()
     mcp_headers_preexisting = MCP_HEADERS_COMMAND.exists() or MCP_HEADERS_COMMAND.is_symlink()
     mcp_token_preexisting = MCP_HTTP_TOKEN.exists() or MCP_HTTP_TOKEN.is_symlink()
@@ -3035,7 +3096,7 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             "repairing the reported plugin or health-monitor adapter.",
             file=sys.stderr,
         )
-        _atomic_json(UPDATE_STATE, {
+        if not persist_update_state({
             "status": "degraded",
             "revision": revision,
             "previous": previous,
@@ -3043,9 +3104,10 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
             "runtime_version": expected_version,
             "claude_plugin": plugin_update,
             "health_monitor": monitor_install,
-        })
+        }):
+            return 2
         return 1
-    _atomic_json(UPDATE_STATE, {
+    if not persist_update_state({
         "status": "ok",
         "revision": revision,
         "previous": previous,
@@ -3053,7 +3115,8 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         "runtime_version": expected_version,
         "claude_plugin": plugin_update,
         "health_monitor": monitor_install,
-    })
+    }):
+        return 2
     print(f"Updated to tested revision {revision}; rollback revision is {previous}")
     if plugin_update.get("reload_required"):
         print("Claude plugin cache updated. Existing sessions still use their loaded hooks; run /reload-plugins or start a new session.")
@@ -3115,7 +3178,7 @@ def rollback(require_signed_commits: bool = False, claude_command: str | None = 
 def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     try:
-        state = _load_update_state()
+        state, update_state_identity = _read_update_state()
     except RuntimeError:
         print("Updater state is unsafe; rollback is blocked fail-closed.", file=sys.stderr)
         return 2
@@ -3282,6 +3345,22 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         )
         return 1
     try:
+        _assert_protected_state_unchanged(
+            UPDATE_STATE,
+            "updater state",
+            MAX_UPDATE_STATE_BYTES,
+            update_state_identity,
+        )
+    except RuntimeError as error:
+        restored = _run(["git", "reset", "--keep", current], root)
+        _restart_installed_runtimes()
+        print(
+            f"Updater state changed during rollback verification ({error}); forward restoration "
+            + ("succeeded." if restored.returncode == 0 else "FAILED."),
+            file=sys.stderr,
+        )
+        return 2 if restored.returncode == 0 else 1
+    try:
         _assert_update_policy_unchanged(UPDATE_CONFIG, active_policy_identity)
         _assert_update_policy_unchanged(UPDATE_PAUSED_CONFIG, paused_policy_identity)
         if active_policy is not None:
@@ -3308,16 +3387,30 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         )
         return 1
     remove_scheduler()
-    _atomic_json(UPDATE_STATE, {
-        "status": "rolled_back",
-        "revision": target,
-        "rolled_back_from": current,
-        "checked_at": int(time.time()),
-        "runtime_version": target_version,
-        "auto_update_paused": True,
-        "paused_update_policy": str(UPDATE_PAUSED_CONFIG) if UPDATE_PAUSED_CONFIG.exists() else "not-enabled",
-        "claude_plugin": plugin_status,
-    })
+    try:
+        _write_update_state(
+            {
+                "status": "rolled_back",
+                "revision": target,
+                "rolled_back_from": current,
+                "checked_at": int(time.time()),
+                "runtime_version": target_version,
+                "auto_update_paused": True,
+                "paused_update_policy": (
+                    str(UPDATE_PAUSED_CONFIG)
+                    if UPDATE_PAUSED_CONFIG.exists()
+                    else "not-enabled"
+                ),
+                "claude_plugin": plugin_status,
+            },
+            update_state_identity,
+        )
+    except (OSError, RuntimeError) as error:
+        print(
+            f"Updater state changed before rollback publication; the replacement was preserved: {error}",
+            file=sys.stderr,
+        )
+        return 2
     print(
         f"Rolled back to tested revision {target}; automatic updates are paused. "
         "After inspection, run an explicit update and re-enable auto-update deliberately."

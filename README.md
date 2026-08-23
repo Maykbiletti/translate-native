@@ -453,6 +453,8 @@ The monitor also keeps its initially inspected health-policy identity authoritat
 
 The updater's recorded state is protected independently from its policy. `doctor`, `auto-update status`, scheduled checks, direct updates, and rollback now read `update-state.json` through a bounded owner-only regular-file path, reject links and exchanged identities, and validate commit hashes plus every security-relevant persisted type. Unsafe state blocks before Git commands or candidate code can run and is never printed or replaced through that read path. A missing state remains valid before the first successful update, while rollback continues to require a complete exact state record.
 
+Update and rollback now retain that initially inspected state identity for the complete maintenance operation. Candidate activation stops if another process replaces the state during preflight or fetch, rollback restores the forward revision if the state changes during runtime verification, and every final status write rechecks the same identity immediately before atomic replacement. Concurrent recovery decisions therefore survive unchanged instead of being overwritten by stale success, degraded, or rolled-back reports; the absent first-run state remains compatible.
+
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:
 
 ```bash

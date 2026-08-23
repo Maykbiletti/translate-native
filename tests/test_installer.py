@@ -1212,6 +1212,68 @@ class InstallerTests(unittest.TestCase):
                 )
                 self.assertEqual(replacement["interval_hours"], 9)
 
+    def test_rollback_state_exchange_during_verification_restores_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, target, current = self._rollback_repository(root)
+            state_path = root / "update-state.json"
+            active_path = root / "updater.json"
+            paused_path = root / "updater.rollback-paused.json"
+            INSTALLER._atomic_json(state_path, {
+                "status": "ok", "revision": current, "previous": target, "checked_at": 1,
+            })
+            INSTALLER._atomic_json(active_path, {
+                "enabled": True, "interval_hours": 24, "require_signed_commits": False,
+            })
+            restart_calls = 0
+
+            def replace_state_on_first_restart() -> tuple[bool, str]:
+                nonlocal restart_calls
+                restart_calls += 1
+                if restart_calls == 1:
+                    state_path.unlink()
+                    INSTALLER._atomic_json(state_path, {
+                        "status": "degraded",
+                        "revision": current,
+                        "previous": target,
+                        "checked_at": 777,
+                        "runtime_unchanged": True,
+                    })
+                return True, "ok"
+
+            errors = io.StringIO()
+            with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", active_path), \
+                 mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", paused_path), \
+                 mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                 mock.patch.object(INSTALLER, "SERVICE_COMMAND", root / "missing-service"), \
+                 mock.patch.object(INSTALLER, "MCP_HTTP_COMMAND", root / "missing-mcp"), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "TARGETS",
+                     {**INSTALLER.TARGETS, "claude": root / "missing-claude"},
+                 ), mock.patch.object(
+                     INSTALLER,
+                     "_restart_installed_runtimes",
+                     side_effect=replace_state_on_first_restart,
+                 ) as restarter, mock.patch.object(
+                     INSTALLER, "remove_scheduler"
+                 ) as scheduler_removal, contextlib.redirect_stderr(errors):
+                self.assertEqual(INSTALLER.rollback(), 2)
+            self.assertEqual(restarter.call_count, 2)
+            scheduler_removal.assert_not_called()
+            self.assertEqual(
+                INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(),
+                current,
+            )
+            self.assertTrue(active_path.exists())
+            self.assertFalse(paused_path.exists())
+            replacement = INSTALLER.json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(replacement["checked_at"], 777)
+            self.assertTrue(replacement["runtime_unchanged"])
+            self.assertIn("forward restoration succeeded", errors.getvalue())
+
     def test_rollback_refuses_dirty_worktree_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2147,6 +2209,54 @@ class InstallerTests(unittest.TestCase):
             ]
             self.assertEqual(len(calls), 2)
             self.assertFalse(any(call[:2] == ["plugin", "update"] for call in calls))
+
+    def test_update_state_exchange_during_candidate_preflight_blocks_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, active, old, _candidate = self._update_repository_pair(root)
+            claude_skill = root / "claude-skill"
+            claude_skill.symlink_to(active / "translate-native", target_is_directory=True)
+            update_state = root / "update-state.json"
+            INSTALLER._atomic_json(update_state, {
+                "status": "ok", "revision": old, "previous": old, "checked_at": 1,
+            })
+
+            def replace_state(*_arguments: object) -> dict:
+                update_state.unlink()
+                INSTALLER._atomic_json(update_state, {
+                    "status": "degraded",
+                    "revision": old,
+                    "previous": old,
+                    "checked_at": 999,
+                    "runtime_unchanged": True,
+                })
+                return {"ready": True}
+
+            errors = io.StringIO()
+            with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                 mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", update_state), \
+                 mock.patch.object(INSTALLER, "HEALTH_CONFIG", root / "missing-health-config.json"), \
+                 mock.patch.object(INSTALLER, "HEALTH_STATE", root / "missing-health-state.json"), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "TARGETS",
+                     {**INSTALLER.TARGETS, "claude": claude_skill},
+                 ), mock.patch.object(
+                     INSTALLER, "preflight_claude_plugin_update", side_effect=replace_state
+                 ), mock.patch.object(INSTALLER, "restart_guard_runtime") as guard_restart, \
+                 contextlib.redirect_stderr(errors):
+                self.assertEqual(INSTALLER._update_unlocked(), 2)
+            self.assertEqual(
+                INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(),
+                old,
+            )
+            self.assertFalse((active / "new-runtime.txt").exists())
+            replacement = INSTALLER.json.loads(update_state.read_text(encoding="utf-8"))
+            self.assertEqual(replacement["checked_at"], 999)
+            self.assertTrue(replacement["runtime_unchanged"])
+            self.assertIn("activation is blocked", errors.getvalue())
+            guard_restart.assert_not_called()
 
     def test_preflight_process_loss_is_structured_and_fail_closed(self) -> None:
         listed = INSTALLER.subprocess.CompletedProcess(
