@@ -2258,6 +2258,115 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("activation is blocked", errors.getvalue())
             guard_restart.assert_not_called()
 
+    def test_update_health_publication_preserves_exchanged_policy_and_state(self) -> None:
+        for exchanged in ("policy", "state"):
+            with self.subTest(exchanged=exchanged), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                upstream, active, _old, candidate = self._update_repository_pair(root)
+                claude_skill = root / "claude-skill"
+                claude_skill.symlink_to(active / "translate-native", target_is_directory=True)
+                health_config = root / "health-monitor.json"
+                health_state = root / "health-state.json"
+                update_state = root / "update-state.json"
+                INSTALLER._atomic_json(health_config, {
+                    "enabled": True,
+                    "interval_seconds": 60,
+                    "plugin_required": True,
+                })
+                INSTALLER._atomic_json(health_state, {
+                    "status": "ok",
+                    "checked_at": 1,
+                    "consecutive_failures": 0,
+                })
+
+                def install_and_exchange() -> tuple[bool, str]:
+                    target = health_config if exchanged == "policy" else health_state
+                    target.unlink()
+                    if exchanged == "policy":
+                        INSTALLER._atomic_json(target, {
+                            "enabled": False,
+                            "interval_seconds": 300,
+                            "plugin_required": False,
+                            "claude_command": "replacement",
+                        })
+                    else:
+                        INSTALLER._atomic_json(target, {
+                            "status": "replacement",
+                            "checked_at": 999,
+                            "consecutive_failures": 7,
+                            "next_repair_at": 9999,
+                        })
+                    return True, "test schedule"
+
+                errors = io.StringIO()
+                with contextlib.ExitStack() as stack:
+                    for name, value in (
+                        ("repository_root", mock.Mock(return_value=active)),
+                        ("REPO_URL", str(upstream)),
+                        ("UPDATE_STATE", update_state),
+                        ("HEALTH_CONFIG", health_config),
+                        ("HEALTH_STATE", health_state),
+                        ("MCP_HTTP_COMMAND", root / "missing-mcp"),
+                        ("MCP_HEADERS_COMMAND", root / "missing-headers"),
+                        ("MCP_HTTP_TOKEN", root / "missing-token"),
+                        ("CLAUDE_CONFIG", root / "missing-claude.json"),
+                        ("SERVICE_COMMAND", root / "missing-service"),
+                        ("TARGETS", {**INSTALLER.TARGETS, "claude": claude_skill}),
+                    ):
+                        stack.enter_context(mock.patch.object(INSTALLER, name, value))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "preflight_claude_plugin_update", return_value={"ready": True}
+                    ))
+                    stack.enter_context(mock.patch.object(INSTALLER, "install_mcp_http_runtime"))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "install_mcp_http_autostart", return_value=(True, "test")
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "configure_claude_mcp", return_value=(None, [])
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "_capture_update_artifact", return_value=(1, 1, 1, 1, 1, 1, 1)
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "install_health_monitor", side_effect=install_and_exchange
+                    ))
+                    stack.enter_context(mock.patch.object(
+                        INSTALLER, "_guard_stack_status", return_value=(True, True)
+                    ))
+                    remove_monitor = stack.enter_context(mock.patch.object(
+                        INSTALLER, "remove_health_monitor"
+                    ))
+                    plugin_update = stack.enter_context(mock.patch.object(
+                        INSTALLER, "_apply_claude_plugin_update"
+                    ))
+                    stack.enter_context(contextlib.redirect_stderr(errors))
+                    self.assertEqual(INSTALLER._update_unlocked(), 1)
+
+                plugin_update.assert_not_called()
+                self.assertEqual(
+                    INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(),
+                    candidate,
+                )
+                recorded = INSTALLER.json.loads(update_state.read_text(encoding="utf-8"))
+                self.assertEqual(recorded["status"], "degraded")
+                self.assertEqual(
+                    recorded["health_monitor"]["detail"],
+                    "protected-health-state-changed",
+                )
+                self.assertIn("replacement was preserved", errors.getvalue())
+                policy = INSTALLER.json.loads(health_config.read_text(encoding="utf-8"))
+                state = INSTALLER.json.loads(health_state.read_text(encoding="utf-8"))
+                if exchanged == "policy":
+                    self.assertFalse(policy["enabled"])
+                    self.assertEqual(policy["claude_command"], "replacement")
+                    self.assertEqual(state["checked_at"], 1)
+                    remove_monitor.assert_called_once_with()
+                else:
+                    self.assertTrue(policy["enabled"])
+                    self.assertEqual(state["status"], "replacement")
+                    self.assertEqual(state["next_repair_at"], 9999)
+                    remove_monitor.assert_not_called()
+
     def test_preflight_process_loss_is_structured_and_fail_closed(self) -> None:
         listed = INSTALLER.subprocess.CompletedProcess(
             [],

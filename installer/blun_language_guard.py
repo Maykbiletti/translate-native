@@ -2720,14 +2720,117 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         return True
     claude_installed = TARGETS["claude"].is_symlink()
     try:
-        initial_monitor_config = _health_monitor_config()
-        _load_health_state()
+        stored_monitor_config, monitor_config_identity = _read_health_config()
+        initial_monitor_config = dict(stored_monitor_config or {})
+        _stored_health_state, health_state_identity = _read_health_state()
     except RuntimeError as error:
         print(
             f"Health-monitor protected state is unsafe; update is blocked before candidate execution: {error}",
             file=sys.stderr,
         )
         return 2
+
+    def health_state_unchanged(stage: str) -> bool:
+        try:
+            _assert_protected_state_unchanged(
+                HEALTH_CONFIG,
+                "health-monitor policy",
+                MAX_HEALTH_FILE_BYTES,
+                monitor_config_identity,
+            )
+            _assert_protected_state_unchanged(
+                HEALTH_STATE,
+                "health-monitor state",
+                MAX_HEALTH_FILE_BYTES,
+                health_state_identity,
+            )
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor protected state changed {stage}; stale maintenance is blocked: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def persist_health_config(value: dict) -> bool:
+        nonlocal monitor_config_identity
+        try:
+            _atomic_json(
+                HEALTH_CONFIG,
+                value,
+                before_replace=lambda: (
+                    _assert_protected_state_unchanged(
+                        HEALTH_CONFIG,
+                        "health-monitor policy",
+                        MAX_HEALTH_FILE_BYTES,
+                        monitor_config_identity,
+                    ),
+                    _assert_protected_state_unchanged(
+                        HEALTH_STATE,
+                        "health-monitor state",
+                        MAX_HEALTH_FILE_BYTES,
+                        health_state_identity,
+                    ),
+                ),
+            )
+            stored_config, monitor_config_identity = _read_health_config()
+            if stored_config != value:
+                raise RuntimeError(
+                    "Health-monitor policy changed after updater replacement"
+                )
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor policy changed before updater publication; the replacement was preserved: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def persist_health_state(value: dict) -> bool:
+        nonlocal health_state_identity
+        try:
+            _atomic_json(
+                HEALTH_STATE,
+                value,
+                before_replace=lambda: (
+                    _assert_protected_state_unchanged(
+                        HEALTH_CONFIG,
+                        "health-monitor policy",
+                        MAX_HEALTH_FILE_BYTES,
+                        monitor_config_identity,
+                    ),
+                    _assert_protected_state_unchanged(
+                        HEALTH_STATE,
+                        "health-monitor state",
+                        MAX_HEALTH_FILE_BYTES,
+                        health_state_identity,
+                    ),
+                ),
+            )
+            stored_state, health_state_identity = _read_health_state()
+            if stored_state != value:
+                raise RuntimeError(
+                    "Health-monitor state changed after updater replacement"
+                )
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor state changed before updater publication; the replacement was preserved: {error}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    def remove_monitor_after_opt_out() -> None:
+        try:
+            replacement, _identity = _read_health_config()
+            if replacement is not None and replacement.get("enabled") is False:
+                remove_health_monitor()
+        except (OSError, RuntimeError) as error:
+            print(
+                f"Health-monitor scheduler cleanup was blocked by unsafe replacement policy: {error}",
+                file=sys.stderr,
+            )
+
     monitor_enabled = initial_monitor_config.get("enabled") is not False
     claude_preflight: dict | None = None
     with tempfile.TemporaryDirectory(prefix="blun-language-guard-") as directory:
@@ -3043,37 +3146,54 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         "installed": not monitor_expected,
         "detail": "explicitly-disabled" if claude_installed else "claude-skill-not-installed",
     }
+    health_transition_blocked = False
     if monitor_expected:
-        monitor_ok, monitor_detail = install_health_monitor()
-        guard_now, mcp_now = _guard_stack_status(timeout=4.0)
-        monitor_ok = monitor_ok and guard_now and mcp_now
-        if monitor_ok:
-            monitor_config = dict(initial_monitor_config)
-            monitor_config.update({"enabled": True, "interval_seconds": 60})
-            configured_claude = claude_command or _configured_claude_command(monitor_config)
-            if configured_claude:
-                monitor_config["claude_command"] = configured_claude
-            _atomic_json(HEALTH_CONFIG, monitor_config)
-            _atomic_json(HEALTH_STATE, {
-                "status": "ok",
-                "checked_at": int(time.time()),
-                "guard_healthy": True,
-                "mcp_healthy": True,
-                "consecutive_failures": 0,
-                "last_repair_at": 0,
-                "next_repair_at": 0,
-                "repairs": [],
-            })
+        if not health_state_unchanged("before scheduler activation"):
+            monitor_ok = False
+            monitor_detail = "protected-health-state-changed"
+            health_transition_blocked = True
+        else:
+            monitor_ok, monitor_detail = install_health_monitor()
+            guard_now, mcp_now = _guard_stack_status(timeout=4.0)
+            monitor_ok = monitor_ok and guard_now and mcp_now
+            if monitor_ok:
+                monitor_config = dict(initial_monitor_config)
+                monitor_config.update({"enabled": True, "interval_seconds": 60})
+                configured_claude = claude_command or _configured_claude_command(monitor_config)
+                if configured_claude:
+                    monitor_config["claude_command"] = configured_claude
+                monitor_ok = persist_health_config(monitor_config)
+                if monitor_ok:
+                    monitor_ok = persist_health_state({
+                        "status": "ok",
+                        "checked_at": int(time.time()),
+                        "guard_healthy": True,
+                        "mcp_healthy": True,
+                        "consecutive_failures": 0,
+                        "last_repair_at": 0,
+                        "next_repair_at": 0,
+                        "repairs": [],
+                    })
+                if not monitor_ok:
+                    monitor_detail = "protected-health-state-changed"
+                    health_transition_blocked = True
+                    remove_monitor_after_opt_out()
         monitor_install = {"attempted": True, "installed": monitor_ok, "detail": monitor_detail}
     expected_version = (root / "VERSION").read_text(encoding="utf-8-sig").strip()
     plugin_update = _apply_claude_plugin_update(
         expected_version,
         claude_command,
         claude_preflight or {},
-    ) if claude_installed else {
+    ) if claude_installed and not health_transition_blocked else {
         "attempted": False,
         "updated": False,
-        "status": {"reason": "claude-skill-not-installed"},
+        "status": {
+            "reason": (
+                "protected-health-state-changed"
+                if health_transition_blocked
+                else "claude-skill-not-installed"
+            )
+        },
     }
     if monitor_expected and plugin_update.get("status", {}).get("installed"):
         monitor_config = dict(initial_monitor_config)
@@ -3085,7 +3205,14 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         configured_claude = claude_command or _configured_claude_command(monitor_config)
         if configured_claude:
             monitor_config["claude_command"] = configured_claude
-        _atomic_json(HEALTH_CONFIG, monitor_config)
+        if not persist_health_config(monitor_config):
+            monitor_install = {
+                "attempted": True,
+                "installed": False,
+                "detail": "protected-health-state-changed",
+            }
+            health_transition_blocked = True
+            remove_monitor_after_opt_out()
     plugin_reason = plugin_update.get("status", {}).get("reason")
     plugin_failed = claude_installed and not plugin_update.get("updated") and plugin_reason != "plugin-not-installed"
     monitor_failed = monitor_expected and not monitor_install["installed"]

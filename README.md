@@ -455,6 +455,8 @@ The updater's recorded state is protected independently from its policy. `doctor
 
 Update and rollback now retain that initially inspected state identity for the complete maintenance operation. Candidate activation stops if another process replaces the state during preflight or fetch, rollback restores the forward revision if the state changes during runtime verification, and every final status write rechecks the same identity immediately before atomic replacement. Concurrent recovery decisions therefore survive unchanged instead of being overwritten by stale success, degraded, or rolled-back reports; the absent first-run state remains compatible.
 
+Forward updates now retain the initially inspected health-policy and backoff-state identities as well. Scheduler activation, healthy-state initialization, and automatic Claude plugin maintenance stop when either protected file is exchanged during the update. Every updater-owned health write rechecks both identities immediately before atomic replacement and refreshes only the identity produced by its own successful write. A concurrent opt-out therefore survives unchanged and removes the schedule activated by the stale updater pass; other replacement policies and newer backoff decisions remain untouched while the update records a degraded retry.
+
 The installer now creates and starts the service automatically through systemd user services on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows:
 
 ```bash
