@@ -3802,21 +3802,36 @@ def health_monitor(action: str) -> int:
 def auto_update(action: str, interval_hours: int = 24, require_signed_commits: bool = False, scheduler: bool = True) -> int:
     if action == "enable":
         try:
-            signed_required = _effective_signed_commit_policy(require_signed_commits)
-            _atomic_json(UPDATE_CONFIG, {
-                "enabled": True,
-                "interval_hours": max(1, interval_hours),
-                "require_signed_commits": signed_required,
-                "repository": REPO_URL,
-                "claude_command": shutil.which("claude") or "",
-            })
-        except (OSError, RuntimeError):
+            active_policy, active_identity = _read_update_policy(UPDATE_CONFIG)
+            paused_policy, paused_identity = _read_update_policy(UPDATE_PAUSED_CONFIG)
+            signed_required = require_signed_commits
+            for policy in (active_policy, paused_policy):
+                if policy is not None:
+                    signed_required = signed_required or policy.get(
+                        "require_signed_commits", False
+                    )
+            _assert_update_policy_unchanged(UPDATE_CONFIG, active_identity)
+            _assert_update_policy_unchanged(UPDATE_PAUSED_CONFIG, paused_identity)
+            _atomic_json(
+                UPDATE_CONFIG,
+                {
+                    "enabled": True,
+                    "interval_hours": max(1, interval_hours),
+                    "require_signed_commits": signed_required,
+                    "repository": REPO_URL,
+                    "claude_command": shutil.which("claude") or "",
+                },
+                before_replace=lambda: _assert_update_policy_unchanged(
+                    UPDATE_CONFIG, active_identity
+                ),
+            )
+            _remove_update_policy(UPDATE_PAUSED_CONFIG, paused_identity)
+        except (OSError, RuntimeError) as error:
             print(
-                "Updater signature policy is unreadable; automatic updates were not reconfigured.",
+                f"Updater policy state changed or is unreadable; automatic updates were not reconfigured: {error}",
                 file=sys.stderr,
             )
             return 2
-        UPDATE_PAUSED_CONFIG.unlink(missing_ok=True)
         print(f"Automatic updates enabled every {max(1, interval_hours)} hour(s).")
         if scheduler:
             ok, detail = install_scheduler()

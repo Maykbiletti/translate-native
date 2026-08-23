@@ -223,9 +223,9 @@ Atomic JSON writes now use an unpredictable owner-only temporary file in the des
 
 Version 6.29 closes the remaining configuration-time downgrade path in the signed-commit policy. Re-running `auto-update enable` to change an interval or repair a scheduler now resolves the same monotonic active and rollback-paused policy before writing configuration. Omitting `--require-signed-commits` therefore cannot overwrite a stored `true`, and restoring automatic updates after rollback cannot discard the paused requirement.
 
-If either stored policy is malformed, non-Boolean, or unreadable, reconfiguration stops before replacing the active file or deleting the paused one. The deliberate escape path remains explicit and auditable: run `auto-update disable` to remove both policies, then enable again without the signature option.
+If either stored policy is malformed, non-Boolean, unreadable, linked, or exchanged during reconfiguration, activation stops before scheduler installation. The active replacement and paused-policy removal are each bound to the exact identities read during monotonic policy resolution, so a concurrent replacement is preserved rather than overwritten or deleted. The deliberate escape path remains explicit and auditable: run `auto-update disable` to remove both policies, then enable again without the signature option.
 
-Regression tests cover interval-only reconfiguration, reactivation from a paused signed policy, preservation of invalid bytes on failure, and the explicit disable-then-enable reset control.
+Regression tests cover interval-only reconfiguration, reactivation from a paused signed policy, preservation of invalid or concurrently replaced policy bytes, linked paused state, and the explicit disable-then-enable reset control.
 
 ### Version 6.28.0: signed-update policy cannot be downgraded by omission
 
