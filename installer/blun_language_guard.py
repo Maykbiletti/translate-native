@@ -3159,7 +3159,14 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
         print("Recorded rollback target is not an ancestor; current files are unchanged.", file=sys.stderr)
         return 2
     try:
-        signed_required = _effective_signed_commit_policy(require_signed_commits)
+        active_policy, active_policy_identity = _read_update_policy(UPDATE_CONFIG)
+        paused_policy, paused_policy_identity = _read_update_policy(UPDATE_PAUSED_CONFIG)
+        signed_required = require_signed_commits
+        for policy in (active_policy, paused_policy):
+            if policy is not None:
+                signed_required = signed_required or policy.get(
+                    "require_signed_commits", False
+                )
     except RuntimeError:
         print("Updater signature policy is unreadable; rollback is blocked fail-closed.", file=sys.stderr)
         return 2
@@ -3274,20 +3281,33 @@ def _rollback_unlocked(require_signed_commits: bool = False, claude_command: str
             file=sys.stderr,
         )
         return 1
-    remove_scheduler()
-    if UPDATE_CONFIG.exists():
-        try:
-            UPDATE_PAUSED_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-            UPDATE_CONFIG.replace(UPDATE_PAUSED_CONFIG)
-        except OSError as error:
-            restored = _run(["git", "reset", "--keep", current], root)
-            _restart_installed_runtimes()
-            print(
-                f"Rollback could not pause automatic updates ({error}); forward restoration "
-                + ("succeeded." if restored.returncode == 0 else "FAILED."),
-                file=sys.stderr,
+    try:
+        _assert_update_policy_unchanged(UPDATE_CONFIG, active_policy_identity)
+        _assert_update_policy_unchanged(UPDATE_PAUSED_CONFIG, paused_policy_identity)
+        if active_policy is not None:
+            _atomic_json(
+                UPDATE_PAUSED_CONFIG,
+                active_policy,
+                before_replace=lambda: (
+                    _assert_update_policy_unchanged(
+                        UPDATE_CONFIG, active_policy_identity
+                    ),
+                    _assert_update_policy_unchanged(
+                        UPDATE_PAUSED_CONFIG, paused_policy_identity
+                    ),
+                ),
             )
-            return 1
+            _remove_update_policy(UPDATE_CONFIG, active_policy_identity)
+    except (OSError, RuntimeError) as error:
+        restored = _run(["git", "reset", "--keep", current], root)
+        _restart_installed_runtimes()
+        print(
+            f"Rollback could not pause automatic updates ({error}); forward restoration "
+            + ("succeeded." if restored.returncode == 0 else "FAILED."),
+            file=sys.stderr,
+        )
+        return 1
+    remove_scheduler()
     _atomic_json(UPDATE_STATE, {
         "status": "rolled_back",
         "revision": target,

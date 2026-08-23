@@ -1149,6 +1149,69 @@ class InstallerTests(unittest.TestCase):
                     self.assertEqual(INSTALLER.auto_update("run"), 0)
                     updater.assert_not_called()
 
+    def test_rollback_preserves_policies_replaced_during_runtime_verification(self) -> None:
+        for replaced_name in ("active", "paused"):
+            with self.subTest(replaced_name=replaced_name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repository, target, current = self._rollback_repository(root)
+                state_path = root / "update-state.json"
+                active_path = root / "updater.json"
+                paused_path = root / "updater.rollback-paused.json"
+                INSTALLER._atomic_json(state_path, {
+                    "status": "ok", "revision": current, "previous": target, "checked_at": 1,
+                })
+                INSTALLER._atomic_json(active_path, {
+                    "enabled": True, "interval_hours": 24, "require_signed_commits": False,
+                })
+                if replaced_name == "paused":
+                    INSTALLER._atomic_json(paused_path, {"require_signed_commits": False})
+                restart_calls = 0
+
+                def replace_policy_on_first_restart() -> tuple[bool, str]:
+                    nonlocal restart_calls
+                    restart_calls += 1
+                    if restart_calls == 1:
+                        path = active_path if replaced_name == "active" else paused_path
+                        path.unlink()
+                        INSTALLER._atomic_json(path, {
+                            "enabled": True,
+                            "interval_hours": 9,
+                            "require_signed_commits": False,
+                        })
+                    return True, "ok"
+
+                with mock.patch.object(INSTALLER, "repository_root", return_value=repository), \
+                     mock.patch.object(INSTALLER, "UPDATE_STATE", state_path), \
+                     mock.patch.object(INSTALLER, "UPDATE_CONFIG", active_path), \
+                     mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", paused_path), \
+                     mock.patch.object(INSTALLER, "OPERATION_LOCK", root / "operation.lock"), \
+                     mock.patch.object(INSTALLER, "SERVICE_COMMAND", root / "missing-service"), \
+                     mock.patch.object(INSTALLER, "MCP_HTTP_COMMAND", root / "missing-mcp"), \
+                     mock.patch.object(
+                         INSTALLER,
+                         "TARGETS",
+                         {**INSTALLER.TARGETS, "claude": root / "missing-claude"},
+                     ), \
+                     mock.patch.object(
+                         INSTALLER,
+                         "_restart_installed_runtimes",
+                         side_effect=replace_policy_on_first_restart,
+                     ) as restarter, \
+                     mock.patch.object(INSTALLER, "remove_scheduler") as scheduler_removal, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.rollback(), 1)
+                self.assertEqual(restarter.call_count, 2)
+                scheduler_removal.assert_not_called()
+                self.assertEqual(
+                    INSTALLER._run(["git", "rev-parse", "HEAD"], repository).stdout.strip(),
+                    current,
+                )
+                replacement_path = active_path if replaced_name == "active" else paused_path
+                replacement = INSTALLER.json.loads(
+                    replacement_path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(replacement["interval_hours"], 9)
+
     def test_rollback_refuses_dirty_worktree_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
