@@ -2408,6 +2408,89 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.HEALTH_CONFIG, INSTALLER.HEALTH_STATE = originals
 
+    def test_health_monitor_install_persists_the_inspected_policy(self) -> None:
+        original = INSTALLER.HEALTH_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.HEALTH_CONFIG = Path(directory) / "health-config.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {
+                "enabled": False, "plugin_required": True, "claude_command": "/bin/claude",
+            })
+            try:
+                with mock.patch.object(INSTALLER, "health_monitor_run", return_value=0), \
+                     mock.patch.object(
+                         INSTALLER, "install_health_monitor", return_value=(True, "test schedule")
+                     ), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("install"), 0)
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertTrue(policy["enabled"])
+                self.assertTrue(policy["plugin_required"])
+                self.assertEqual(policy["interval_seconds"], 60)
+                self.assertEqual(policy["claude_command"], "/bin/claude")
+            finally:
+                INSTALLER.HEALTH_CONFIG = original
+
+    def test_health_monitor_install_blocks_policy_exchange_before_scheduler_change(self) -> None:
+        original = INSTALLER.HEALTH_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.HEALTH_CONFIG = Path(directory) / "health-config.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {"enabled": False})
+
+            def replace_policy(_config: dict | None = None) -> str:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(
+                    INSTALLER.HEALTH_CONFIG, {"enabled": False, "claude_command": "replacement"}
+                )
+                return "/bin/claude"
+
+            try:
+                with mock.patch.object(INSTALLER, "health_monitor_run", return_value=0), \
+                     mock.patch.object(
+                         INSTALLER, "_configured_claude_command", side_effect=replace_policy
+                     ), mock.patch.object(INSTALLER, "install_health_monitor") as installer, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("install"), 2)
+                installer.assert_not_called()
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertEqual(policy["claude_command"], "replacement")
+            finally:
+                INSTALLER.HEALTH_CONFIG = original
+
+    def test_health_monitor_install_rolls_back_after_policy_exchange(self) -> None:
+        original = INSTALLER.HEALTH_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            INSTALLER.HEALTH_CONFIG = Path(directory) / "health-config.json"
+            INSTALLER._atomic_json(INSTALLER.HEALTH_CONFIG, {"enabled": False})
+
+            def install_and_replace() -> tuple[bool, str]:
+                INSTALLER.HEALTH_CONFIG.unlink()
+                INSTALLER._atomic_json(
+                    INSTALLER.HEALTH_CONFIG, {"enabled": False, "claude_command": "replacement"}
+                )
+                return True, "test schedule"
+
+            try:
+                with mock.patch.object(INSTALLER, "health_monitor_run", return_value=0), \
+                     mock.patch.object(
+                         INSTALLER, "_configured_claude_command", return_value="/bin/claude"
+                     ), mock.patch.object(
+                         INSTALLER, "install_health_monitor", side_effect=install_and_replace
+                     ) as installer, mock.patch.object(
+                         INSTALLER, "remove_health_monitor"
+                     ) as remover, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(INSTALLER.health_monitor("install"), 2)
+                installer.assert_called_once_with()
+                remover.assert_called_once_with()
+                policy = INSTALLER.json.loads(
+                    INSTALLER.HEALTH_CONFIG.read_text(encoding="utf-8")
+                )
+                self.assertEqual(policy["claude_command"], "replacement")
+            finally:
+                INSTALLER.HEALTH_CONFIG = original
+
     def test_missing_or_uninstalled_claude_plugin_is_not_modified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

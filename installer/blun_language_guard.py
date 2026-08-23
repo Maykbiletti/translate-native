@@ -3806,15 +3806,51 @@ def health_monitor(action: str) -> int:
     check = health_monitor_run()
     if check == 2:
         return 2
-    ok, detail = install_health_monitor()
-    if ok:
-        config = _health_monitor_config()
+    try:
+        stored_config, config_identity = _read_health_config()
+        config = dict(stored_config or {})
         config.update({
             "enabled": True,
             "interval_seconds": 60,
             "claude_command": _configured_claude_command(config),
         })
-        _atomic_json(HEALTH_CONFIG, config)
+        _assert_protected_state_unchanged(
+            HEALTH_CONFIG,
+            "health-monitor policy",
+            MAX_HEALTH_FILE_BYTES,
+            config_identity,
+        )
+    except RuntimeError as error:
+        print(
+            f"Health-monitor installation is blocked fail-closed by unsafe policy: {error}",
+            file=sys.stderr,
+        )
+        return 2
+    ok, detail = install_health_monitor()
+    if ok:
+        try:
+            _atomic_json(
+                HEALTH_CONFIG,
+                config,
+                before_replace=lambda: _assert_protected_state_unchanged(
+                    HEALTH_CONFIG,
+                    "health-monitor policy",
+                    MAX_HEALTH_FILE_BYTES,
+                    config_identity,
+                ),
+            )
+        except (OSError, RuntimeError) as error:
+            cleanup = "scheduler rollback completed"
+            try:
+                remove_health_monitor()
+            except (OSError, RuntimeError) as cleanup_error:
+                cleanup = f"scheduler rollback failed: {cleanup_error}"
+            print(
+                "Health-monitor installation stopped before unsafe policy replacement; "
+                f"{cleanup}: {error}",
+                file=sys.stderr,
+            )
+            return 2
     print(f"{'Health monitor installed' if ok else 'Health monitor installation failed'}: {detail}")
     return 0 if ok and check == 0 else 1
 
