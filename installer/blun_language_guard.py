@@ -2425,6 +2425,72 @@ def _clean_checkout_revision(root: Path) -> str | None:
     return revision
 
 
+def _update_artifact_identity(
+    details: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    """Bind rollback cleanup to the exact artifact created by this update."""
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_nlink,
+        details.st_size,
+        details.st_ctime_ns,
+        details.st_mtime_ns,
+    )
+
+
+def _capture_update_artifact(
+    path: Path,
+) -> tuple[int, int, int, int, int, int, int]:
+    try:
+        details = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"Updated runtime artifact cannot be inspected: {path}") from error
+    return _update_artifact_identity(details)
+
+
+def _assert_update_artifact_unchanged(
+    path: Path,
+    expected: tuple[int, int, int, int, int, int, int],
+    *,
+    missing_ok: bool = False,
+) -> bool:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        if missing_ok:
+            return False
+        raise RuntimeError(f"Updated runtime artifact disappeared before rollback: {path}")
+    except OSError as error:
+        raise RuntimeError(f"Updated runtime artifact cannot be rechecked: {path}") from error
+    if _update_artifact_identity(current) != expected:
+        raise RuntimeError(f"Updated runtime artifact changed before rollback: {path}")
+    return True
+
+
+def _remove_created_update_artifact(
+    path: Path,
+    expected: tuple[int, int, int, int, int, int, int],
+) -> None:
+    if not _assert_update_artifact_unchanged(path, expected, missing_ok=True):
+        return
+    _assert_update_artifact_unchanged(path, expected)
+    path.unlink()
+
+
+def _restore_updated_claude_config(
+    path: Path,
+    payload: bytes,
+    expected: tuple[int, int, int, int, int, int, int],
+) -> None:
+    _atomic_bytes(
+        path,
+        payload,
+        before_replace=lambda: _assert_update_artifact_unchanged(path, expected),
+    )
+
+
 def update(require_signed_commits: bool = False, claude_command: str | None = None) -> int:
     root = repository_root()
     if not (root / ".git").exists():
@@ -2610,41 +2676,116 @@ def _update_unlocked(require_signed_commits: bool = False, claude_command: str |
         return 1 if post_tests.returncode else 2
     mcp_runtime_preexisting = MCP_HTTP_COMMAND.exists() or MCP_HTTP_COMMAND.is_symlink()
     mcp_headers_preexisting = MCP_HEADERS_COMMAND.exists() or MCP_HEADERS_COMMAND.is_symlink()
-    mcp_token_preexisting = MCP_HTTP_TOKEN.exists()
-    claude_config_preexisting = CLAUDE_CONFIG.exists()
-    claude_config_bytes = CLAUDE_CONFIG.read_bytes() if claude_config_preexisting else b""
-    claude_config_mode = CLAUDE_CONFIG.stat().st_mode & 0o777 if claude_config_preexisting else None
+    mcp_token_preexisting = MCP_HTTP_TOKEN.exists() or MCP_HTTP_TOKEN.is_symlink()
+    try:
+        _claude_config, preflight_claude_config, _claude_config_identity_before = (
+            _read_protected_claude_config(CLAUDE_CONFIG)
+            if claude_installed
+            else ({}, None, None)
+        )
+    except RuntimeError as error:
+        rollback = _run(["git", "reset", "--keep", previous], root)
+        restored_head = _run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"], root
+        ).stdout.strip()
+        restored = rollback.returncode == 0 and restored_head == previous
+        print(
+            f"Claude configuration is unsafe; runtime activation is blocked ({error}) and repository rollback "
+            + ("succeeded." if restored else "FAILED."),
+            file=sys.stderr,
+        )
+        return 2 if restored else 1
+    claude_config_preexisting = preflight_claude_config is not None
+    claude_config_bytes: bytes | None = None
+    installed_artifacts: dict[Path, tuple[int, int, int, int, int, int, int]] = {}
+    created_artifacts: set[Path] = set()
+    configured_claude_identity: tuple[int, int, int, int, int, int, int] | None = None
 
     def rollback_runtime() -> subprocess.CompletedProcess[str]:
         rollback = _run(["git", "reset", "--keep", previous], root)
+        cleanup_error: OSError | RuntimeError | None = None
         if claude_installed:
-            if not mcp_runtime_preexisting:
-                remove_mcp_http_autostart()
-                MCP_HTTP_COMMAND.unlink(missing_ok=True)
-            if not mcp_headers_preexisting:
-                MCP_HEADERS_COMMAND.unlink(missing_ok=True)
-            if not mcp_token_preexisting:
-                MCP_HTTP_TOKEN.unlink(missing_ok=True)
-            if claude_config_preexisting:
-                temporary = CLAUDE_CONFIG.with_suffix(CLAUDE_CONFIG.suffix + ".restore")
-                temporary.write_bytes(claude_config_bytes)
-                if claude_config_mode is not None and os.name != "nt":
-                    os.chmod(temporary, claude_config_mode)
-                temporary.replace(CLAUDE_CONFIG)
-            else:
-                CLAUDE_CONFIG.unlink(missing_ok=True)
+            try:
+                for artifact, identity in installed_artifacts.items():
+                    _assert_update_artifact_unchanged(
+                        artifact,
+                        identity,
+                        missing_ok=artifact in created_artifacts,
+                    )
+                if configured_claude_identity is not None:
+                    _assert_update_artifact_unchanged(
+                        CLAUDE_CONFIG,
+                        configured_claude_identity,
+                        missing_ok=not claude_config_preexisting,
+                    )
+                if MCP_HTTP_COMMAND in created_artifacts:
+                    remove_mcp_http_autostart()
+                for artifact in created_artifacts:
+                    _remove_created_update_artifact(
+                        artifact,
+                        installed_artifacts[artifact],
+                    )
+                if configured_claude_identity is not None:
+                    if claude_config_preexisting:
+                        if claude_config_bytes is None:
+                            raise RuntimeError(
+                                "Claude configuration rollback backup is unavailable"
+                            )
+                        _restore_updated_claude_config(
+                            CLAUDE_CONFIG,
+                            claude_config_bytes,
+                            configured_claude_identity,
+                        )
+                    else:
+                        _remove_created_update_artifact(
+                            CLAUDE_CONFIG,
+                            configured_claude_identity,
+                        )
+            except (OSError, RuntimeError) as error:
+                cleanup_error = error
         restart_guard_runtime()
-        if mcp_runtime_preexisting:
+        if mcp_runtime_preexisting and cleanup_error is None:
             restart_mcp_http_runtime()
+        if cleanup_error is not None:
+            print(
+                f"Runtime rollback cleanup blocked fail-closed: {cleanup_error}",
+                file=sys.stderr,
+            )
+            return subprocess.CompletedProcess(
+                rollback.args,
+                1,
+                rollback.stdout,
+                ((rollback.stderr or "") + f"\n{cleanup_error}").strip(),
+            )
         return rollback
 
     if claude_installed:
         try:
             install_mcp_http_runtime(root)
+            installed_artifacts[MCP_HTTP_COMMAND] = _capture_update_artifact(MCP_HTTP_COMMAND)
+            installed_artifacts[MCP_HEADERS_COMMAND] = _capture_update_artifact(MCP_HEADERS_COMMAND)
+            installed_artifacts[MCP_HTTP_TOKEN] = _capture_update_artifact(MCP_HTTP_TOKEN)
+            if not mcp_runtime_preexisting:
+                created_artifacts.add(MCP_HTTP_COMMAND)
+            if not mcp_headers_preexisting:
+                created_artifacts.add(MCP_HEADERS_COMMAND)
+            if not mcp_token_preexisting:
+                created_artifacts.add(MCP_HTTP_TOKEN)
             installed, detail = install_mcp_http_autostart(root)
             if not installed:
                 raise RuntimeError(f"persistent MCP autostart failed: {detail}")
-            configure_claude_mcp()
+            claude_backup, _removed_shadows = configure_claude_mcp()
+            configured_claude_identity = _capture_update_artifact(CLAUDE_CONFIG)
+            if claude_backup is None:
+                claude_config_preexisting = False
+                claude_config_bytes = b""
+            else:
+                _backup_config, claude_config_bytes, _backup_identity = (
+                    _read_protected_claude_config(claude_backup)
+                )
+                if claude_config_bytes is None:
+                    raise RuntimeError("Claude configuration rollback backup disappeared")
+                claude_config_preexisting = True
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
             rollback = rollback_runtime()
             print(

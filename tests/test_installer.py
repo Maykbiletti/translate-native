@@ -934,6 +934,121 @@ class InstallerTests(unittest.TestCase):
                     guard_restart.assert_not_called()
                     mcp_restart.assert_not_called()
 
+    def test_update_runtime_rollback_preserves_exchanged_created_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, active, old, _candidate = self._update_repository_pair(root)
+            claude_skill = root / "claude-skill"
+            claude_skill.symlink_to(active / "translate-native", target_is_directory=True)
+            mcp_command = root / "bin" / "blun-language-guard-mcp"
+            mcp_headers = root / "bin" / "blun-language-guard-mcp-headers"
+            mcp_token = root / "config" / "mcp-http.token"
+            claude_config = root / ".claude.json"
+
+            def install_runtime_artifacts(_repository: Path) -> None:
+                mcp_command.parent.mkdir(parents=True, exist_ok=True)
+                mcp_token.parent.mkdir(parents=True, exist_ok=True)
+                mcp_command.symlink_to(root / "gateway.py")
+                mcp_headers.symlink_to(root / "headers.py")
+                mcp_token.write_text("t" * 64 + "\n", encoding="ascii")
+                if os.name != "nt":
+                    mcp_token.chmod(0o600)
+
+            def exchange_command_before_failure(_repository: Path) -> tuple[bool, str]:
+                replacement = root / "foreign-command"
+                replacement.write_text("operator-owned replacement\n", encoding="utf-8")
+                os.replace(replacement, mcp_command)
+                return False, "injected activation failure"
+
+            errors = io.StringIO()
+            with mock.patch.object(INSTALLER, "repository_root", return_value=active), \
+                 mock.patch.object(INSTALLER, "REPO_URL", str(upstream)), \
+                 mock.patch.object(INSTALLER, "UPDATE_STATE", root / "update-state.json"), \
+                 mock.patch.object(INSTALLER, "UPDATE_CONFIG", root / "updater.json"), \
+                 mock.patch.object(INSTALLER, "UPDATE_PAUSED_CONFIG", root / "updater-paused.json"), \
+                 mock.patch.object(INSTALLER, "HEALTH_CONFIG", root / "health-monitor.json"), \
+                 mock.patch.object(INSTALLER, "HEALTH_STATE", root / "health-state.json"), \
+                 mock.patch.object(INSTALLER, "MCP_HTTP_COMMAND", mcp_command), \
+                 mock.patch.object(INSTALLER, "MCP_HEADERS_COMMAND", mcp_headers), \
+                 mock.patch.object(INSTALLER, "MCP_HTTP_TOKEN", mcp_token), \
+                 mock.patch.object(INSTALLER, "CLAUDE_CONFIG", claude_config), \
+                 mock.patch.object(INSTALLER, "SERVICE_COMMAND", root / "missing-service"), \
+                 mock.patch.object(INSTALLER, "TARGETS", {**INSTALLER.TARGETS, "claude": claude_skill}), \
+                 mock.patch.object(INSTALLER, "preflight_claude_plugin_update", return_value={"ready": True}), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "install_mcp_http_runtime",
+                     side_effect=install_runtime_artifacts,
+                 ), \
+                 mock.patch.object(
+                     INSTALLER,
+                     "install_mcp_http_autostart",
+                     side_effect=exchange_command_before_failure,
+                 ), \
+                 mock.patch.object(INSTALLER, "remove_mcp_http_autostart") as remove_autostart, \
+                 mock.patch.object(INSTALLER, "restart_guard_runtime"), \
+                 contextlib.redirect_stderr(errors):
+                self.assertEqual(INSTALLER._update_unlocked(), 1)
+
+            self.assertTrue(
+                mcp_command.exists() or mcp_command.is_symlink(),
+                errors.getvalue(),
+            )
+            self.assertEqual(
+                mcp_command.read_text(encoding="utf-8"),
+                "operator-owned replacement\n",
+            )
+            self.assertTrue(mcp_headers.is_symlink())
+            self.assertTrue(mcp_token.is_file())
+            self.assertIn("cleanup blocked fail-closed", errors.getvalue())
+            self.assertIn("rollback FAILED", errors.getvalue())
+            remove_autostart.assert_not_called()
+            self.assertEqual(INSTALLER._run(["git", "rev-parse", "HEAD"], active).stdout.strip(), old)
+
+    def test_update_rollback_helpers_preserve_exchanged_artifacts_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, install_as_link in (
+                ("mcp-command", True),
+                ("mcp-headers", True),
+                ("mcp-token", False),
+                ("claude-config", False),
+            ):
+                with self.subTest(name=name):
+                    path = root / name
+                    if install_as_link:
+                        path.symlink_to(root / f"{name}-source")
+                    else:
+                        path.write_text("installer-created\n", encoding="utf-8")
+                    expected = INSTALLER._capture_update_artifact(path)
+                    replacement = root / f"{name}-replacement"
+                    replacement.write_text("operator-owned\n", encoding="utf-8")
+                    os.replace(replacement, path)
+                    with self.assertRaisesRegex(RuntimeError, "changed before rollback"):
+                        INSTALLER._remove_created_update_artifact(path, expected)
+                    self.assertEqual(path.read_text(encoding="utf-8"), "operator-owned\n")
+
+            config = root / "restore-config"
+            config.write_text("updated\n", encoding="utf-8")
+            expected = INSTALLER._capture_update_artifact(config)
+            replacement = root / "restore-config-replacement"
+            replacement.write_text("concurrent configuration\n", encoding="utf-8")
+            os.replace(replacement, config)
+            with self.assertRaisesRegex(RuntimeError, "changed before rollback"):
+                INSTALLER._restore_updated_claude_config(config, b"original\n", expected)
+            self.assertEqual(config.read_text(encoding="utf-8"), "concurrent configuration\n")
+
+            owned = root / "owned-artifact"
+            owned.write_text("created by updater\n", encoding="utf-8")
+            expected = INSTALLER._capture_update_artifact(owned)
+            INSTALLER._remove_created_update_artifact(owned, expected)
+            self.assertFalse(owned.exists())
+
+            config.write_text("updated by updater\n", encoding="utf-8")
+            expected = INSTALLER._capture_update_artifact(config)
+            INSTALLER._restore_updated_claude_config(config, b"original\n", expected)
+            self.assertEqual(config.read_bytes(), b"original\n")
+
     def test_rollback_tests_target_pauses_updater_and_records_exact_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
