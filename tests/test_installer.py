@@ -3414,6 +3414,36 @@ class InstallerTests(unittest.TestCase):
             finally:
                 INSTALLER.OPERATION_LOCK = original
 
+    @unittest.skipUnless(os.name != "nt", "POSIX directory and symlink semantics")
+    def test_unsafe_operation_lock_parent_directories_block_without_redirecting(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        try:
+            for unsafe in ("symlink", "permissions"):
+                with self.subTest(unsafe=unsafe), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    home = root / "home"
+                    home.mkdir(mode=0o700)
+                    config = home / ".config"
+                    redirected = root / "redirected"
+                    redirected.mkdir(mode=0o700)
+                    if unsafe == "symlink":
+                        config.symlink_to(redirected, target_is_directory=True)
+                    else:
+                        config.mkdir(mode=0o700)
+                        config.chmod(0o777)
+                    INSTALLER.OPERATION_LOCK = config / "blun-language-guard" / "operation.lock"
+
+                    with mock.patch.object(INSTALLER.Path, "home", return_value=home):
+                        token = INSTALLER._acquire_operation_lock("update", now=100)
+
+                    self.assertIsNone(token)
+                    self.assertFalse((redirected / "blun-language-guard" / "operation.lock").exists())
+                    if unsafe == "permissions":
+                        self.assertFalse(INSTALLER.OPERATION_LOCK.exists())
+                        self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o777)
+        finally:
+            INSTALLER.OPERATION_LOCK = original
+
     def test_old_operation_lock_owned_by_living_process_is_never_stolen(self) -> None:
         original = INSTALLER.OPERATION_LOCK
         with tempfile.TemporaryDirectory() as directory:
@@ -3575,7 +3605,7 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.OPERATION_LOCK.chmod(0o600)
             os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
 
-            def replace_lock(_metadata: os.stat_result) -> bool:
+            def replace_lock(_metadata: os.stat_result, **_kwargs) -> bool:
                 INSTALLER.OPERATION_LOCK.unlink()
                 INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
                     "operation": "rollback", "pid": os.getpid(), "started_at": 200, "token": "replacement",
@@ -3603,7 +3633,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIsNotNone(token)
                 original_value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
 
-                def replace_after_read(_metadata: os.stat_result) -> dict:
+                def replace_after_read(_metadata: os.stat_result, **_kwargs) -> dict:
                     INSTALLER.OPERATION_LOCK.unlink()
                     INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
                         "operation": "rollback", "pid": os.getpid(), "started_at": 200, "token": "replacement",
@@ -3617,6 +3647,42 @@ class InstallerTests(unittest.TestCase):
                 value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
                 self.assertEqual(value["operation"], "rollback")
                 self.assertEqual(value["token"], "replacement")
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_operation_lock_parent_exchange_during_release_preserves_replacement(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "locks"
+            parent.mkdir(mode=0o700)
+            detached = root / "detached-locks"
+            lock = parent / "operation.lock"
+            replacement = b"replacement-parent-lock\n"
+            INSTALLER.OPERATION_LOCK = lock
+            try:
+                token = INSTALLER._acquire_operation_lock("update", now=100)
+                self.assertIsNotNone(token)
+                real_unlink = INSTALLER._unlink_operation_lock
+
+                def exchange_parent_then_unlink(directory_handle: int | None) -> None:
+                    parent.rename(detached)
+                    parent.mkdir(mode=0o700)
+                    lock.write_bytes(replacement)
+                    if os.name != "nt":
+                        lock.chmod(0o600)
+                    real_unlink(directory_handle)
+
+                with mock.patch.object(
+                    INSTALLER,
+                    "_unlink_operation_lock",
+                    side_effect=exchange_parent_then_unlink,
+                ):
+                    assert token is not None
+                    INSTALLER._release_operation_lock(token)
+
+                self.assertEqual(lock.read_bytes(), replacement)
+                self.assertFalse((detached / "operation.lock").exists())
             finally:
                 INSTALLER.OPERATION_LOCK = original
 
@@ -3663,21 +3729,23 @@ class InstallerTests(unittest.TestCase):
             lock = Path(directory) / "operation.lock"
             INSTALLER.OPERATION_LOCK = lock
             replacement = b"replacement-lock\n"
-            real_lstat = type(lock).lstat
+            real_lstat = INSTALLER._operation_lock_lstat
             exchanged = False
 
-            def exchange_before_install_check(candidate: Path) -> os.stat_result:
+            def exchange_before_install_check(directory: int | None) -> os.stat_result:
                 nonlocal exchanged
-                if candidate == lock and not exchanged:
+                if not exchanged:
                     exchanged = True
-                    candidate.unlink()
-                    candidate.write_bytes(replacement)
+                    lock.unlink()
+                    lock.write_bytes(replacement)
                     if os.name != "nt":
-                        candidate.chmod(0o600)
-                return real_lstat(candidate)
+                        lock.chmod(0o600)
+                return real_lstat(directory)
 
             try:
-                with mock.patch.object(type(lock), "lstat", new=exchange_before_install_check):
+                with mock.patch.object(
+                    INSTALLER, "_operation_lock_lstat", side_effect=exchange_before_install_check,
+                ):
                     token = INSTALLER._acquire_operation_lock("update", now=100)
                 self.assertIsNone(token)
                 self.assertEqual(lock.read_bytes(), replacement)

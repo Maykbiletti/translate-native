@@ -2418,20 +2418,61 @@ def _process_start_identity(pid: int) -> str | None:
     return _posix_process_start_identity(pid)
 
 
-def _read_operation_lock(metadata: os.stat_result) -> dict | None:
+@contextlib.contextmanager
+def _open_operation_lock_directory():
+    """Hold the owner-controlled lock directory for one complete lock transition."""
+    if os.name == "nt":
+        OPERATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        yield None
+        return
+    home = Path.home()
+    try:
+        OPERATION_LOCK.parent.relative_to(home)
+    except ValueError:
+        # Tests and embedders may place the lock outside the account home. The
+        # final parent still receives the same no-follow and identity checks.
+        home = OPERATION_LOCK.parent
+    with _open_service_definition_directory(OPERATION_LOCK.parent, home) as directory:
+        yield directory
+
+
+def _operation_lock_lstat(directory: int | None) -> os.stat_result:
+    if directory is None:
+        return OPERATION_LOCK.lstat()
+    return os.stat(OPERATION_LOCK.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_operation_lock_file(directory: int | None, flags: int, mode: int | None = None) -> int:
+    path: str | Path = OPERATION_LOCK if directory is None else OPERATION_LOCK.name
+    kwargs = {} if directory is None else {"dir_fd": directory}
+    if mode is None:
+        return os.open(path, flags, **kwargs)
+    return os.open(path, flags, mode, **kwargs)
+
+
+def _unlink_operation_lock(directory: int | None) -> None:
+    if directory is None:
+        OPERATION_LOCK.unlink()
+        return
+    os.unlink(OPERATION_LOCK.name, dir_fd=directory)
+
+
+def _read_operation_lock(
+    metadata: os.stat_result, *, directory: int | None = None,
+) -> dict | None:
     """Read the exact bounded lock instance described by metadata."""
     if not _operation_lock_details_safe(metadata):
         return None
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(OPERATION_LOCK, flags)
+        descriptor = _open_operation_lock_file(directory, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
             if not _operation_lock_details_safe(opened) or not _same_file_identity(metadata, opened):
                 return None
             raw = handle.read(MAX_OPERATION_LOCK_BYTES + 1)
             after_read = os.fstat(handle.fileno())
-        after_path = OPERATION_LOCK.lstat()
+        after_path = _operation_lock_lstat(directory)
     except OSError:
         return None
     if (
@@ -2464,9 +2505,11 @@ def _operation_lock_details_safe(details: os.stat_result) -> bool:
     return True
 
 
-def _operation_lock_owner_alive(metadata: os.stat_result) -> bool | None:
+def _operation_lock_owner_alive(
+    metadata: os.stat_result, *, directory: int | None = None,
+) -> bool | None:
     """Return the validated owner's liveness, or None for an untrusted lock body."""
-    value = _read_operation_lock(metadata)
+    value = _read_operation_lock(metadata, directory=directory)
     if value is None:
         return None
     pid = value.get("pid")
@@ -2502,15 +2545,28 @@ def _operation_lock_owner_alive(metadata: os.stat_result) -> bool | None:
 
 def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | None:
     """Take a same-user cross-platform lock without racing a living owner."""
+    try:
+        with _open_operation_lock_directory() as directory:
+            return _acquire_operation_lock_at(directory, operation, now=now)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _acquire_operation_lock_at(
+    directory: int | None, operation: str, *, now: int | None = None,
+) -> str | None:
     timestamp = int(time.time()) if now is None else now
     token = os.urandom(16).hex()
-    OPERATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(2):
         try:
-            descriptor = os.open(OPERATION_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            descriptor = _open_operation_lock_file(
+                directory,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
         except FileExistsError:
             try:
-                metadata = OPERATION_LOCK.lstat()
+                metadata = _operation_lock_lstat(directory)
                 if not _operation_lock_details_safe(metadata):
                     return None
                 stale = timestamp - int(metadata.st_mtime) > OPERATION_LOCK_STALE_SECONDS
@@ -2518,16 +2574,16 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
                 stale = False
             if not stale or attempt:
                 return None
-            if _operation_lock_owner_alive(metadata) is True:
+            if _operation_lock_owner_alive(metadata, directory=directory) is True:
                 return None
             try:
-                current = OPERATION_LOCK.lstat()
+                current = _operation_lock_lstat(directory)
                 if (
                     not _operation_lock_details_safe(current)
                     or not _same_file_identity(metadata, current)
                 ):
                     return None
-                OPERATION_LOCK.unlink()
+                _unlink_operation_lock(directory)
             except OSError:
                 return None
             continue
@@ -2542,7 +2598,7 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
             handle.flush()
             written = os.fstat(handle.fileno())
         try:
-            installed = OPERATION_LOCK.lstat()
+            installed = _operation_lock_lstat(directory)
         except OSError:
             return None
         if (
@@ -2560,18 +2616,26 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
 def _release_operation_lock(token: str) -> None:
     """Release only the lock instance acquired by this process."""
     try:
-        metadata = OPERATION_LOCK.lstat()
+        with _open_operation_lock_directory() as directory:
+            _release_operation_lock_at(directory, token)
+    except (OSError, RuntimeError):
+        return
+
+
+def _release_operation_lock_at(directory: int | None, token: str) -> None:
+    try:
+        metadata = _operation_lock_lstat(directory)
     except OSError:
         return
     if not _operation_lock_details_safe(metadata):
         return
-    value = _read_operation_lock(metadata)
+    value = _read_operation_lock(metadata, directory=directory)
     if value is None or value.get("token") != token:
         return
     try:
-        current = OPERATION_LOCK.lstat()
+        current = _operation_lock_lstat(directory)
         if _operation_lock_details_safe(current) and _same_file_identity(metadata, current):
-            OPERATION_LOCK.unlink()
+            _unlink_operation_lock(directory)
     except OSError:
         return
 
