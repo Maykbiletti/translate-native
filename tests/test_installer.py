@@ -2973,6 +2973,62 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.ensure_service_token(token)
             self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
 
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_service_token_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER.ensure_service_token(linked / "service.token")
+            self.assertFalse((target / "service.token").exists())
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER.ensure_service_token(writable / "service.token")
+                self.assertFalse((writable / "service.token").exists())
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_service_token_parent_exchange_during_creation_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            replacement = root / "replacement"
+            replacement.mkdir()
+            token = trusted / "service.token"
+            original_open = INSTALLER._open_service_token_file
+
+            def exchange_parent(
+                path: Path,
+                directory_handle: int | None,
+                flags: int,
+                mode: int | None = None,
+            ) -> int:
+                trusted.rename(root / "guard-old")
+                replacement.rename(trusted)
+                return original_open(path, directory_handle, flags, mode)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_open_service_token_file",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                    INSTALLER.ensure_service_token(token)
+
+            self.assertFalse(token.exists())
+            old_token = root / "guard-old" / "service.token"
+            self.assertGreaterEqual(len(old_token.read_text(encoding="ascii").strip()), 32)
+
     def test_mcp_http_runtime_installs_commands_and_owner_only_token(self) -> None:
         originals = (
             INSTALLER.MCP_HTTP_COMMAND,

@@ -435,7 +435,7 @@ def _write_service_definition(path: Path, content: str, *, home: Path | None = N
     )
 
 
-def _existing_signing_key_directory_anchor(path: Path) -> Path:
+def _existing_trust_state_directory_anchor(path: Path) -> Path:
     """Return the nearest existing ancestor used to open a test/embedded path."""
     candidate = path
     while True:
@@ -445,13 +445,13 @@ def _existing_signing_key_directory_anchor(path: Path) -> Path:
         except FileNotFoundError:
             parent = candidate.parent
             if parent == candidate:
-                raise RuntimeError(f"Signing-key directory has no existing anchor: {path}")
+                raise RuntimeError(f"Trust-state directory has no existing anchor: {path}")
             candidate = parent
 
 
 @contextlib.contextmanager
-def _open_signing_key_directory(path: Path):
-    """Hold the owner-controlled signing-key directory through one operation."""
+def _open_trust_state_directory(path: Path):
+    """Hold one owner-controlled trust-state directory through an operation."""
     if os.name == "nt":
         path.parent.mkdir(parents=True, exist_ok=True)
         yield None
@@ -462,8 +462,15 @@ def _open_signing_key_directory(path: Path):
     except ValueError:
         # Tests and embedders may inject a path outside the account home. Start
         # at its nearest existing ancestor while retaining the same checks.
-        home = _existing_signing_key_directory_anchor(path.parent)
+        home = _existing_trust_state_directory_anchor(path.parent)
     with _open_service_definition_directory(path.parent, home) as directory:
+        yield directory
+
+
+@contextlib.contextmanager
+def _open_signing_key_directory(path: Path):
+    """Hold the owner-controlled signing-key directory through one operation."""
+    with _open_trust_state_directory(path) as directory:
         yield directory
 
 
@@ -539,10 +546,40 @@ def _validate_service_token_details(path: Path, details: os.stat_result) -> None
         raise RuntimeError(f"Service-token owner is invalid: {path}")
 
 
-def _read_protected_service_token(path: Path) -> str:
-    before = path.lstat()
+@contextlib.contextmanager
+def _open_service_token_directory(path: Path):
+    """Hold the owner-controlled service-token directory through one operation."""
+    with _open_trust_state_directory(path) as directory:
+        yield directory
+
+
+def _service_token_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_service_token_file(
+    path: Path,
+    directory: int | None,
+    flags: int,
+    mode: int | None = None,
+) -> int:
+    target: str | Path = path if directory is None else path.name
+    kwargs = {} if directory is None else {"dir_fd": directory}
+    if mode is None:
+        return os.open(target, flags, **kwargs)
+    return os.open(target, flags, mode, **kwargs)
+
+
+def _read_protected_service_token(path: Path, *, directory: int | None = None) -> str:
+    before = _service_token_lstat(path, directory)
     _validate_service_token_details(path, before)
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = _open_service_token_file(
+        path,
+        directory,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
         opened = os.fstat(descriptor)
         _validate_service_token_details(path, opened)
@@ -569,26 +606,26 @@ def _read_protected_service_token(path: Path) -> str:
 def ensure_service_token(path: Path | None = None) -> None:
     """Create a stable text token used only by host adapters and the MCP process."""
     path = path or SERVICE_TOKEN
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _read_protected_service_token(path)
-        return
-    except FileNotFoundError:
-        pass
-    token = os.urandom(32).hex().encode("ascii") + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        _read_protected_service_token(path)
-        return
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(token)
-            handle.flush()
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    with _open_service_token_directory(path) as directory:
+        try:
+            _read_protected_service_token(path, directory=directory)
+            return
+        except FileNotFoundError:
+            pass
+        token = os.urandom(32).hex().encode("ascii") + b"\n"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = _open_service_token_file(path, directory, flags, 0o600)
+        except FileExistsError:
+            _read_protected_service_token(path, directory=directory)
+            return
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
