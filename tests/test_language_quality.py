@@ -44,6 +44,7 @@ class ReceiptTests(unittest.TestCase):
             details = key_path.stat()
             opened = SimpleNamespace(
                 st_mode=details.st_mode,
+                st_nlink=details.st_nlink,
                 st_size=details.st_size,
                 st_uid=details.st_uid,
                 st_dev=details.st_dev,
@@ -82,6 +83,31 @@ class ReceiptTests(unittest.TestCase):
             key_path.chmod(0o644)
             with self.assertRaisesRegex(ValueError, "owner-only"):
                 QUALITY.load_or_create_key(key_path)
+
+    @unittest.skipIf(os.name == "nt", "POSIX hard-link test")
+    def test_signing_key_rejects_hard_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key_path = root / "signing.key"
+            alias = root / "signing-key-alias"
+            key_path.write_bytes(b"k" * 32)
+            key_path.chmod(0o600)
+            os.link(key_path, alias)
+
+            with self.assertRaisesRegex(ValueError, "exactly one hard link"):
+                QUALITY.load_existing_key(key_path)
+            self.assertEqual(alias.read_bytes(), b"k" * 32)
+
+            key_path.unlink()
+            alias.unlink()
+
+            def link_during_creation(_descriptor: int) -> None:
+                os.link(key_path, alias)
+
+            with mock.patch.object(QUALITY.os, "fsync", side_effect=link_during_creation):
+                with self.assertRaisesRegex(ValueError, "exactly one hard link"):
+                    QUALITY.load_or_create_key(key_path)
+            self.assertEqual(alias.read_bytes(), key_path.read_bytes())
 
     def test_receipt_is_bound_to_every_input(self) -> None:
         token = QUALITY.issue_receipt("Hello", "Hej", "sv-SE", self.KEY)

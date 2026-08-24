@@ -2803,6 +2803,33 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.ensure_signing_key(key)
             self.assertEqual(sentinel.read_bytes(), b"s" * 32)
 
+    @unittest.skipIf(os.name == "nt", "POSIX hard-link test")
+    def test_signing_key_rejects_hard_links_during_install_and_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key = root / "signing.key"
+            alias = root / "signing-key-alias"
+            key.write_bytes(b"k" * 32)
+            key.chmod(0o600)
+            os.link(key, alias)
+
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard link"):
+                INSTALLER.ensure_signing_key(key)
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard link"):
+                INSTALLER._inspect_protected_signing_key(key)
+            self.assertEqual(alias.read_bytes(), b"k" * 32)
+
+            key.unlink()
+            alias.unlink()
+
+            def link_during_creation(_descriptor: int) -> None:
+                os.link(key, alias)
+
+            with mock.patch.object(INSTALLER.os, "fsync", side_effect=link_during_creation):
+                with self.assertRaisesRegex(RuntimeError, "exactly one hard link"):
+                    INSTALLER.ensure_signing_key(key)
+            self.assertEqual(alias.read_bytes(), key.read_bytes())
+
     @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
     def test_signing_key_rejects_unsafe_parent_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -491,6 +491,8 @@ def _open_signing_key_file(
 def _validate_signing_key_details(path: Path, details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"Signing-key path is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"Signing key must have exactly one hard link: {path}")
     if details.st_size < 32 or details.st_size > 64 * 1024:
         raise RuntimeError(f"Signing key has an invalid size: {path}")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -529,6 +531,7 @@ def ensure_signing_key(path: Path | None = None) -> None:
                 os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        _validate_signing_key_details(path, _signing_key_lstat(path, directory))
 
 
 def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:

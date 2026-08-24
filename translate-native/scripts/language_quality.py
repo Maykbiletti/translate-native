@@ -58,6 +58,8 @@ def _b64decode(data: str) -> bytes:
 def _validate_signing_key_stat(details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise ValueError("signing key must be a regular file")
+    if details.st_nlink != 1:
+        raise ValueError("signing key must have exactly one hard link")
     if details.st_size < 32 or details.st_size > MAX_SIGNING_KEY_BYTES:
         raise ValueError("signing key has an invalid size")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -66,10 +68,11 @@ def _validate_signing_key_stat(details: os.stat_result) -> None:
         raise ValueError("signing key has the wrong owner")
 
 
-def _signing_key_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _signing_key_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
@@ -117,6 +120,12 @@ def load_or_create_key(path: Path) -> bytes:
             handle.write(key)
             handle.flush()
             os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        _validate_signing_key_stat(opened)
+        installed = os.lstat(path)
+        _validate_signing_key_stat(installed)
+        if _signing_key_identity(installed) != _signing_key_identity(opened):
+            raise ValueError("signing key changed while creating")
     finally:
         os.close(descriptor)
     return key
