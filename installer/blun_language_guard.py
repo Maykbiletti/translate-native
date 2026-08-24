@@ -649,10 +649,40 @@ def _validate_mcp_http_token_details(path: Path, details: os.stat_result) -> Non
         raise RuntimeError(f"MCP access-token owner is invalid: {path}")
 
 
-def _read_protected_mcp_http_token(path: Path) -> str:
-    before = path.lstat()
+@contextlib.contextmanager
+def _open_mcp_http_token_directory(path: Path):
+    """Hold the owner-controlled MCP token directory through one operation."""
+    with _open_trust_state_directory(path) as directory:
+        yield directory
+
+
+def _mcp_http_token_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_mcp_http_token_file(
+    path: Path,
+    directory: int | None,
+    flags: int,
+    mode: int | None = None,
+) -> int:
+    target: str | Path = path if directory is None else path.name
+    kwargs = {} if directory is None else {"dir_fd": directory}
+    if mode is None:
+        return os.open(target, flags, **kwargs)
+    return os.open(target, flags, mode, **kwargs)
+
+
+def _read_protected_mcp_http_token(path: Path, *, directory: int | None = None) -> str:
+    before = _mcp_http_token_lstat(path, directory)
     _validate_mcp_http_token_details(path, before)
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = _open_mcp_http_token_file(
+        path,
+        directory,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
         opened = os.fstat(descriptor)
         _validate_mcp_http_token_details(path, opened)
@@ -661,7 +691,7 @@ def _read_protected_mcp_http_token(path: Path) -> str:
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             raw = handle.read(MAX_MCP_HTTP_TOKEN_BYTES + 1)
         after_read = os.fstat(descriptor)
-        after_path = path.lstat()
+        after_path = _mcp_http_token_lstat(path, directory)
     finally:
         os.close(descriptor)
     if len(raw) > MAX_MCP_HTTP_TOKEN_BYTES:
@@ -683,26 +713,26 @@ def _read_protected_mcp_http_token(path: Path) -> str:
 def ensure_mcp_http_token(path: Path | None = None) -> None:
     """Create a stable bearer token for the loopback HTTP MCP endpoint."""
     path = path or MCP_HTTP_TOKEN
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _read_protected_mcp_http_token(path)
-        return
-    except FileNotFoundError:
-        pass
-    token = os.urandom(32).hex().encode("ascii") + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        _read_protected_mcp_http_token(path)
-        return
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(token)
-            handle.flush()
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    with _open_mcp_http_token_directory(path) as directory:
+        try:
+            _read_protected_mcp_http_token(path, directory=directory)
+            return
+        except FileNotFoundError:
+            pass
+        token = os.urandom(32).hex().encode("ascii") + b"\n"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = _open_mcp_http_token_file(path, directory, flags, 0o600)
+        except FileExistsError:
+            _read_protected_mcp_http_token(path, directory=directory)
+            return
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def install_delivery_boundary(root: Path) -> None:
