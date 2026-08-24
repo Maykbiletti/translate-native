@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -504,6 +505,64 @@ class GuardServiceTests(unittest.TestCase):
         self.audit_path.chmod(0o666)
         with self.assertRaisesRegex(RuntimeError, "writable outside"):
             self.service.handle(self.release_request())
+
+    @unittest.skipIf(os.name == "nt", "POSIX audit-directory safety test")
+    def test_unsafe_audit_parent_directories_block_without_writing(self) -> None:
+        root = Path(self.temporary.name)
+        redirected = root / "redirected"
+        redirected.mkdir()
+        linked = root / "linked"
+        linked.symlink_to(redirected, target_is_directory=True)
+        linked_audit = linked / "audit.jsonl"
+
+        with self.assertRaisesRegex(RuntimeError, "audit directory"):
+            SERVICE.AUDIT.append_audit(linked_audit, {"event": "linked-parent"})
+        self.assertFalse((redirected / "audit.jsonl").exists())
+        self.assertFalse((redirected / "audit.jsonl.lock").exists())
+        self.assertFalse(SERVICE.AUDIT.audit_paths_healthy(linked_audit))
+
+        writable = root / "writable"
+        writable.mkdir()
+        writable.chmod(0o777)
+        try:
+            writable_audit = writable / "audit.jsonl"
+            with self.assertRaisesRegex(RuntimeError, "writable outside"):
+                SERVICE.AUDIT.append_audit(writable_audit, {"event": "open-parent"})
+            self.assertFalse(writable_audit.exists())
+            self.assertFalse(SERVICE.AUDIT.audit_paths_healthy(writable_audit))
+        finally:
+            writable.chmod(0o700)
+
+    def test_audit_health_does_not_create_missing_parent_directories(self) -> None:
+        missing = Path(self.temporary.name) / "missing" / "nested" / "audit.jsonl"
+
+        self.assertTrue(SERVICE.AUDIT.audit_paths_healthy(missing))
+        self.assertFalse(missing.parent.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX audit-directory identity test")
+    def test_audit_append_pins_parent_across_lock_and_log(self) -> None:
+        root = Path(self.temporary.name)
+        trusted = root / "trusted"
+        trusted.mkdir()
+        audit_path = trusted / "audit.jsonl"
+        replacement = root / "replacement"
+        replacement.mkdir()
+        displaced = root / "displaced"
+        real_lock = SERVICE.AUDIT._exclusive_lock
+
+        @contextmanager
+        def exchange_parent(handle):
+            with real_lock(handle):
+                trusted.rename(displaced)
+                replacement.rename(trusted)
+                yield
+
+        with mock.patch.object(SERVICE.AUDIT, "_exclusive_lock", exchange_parent):
+            with self.assertRaisesRegex(RuntimeError, "audit directory changed"):
+                SERVICE.AUDIT.append_audit(audit_path, {"event": "parent-race"})
+
+        self.assertFalse((trusted / "audit.jsonl").exists())
+        self.assertTrue((displaced / "audit.jsonl").exists())
 
     @unittest.skipIf(os.name == "nt", "POSIX audit-path link test")
     def test_health_blocks_on_unsafe_audit_state_without_writing_it(self) -> None:
