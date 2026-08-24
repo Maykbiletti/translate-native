@@ -2855,6 +2855,68 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(key.exists())
             self.assertEqual((root / "guard-old" / "signing.key").stat().st_size, 32)
 
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_signing_key_inspection_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            target_key = target / "signing.key"
+            target_key.write_bytes(b"a" * 32)
+            target_key.chmod(0o600)
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER._inspect_protected_signing_key(linked / "signing.key")
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable_key = writable / "signing.key"
+            writable_key.write_bytes(b"b" * 32)
+            writable_key.chmod(0o600)
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER._inspect_protected_signing_key(writable_key)
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_signing_key_inspection_detects_parent_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            key = trusted / "signing.key"
+            key.write_bytes(b"a" * 32)
+            key.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            replacement_key = replacement / "signing.key"
+            replacement_key.write_bytes(b"b" * 32)
+            replacement_key.chmod(0o600)
+            original_lstat = INSTALLER._signing_key_lstat
+
+            def exchange_parent(
+                path: Path, directory_handle: int | None,
+            ) -> os.stat_result:
+                details = original_lstat(path, directory_handle)
+                trusted.rename(root / "guard-old")
+                replacement.rename(trusted)
+                return details
+
+            with mock.patch.object(
+                INSTALLER,
+                "_signing_key_lstat",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                    INSTALLER._inspect_protected_signing_key(key)
+
+            self.assertEqual(key.read_bytes(), b"b" * 32)
+            self.assertEqual((root / "guard-old" / "signing.key").read_bytes(), b"a" * 32)
+
     def test_install_delivery_boundary_creates_command_policy_and_key(self) -> None:
         originals = (
             INSTALLER.DELIVERY_COMMAND,

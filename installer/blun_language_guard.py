@@ -499,6 +499,12 @@ def _validate_signing_key_details(path: Path, details: os.stat_result) -> None:
         raise RuntimeError(f"Signing-key owner is invalid: {path}")
 
 
+def _inspect_protected_signing_key(path: Path) -> None:
+    """Validate one existing key while retaining its trusted parent directory."""
+    with _open_signing_key_directory(path) as directory:
+        _validate_signing_key_details(path, _signing_key_lstat(path, directory))
+
+
 def ensure_signing_key(path: Path | None = None) -> None:
     """Create the local trust key once and never replace an existing key."""
     path = path or SIGNING_KEY
@@ -1646,7 +1652,11 @@ def doctor() -> int:
         DELIVERY_COMMAND.is_symlink() and DELIVERY_COMMAND.resolve() == delivery_source.resolve(),
         str(DELIVERY_COMMAND),
     ))
-    key_secure = SIGNING_KEY.is_file() and (os.name == "nt" or SIGNING_KEY.stat().st_mode & 0o077 == 0)
+    try:
+        _inspect_protected_signing_key(SIGNING_KEY)
+        key_secure = True
+    except (OSError, RuntimeError):
+        key_secure = False
     checks.append(("signing key", key_secure, str(SIGNING_KEY)))
     service_source = root / "integrations" / "guard_service.py"
     checks.append((
