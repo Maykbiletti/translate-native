@@ -435,37 +435,87 @@ def _write_service_definition(path: Path, content: str, *, home: Path | None = N
     )
 
 
+def _existing_signing_key_directory_anchor(path: Path) -> Path:
+    """Return the nearest existing ancestor used to open a test/embedded path."""
+    candidate = path
+    while True:
+        try:
+            candidate.lstat()
+            return candidate
+        except FileNotFoundError:
+            parent = candidate.parent
+            if parent == candidate:
+                raise RuntimeError(f"Signing-key directory has no existing anchor: {path}")
+            candidate = parent
+
+
+@contextlib.contextmanager
+def _open_signing_key_directory(path: Path):
+    """Hold the owner-controlled signing-key directory through one operation."""
+    if os.name == "nt":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        yield None
+        return
+    home = Path.home()
+    try:
+        path.parent.relative_to(home)
+    except ValueError:
+        # Tests and embedders may inject a path outside the account home. Start
+        # at its nearest existing ancestor while retaining the same checks.
+        home = _existing_signing_key_directory_anchor(path.parent)
+    with _open_service_definition_directory(path.parent, home) as directory:
+        yield directory
+
+
+def _signing_key_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_signing_key_file(
+    path: Path, directory: int | None, flags: int, mode: int,
+) -> int:
+    if directory is None:
+        return os.open(path, flags, mode)
+    return os.open(path.name, flags, mode, dir_fd=directory)
+
+
+def _validate_signing_key_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Signing-key path is not a regular file: {path}")
+    if details.st_size < 32 or details.st_size > 64 * 1024:
+        raise RuntimeError(f"Signing key has an invalid size: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise RuntimeError(f"Signing-key permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Signing-key owner is invalid: {path}")
+
+
 def ensure_signing_key(path: Path | None = None) -> None:
     """Create the local trust key once and never replace an existing key."""
     path = path or SIGNING_KEY
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        details = path.lstat()
-    except FileNotFoundError:
-        details = None
-    if details is not None:
-        if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
-            raise RuntimeError(f"Signing-key path is not a regular file: {path}")
-        if details.st_size < 32 or details.st_size > 64 * 1024:
-            raise RuntimeError(f"Signing key has an invalid size: {path}")
-        if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
-            raise RuntimeError(f"Signing-key permissions must be owner-only: {path}")
-        if hasattr(os, "getuid") and details.st_uid != os.getuid():
-            raise RuntimeError(f"Signing-key owner is invalid: {path}")
-        return
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        ensure_signing_key(path)
-        return
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(os.urandom(32))
-            handle.flush()
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    with _open_signing_key_directory(path) as directory:
+        try:
+            details = _signing_key_lstat(path, directory)
+        except FileNotFoundError:
+            details = None
+        if details is not None:
+            _validate_signing_key_details(path, details)
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = _open_signing_key_file(path, directory, flags, 0o600)
+        except FileExistsError:
+            _validate_signing_key_details(path, _signing_key_lstat(path, directory))
+            return
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(os.urandom(32))
+                handle.flush()
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
