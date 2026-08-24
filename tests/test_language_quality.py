@@ -54,7 +54,9 @@ class ReceiptTests(unittest.TestCase):
             )
             changed = SimpleNamespace(**vars(opened))
             changed.st_mtime_ns += 1
-            with mock.patch.object(QUALITY.os, "fstat", side_effect=(opened, changed)):
+            with mock.patch.object(
+                QUALITY, "_signing_key_fstat", side_effect=(opened, changed),
+            ):
                 with self.assertRaisesRegex(ValueError, "changed while reading"):
                     QUALITY.load_existing_key(key_path)
 
@@ -108,6 +110,115 @@ class ReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "exactly one hard link"):
                     QUALITY.load_or_create_key(key_path)
             self.assertEqual(alias.read_bytes(), key_path.read_bytes())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_signing_key_loader_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            target_key = target / "signing.key"
+            target_key.write_bytes(b"a" * 32)
+            target_key.chmod(0o600)
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "safely open"):
+                QUALITY.load_existing_key(linked / "signing.key")
+            self.assertEqual(target_key.read_bytes(), b"a" * 32)
+
+            creation_target = root / "creation-target"
+            creation_target.mkdir()
+            creation_link = root / "creation-link"
+            creation_link.symlink_to(creation_target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "safely open"):
+                QUALITY.load_or_create_key(creation_link / "signing.key")
+            self.assertFalse((creation_target / "signing.key").exists())
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable_key = writable / "signing.key"
+            writable_key.write_bytes(b"b" * 32)
+            writable_key.chmod(0o600)
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(ValueError, "writable outside its owner"):
+                    QUALITY.load_existing_key(writable_key)
+            finally:
+                writable.chmod(0o700)
+
+            creation_writable = root / "creation-writable"
+            creation_writable.mkdir()
+            creation_writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(ValueError, "writable outside its owner"):
+                    QUALITY.load_or_create_key(creation_writable / "signing.key")
+                self.assertFalse((creation_writable / "signing.key").exists())
+            finally:
+                creation_writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_signing_key_loader_detects_parent_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            key_path = trusted / "signing.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            replacement_key = replacement / "signing.key"
+            replacement_key.write_bytes(b"b" * 32)
+            replacement_key.chmod(0o600)
+            real_open = QUALITY.os.open
+            exchanged = False
+
+            def exchange_parent(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal exchanged
+                if Path(path).name == "signing.key" and not exchanged:
+                    exchanged = True
+                    trusted.rename(root / "trusted-old")
+                    replacement.rename(trusted)
+                if dir_fd is None:
+                    return real_open(path, flags, mode)
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(QUALITY.os, "open", side_effect=exchange_parent):
+                with self.assertRaisesRegex(ValueError, "directory changed"):
+                    QUALITY.load_existing_key(key_path)
+
+            self.assertEqual(key_path.read_bytes(), b"b" * 32)
+            self.assertEqual((root / "trusted-old" / "signing.key").read_bytes(), b"a" * 32)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_signing_key_creator_detects_parent_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            key_path = trusted / "signing.key"
+            replacement = root / "replacement"
+            replacement.mkdir()
+            real_open = QUALITY.os.open
+            exchanged = False
+
+            def exchange_parent(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal exchanged
+                if Path(path).name == "signing.key" and not exchanged:
+                    exchanged = True
+                    trusted.rename(root / "trusted-old")
+                    replacement.rename(trusted)
+                if dir_fd is None:
+                    return real_open(path, flags, mode)
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(QUALITY.os, "open", side_effect=exchange_parent):
+                with self.assertRaisesRegex(ValueError, "directory changed"):
+                    QUALITY.load_or_create_key(key_path)
+
+            self.assertFalse(key_path.exists())
+            self.assertEqual((root / "trusted-old" / "signing.key").stat().st_size, 32)
 
     def test_receipt_is_bound_to_every_input(self) -> None:
         token = QUALITY.issue_receipt("Hello", "Hej", "sv-SE", self.KEY)
