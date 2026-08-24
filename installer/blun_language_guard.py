@@ -675,7 +675,7 @@ def _open_mcp_http_token_file(
     return os.open(target, flags, mode, **kwargs)
 
 
-def _read_protected_mcp_http_token(path: Path, *, directory: int | None = None) -> str:
+def _read_protected_mcp_http_token_at(path: Path, directory: int | None) -> str:
     before = _mcp_http_token_lstat(path, directory)
     _validate_mcp_http_token_details(path, before)
     descriptor = _open_mcp_http_token_file(
@@ -710,12 +710,17 @@ def _read_protected_mcp_http_token(path: Path, *, directory: int | None = None) 
     return token
 
 
+def _read_protected_mcp_http_token(path: Path) -> str:
+    with _open_mcp_http_token_directory(path) as directory:
+        return _read_protected_mcp_http_token_at(path, directory)
+
+
 def ensure_mcp_http_token(path: Path | None = None) -> None:
     """Create a stable bearer token for the loopback HTTP MCP endpoint."""
     path = path or MCP_HTTP_TOKEN
     with _open_mcp_http_token_directory(path) as directory:
         try:
-            _read_protected_mcp_http_token(path, directory=directory)
+            _read_protected_mcp_http_token_at(path, directory)
             return
         except FileNotFoundError:
             pass
@@ -724,7 +729,7 @@ def ensure_mcp_http_token(path: Path | None = None) -> None:
         try:
             descriptor = _open_mcp_http_token_file(path, directory, flags, 0o600)
         except FileExistsError:
-            _read_protected_mcp_http_token(path, directory=directory)
+            _read_protected_mcp_http_token_at(path, directory)
             return
         try:
             with os.fdopen(descriptor, "wb", closefd=False) as handle:

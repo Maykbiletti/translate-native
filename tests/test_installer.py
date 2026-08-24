@@ -3155,7 +3155,74 @@ class InstallerTests(unittest.TestCase):
             changed = replacement.stat()
             with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
                 with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER._read_protected_mcp_http_token_at(token, None)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_mcp_http_token_reader_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            target_token = target / "mcp-http.token"
+            target_token.write_text("a" * 64 + "\n", encoding="ascii")
+            target_token.chmod(0o600)
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER._read_protected_mcp_http_token(linked / "mcp-http.token")
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable_token = writable / "mcp-http.token"
+            writable_token.write_text("b" * 64 + "\n", encoding="ascii")
+            writable_token.chmod(0o600)
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER._read_protected_mcp_http_token(writable_token)
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_mcp_http_token_reader_detects_parent_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            token = trusted / "mcp-http.token"
+            token.write_text("a" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            replacement_token = replacement / "mcp-http.token"
+            replacement_token.write_text("b" * 64 + "\n", encoding="ascii")
+            replacement_token.chmod(0o600)
+            original_open = INSTALLER._open_mcp_http_token_file
+
+            def exchange_parent(
+                path: Path,
+                directory_handle: int | None,
+                flags: int,
+                mode: int | None = None,
+            ) -> int:
+                trusted.rename(root / "guard-old")
+                replacement.rename(trusted)
+                return original_open(path, directory_handle, flags, mode)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_open_mcp_http_token_file",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
                     INSTALLER._read_protected_mcp_http_token(token)
+
+            self.assertEqual(token.read_text(encoding="ascii"), "b" * 64 + "\n")
+            self.assertEqual(
+                (root / "guard-old" / "mcp-http.token").read_text(encoding="ascii"),
+                "a" * 64 + "\n",
+            )
 
     @unittest.skipIf(os.name == "nt", "POSIX link test")
     def test_mcp_probe_rejects_linked_access_token_before_network(self) -> None:
