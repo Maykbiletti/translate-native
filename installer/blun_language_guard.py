@@ -572,7 +572,7 @@ def _open_service_token_file(
     return os.open(target, flags, mode, **kwargs)
 
 
-def _read_protected_service_token(path: Path, *, directory: int | None = None) -> str:
+def _read_protected_service_token_at(path: Path, directory: int | None) -> str:
     before = _service_token_lstat(path, directory)
     _validate_service_token_details(path, before)
     descriptor = _open_service_token_file(
@@ -603,12 +603,17 @@ def _read_protected_service_token(path: Path, *, directory: int | None = None) -
     return token
 
 
+def _read_protected_service_token(path: Path) -> str:
+    with _open_service_token_directory(path) as directory:
+        return _read_protected_service_token_at(path, directory)
+
+
 def ensure_service_token(path: Path | None = None) -> None:
     """Create a stable text token used only by host adapters and the MCP process."""
     path = path or SERVICE_TOKEN
     with _open_service_token_directory(path) as directory:
         try:
-            _read_protected_service_token(path, directory=directory)
+            _read_protected_service_token_at(path, directory)
             return
         except FileNotFoundError:
             pass
@@ -617,7 +622,7 @@ def ensure_service_token(path: Path | None = None) -> None:
         try:
             descriptor = _open_service_token_file(path, directory, flags, 0o600)
         except FileExistsError:
-            _read_protected_service_token(path, directory=directory)
+            _read_protected_service_token_at(path, directory)
             return
         try:
             with os.fdopen(descriptor, "wb", closefd=False) as handle:
