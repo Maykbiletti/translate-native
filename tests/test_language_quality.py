@@ -32,9 +32,19 @@ class ReceiptTests(unittest.TestCase):
             key_path.write_bytes(b"short")
             with self.assertRaisesRegex(ValueError, "invalid size"):
                 QUALITY.load_or_create_key(key_path)
+
             key_path.write_bytes(b"x" * (QUALITY.MAX_SIGNING_KEY_BYTES + 1))
             with self.assertRaisesRegex(ValueError, "invalid size"):
                 QUALITY.load_or_create_key(key_path)
+
+    def test_missing_signing_key_lookup_does_not_create_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "missing" / "nested" / "signing.key"
+
+            with self.assertRaises(FileNotFoundError):
+                QUALITY.load_existing_key(key_path)
+
+            self.assertFalse(key_path.parent.exists())
 
     def test_signing_key_rejects_identity_change_while_reading(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

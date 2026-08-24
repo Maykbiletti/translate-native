@@ -127,9 +127,10 @@ def _existing_signing_key_directory_anchor(path: Path) -> Path:
 
 
 @contextlib.contextmanager
-def _open_signing_key_directory(path: Path):
+def _open_signing_key_directory(path: Path, *, create: bool):
     if os.name == "nt":
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
         yield None
         return
     anchor = Path.home()
@@ -157,6 +158,8 @@ def _open_signing_key_directory(path: Path):
                 try:
                     child = os.open(component, flags, dir_fd=descriptor)
                 except FileNotFoundError:
+                    if not create:
+                        raise
                     try:
                         os.mkdir(component, mode=0o700, dir_fd=descriptor)
                     except FileExistsError:
@@ -175,6 +178,8 @@ def _open_signing_key_directory(path: Path):
                 os.fstat(descriptor),
             )
         except ValueError:
+            raise
+        except FileNotFoundError:
             raise
         except OSError as error:
             raise ValueError(
@@ -233,7 +238,7 @@ def _load_existing_key_at(path: Path, directory: int | None) -> bytes:
 
 
 def load_existing_key(path: Path) -> bytes:
-    with _open_signing_key_directory(path) as directory:
+    with _open_signing_key_directory(path, create=False) as directory:
         return _load_existing_key_at(path, directory)
 
 
@@ -241,7 +246,7 @@ def load_or_create_key(path: Path) -> bytes:
     env_key = os.environ.get("BLUN_LANGUAGE_GUARD_KEY")
     if env_key:
         return hashlib.sha256(env_key.encode("utf-8")).digest()
-    with _open_signing_key_directory(path) as directory:
+    with _open_signing_key_directory(path, create=True) as directory:
         try:
             return _load_existing_key_at(path, directory)
         except FileNotFoundError:
