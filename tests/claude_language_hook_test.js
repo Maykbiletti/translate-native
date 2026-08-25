@@ -380,6 +380,58 @@ async function main() {
       fs.readFileSync(path.join(`${trustedPolicyDirectory}-old`, "delivery-policy.json"), "utf8"),
       /"mandatory":true/
     );
+
+    const traversedPolicyDirectory = path.join(temporary, "traversed-policy-directory");
+    const replacementTraversalDirectory = path.join(temporary, "replacement-traversal-directory");
+    const traversedPolicyConfig = path.join(traversedPolicyDirectory, "config");
+    const replacementTraversalConfig = path.join(replacementTraversalDirectory, "config");
+    fs.mkdirSync(traversedPolicyDirectory, { mode: 0o700 });
+    fs.mkdirSync(replacementTraversalDirectory, { mode: 0o700 });
+    fs.mkdirSync(traversedPolicyConfig, { mode: 0o700 });
+    fs.mkdirSync(replacementTraversalConfig, { mode: 0o700 });
+    const traversedPolicy = path.join(traversedPolicyConfig, "delivery-policy.json");
+    fs.copyFileSync(policyFile, traversedPolicy);
+    fs.chmodSync(traversedPolicy, 0o600);
+    fs.writeFileSync(
+      path.join(replacementTraversalConfig, "delivery-policy.json"),
+      "{}",
+      { mode: 0o600 }
+    );
+    const originalTraversalHome = os.homedir;
+    const originalTraversalOpenSync = fs.openSync;
+    let openedTraversalParent = false;
+    let exchangedTraversalParent = false;
+    os.homedir = () => temporary;
+    fs.openSync = (candidate, ...options) => {
+      const basename = path.basename(String(candidate));
+      if (basename === path.basename(traversedPolicyDirectory)) openedTraversalParent = true;
+      if (basename !== "config" || !openedTraversalParent || exchangedTraversalParent) {
+        return originalTraversalOpenSync(candidate, ...options);
+      }
+      fs.renameSync(traversedPolicyDirectory, `${traversedPolicyDirectory}-old`);
+      fs.renameSync(replacementTraversalDirectory, traversedPolicyDirectory);
+      try {
+        return originalTraversalOpenSync(candidate, ...options);
+      } finally {
+        fs.renameSync(traversedPolicyDirectory, `${traversedPolicyDirectory}-replacement`);
+        fs.renameSync(`${traversedPolicyDirectory}-old`, traversedPolicyDirectory);
+        exchangedTraversalParent = true;
+      }
+    };
+    try {
+      assert.strictEqual(readProtectedDeliveryPolicy(traversedPolicy).mandatory, true);
+    } finally {
+      fs.openSync = originalTraversalOpenSync;
+      os.homedir = originalTraversalHome;
+    }
+    assert(exchangedTraversalParent, "the intermediate policy parent must be exchanged during traversal");
+    assert.strictEqual(
+      fs.readFileSync(
+        path.join(`${traversedPolicyDirectory}-replacement`, "config", "delivery-policy.json"),
+        "utf8"
+      ),
+      "{}"
+    );
   }
 
   const environment = { BLUN_LANGUAGE_GUARD_RUNTIME: temporary };

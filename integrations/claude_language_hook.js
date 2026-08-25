@@ -116,6 +116,7 @@ function openProtectedDirectory(file, label) {
   const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
   const directoryOnly = typeof fs.constants.O_DIRECTORY === "number" ? fs.constants.O_DIRECTORY : 0;
   const flags = fs.constants.O_RDONLY | noFollow | directoryOnly;
+  const descriptorRoot = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
   let descriptor = null;
   let current = anchor;
   try {
@@ -123,7 +124,7 @@ function openProtectedDirectory(file, label) {
     validateProtectedDirectoryStats(fs.fstatSync(descriptor), anchor, label);
     for (const component of components) {
       current = path.join(current, component);
-      const child = fs.openSync(current, flags);
+      const child = fs.openSync(path.join(descriptorRoot, String(descriptor), component), flags);
       try {
         validateProtectedDirectoryStats(fs.fstatSync(child), current, label);
       } catch (error) {
@@ -134,7 +135,6 @@ function openProtectedDirectory(file, label) {
       descriptor = child;
     }
     const identity = protectedDirectoryIdentity(fs.fstatSync(descriptor));
-    const descriptorRoot = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
     const accessPath = path.join(descriptorRoot, String(descriptor), path.basename(absoluteFile));
     return { accessPath, absoluteFile, descriptor, directory, identity };
   } catch (error) {
