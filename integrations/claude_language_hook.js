@@ -510,29 +510,32 @@ function sameRecordIdentity(stats, expected) {
     && stats.mtimeMs === expected.mtimeMs;
 }
 
+function readProtectedRecordFile(recordFile) {
+  const before = fs.lstatSync(recordFile);
+  validateRecordStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(recordFile, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validateRecordStats(opened);
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("delivery grant state changed while opening");
+    }
+    const raw = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("delivery grant state root must be an object");
+    }
+    return { record: parsed, fileIdentity: recordIdentity(opened) };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function readProtectedRecord(destination) {
   const protectedDirectory = openProtectedDirectory(destination, "delivery grant state");
-  const recordFile = protectedDirectory.accessPath;
   try {
-    const before = fs.lstatSync(recordFile);
-    validateRecordStats(before);
-    const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-    const descriptor = fs.openSync(recordFile, fs.constants.O_RDONLY | noFollow);
-    try {
-      const opened = fs.fstatSync(descriptor);
-      validateRecordStats(opened);
-      if (!sameRecordIdentity(opened, recordIdentity(before))) {
-        throw new Error("delivery grant state changed while opening");
-      }
-      const raw = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "");
-      const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("delivery grant state root must be an object");
-      }
-      return { record: parsed, fileIdentity: recordIdentity(opened) };
-    } finally {
-      fs.closeSync(descriptor);
-    }
+    return readProtectedRecordFile(protectedDirectory.accessPath);
   } finally {
     closeProtectedDirectory(protectedDirectory, "delivery grant state");
   }
@@ -605,35 +608,42 @@ function invalidateAgentRecord(input) {
 function invalidateSessionRecords(input) {
   const directory = stateDirectory();
   const expectedSession = sessionHash(input);
-  const legacyMainRecord = statePath(input);
-  let entries;
+  const legacyMainRecordName = path.basename(statePath(input));
   try {
-    entries = fs.readdirSync(directory, { withFileTypes: true });
+    fs.lstatSync(directory);
   } catch (error) {
     if (error && error.code === "ENOENT") return;
     throw error;
   }
-  for (const entry of entries) {
-    if ((!entry.isFile() && !entry.isSymbolicLink()) || !entry.name.endsWith(".json")) continue;
-    const candidate = path.join(directory, entry.name);
-    let belongsToSession = candidate === legacyMainRecord;
-    if (!belongsToSession) {
+  const anchor = path.join(directory, ".session-invalidation-anchor");
+  const protectedDirectory = openProtectedDirectory(anchor, "Claude hook state");
+  const stateAccessDirectory = path.dirname(protectedDirectory.accessPath);
+  try {
+    const entries = fs.readdirSync(stateAccessDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+      if ((!entry.isFile() && !entry.isSymbolicLink()) || !entry.name.endsWith(".json")) continue;
+      const candidate = path.join(stateAccessDirectory, entry.name);
+      let belongsToSession = entry.name === legacyMainRecordName;
+      if (!belongsToSession) {
+        try {
+          const { record } = readProtectedRecordFile(candidate);
+          const legacyGrant = typeof record.session_sha256 !== "string"
+            && typeof record.delivery_grant === "string"
+            && Number.isFinite(record.authorized_at);
+          belongsToSession = record.session_sha256 === expectedSession || legacyGrant;
+        } catch (_) {
+          continue;
+        }
+      }
+      if (!belongsToSession) continue;
       try {
-        const { record } = readProtectedRecord(candidate);
-        const legacyGrant = typeof record.session_sha256 !== "string"
-          && typeof record.delivery_grant === "string"
-          && Number.isFinite(record.authorized_at);
-        belongsToSession = record.session_sha256 === expectedSession || legacyGrant;
-      } catch (_) {
-        continue;
+        fs.unlinkSync(candidate);
+      } catch (error) {
+        if (!error || error.code !== "ENOENT") throw error;
       }
     }
-    if (!belongsToSession) continue;
-    try {
-      fs.unlinkSync(candidate);
-    } catch (error) {
-      if (!error || error.code !== "ENOENT") throw error;
-    }
+  } finally {
+    closeProtectedDirectory(protectedDirectory, "Claude hook state");
   }
 }
 

@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
-const { beginSessionEpoch, invalidateAgentRecord, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
+const { beginSessionEpoch, invalidateAgentRecord, invalidateSessionRecords, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -204,6 +204,108 @@ async function main() {
       fs.readFileSync(path.join(`${trustedInvalidateDirectory}-replacement`, invalidateRecordName), "utf8"),
       '{"grant":"replacement"}\n'
     );
+
+    const trustedSessionInvalidateDirectory = path.join(temporary, "trusted-session-invalidate-directory");
+    const replacementSessionInvalidateDirectory = path.join(temporary, "replacement-session-invalidate-directory");
+    fs.mkdirSync(trustedSessionInvalidateDirectory, { mode: 0o700 });
+    fs.mkdirSync(replacementSessionInvalidateDirectory, { mode: 0o700 });
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedSessionInvalidateDirectory;
+    const sessionInvalidateInput = { session_id: "session-invalidate-parent-race", agent_id: "main" };
+    const sessionInvalidateHash = crypto.createHash("sha256").update(sessionInvalidateInput.session_id).digest("hex");
+    const sessionInvalidateRecordName = "child-grant.json";
+    const unrelatedRecordName = "unrelated-grant.json";
+    fs.writeFileSync(
+      path.join(trustedSessionInvalidateDirectory, sessionInvalidateRecordName),
+      `${JSON.stringify({ session_sha256: sessionInvalidateHash })}\n`,
+      { mode: 0o600 }
+    );
+    fs.writeFileSync(
+      path.join(trustedSessionInvalidateDirectory, unrelatedRecordName),
+      `${JSON.stringify({ session_sha256: "0".repeat(64) })}\n`,
+      { mode: 0o600 }
+    );
+    fs.writeFileSync(
+      path.join(replacementSessionInvalidateDirectory, sessionInvalidateRecordName),
+      '{"grant":"replacement"}\n',
+      { mode: 0o600 }
+    );
+    const originalSessionInvalidateUnlinkSync = fs.unlinkSync;
+    let exchangedSessionInvalidateDirectory = false;
+    fs.unlinkSync = (candidate, ...options) => {
+      if (path.basename(String(candidate)) === sessionInvalidateRecordName
+          && !exchangedSessionInvalidateDirectory) {
+        fs.renameSync(trustedSessionInvalidateDirectory, `${trustedSessionInvalidateDirectory}-old`);
+        fs.renameSync(replacementSessionInvalidateDirectory, trustedSessionInvalidateDirectory);
+        const result = originalSessionInvalidateUnlinkSync(candidate, ...options);
+        fs.renameSync(trustedSessionInvalidateDirectory, `${trustedSessionInvalidateDirectory}-replacement`);
+        fs.renameSync(`${trustedSessionInvalidateDirectory}-old`, trustedSessionInvalidateDirectory);
+        exchangedSessionInvalidateDirectory = true;
+        return result;
+      }
+      return originalSessionInvalidateUnlinkSync(candidate, ...options);
+    };
+    try {
+      invalidateSessionRecords(sessionInvalidateInput);
+    } finally {
+      fs.unlinkSync = originalSessionInvalidateUnlinkSync;
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
+    assert(exchangedSessionInvalidateDirectory, "the session grant parent must be exchanged during invalidation");
+    assert(
+      !fs.existsSync(path.join(trustedSessionInvalidateDirectory, sessionInvalidateRecordName)),
+      "the original session grant must be invalidated"
+    );
+    assert(fs.existsSync(
+      path.join(trustedSessionInvalidateDirectory, unrelatedRecordName)
+    ), "another session's grant must remain");
+    assert.strictEqual(
+      fs.readFileSync(
+        path.join(`${trustedSessionInvalidateDirectory}-replacement`, sessionInvalidateRecordName),
+        "utf8"
+      ),
+      '{"grant":"replacement"}\n'
+    );
+
+    const writableSessionInvalidateDirectory = path.join(temporary, "writable-session-invalidate-directory");
+    fs.mkdirSync(writableSessionInvalidateDirectory, { mode: 0o700 });
+    const writableSessionInvalidateRecord = path.join(
+      writableSessionInvalidateDirectory, sessionInvalidateRecordName
+    );
+    fs.writeFileSync(
+      writableSessionInvalidateRecord,
+      `${JSON.stringify({ session_sha256: sessionInvalidateHash })}\n`,
+      { mode: 0o600 }
+    );
+    fs.chmodSync(writableSessionInvalidateDirectory, 0o777);
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = writableSessionInvalidateDirectory;
+    try {
+      assert.throws(
+        () => invalidateSessionRecords(sessionInvalidateInput),
+        /directory is writable outside its owner/
+      );
+      assert(
+        fs.existsSync(writableSessionInvalidateRecord),
+        "unsafe-parent session invalidation must preserve the grant"
+      );
+    } finally {
+      fs.chmodSync(writableSessionInvalidateDirectory, 0o700);
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
+
+    const missingSessionInvalidateDirectory = path.join(temporary, "missing-session-invalidate-directory");
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = missingSessionInvalidateDirectory;
+    try {
+      invalidateSessionRecords(sessionInvalidateInput);
+      assert(
+        !fs.existsSync(missingSessionInvalidateDirectory),
+        "session invalidation must not create a missing state directory"
+      );
+    } finally {
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
 
     const writableInvalidateDirectory = path.join(temporary, "writable-invalidate-directory");
     fs.mkdirSync(writableInvalidateDirectory, { mode: 0o700 });
