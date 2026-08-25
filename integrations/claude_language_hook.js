@@ -433,36 +433,42 @@ async function beginSessionEpoch(input) {
   const directory = stateDirectory();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const destination = sessionEpochPath(input);
+  const protectedDirectory = openProtectedDirectory(destination, "session epoch");
+  const epochFile = protectedDirectory.accessPath;
   try {
-    fs.unlinkSync(destination);
-  } catch (error) {
-    if (!error || error.code !== "ENOENT") throw error;
-  }
-  invalidateSessionRecords(input);
-  const epoch = crypto.randomBytes(32).toString("hex");
-  const registration = await callGuard({
-    operation: "register_session_epoch",
-    session_id: String(input.session_id || ""),
-    session_epoch: epoch
-  }, 3000);
-  if (registration.status !== "PASS" || registration.registered !== true) {
-    throw new Error("isolated guard rejected the session epoch");
-  }
-  const temporary = `${destination}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
-  let descriptor;
-  try {
-    descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
-    fs.writeFileSync(descriptor, `${epoch}\n`, "utf8");
-    fs.fsyncSync(descriptor);
-    fs.closeSync(descriptor);
-    descriptor = undefined;
-    fs.renameSync(temporary, destination);
+    try {
+      fs.unlinkSync(epochFile);
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+    }
+    invalidateSessionRecords(input);
+    const epoch = crypto.randomBytes(32).toString("hex");
+    const registration = await callGuard({
+      operation: "register_session_epoch",
+      session_id: String(input.session_id || ""),
+      session_epoch: epoch
+    }, 3000);
+    if (registration.status !== "PASS" || registration.registered !== true) {
+      throw new Error("isolated guard rejected the session epoch");
+    }
+    const temporary = `${epochFile}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
+    let descriptor;
+    try {
+      descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      fs.writeFileSync(descriptor, `${epoch}\n`, "utf8");
+      fs.fsyncSync(descriptor);
+      fs.closeSync(descriptor);
+      descriptor = undefined;
+      fs.renameSync(temporary, epochFile);
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+      try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+    }
+    try { fs.chmodSync(epochFile, 0o600); } catch (_) {}
+    return epoch;
   } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
-    try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+    closeProtectedDirectory(protectedDirectory, "session epoch");
   }
-  try { fs.chmodSync(destination, 0o600); } catch (_) {}
-  return epoch;
 }
 
 function statePath(input) {

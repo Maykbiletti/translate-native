@@ -616,6 +616,64 @@ async function main() {
   const previousRuntime = process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
   process.env.BLUN_LANGUAGE_GUARD_RUNTIME = temporary;
   try {
+    if (process.platform !== "win32") {
+      const previousStateDirectory = process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      const trustedEpochWriteDirectory = path.join(temporary, "trusted-epoch-write-directory");
+      const replacementEpochWriteDirectory = path.join(temporary, "replacement-epoch-write-directory");
+      fs.mkdirSync(trustedEpochWriteDirectory, { mode: 0o700 });
+      fs.mkdirSync(replacementEpochWriteDirectory, { mode: 0o700 });
+      fs.writeFileSync(path.join(replacementEpochWriteDirectory, "sentinel"), "replacement\n", { mode: 0o600 });
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      const epochWriteInput = { session_id: "epoch-write-parent-race", cwd: temporary };
+      const epochWriteName = `session-${crypto.createHash("sha256").update(epochWriteInput.session_id).digest("hex")}.epoch`;
+      const originalEpochWriteRenameSync = fs.renameSync;
+      let exchangedEpochWriteDirectory = false;
+      fs.renameSync = (source, destination, ...options) => {
+        if (path.basename(String(destination)) === epochWriteName && !exchangedEpochWriteDirectory) {
+          originalEpochWriteRenameSync(trustedEpochWriteDirectory, `${trustedEpochWriteDirectory}-old`);
+          originalEpochWriteRenameSync(replacementEpochWriteDirectory, trustedEpochWriteDirectory);
+          const result = originalEpochWriteRenameSync(source, destination, ...options);
+          originalEpochWriteRenameSync(trustedEpochWriteDirectory, `${trustedEpochWriteDirectory}-replacement`);
+          originalEpochWriteRenameSync(`${trustedEpochWriteDirectory}-old`, trustedEpochWriteDirectory);
+          exchangedEpochWriteDirectory = true;
+          return result;
+        }
+        return originalEpochWriteRenameSync(source, destination, ...options);
+      };
+      let writtenEpoch;
+      try {
+        writtenEpoch = await beginSessionEpoch(epochWriteInput);
+      } finally {
+        fs.renameSync = originalEpochWriteRenameSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(exchangedEpochWriteDirectory, "the epoch parent must be exchanged during publication");
+      assert.strictEqual(
+        fs.readFileSync(path.join(trustedEpochWriteDirectory, epochWriteName), "utf8"),
+        `${writtenEpoch}\n`
+      );
+      assert.strictEqual(
+        fs.readFileSync(path.join(`${trustedEpochWriteDirectory}-replacement`, "sentinel"), "utf8"),
+        "replacement\n"
+      );
+
+      const writableEpochWriteDirectory = path.join(temporary, "writable-epoch-write-directory");
+      fs.mkdirSync(writableEpochWriteDirectory, { mode: 0o777 });
+      fs.chmodSync(writableEpochWriteDirectory, 0o777);
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = writableEpochWriteDirectory;
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch({ session_id: "unsafe-epoch-write-parent", cwd: temporary }),
+          /directory is writable outside its owner/
+        );
+      } finally {
+        fs.chmodSync(writableEpochWriteDirectory, 0o700);
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+    }
+
     const protectedInput = { session_id: "session-epoch-hardening", cwd: temporary };
     const protectedEpoch = path.join(
       temporary,
