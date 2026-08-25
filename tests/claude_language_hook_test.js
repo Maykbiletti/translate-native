@@ -468,6 +468,74 @@ async function main() {
     fs.writeFileSync(protectedEpoch, `${"a".repeat(129)}\n`, { mode: 0o600 });
     assert.throws(() => readSessionEpoch(protectedInput), /invalid size/);
     fs.unlinkSync(protectedEpoch);
+
+    if (process.platform !== "win32") {
+      const epochName = path.basename(protectedEpoch);
+      const previousStateDirectory = process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      const linkedEpochTarget = path.join(temporary, "linked-epoch-target");
+      const linkedEpochDirectory = path.join(temporary, "linked-epoch-directory");
+      fs.mkdirSync(linkedEpochTarget, { mode: 0o700 });
+      fs.writeFileSync(path.join(linkedEpochTarget, epochName), `${"b".repeat(64)}\n`, { mode: 0o600 });
+      fs.symlinkSync(linkedEpochTarget, linkedEpochDirectory, "dir");
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = linkedEpochDirectory;
+      assert.throws(() => readSessionEpoch(protectedInput), /directory cannot be opened safely/);
+
+      const writableEpochDirectory = path.join(temporary, "writable-epoch-directory");
+      fs.mkdirSync(writableEpochDirectory, { mode: 0o700 });
+      fs.writeFileSync(path.join(writableEpochDirectory, epochName), `${"c".repeat(64)}\n`, { mode: 0o600 });
+      fs.chmodSync(writableEpochDirectory, 0o777);
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = writableEpochDirectory;
+      try {
+        assert.throws(() => readSessionEpoch(protectedInput), /directory is writable outside its owner/);
+      } finally {
+        fs.chmodSync(writableEpochDirectory, 0o700);
+      }
+
+      const trustedEpochDirectory = path.join(temporary, "trusted-epoch-directory");
+      const replacementEpochDirectory = path.join(temporary, "replacement-epoch-directory");
+      fs.mkdirSync(trustedEpochDirectory, { mode: 0o700 });
+      fs.mkdirSync(replacementEpochDirectory, { mode: 0o700 });
+      const originalEpoch = "d".repeat(64);
+      const replacementEpoch = "e".repeat(64);
+      fs.writeFileSync(path.join(trustedEpochDirectory, epochName), `${originalEpoch}\n`, { mode: 0o600 });
+      fs.writeFileSync(path.join(replacementEpochDirectory, epochName), `${replacementEpoch}\n`, { mode: 0o600 });
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochDirectory;
+      const originalEpochLstatSync = fs.lstatSync;
+      const originalEpochOpenSync = fs.openSync;
+      let exchangedEpochDirectory = false;
+      let restoredEpochDirectory = false;
+      fs.lstatSync = (candidate, ...options) => {
+        const details = originalEpochLstatSync(candidate, ...options);
+        if (path.basename(String(candidate)) === epochName && !exchangedEpochDirectory) {
+          fs.renameSync(trustedEpochDirectory, `${trustedEpochDirectory}-old`);
+          fs.renameSync(replacementEpochDirectory, trustedEpochDirectory);
+          exchangedEpochDirectory = true;
+        }
+        return details;
+      };
+      fs.openSync = (candidate, ...options) => {
+        const descriptor = originalEpochOpenSync(candidate, ...options);
+        if (path.basename(String(candidate)) === epochName
+            && exchangedEpochDirectory && !restoredEpochDirectory) {
+          fs.renameSync(trustedEpochDirectory, `${trustedEpochDirectory}-replacement`);
+          fs.renameSync(`${trustedEpochDirectory}-old`, trustedEpochDirectory);
+          restoredEpochDirectory = true;
+        }
+        return descriptor;
+      };
+      try {
+        assert.strictEqual(readSessionEpoch(protectedInput).epoch, originalEpoch);
+      } finally {
+        fs.lstatSync = originalEpochLstatSync;
+        fs.openSync = originalEpochOpenSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert.strictEqual(
+        fs.readFileSync(path.join(`${trustedEpochDirectory}-replacement`, epochName), "utf8"),
+        `${replacementEpoch}\n`
+      );
+    }
   } finally {
     if (previousRuntime === undefined) delete process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
     else process.env.BLUN_LANGUAGE_GUARD_RUNTIME = previousRuntime;
