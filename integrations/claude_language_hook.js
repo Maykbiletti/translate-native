@@ -548,22 +548,26 @@ function removeExactRecord(destination, expected) {
 }
 
 function writeRecord(input, record) {
-  const directory = stateDirectory();
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const destination = statePath(input);
-  const temporary = `${destination}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
-  let descriptor;
+  const protectedDirectory = openProtectedDirectory(destination, "delivery grant state");
+  const stateFile = protectedDirectory.accessPath;
+  const temporary = `${stateFile}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
   try {
-    descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
-    fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, "utf8");
-    fs.fsyncSync(descriptor);
-    fs.closeSync(descriptor);
-    descriptor = undefined;
-    fs.renameSync(temporary, destination);
-    try { fs.chmodSync(destination, 0o600); } catch (_) {}
+    let descriptor;
+    try {
+      descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, "utf8");
+      fs.fsyncSync(descriptor);
+      fs.closeSync(descriptor);
+      descriptor = undefined;
+      fs.renameSync(temporary, stateFile);
+      try { fs.chmodSync(stateFile, 0o600); } catch (_) {}
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+      try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+    }
   } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
-    try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+    closeProtectedDirectory(protectedDirectory, "delivery grant state");
   }
 }
 
@@ -1027,4 +1031,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash, writeRecord };

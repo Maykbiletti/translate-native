@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
-const { beginSessionEpoch, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord } = require(HOOK);
+const { beginSessionEpoch, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -166,6 +166,59 @@ async function main() {
       fs.readFileSync(path.join(replacementAfterConsume, recordName), "utf8"),
       '{"grant":"replacement"}\n'
     );
+
+    const previousStateDirectory = process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+    const trustedWriteDirectory = path.join(temporary, "trusted-write-directory");
+    const replacementWriteDirectory = path.join(temporary, "replacement-write-directory");
+    fs.mkdirSync(trustedWriteDirectory, { mode: 0o700 });
+    fs.mkdirSync(replacementWriteDirectory, { mode: 0o700 });
+    fs.writeFileSync(path.join(replacementWriteDirectory, "sentinel"), "replacement\n", { mode: 0o600 });
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedWriteDirectory;
+    const writeInput = { session_id: "write-parent-race", agent_id: "main" };
+    const writeRecordName = `${crypto.createHash("sha256").update("write-parent-race\0main").digest("hex")}.json`;
+    const originalWriteRenameSync = fs.renameSync;
+    let exchangedWriteDirectory = false;
+    fs.renameSync = (source, destination, ...options) => {
+      if (path.basename(String(destination)) === writeRecordName && !exchangedWriteDirectory) {
+        originalWriteRenameSync(trustedWriteDirectory, `${trustedWriteDirectory}-old`);
+        originalWriteRenameSync(replacementWriteDirectory, trustedWriteDirectory);
+        const result = originalWriteRenameSync(source, destination, ...options);
+        originalWriteRenameSync(trustedWriteDirectory, `${trustedWriteDirectory}-replacement`);
+        originalWriteRenameSync(`${trustedWriteDirectory}-old`, trustedWriteDirectory);
+        exchangedWriteDirectory = true;
+        return result;
+      }
+      return originalWriteRenameSync(source, destination, ...options);
+    };
+    try {
+      writeRecord(writeInput, { grant: "original" });
+    } finally {
+      fs.renameSync = originalWriteRenameSync;
+      if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+    }
+    assert(exchangedWriteDirectory, "the grant parent must be exchanged during publication");
+    assert.strictEqual(
+      fs.readFileSync(path.join(trustedWriteDirectory, writeRecordName), "utf8"),
+      '{"grant":"original"}\n'
+    );
+    assert.strictEqual(
+      fs.readFileSync(path.join(`${trustedWriteDirectory}-replacement`, "sentinel"), "utf8"),
+      "replacement\n"
+    );
+
+    const missingWriteDirectory = path.join(temporary, "missing-write-directory");
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = missingWriteDirectory;
+    try {
+      assert.throws(
+        () => writeRecord({ session_id: "missing-write-parent", agent_id: "main" }, { grant: "blocked" }),
+        /directory cannot be opened safely/
+      );
+      assert(!fs.existsSync(missingWriteDirectory), "grant writing must not create an unverified state directory");
+    } finally {
+      if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+    }
   }
   const token = "a".repeat(64);
   const serviceTokenFile = path.join(temporary, "service.token");
