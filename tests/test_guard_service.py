@@ -67,7 +67,7 @@ class GuardServiceTests(unittest.TestCase):
         )
         changed = SimpleNamespace(**vars(opened))
         changed.st_mtime_ns += 1
-        with mock.patch.object(CLIENT.os, "fstat", side_effect=(opened, changed)):
+        with mock.patch.object(CLIENT, "_token_fstat", side_effect=(opened, changed)):
             with self.assertRaisesRegex(CLIENT.GuardServiceError, "changed while reading"):
                 CLIENT.load_service_token(token_path)
 
@@ -88,6 +88,72 @@ class GuardServiceTests(unittest.TestCase):
         token_path.chmod(0o644)
         with self.assertRaisesRegex(CLIENT.GuardServiceError, "owner-only"):
             CLIENT.load_service_token(token_path)
+
+    @unittest.skipIf(os.name == "nt", "POSIX service-token directory safety test")
+    def test_service_token_runtime_rejects_unsafe_parent_directories(self) -> None:
+        root = Path(self.temporary.name)
+        redirected = root / "redirected"
+        redirected.mkdir()
+        redirected_token = redirected / "service.token"
+        redirected_token.write_text("r" * 64 + "\n", encoding="ascii")
+        redirected_token.chmod(0o600)
+        linked = root / "linked"
+        linked.symlink_to(redirected, target_is_directory=True)
+
+        with self.assertRaisesRegex(CLIENT.GuardServiceError, "token directory"):
+            CLIENT.load_service_token(linked / "service.token")
+
+        writable = root / "writable"
+        writable.mkdir()
+        writable_token = writable / "service.token"
+        writable_token.write_text("w" * 64 + "\n", encoding="ascii")
+        writable_token.chmod(0o600)
+        writable.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(CLIENT.GuardServiceError, "writable outside"):
+                CLIENT.load_service_token(writable_token)
+        finally:
+            writable.chmod(0o700)
+
+    def test_service_token_runtime_does_not_create_missing_parent_directories(self) -> None:
+        token_path = Path(self.temporary.name) / "missing" / "nested" / "service.token"
+
+        with self.assertRaises(FileNotFoundError):
+            CLIENT.load_service_token(token_path)
+
+        self.assertFalse(token_path.parent.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX service-token directory identity test")
+    def test_service_token_runtime_detects_parent_exchange_after_open(self) -> None:
+        root = Path(self.temporary.name)
+        trusted = root / "trusted"
+        trusted.mkdir()
+        token_path = trusted / "service.token"
+        token_path.write_text("t" * 64 + "\n", encoding="ascii")
+        token_path.chmod(0o600)
+        replacement = root / "replacement"
+        replacement.mkdir()
+        replacement_token = replacement / "service.token"
+        replacement_token.write_text("x" * 64 + "\n", encoding="ascii")
+        replacement_token.chmod(0o600)
+        displaced = root / "displaced"
+        real_validate = CLIENT._validate_token_file
+        calls = 0
+
+        def exchange_after_open(details) -> None:
+            nonlocal calls
+            real_validate(details)
+            calls += 1
+            if calls == 2:
+                trusted.rename(displaced)
+                replacement.rename(trusted)
+
+        with mock.patch.object(CLIENT, "_validate_token_file", side_effect=exchange_after_open):
+            with self.assertRaisesRegex(CLIENT.GuardServiceError, "token directory changed"):
+                CLIENT.load_service_token(token_path)
+
+        self.assertEqual((trusted / "service.token").read_text(encoding="ascii").strip(), "x" * 64)
+        self.assertEqual((displaced / "service.token").read_text(encoding="ascii").strip(), "t" * 64)
 
     def release_request(self, target: str = "Natürlich ist das möglich.") -> dict:
         return {
