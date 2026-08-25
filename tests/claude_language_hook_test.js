@@ -111,6 +111,44 @@ async function main() {
       fs.readFileSync(path.join(`${trustedRecordDirectory}-replacement`, recordName), "utf8"),
       '{"grant":"replacement"}\n'
     );
+
+    const inspectedGrant = readProtectedRecord(trustedRecord);
+    const replacementBeforeConsume = `${trustedRecordDirectory}-replacement`;
+    const replacementAfterConsume = `${trustedRecordDirectory}-replacement-after-consume`;
+    const originalConsumeLstatSync = fs.lstatSync;
+    const originalConsumeUnlinkSync = fs.unlinkSync;
+    let exchangedConsumeDirectory = false;
+    let restoredConsumeDirectory = false;
+    fs.lstatSync = (candidate, ...options) => {
+      const details = originalConsumeLstatSync(candidate, ...options);
+      if (path.basename(String(candidate)) === recordName && !exchangedConsumeDirectory) {
+        fs.renameSync(trustedRecordDirectory, `${trustedRecordDirectory}-consume-old`);
+        fs.renameSync(replacementBeforeConsume, trustedRecordDirectory);
+        exchangedConsumeDirectory = true;
+      }
+      return details;
+    };
+    fs.unlinkSync = (candidate, ...options) => {
+      const result = originalConsumeUnlinkSync(candidate, ...options);
+      if (path.basename(String(candidate)) === recordName
+          && exchangedConsumeDirectory && !restoredConsumeDirectory) {
+        fs.renameSync(trustedRecordDirectory, replacementAfterConsume);
+        fs.renameSync(`${trustedRecordDirectory}-consume-old`, trustedRecordDirectory);
+        restoredConsumeDirectory = true;
+      }
+      return result;
+    };
+    try {
+      removeExactRecord(trustedRecord, inspectedGrant.fileIdentity);
+    } finally {
+      fs.lstatSync = originalConsumeLstatSync;
+      fs.unlinkSync = originalConsumeUnlinkSync;
+    }
+    assert(!fs.existsSync(trustedRecord), "the originally inspected grant must be consumed");
+    assert.strictEqual(
+      fs.readFileSync(path.join(replacementAfterConsume, recordName), "utf8"),
+      '{"grant":"replacement"}\n'
+    );
   }
   const token = "a".repeat(64);
   const serviceTokenFile = path.join(temporary, "service.token");

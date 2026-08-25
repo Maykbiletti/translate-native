@@ -527,12 +527,18 @@ function readProtectedRecord(destination) {
 }
 
 function removeExactRecord(destination, expected) {
-  const current = fs.lstatSync(destination);
-  validateRecordStats(current);
-  if (!sameRecordIdentity(current, expected)) {
-    throw new Error("delivery grant state changed before consumption");
+  const protectedDirectory = openProtectedDirectory(destination, "Claude hook state");
+  const stateFile = protectedDirectory.accessPath;
+  try {
+    const current = fs.lstatSync(stateFile);
+    validateRecordStats(current);
+    if (!sameRecordIdentity(current, expected)) {
+      throw new Error("delivery grant state changed before consumption");
+    }
+    fs.unlinkSync(stateFile);
+  } finally {
+    closeProtectedDirectory(protectedDirectory, "Claude hook state");
   }
-  fs.unlinkSync(destination);
 }
 
 function writeRecord(input, record) {
