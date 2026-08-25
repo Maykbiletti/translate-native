@@ -499,24 +499,30 @@ function sameRecordIdentity(stats, expected) {
 }
 
 function readProtectedRecord(destination) {
-  const before = fs.lstatSync(destination);
-  validateRecordStats(before);
-  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  const protectedDirectory = openProtectedDirectory(destination, "delivery grant state");
+  const recordFile = protectedDirectory.accessPath;
   try {
-    const opened = fs.fstatSync(descriptor);
-    validateRecordStats(opened);
-    if (!sameRecordIdentity(opened, recordIdentity(before))) {
-      throw new Error("delivery grant state changed while opening");
+    const before = fs.lstatSync(recordFile);
+    validateRecordStats(before);
+    const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+    const descriptor = fs.openSync(recordFile, fs.constants.O_RDONLY | noFollow);
+    try {
+      const opened = fs.fstatSync(descriptor);
+      validateRecordStats(opened);
+      if (!sameRecordIdentity(opened, recordIdentity(before))) {
+        throw new Error("delivery grant state changed while opening");
+      }
+      const raw = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "");
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("delivery grant state root must be an object");
+      }
+      return { record: parsed, fileIdentity: recordIdentity(opened) };
+    } finally {
+      fs.closeSync(descriptor);
     }
-    const raw = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("delivery grant state root must be an object");
-    }
-    return { record: parsed, fileIdentity: recordIdentity(opened) };
   } finally {
-    fs.closeSync(descriptor);
+    closeProtectedDirectory(protectedDirectory, "delivery grant state");
   }
 }
 

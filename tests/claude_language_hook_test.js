@@ -42,6 +42,76 @@ async function main() {
   assert(fs.existsSync(replacedRecord), "a replacement record must not be removed");
   fs.unlinkSync(replacedRecord);
   fs.unlinkSync(`${replacedRecord}.old`);
+  if (process.platform !== "win32") {
+    const recordName = "delivery-grant.json";
+    const linkedRecordTarget = path.join(temporary, "linked-record-target");
+    const linkedRecordDirectory = path.join(temporary, "linked-record-directory");
+    fs.mkdirSync(linkedRecordTarget, { mode: 0o700 });
+    fs.writeFileSync(path.join(linkedRecordTarget, recordName), '{"grant":"linked"}\n', { mode: 0o600 });
+    fs.symlinkSync(linkedRecordTarget, linkedRecordDirectory, "dir");
+    assert.throws(
+      () => readProtectedRecord(path.join(linkedRecordDirectory, recordName)),
+      /directory cannot be opened safely/
+    );
+
+    const writableRecordDirectory = path.join(temporary, "writable-record-directory");
+    fs.mkdirSync(writableRecordDirectory, { mode: 0o700 });
+    fs.writeFileSync(path.join(writableRecordDirectory, recordName), '{"grant":"writable"}\n', { mode: 0o600 });
+    fs.chmodSync(writableRecordDirectory, 0o777);
+    try {
+      assert.throws(
+        () => readProtectedRecord(path.join(writableRecordDirectory, recordName)),
+        /directory is writable outside its owner/
+      );
+    } finally {
+      fs.chmodSync(writableRecordDirectory, 0o700);
+    }
+
+    const trustedRecordDirectory = path.join(temporary, "trusted-record-directory");
+    const replacementRecordDirectory = path.join(temporary, "replacement-record-directory");
+    fs.mkdirSync(trustedRecordDirectory, { mode: 0o700 });
+    fs.mkdirSync(replacementRecordDirectory, { mode: 0o700 });
+    const trustedRecord = path.join(trustedRecordDirectory, recordName);
+    fs.writeFileSync(trustedRecord, '{"grant":"original"}\n', { mode: 0o600 });
+    fs.writeFileSync(
+      path.join(replacementRecordDirectory, recordName),
+      '{"grant":"replacement"}\n',
+      { mode: 0o600 }
+    );
+    const originalRecordLstatSync = fs.lstatSync;
+    const originalRecordOpenSync = fs.openSync;
+    let exchangedRecordDirectory = false;
+    let restoredRecordDirectory = false;
+    fs.lstatSync = (candidate, ...options) => {
+      const details = originalRecordLstatSync(candidate, ...options);
+      if (path.basename(String(candidate)) === recordName && !exchangedRecordDirectory) {
+        fs.renameSync(trustedRecordDirectory, `${trustedRecordDirectory}-old`);
+        fs.renameSync(replacementRecordDirectory, trustedRecordDirectory);
+        exchangedRecordDirectory = true;
+      }
+      return details;
+    };
+    fs.openSync = (candidate, ...options) => {
+      const descriptor = originalRecordOpenSync(candidate, ...options);
+      if (path.basename(String(candidate)) === recordName
+          && exchangedRecordDirectory && !restoredRecordDirectory) {
+        fs.renameSync(trustedRecordDirectory, `${trustedRecordDirectory}-replacement`);
+        fs.renameSync(`${trustedRecordDirectory}-old`, trustedRecordDirectory);
+        restoredRecordDirectory = true;
+      }
+      return descriptor;
+    };
+    try {
+      assert.strictEqual(readProtectedRecord(trustedRecord).record.grant, "original");
+    } finally {
+      fs.lstatSync = originalRecordLstatSync;
+      fs.openSync = originalRecordOpenSync;
+    }
+    assert.strictEqual(
+      fs.readFileSync(path.join(`${trustedRecordDirectory}-replacement`, recordName), "utf8"),
+      '{"grant":"replacement"}\n'
+    );
+  }
   const token = "a".repeat(64);
   const serviceTokenFile = path.join(temporary, "service.token");
   fs.writeFileSync(serviceTokenFile, `${token}\n`, { mode: 0o600 });
