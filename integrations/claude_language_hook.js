@@ -47,55 +47,180 @@ function validatePolicyStats(stats) {
   }
 }
 
-function readProtectedDeliveryPolicy(file) {
-  const before = fs.lstatSync(file);
-  validatePolicyStats(before);
+function policyDirectoryIdentity(stats) {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    mode: stats.mode,
+    uid: stats.uid,
+    gid: stats.gid
+  };
+}
+
+function samePolicyDirectoryIdentity(stats, expected) {
+  return stats.dev === expected.dev
+    && stats.ino === expected.ino
+    && stats.mode === expected.mode
+    && stats.uid === expected.uid
+    && stats.gid === expected.gid;
+}
+
+function validatePolicyDirectoryStats(stats, directory) {
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`delivery policy directory must be a directory: ${directory}`);
+  }
+  if (process.platform !== "win32" && (stats.mode & 0o022) !== 0) {
+    throw new Error(`delivery policy directory is writable outside its owner: ${directory}`);
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error(`delivery policy directory has the wrong owner: ${directory}`);
+  }
+}
+
+function existingPolicyDirectoryAnchor(directory) {
+  let candidate = directory;
+  while (true) {
+    try {
+      fs.lstatSync(candidate);
+      return candidate;
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+      const parent = path.dirname(candidate);
+      if (parent === candidate) {
+        throw new Error(`delivery policy directory has no existing anchor: ${directory}`);
+      }
+      candidate = parent;
+    }
+  }
+}
+
+function openPolicyDirectory(file) {
+  const absoluteFile = path.resolve(file);
+  const directory = path.dirname(absoluteFile);
+  if (process.platform === "win32") {
+    const details = fs.lstatSync(directory);
+    validatePolicyDirectoryStats(details, directory);
+    return {
+      accessPath: absoluteFile,
+      absoluteFile,
+      descriptor: null,
+      directory,
+      identity: policyDirectoryIdentity(details)
+    };
+  }
+  const home = path.resolve(os.homedir());
+  const underHome = directory === home || directory.startsWith(`${home}${path.sep}`);
+  const anchor = underHome ? home : existingPolicyDirectoryAnchor(directory);
+  const relative = path.relative(anchor, directory);
+  const components = relative ? relative.split(path.sep) : [];
   const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
-  let raw;
-  let opened;
+  const directoryOnly = typeof fs.constants.O_DIRECTORY === "number" ? fs.constants.O_DIRECTORY : 0;
+  const flags = fs.constants.O_RDONLY | noFollow | directoryOnly;
+  let descriptor = null;
+  let current = anchor;
   try {
-    opened = fs.fstatSync(descriptor);
-    validatePolicyStats(opened);
-    if (!sameRecordIdentity(opened, recordIdentity(before)) || opened.nlink !== before.nlink) {
-      throw new Error("delivery policy changed while opening");
+    descriptor = fs.openSync(anchor, flags);
+    validatePolicyDirectoryStats(fs.fstatSync(descriptor), anchor);
+    for (const component of components) {
+      current = path.join(current, component);
+      const child = fs.openSync(current, flags);
+      try {
+        validatePolicyDirectoryStats(fs.fstatSync(child), current);
+      } catch (error) {
+        fs.closeSync(child);
+        throw error;
+      }
+      fs.closeSync(descriptor);
+      descriptor = child;
     }
-    const buffer = Buffer.alloc(MAX_POLICY_BYTES + 1);
-    let size = 0;
-    while (size < buffer.length) {
-      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
-      if (count === 0) break;
-      size += count;
+    const identity = policyDirectoryIdentity(fs.fstatSync(descriptor));
+    const descriptorRoot = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
+    const accessPath = path.join(descriptorRoot, String(descriptor), path.basename(absoluteFile));
+    return { accessPath, absoluteFile, descriptor, directory, identity };
+  } catch (error) {
+    if (descriptor !== null) fs.closeSync(descriptor);
+    if (error && String(error.message || "").startsWith("delivery policy directory")) throw error;
+    throw new Error(`delivery policy directory cannot be opened safely: ${current}`);
+  }
+}
+
+function closePolicyDirectory(protectedDirectory) {
+  if (protectedDirectory.descriptor === null) {
+    const current = fs.lstatSync(protectedDirectory.directory);
+    validatePolicyDirectoryStats(current, protectedDirectory.directory);
+    if (!samePolicyDirectoryIdentity(current, protectedDirectory.identity)) {
+      throw new Error(`delivery policy directory changed while reading: ${protectedDirectory.directory}`);
     }
-    const afterRead = fs.fstatSync(descriptor);
-    if (!sameRecordIdentity(afterRead, recordIdentity(opened)) || afterRead.nlink !== opened.nlink) {
+    return;
+  }
+  try {
+    const held = fs.fstatSync(protectedDirectory.descriptor);
+    const current = fs.lstatSync(protectedDirectory.directory);
+    validatePolicyDirectoryStats(current, protectedDirectory.directory);
+    if (!samePolicyDirectoryIdentity(held, protectedDirectory.identity)
+        || !samePolicyDirectoryIdentity(current, protectedDirectory.identity)) {
+      throw new Error(`delivery policy directory changed while reading: ${protectedDirectory.directory}`);
+    }
+  } finally {
+    fs.closeSync(protectedDirectory.descriptor);
+  }
+}
+
+function readProtectedDeliveryPolicy(file) {
+  const protectedDirectory = openPolicyDirectory(file);
+  const policyFile = protectedDirectory.accessPath;
+  try {
+    const before = fs.lstatSync(policyFile);
+    validatePolicyStats(before);
+    const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+    const descriptor = fs.openSync(policyFile, fs.constants.O_RDONLY | noFollow);
+    let raw;
+    let opened;
+    try {
+      opened = fs.fstatSync(descriptor);
+      validatePolicyStats(opened);
+      if (!sameRecordIdentity(opened, recordIdentity(before)) || opened.nlink !== before.nlink) {
+        throw new Error("delivery policy changed while opening");
+      }
+      const buffer = Buffer.alloc(MAX_POLICY_BYTES + 1);
+      let size = 0;
+      while (size < buffer.length) {
+        const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+        if (count === 0) break;
+        size += count;
+      }
+      const afterRead = fs.fstatSync(descriptor);
+      if (!sameRecordIdentity(afterRead, recordIdentity(opened)) || afterRead.nlink !== opened.nlink) {
+        throw new Error("delivery policy changed while reading");
+      }
+      if (size > MAX_POLICY_BYTES) throw new Error("delivery policy has an invalid size");
+      raw = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "");
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    const afterPath = fs.lstatSync(policyFile);
+    if (!sameRecordIdentity(afterPath, recordIdentity(opened)) || afterPath.nlink !== opened.nlink) {
       throw new Error("delivery policy changed while reading");
     }
-    if (size > MAX_POLICY_BYTES) throw new Error("delivery policy has an invalid size");
-    raw = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("delivery policy root must be an object");
+    }
+    const isolated = parsed.isolated_service;
+    if (parsed.mandatory !== true || !isolated || typeof isolated !== "object" || Array.isArray(isolated)
+        || isolated.required !== true || typeof isolated.endpoint !== "string" || !isolated.endpoint.trim()
+        || isolated.endpoint.length > 4096 || typeof isolated.token_file !== "string" || !isolated.token_file.trim()
+        || isolated.token_file.length > 4096
+        || (Object.hasOwn(parsed, "fail_closed") && parsed.fail_closed !== true)
+        || (Object.hasOwn(parsed, "direct_delivery_allowed") && parsed.direct_delivery_allowed !== false)
+        || (Object.hasOwn(parsed, "raw_streaming_allowed") && parsed.raw_streaming_allowed !== false)
+        || (Object.hasOwn(parsed, "on_guard_error") && parsed.on_guard_error !== "block")) {
+      throw new Error("mandatory isolated-service policy is invalid");
+    }
+    return parsed;
   } finally {
-    fs.closeSync(descriptor);
+    closePolicyDirectory(protectedDirectory);
   }
-  const afterPath = fs.lstatSync(file);
-  if (!sameRecordIdentity(afterPath, recordIdentity(opened)) || afterPath.nlink !== opened.nlink) {
-    throw new Error("delivery policy changed while reading");
-  }
-  const parsed = JSON.parse(raw);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("delivery policy root must be an object");
-  }
-  const isolated = parsed.isolated_service;
-  if (parsed.mandatory !== true || !isolated || typeof isolated !== "object" || Array.isArray(isolated)
-      || isolated.required !== true || typeof isolated.endpoint !== "string" || !isolated.endpoint.trim()
-      || isolated.endpoint.length > 4096 || typeof isolated.token_file !== "string" || !isolated.token_file.trim()
-      || isolated.token_file.length > 4096
-      || (Object.hasOwn(parsed, "fail_closed") && parsed.fail_closed !== true)
-      || (Object.hasOwn(parsed, "direct_delivery_allowed") && parsed.direct_delivery_allowed !== false)
-      || (Object.hasOwn(parsed, "raw_streaming_allowed") && parsed.raw_streaming_allowed !== false)
-      || (Object.hasOwn(parsed, "on_guard_error") && parsed.on_guard_error !== "block")) {
-    throw new Error("mandatory isolated-service policy is invalid");
-  }
-  return parsed;
 }
 
 function validateServiceTokenStats(stats) {

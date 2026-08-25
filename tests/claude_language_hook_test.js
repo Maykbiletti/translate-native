@@ -208,7 +208,7 @@ async function main() {
   let policyStatsReads = 0;
   fs.lstatSync = (candidate, ...options) => {
     const details = originalLstatSync(candidate, ...options);
-    if (candidate === policyFile && ++policyStatsReads === 2) {
+    if (path.basename(candidate) === path.basename(policyFile) && ++policyStatsReads === 2) {
       return { ...details, mtimeMs: details.mtimeMs + 1 };
     }
     return details;
@@ -228,11 +228,79 @@ async function main() {
   });
   const originalPolicyFstatSync = fs.fstatSync;
   let policyFstatCalls = 0;
-  fs.fstatSync = (...args) => (++policyFstatCalls === 1 ? stablePolicyStats : relinkedPolicyStats);
+  fs.fstatSync = (...args) => {
+    const details = originalPolicyFstatSync(...args);
+    if (details.isDirectory()) return details;
+    return ++policyFstatCalls === 1 ? stablePolicyStats : relinkedPolicyStats;
+  };
   try {
     assert.throws(() => readProtectedDeliveryPolicy(policyFile), /changed while reading/);
   } finally {
     fs.fstatSync = originalPolicyFstatSync;
+  }
+
+  if (process.platform !== "win32") {
+    const policyTarget = path.join(temporary, "policy-target");
+    fs.mkdirSync(policyTarget, { mode: 0o700 });
+    const targetPolicy = path.join(policyTarget, "delivery-policy.json");
+    fs.copyFileSync(policyFile, targetPolicy);
+    fs.chmodSync(targetPolicy, 0o600);
+    const linkedPolicyDirectory = path.join(temporary, "linked-policy-directory");
+    fs.symlinkSync(policyTarget, linkedPolicyDirectory, "dir");
+    assert.throws(
+      () => readProtectedDeliveryPolicy(path.join(linkedPolicyDirectory, "delivery-policy.json")),
+      /directory cannot be opened safely/
+    );
+
+    const writablePolicyDirectory = path.join(temporary, "writable-policy-directory");
+    fs.mkdirSync(writablePolicyDirectory, { mode: 0o700 });
+    const writablePolicy = path.join(writablePolicyDirectory, "delivery-policy.json");
+    fs.copyFileSync(policyFile, writablePolicy);
+    fs.chmodSync(writablePolicy, 0o600);
+    fs.chmodSync(writablePolicyDirectory, 0o777);
+    try {
+      assert.throws(
+        () => readProtectedDeliveryPolicy(writablePolicy),
+        /directory is writable outside its owner/
+      );
+    } finally {
+      fs.chmodSync(writablePolicyDirectory, 0o700);
+    }
+
+    const missingPolicy = path.join(temporary, "missing-policy", "config", "delivery-policy.json");
+    assert.throws(() => readProtectedDeliveryPolicy(missingPolicy));
+    assert(!fs.existsSync(path.dirname(missingPolicy)), "read-only policy checks must not create paths");
+
+    const trustedPolicyDirectory = path.join(temporary, "trusted-policy-directory");
+    const replacementPolicyDirectory = path.join(temporary, "replacement-policy-directory");
+    fs.mkdirSync(trustedPolicyDirectory, { mode: 0o700 });
+    fs.mkdirSync(replacementPolicyDirectory, { mode: 0o700 });
+    const exchangedPolicy = path.join(trustedPolicyDirectory, "delivery-policy.json");
+    fs.copyFileSync(policyFile, exchangedPolicy);
+    fs.chmodSync(exchangedPolicy, 0o600);
+    const replacementPolicy = path.join(replacementPolicyDirectory, "delivery-policy.json");
+    fs.writeFileSync(replacementPolicy, "{}", { mode: 0o600 });
+    const originalExchangeLstatSync = fs.lstatSync;
+    let exchangedPolicyDirectory = false;
+    fs.lstatSync = (candidate, ...options) => {
+      const details = originalExchangeLstatSync(candidate, ...options);
+      if (path.basename(candidate) === path.basename(exchangedPolicy) && !exchangedPolicyDirectory) {
+        fs.renameSync(trustedPolicyDirectory, `${trustedPolicyDirectory}-old`);
+        fs.renameSync(replacementPolicyDirectory, trustedPolicyDirectory);
+        exchangedPolicyDirectory = true;
+      }
+      return details;
+    };
+    try {
+      assert.throws(() => readProtectedDeliveryPolicy(exchangedPolicy), /directory changed while reading/);
+    } finally {
+      fs.lstatSync = originalExchangeLstatSync;
+    }
+    assert.strictEqual(fs.readFileSync(exchangedPolicy, "utf8"), "{}");
+    assert.match(
+      fs.readFileSync(path.join(`${trustedPolicyDirectory}-old`, "delivery-policy.json"), "utf8"),
+      /"mandatory":true/
+    );
   }
 
   const environment = { BLUN_LANGUAGE_GUARD_RUNTIME: temporary };
