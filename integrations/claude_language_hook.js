@@ -98,6 +98,7 @@ function readProtectedDeliveryPolicy(file) {
 
 function validateServiceTokenStats(stats) {
   if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("service token must be a regular file");
+  if (stats.nlink !== 1) throw new Error("service token must not have additional hard links");
   if (stats.size < 32 || stats.size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
   if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
     throw new Error("service token permissions are too broad");
@@ -115,7 +116,7 @@ function readProtectedServiceToken(destination) {
   try {
     const opened = fs.fstatSync(descriptor);
     validateServiceTokenStats(opened);
-    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+    if (!sameRecordIdentity(opened, recordIdentity(before)) || opened.nlink !== before.nlink) {
       throw new Error("service token changed while opening");
     }
     const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
@@ -126,7 +127,7 @@ function readProtectedServiceToken(destination) {
       size += count;
     }
     const after = fs.fstatSync(descriptor);
-    if (!sameRecordIdentity(after, recordIdentity(opened))) {
+    if (!sameRecordIdentity(after, recordIdentity(opened)) || after.nlink !== opened.nlink) {
       throw new Error("service token changed while reading");
     }
     if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");

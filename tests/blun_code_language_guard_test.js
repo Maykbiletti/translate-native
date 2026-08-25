@@ -22,6 +22,27 @@ if (process.platform !== "win32") {
   const linkedToken = path.join(temporary, "linked-service.token");
   fs.symlinkSync(tokenFile, linkedToken);
   assert.throws(() => readProtectedServiceToken(linkedToken), /regular file/);
+  const hardlinkedToken = path.join(temporary, "hardlinked-service.token");
+  fs.linkSync(tokenFile, hardlinkedToken);
+  assert.throws(() => readProtectedServiceToken(tokenFile), /hard links/);
+  fs.unlinkSync(hardlinkedToken);
+
+  const stableTokenStats = fs.statSync(tokenFile);
+  const relinkedTokenStats = new Proxy(stableTokenStats, {
+    get(target, property) {
+      if (property === "nlink") return target.nlink + 1;
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const originalTokenFstatSync = fs.fstatSync;
+  let tokenFstatCalls = 0;
+  fs.fstatSync = (...args) => (++tokenFstatCalls === 1 ? stableTokenStats : relinkedTokenStats);
+  try {
+    assert.throws(() => readProtectedServiceToken(tokenFile), /changed while reading/);
+  } finally {
+    fs.fstatSync = originalTokenFstatSync;
+  }
 }
 
 const protectedHome = path.join(temporary, "protected-home");

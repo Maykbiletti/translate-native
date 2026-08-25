@@ -3062,6 +3062,34 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.ensure_service_token(token)
             self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
 
+            token.unlink()
+            token.write_text("t" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            hardlink = root / "hardlinked-service.token"
+            os.link(token, hardlink)
+            with self.assertRaisesRegex(RuntimeError, "hard links"):
+                INSTALLER.ensure_service_token(token)
+            with self.assertRaisesRegex(RuntimeError, "hard links"):
+                INSTALLER._read_protected_service_token(token)
+            hardlink.unlink()
+
+            stable = token.stat()
+            linked_during_read = SimpleNamespace(
+                st_mode=stable.st_mode,
+                st_size=stable.st_size,
+                st_uid=stable.st_uid,
+                st_dev=stable.st_dev,
+                st_ino=stable.st_ino,
+                st_nlink=stable.st_nlink + 1,
+                st_ctime_ns=stable.st_ctime_ns,
+                st_mtime_ns=stable.st_mtime_ns,
+            )
+            with mock.patch.object(
+                INSTALLER.os, "fstat", side_effect=(stable, linked_during_read)
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER._read_protected_service_token_at(token, None)
+
     @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
     def test_service_token_rejects_unsafe_parent_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3095,6 +3123,7 @@ class InstallerTests(unittest.TestCase):
             replacement.mkdir()
             token = trusted / "service.token"
             original_open = INSTALLER._open_service_token_file
+            calls = 0
 
             def exchange_parent(
                 path: Path,
@@ -3102,8 +3131,11 @@ class InstallerTests(unittest.TestCase):
                 flags: int,
                 mode: int | None = None,
             ) -> int:
-                trusted.rename(root / "guard-old")
-                replacement.rename(trusted)
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    trusted.rename(root / "guard-old")
+                    replacement.rename(trusted)
                 return original_open(path, directory_handle, flags, mode)
 
             with mock.patch.object(

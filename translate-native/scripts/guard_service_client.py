@@ -20,10 +20,11 @@ class GuardServiceError(RuntimeError):
     """Raised when the isolated guard cannot evaluate a request safely."""
 
 
-def _token_file_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _token_file_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
@@ -136,6 +137,8 @@ def _open_token_directory(path: Path) -> Iterator[int | None]:
 def _validate_token_file(details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise GuardServiceError("guard service token must be a regular file")
+    if details.st_nlink != 1:
+        raise GuardServiceError("guard service token must not have additional hard links")
     if details.st_size < 32 or details.st_size > MAX_SERVICE_TOKEN_BYTES:
         raise GuardServiceError("guard service token has an invalid size")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:

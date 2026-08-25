@@ -62,12 +62,21 @@ class GuardServiceTests(unittest.TestCase):
             st_uid=details.st_uid,
             st_dev=details.st_dev,
             st_ino=details.st_ino,
+            st_nlink=details.st_nlink,
             st_ctime_ns=details.st_ctime_ns,
             st_mtime_ns=details.st_mtime_ns,
         )
         changed = SimpleNamespace(**vars(opened))
         changed.st_mtime_ns += 1
         with mock.patch.object(CLIENT, "_token_fstat", side_effect=(opened, changed)):
+            with self.assertRaisesRegex(CLIENT.GuardServiceError, "changed while reading"):
+                CLIENT.load_service_token(token_path)
+
+        linked_during_read = SimpleNamespace(**vars(opened))
+        linked_during_read.st_nlink += 1
+        with mock.patch.object(
+            CLIENT, "_token_fstat", side_effect=(opened, linked_during_read)
+        ):
             with self.assertRaisesRegex(CLIENT.GuardServiceError, "changed while reading"):
                 CLIENT.load_service_token(token_path)
 
@@ -85,6 +94,11 @@ class GuardServiceTests(unittest.TestCase):
         linked.symlink_to(token_path)
         with self.assertRaisesRegex(CLIENT.GuardServiceError, "regular file"):
             CLIENT.load_service_token(linked)
+        hardlink = root / "hardlinked.token"
+        os.link(token_path, hardlink)
+        with self.assertRaisesRegex(CLIENT.GuardServiceError, "hard links"):
+            CLIENT.load_service_token(token_path)
+        hardlink.unlink()
         token_path.chmod(0o644)
         with self.assertRaisesRegex(CLIENT.GuardServiceError, "owner-only"):
             CLIENT.load_service_token(token_path)

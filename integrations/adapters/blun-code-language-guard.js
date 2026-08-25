@@ -30,6 +30,7 @@ function sameProtectedFile(stats, expected) {
 
 function validateServiceTokenStats(stats) {
   if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("service token must be a regular file");
+  if (stats.nlink !== 1) throw new Error("service token must not have additional hard links");
   if (stats.size < 32 || stats.size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
   if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) throw new Error("service token permissions are too broad");
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) throw new Error("service token has the wrong owner");
@@ -43,7 +44,9 @@ function readProtectedServiceToken(destination) {
   try {
     const opened = fs.fstatSync(descriptor);
     validateServiceTokenStats(opened);
-    if (!sameProtectedFile(opened, protectedFileIdentity(before))) throw new Error("service token changed while opening");
+    if (!sameProtectedFile(opened, protectedFileIdentity(before)) || opened.nlink !== before.nlink) {
+      throw new Error("service token changed while opening");
+    }
     const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
     let size = 0;
     while (size < buffer.length) {
@@ -52,7 +55,9 @@ function readProtectedServiceToken(destination) {
       size += count;
     }
     const after = fs.fstatSync(descriptor);
-    if (!sameProtectedFile(after, protectedFileIdentity(opened))) throw new Error("service token changed while reading");
+    if (!sameProtectedFile(after, protectedFileIdentity(opened)) || after.nlink !== opened.nlink) {
+      throw new Error("service token changed while reading");
+    }
     if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
     const token = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "").trim();
     if (token.length < 32) throw new Error("service token is invalid");

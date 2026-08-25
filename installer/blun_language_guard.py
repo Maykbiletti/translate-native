@@ -534,10 +534,11 @@ def ensure_signing_key(path: Path | None = None) -> None:
         _validate_signing_key_details(path, _signing_key_lstat(path, directory))
 
 
-def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
@@ -547,6 +548,8 @@ def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int
 def _validate_service_token_details(path: Path, details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"Service-token path is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"Service token must not have additional hard links: {path}")
     if details.st_size < 32 or details.st_size > 64 * 1024:
         raise RuntimeError(f"Service token has an invalid size: {path}")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -640,6 +643,7 @@ def ensure_service_token(path: Path | None = None) -> None:
                 os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        _read_protected_service_token_at(path, directory)
 
 
 def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
