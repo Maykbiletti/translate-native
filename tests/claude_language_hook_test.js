@@ -43,6 +43,23 @@ async function main() {
   fs.unlinkSync(replacedRecord);
   fs.unlinkSync(`${replacedRecord}.old`);
   if (process.platform !== "win32") {
+    const hardlinkedRecord = path.join(temporary, "hardlinked-record.json");
+    const hardlinkedRecordAlias = `${hardlinkedRecord}.alias`;
+    fs.writeFileSync(hardlinkedRecord, '{"grant":"hardlinked"}\n', { mode: 0o600 });
+    fs.linkSync(hardlinkedRecord, hardlinkedRecordAlias);
+    assert.throws(() => readProtectedRecord(hardlinkedRecord), /hard links/);
+    fs.unlinkSync(hardlinkedRecordAlias);
+    const inspectedHardlinkCandidate = readProtectedRecord(hardlinkedRecord);
+    fs.linkSync(hardlinkedRecord, hardlinkedRecordAlias);
+    assert.throws(
+      () => removeExactRecord(hardlinkedRecord, inspectedHardlinkCandidate.fileIdentity),
+      /hard links/
+    );
+    assert(fs.existsSync(hardlinkedRecord), "a hard-linked grant must not be consumed");
+    assert(fs.existsSync(hardlinkedRecordAlias), "the grant alias must remain untouched");
+    fs.unlinkSync(hardlinkedRecordAlias);
+    fs.unlinkSync(hardlinkedRecord);
+
     const recordName = "delivery-grant.json";
     const linkedRecordTarget = path.join(temporary, "linked-record-target");
     const linkedRecordDirectory = path.join(temporary, "linked-record-directory");
@@ -561,6 +578,13 @@ async function main() {
     assert.strictEqual(fs.readFileSync(sentinel, "utf8"), "do-not-overwrite\n");
     assert(fs.lstatSync(legacyTemporary).isSymbolicLink(), "legacy predictable temp link must remain untouched");
     fs.unlinkSync(legacyTemporary);
+
+    if (process.platform !== "win32") {
+      const hardlinkedEpoch = `${protectedEpoch}.alias`;
+      fs.linkSync(protectedEpoch, hardlinkedEpoch);
+      assert.throws(() => readSessionEpoch(protectedInput), /hard links/);
+      fs.unlinkSync(hardlinkedEpoch);
+    }
 
     const inspectedEpoch = readSessionEpoch(protectedInput);
     fs.renameSync(protectedEpoch, `${protectedEpoch}.old`);

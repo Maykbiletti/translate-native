@@ -394,6 +394,7 @@ function readSessionEpoch(input) {
   try {
     const before = fs.lstatSync(epochFile);
     if (!before.isFile() || before.isSymbolicLink()) throw new Error("session epoch must be a regular file");
+    if (before.nlink !== 1) throw new Error("session epoch must not have additional hard links");
     if (before.size < 1 || before.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
     if (process.platform !== "win32" && (before.mode & 0o077) !== 0) {
       throw new Error("session epoch permissions are too broad");
@@ -406,6 +407,7 @@ function readSessionEpoch(input) {
     try {
       const opened = fs.fstatSync(descriptor);
       if (!opened.isFile() || opened.isSymbolicLink()) throw new Error("session epoch must be a regular file");
+      if (opened.nlink !== 1) throw new Error("session epoch must not have additional hard links");
       if (opened.size < 1 || opened.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
       if (process.platform !== "win32" && (opened.mode & 0o077) !== 0) {
         throw new Error("session epoch permissions are too broad");
@@ -471,6 +473,9 @@ function validateRecordStats(stats) {
   if (!stats.isFile() || stats.isSymbolicLink()) {
     throw new Error("delivery grant state must be a regular file");
   }
+  if (stats.nlink !== 1) {
+    throw new Error("delivery grant state must not have additional hard links");
+  }
   if (stats.size < 1 || stats.size > MAX_RECORD_BYTES) {
     throw new Error("delivery grant state has an invalid size");
   }
@@ -486,6 +491,7 @@ function recordIdentity(stats) {
   return {
     dev: stats.dev,
     ino: stats.ino,
+    nlink: stats.nlink,
     size: stats.size,
     ctimeMs: stats.ctimeMs,
     mtimeMs: stats.mtimeMs
@@ -494,7 +500,7 @@ function recordIdentity(stats) {
 
 function sameRecordIdentity(stats, expected) {
   return expected && stats.dev === expected.dev && stats.ino === expected.ino
-    && stats.size === expected.size && stats.ctimeMs === expected.ctimeMs
+    && stats.nlink === expected.nlink && stats.size === expected.size && stats.ctimeMs === expected.ctimeMs
     && stats.mtimeMs === expected.mtimeMs;
 }
 
