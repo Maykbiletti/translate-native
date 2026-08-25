@@ -153,7 +153,11 @@ const changedStats = new Proxy(stableStats, {
 });
 const originalFstatSync = fs.fstatSync;
 let fstatCalls = 0;
-fs.fstatSync = (...args) => (++fstatCalls === 1 ? stableStats : changedStats);
+fs.fstatSync = (...args) => {
+  const details = originalFstatSync(...args);
+  if (details.isDirectory()) return details;
+  return ++fstatCalls === 1 ? stableStats : changedStats;
+};
 try {
   assert.throws(() => readProtectedLegacyConfig(protectedConfig), /changed while reading/);
 } finally {
@@ -193,6 +197,84 @@ if (process.platform !== "win32") {
   fs.writeFileSync(writableConfig, protectedPayload, { mode: 0o622 });
   fs.chmodSync(writableConfig, 0o622);
   assert.throws(() => loadLegacyGuardConfig(writableHome), /writable outside/);
+
+  const configTarget = path.join(temporary, "legacy-config-target");
+  fs.mkdirSync(configTarget, { mode: 0o700 });
+  fs.copyFileSync(protectedConfig, path.join(configTarget, "mcp.json"));
+  const linkedParentHome = path.join(temporary, "linked-config-parent-home");
+  fs.mkdirSync(linkedParentHome, { mode: 0o700 });
+  fs.symlinkSync(configTarget, path.join(linkedParentHome, ".blun"), "dir");
+  assert.throws(
+    () => loadLegacyGuardConfig(linkedParentHome),
+    /directory cannot be opened safely/
+  );
+
+  const writableParentHome = path.join(temporary, "writable-config-parent-home");
+  const writableParent = path.join(writableParentHome, ".blun");
+  fs.mkdirSync(writableParent, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(writableParent, "mcp.json"), protectedPayload, { mode: 0o600 });
+  fs.chmodSync(writableParent, 0o777);
+  try {
+    assert.throws(
+      () => loadLegacyGuardConfig(writableParentHome),
+      /directory is writable outside its owner/
+    );
+  } finally {
+    fs.chmodSync(writableParent, 0o700);
+  }
+
+  const missingConfigHome = path.join(temporary, "missing-config-home");
+  fs.mkdirSync(missingConfigHome, { mode: 0o700 });
+  assert.equal(loadLegacyGuardConfig(missingConfigHome), null);
+  assert(!fs.existsSync(path.join(missingConfigHome, ".blun")), "read-only config checks must not create paths");
+
+  const trustedConfigHome = path.join(temporary, "trusted-config-home");
+  const replacementConfigHome = path.join(temporary, "replacement-config-home");
+  const trustedConfigDirectory = path.join(trustedConfigHome, ".blun");
+  const replacementConfigDirectory = path.join(replacementConfigHome, ".blun");
+  fs.mkdirSync(trustedConfigDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(replacementConfigDirectory, { recursive: true, mode: 0o700 });
+  const exchangedConfig = path.join(trustedConfigDirectory, "mcp.json");
+  const replacementPayload = JSON.stringify({ mcpServers: { replacement: { command: "false" } } });
+  fs.writeFileSync(exchangedConfig, protectedPayload, { mode: 0o600 });
+  fs.writeFileSync(
+    path.join(replacementConfigDirectory, "mcp.json"),
+    replacementPayload,
+    { mode: 0o600 }
+  );
+  const originalExchangeLstatSync = fs.lstatSync;
+  const originalExchangeOpenSync = fs.openSync;
+  let exchangedConfigDirectory = false;
+  let restoredConfigDirectory = false;
+  fs.lstatSync = (candidate, ...options) => {
+    const details = originalExchangeLstatSync(candidate, ...options);
+    if (path.basename(candidate) === path.basename(exchangedConfig) && !exchangedConfigDirectory) {
+      fs.renameSync(trustedConfigDirectory, `${trustedConfigDirectory}-old`);
+      fs.renameSync(replacementConfigDirectory, trustedConfigDirectory);
+      exchangedConfigDirectory = true;
+    }
+    return details;
+  };
+  fs.openSync = (candidate, ...options) => {
+    const descriptor = originalExchangeOpenSync(candidate, ...options);
+    if (path.basename(candidate) === path.basename(exchangedConfig)
+        && exchangedConfigDirectory && !restoredConfigDirectory) {
+      fs.renameSync(trustedConfigDirectory, `${trustedConfigDirectory}-replacement`);
+      fs.renameSync(`${trustedConfigDirectory}-old`, trustedConfigDirectory);
+      restoredConfigDirectory = true;
+    }
+    return descriptor;
+  };
+  try {
+    assert.equal(readProtectedLegacyConfig(exchangedConfig), protectedPayload);
+  } finally {
+    fs.lstatSync = originalExchangeLstatSync;
+    fs.openSync = originalExchangeOpenSync;
+  }
+  assert.equal(
+    fs.readFileSync(path.join(`${trustedConfigDirectory}-replacement`, "mcp.json"), "utf8"),
+    replacementPayload
+  );
 }
 const records = [];
 const store = {
