@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
-const { beginSessionEpoch, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
+const { beginSessionEpoch, invalidateAgentRecord, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -166,6 +166,59 @@ async function main() {
       fs.readFileSync(path.join(replacementAfterConsume, recordName), "utf8"),
       '{"grant":"replacement"}\n'
     );
+
+    const previousInvalidateStateDirectory = process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+    const trustedInvalidateDirectory = path.join(temporary, "trusted-invalidate-directory");
+    const replacementInvalidateDirectory = path.join(temporary, "replacement-invalidate-directory");
+    fs.mkdirSync(trustedInvalidateDirectory, { mode: 0o700 });
+    fs.mkdirSync(replacementInvalidateDirectory, { mode: 0o700 });
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedInvalidateDirectory;
+    const invalidateInput = { session_id: "invalidate-parent-race", agent_id: "main" };
+    const invalidateRecordName = `${crypto.createHash("sha256").update("invalidate-parent-race\0main").digest("hex")}.json`;
+    fs.writeFileSync(path.join(trustedInvalidateDirectory, invalidateRecordName), '{"grant":"original"}\n', { mode: 0o600 });
+    fs.writeFileSync(path.join(replacementInvalidateDirectory, invalidateRecordName), '{"grant":"replacement"}\n', { mode: 0o600 });
+    const originalInvalidateUnlinkSync = fs.unlinkSync;
+    let exchangedInvalidateDirectory = false;
+    fs.unlinkSync = (candidate, ...options) => {
+      if (path.basename(String(candidate)) === invalidateRecordName && !exchangedInvalidateDirectory) {
+        fs.renameSync(trustedInvalidateDirectory, `${trustedInvalidateDirectory}-old`);
+        fs.renameSync(replacementInvalidateDirectory, trustedInvalidateDirectory);
+        const result = originalInvalidateUnlinkSync(candidate, ...options);
+        fs.renameSync(trustedInvalidateDirectory, `${trustedInvalidateDirectory}-replacement`);
+        fs.renameSync(`${trustedInvalidateDirectory}-old`, trustedInvalidateDirectory);
+        exchangedInvalidateDirectory = true;
+        return result;
+      }
+      return originalInvalidateUnlinkSync(candidate, ...options);
+    };
+    try {
+      invalidateAgentRecord(invalidateInput);
+    } finally {
+      fs.unlinkSync = originalInvalidateUnlinkSync;
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
+    assert(exchangedInvalidateDirectory, "the grant parent must be exchanged during invalidation");
+    assert(!fs.existsSync(path.join(trustedInvalidateDirectory, invalidateRecordName)), "the original grant must be invalidated");
+    assert.strictEqual(
+      fs.readFileSync(path.join(`${trustedInvalidateDirectory}-replacement`, invalidateRecordName), "utf8"),
+      '{"grant":"replacement"}\n'
+    );
+
+    const writableInvalidateDirectory = path.join(temporary, "writable-invalidate-directory");
+    fs.mkdirSync(writableInvalidateDirectory, { mode: 0o700 });
+    const writableInvalidateRecord = path.join(writableInvalidateDirectory, invalidateRecordName);
+    fs.writeFileSync(writableInvalidateRecord, '{"grant":"preserve"}\n', { mode: 0o600 });
+    fs.chmodSync(writableInvalidateDirectory, 0o777);
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = writableInvalidateDirectory;
+    try {
+      assert.throws(() => invalidateAgentRecord(invalidateInput), /directory is writable outside its owner/);
+      assert(fs.existsSync(writableInvalidateRecord), "unsafe-parent invalidation must preserve the grant");
+    } finally {
+      fs.chmodSync(writableInvalidateDirectory, 0o700);
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
 
     const previousStateDirectory = process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
     const trustedWriteDirectory = path.join(temporary, "trusted-write-directory");

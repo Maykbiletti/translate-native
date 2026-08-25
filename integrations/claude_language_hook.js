@@ -589,10 +589,16 @@ function readRecord(input) {
 
 function invalidateAgentRecord(input) {
   const destination = statePath(input);
+  const protectedDirectory = openProtectedDirectory(destination, "delivery grant state");
+  const stateFile = protectedDirectory.accessPath;
   try {
-    fs.unlinkSync(destination);
-  } catch (error) {
-    if (!error || error.code !== "ENOENT") throw error;
+    try {
+      fs.unlinkSync(stateFile);
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+    }
+  } finally {
+    closeProtectedDirectory(protectedDirectory, "delivery grant state");
   }
 }
 
