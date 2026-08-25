@@ -3038,7 +3038,9 @@ class InstallerTests(unittest.TestCase):
                     st_mtime_ns=stable.st_mtime_ns,
                 )
                 with mock.patch.object(
-                    INSTALLER.os, "fstat", side_effect=(stable, relinked)
+                    INSTALLER,
+                    "_protected_state_lstat",
+                    side_effect=(stable, relinked),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "changed while reading"):
                         INSTALLER._load_delivery_policy()
@@ -3138,6 +3140,117 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.DELIVERY_POLICY,
                     INSTALLER.SIGNING_KEY,
                 ) = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_delivery_policy_reader_rejects_unsafe_parents_without_creating_missing_paths(self) -> None:
+        original = INSTALLER.DELIVERY_POLICY
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            policy = {
+                "mandatory": True,
+                "fail_closed": True,
+                "direct_delivery_allowed": False,
+                "raw_streaming_allowed": False,
+                "on_guard_error": "block",
+                "isolated_service": {
+                    "required": True,
+                    "endpoint": "tcp:127.0.0.1:47631",
+                    "token_file": str(temporary / "service.token"),
+                    "audit_file": str(temporary / "audit.jsonl"),
+                },
+            }
+            target = temporary / "target"
+            target.mkdir()
+            target_policy = target / "delivery-policy.json"
+            target_policy.write_text(INSTALLER.json.dumps(policy), encoding="utf-8")
+            target_policy.chmod(0o600)
+            linked = temporary / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+            try:
+                INSTALLER.DELIVERY_POLICY = linked / "delivery-policy.json"
+                with self.assertRaisesRegex(RuntimeError, "safely open"):
+                    INSTALLER._load_delivery_policy()
+
+                writable = temporary / "writable"
+                writable.mkdir()
+                writable_policy = writable / "delivery-policy.json"
+                writable_policy.write_text(INSTALLER.json.dumps(policy), encoding="utf-8")
+                writable_policy.chmod(0o600)
+                writable.chmod(0o777)
+                INSTALLER.DELIVERY_POLICY = writable_policy
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                        INSTALLER._load_delivery_policy()
+                finally:
+                    writable.chmod(0o700)
+
+                missing = temporary / "missing" / "config" / "delivery-policy.json"
+                INSTALLER.DELIVERY_POLICY = missing
+                self.assertIsNone(INSTALLER._load_delivery_policy())
+                self.assertFalse(missing.parent.exists())
+            finally:
+                INSTALLER.DELIVERY_POLICY = original
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_delivery_policy_reader_detects_parent_exchange(self) -> None:
+        original_policy_path = INSTALLER.DELIVERY_POLICY
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            trusted = temporary / "config"
+            trusted.mkdir()
+            replacement = temporary / "replacement"
+            replacement.mkdir()
+            policy_path = trusted / "delivery-policy.json"
+            policy = {
+                "mandatory": True,
+                "fail_closed": True,
+                "direct_delivery_allowed": False,
+                "raw_streaming_allowed": False,
+                "on_guard_error": "block",
+                "isolated_service": {
+                    "required": True,
+                    "endpoint": "tcp:127.0.0.1:47631",
+                    "token_file": str(temporary / "service.token"),
+                    "audit_file": str(temporary / "audit.jsonl"),
+                },
+            }
+            policy_path.write_text(INSTALLER.json.dumps(policy), encoding="utf-8")
+            policy_path.chmod(0o600)
+            replacement_policy = replacement / "delivery-policy.json"
+            replacement_policy.write_text("{}", encoding="utf-8")
+            replacement_policy.chmod(0o600)
+            original_lstat = INSTALLER._protected_state_lstat
+            exchanged = False
+
+            def exchange_parent(
+                path: Path, directory_handle: int | None,
+            ) -> os.stat_result:
+                nonlocal exchanged
+                details = original_lstat(path, directory_handle)
+                if not exchanged:
+                    trusted.rename(temporary / "config-old")
+                    replacement.rename(trusted)
+                    exchanged = True
+                return details
+
+            INSTALLER.DELIVERY_POLICY = policy_path
+            try:
+                with mock.patch.object(
+                    INSTALLER,
+                    "_protected_state_lstat",
+                    side_effect=exchange_parent,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                        INSTALLER._load_delivery_policy()
+                self.assertEqual(policy_path.read_text(encoding="utf-8"), "{}")
+                self.assertIn(
+                    '"mandatory": true',
+                    (temporary / "config-old" / "delivery-policy.json").read_text(
+                        encoding="utf-8"
+                    ),
+                )
+            finally:
+                INSTALLER.DELIVERY_POLICY = original_policy_path
 
     def test_guard_runtime_installs_command_and_owner_only_token(self) -> None:
         originals = (

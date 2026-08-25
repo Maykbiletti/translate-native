@@ -450,10 +450,21 @@ def _existing_trust_state_directory_anchor(path: Path) -> Path:
 
 
 @contextlib.contextmanager
-def _open_trust_state_directory(path: Path):
+def _open_trust_state_directory(
+    path: Path,
+    *,
+    create: bool = True,
+    missing_ok: bool = False,
+):
     """Hold one owner-controlled trust-state directory through an operation."""
     if os.name == "nt":
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        elif not path.parent.exists():
+            if missing_ok:
+                yield None
+                return
+            raise RuntimeError(f"Trust-state directory is missing: {path.parent}")
         yield None
         return
     home = Path.home()
@@ -463,7 +474,12 @@ def _open_trust_state_directory(path: Path):
         # Tests and embedders may inject a path outside the account home. Start
         # at its nearest existing ancestor while retaining the same checks.
         home = _existing_trust_state_directory_anchor(path.parent)
-    with _open_service_definition_directory(path.parent, home) as directory:
+    with _open_service_definition_directory(
+        path.parent,
+        home,
+        create=create,
+        missing_ok=missing_ok,
+    ) as directory:
         yield directory
 
 
@@ -2532,6 +2548,15 @@ def _validate_delivery_policy(value: dict | None) -> dict | None:
 
 
 def _load_delivery_policy(*, directory: int | None = None) -> dict | None:
+    if directory is None and os.name != "nt":
+        with _open_trust_state_directory(
+            DELIVERY_POLICY,
+            create=False,
+            missing_ok=True,
+        ) as protected_directory:
+            if protected_directory is None:
+                return None
+            return _load_delivery_policy(directory=protected_directory)
     value = _load_protected_state_json(
         DELIVERY_POLICY,
         "delivery policy",
