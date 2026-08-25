@@ -252,7 +252,9 @@ class EnforcedDeliveryTests(unittest.TestCase):
             st_ctime_ns=before.st_ctime_ns,
             st_mtime_ns=before.st_mtime_ns + 1,
         )
-        with mock.patch.object(Path, "lstat", side_effect=[before, exchanged]):
+        with mock.patch.object(
+            MODULE, "_policy_lstat", side_effect=[before, exchanged],
+        ):
             with self.assertRaisesRegex(MODULE.DeliveryBlocked, "changed while reading"):
                 MODULE.load_installed_service_policy(policy_path)
 
@@ -266,9 +268,94 @@ class EnforcedDeliveryTests(unittest.TestCase):
             st_ctime_ns=before.st_ctime_ns,
             st_mtime_ns=before.st_mtime_ns,
         )
-        with mock.patch.object(MODULE.os, "fstat", side_effect=(before, relinked)):
+        with mock.patch.object(
+            MODULE, "_policy_fstat", side_effect=(before, relinked),
+        ):
             with self.assertRaisesRegex(MODULE.DeliveryBlocked, "changed while reading"):
                 MODULE.load_installed_service_policy(policy_path)
+
+    @unittest.skipIf(os.name == "nt", "POSIX policy-directory security test")
+    def test_installed_policy_rejects_unsafe_parents_without_creating_missing_paths(self) -> None:
+        root = Path(self.temporary.name)
+        policy = {
+            "mandatory": True,
+            "isolated_service": {
+                "required": True,
+                "endpoint": "tcp:127.0.0.1:47631",
+                "token_file": str(root / "service.token"),
+            },
+        }
+        target = root / "target"
+        target.mkdir()
+        target_policy = target / "delivery-policy.json"
+        target_policy.write_text(json.dumps(policy), encoding="utf-8")
+        target_policy.chmod(0o600)
+        linked = root / "linked"
+        linked.symlink_to(target, target_is_directory=True)
+        with self.assertRaisesRegex(MODULE.DeliveryBlocked, "opened safely"):
+            MODULE.load_installed_service_policy(linked / "delivery-policy.json")
+
+        writable = root / "writable"
+        writable.mkdir()
+        writable_policy = writable / "delivery-policy.json"
+        writable_policy.write_text(json.dumps(policy), encoding="utf-8")
+        writable_policy.chmod(0o600)
+        writable.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(MODULE.DeliveryBlocked, "writable outside its owner"):
+                MODULE.load_installed_service_policy(writable_policy)
+        finally:
+            writable.chmod(0o700)
+
+        missing = root / "missing" / "config" / "delivery-policy.json"
+        self.assertEqual(MODULE.load_installed_service_policy(missing), {})
+        self.assertFalse(missing.parent.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX policy-directory identity test")
+    def test_installed_policy_rejects_parent_exchange_during_read(self) -> None:
+        root = Path(self.temporary.name)
+        trusted = root / "config"
+        trusted.mkdir()
+        replacement = root / "replacement"
+        replacement.mkdir()
+        policy_path = trusted / "delivery-policy.json"
+        policy = {
+            "mandatory": True,
+            "isolated_service": {
+                "required": True,
+                "endpoint": "tcp:127.0.0.1:47631",
+                "token_file": str(root / "service.token"),
+            },
+        }
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        policy_path.chmod(0o600)
+        replacement_policy = replacement / "delivery-policy.json"
+        replacement_policy.write_text("{}", encoding="utf-8")
+        replacement_policy.chmod(0o600)
+        original_lstat = MODULE._policy_lstat
+        exchanged = False
+
+        def exchange_parent(path: Path, directory: int | None) -> os.stat_result:
+            nonlocal exchanged
+            details = original_lstat(path, directory)
+            if not exchanged:
+                trusted.rename(root / "config-old")
+                replacement.rename(trusted)
+                exchanged = True
+            return details
+
+        with mock.patch.object(
+            MODULE,
+            "_policy_lstat",
+            side_effect=exchange_parent,
+        ):
+            with self.assertRaisesRegex(MODULE.DeliveryBlocked, "directory changed"):
+                MODULE.load_installed_service_policy(policy_path)
+        self.assertEqual(policy_path.read_text(encoding="utf-8"), "{}")
+        self.assertIn(
+            '"mandatory": true',
+            (root / "config-old" / "delivery-policy.json").read_text(encoding="utf-8"),
+        )
 
     def test_installed_service_policy_prevents_local_key_fallback(self) -> None:
         token_path = Path(self.temporary.name) / "service.token"
