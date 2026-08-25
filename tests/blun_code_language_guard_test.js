@@ -37,12 +37,91 @@ if (process.platform !== "win32") {
   });
   const originalTokenFstatSync = fs.fstatSync;
   let tokenFstatCalls = 0;
-  fs.fstatSync = (...args) => (++tokenFstatCalls === 1 ? stableTokenStats : relinkedTokenStats);
+  fs.fstatSync = (...args) => {
+    const details = originalTokenFstatSync(...args);
+    if (details.isDirectory()) return details;
+    return ++tokenFstatCalls === 1 ? stableTokenStats : relinkedTokenStats;
+  };
   try {
     assert.throws(() => readProtectedServiceToken(tokenFile), /changed while reading/);
   } finally {
     fs.fstatSync = originalTokenFstatSync;
   }
+
+  const tokenTarget = path.join(temporary, "service-token-target");
+  fs.mkdirSync(tokenTarget, { mode: 0o700 });
+  fs.copyFileSync(tokenFile, path.join(tokenTarget, "service.token"));
+  const linkedTokenDirectory = path.join(temporary, "linked-service-token-directory");
+  fs.symlinkSync(tokenTarget, linkedTokenDirectory, "dir");
+  assert.throws(
+    () => readProtectedServiceToken(path.join(linkedTokenDirectory, "service.token")),
+    /directory cannot be opened safely/
+  );
+
+  const writableTokenDirectory = path.join(temporary, "writable-service-token-directory");
+  fs.mkdirSync(writableTokenDirectory, { mode: 0o700 });
+  const writableToken = path.join(writableTokenDirectory, "service.token");
+  fs.copyFileSync(tokenFile, writableToken);
+  fs.chmodSync(writableTokenDirectory, 0o777);
+  try {
+    assert.throws(
+      () => readProtectedServiceToken(writableToken),
+      /directory is writable outside its owner/
+    );
+  } finally {
+    fs.chmodSync(writableTokenDirectory, 0o700);
+  }
+
+  const missingToken = path.join(temporary, "missing-service-token", "config", "service.token");
+  assert.throws(() => readProtectedServiceToken(missingToken));
+  assert(!fs.existsSync(path.dirname(missingToken)), "read-only token checks must not create paths");
+
+  const trustedTokenDirectory = path.join(temporary, "trusted-service-token-directory");
+  const replacementTokenDirectory = path.join(temporary, "replacement-service-token-directory");
+  fs.mkdirSync(trustedTokenDirectory, { mode: 0o700 });
+  fs.mkdirSync(replacementTokenDirectory, { mode: 0o700 });
+  const originalToken = "b".repeat(64);
+  const replacementToken = "c".repeat(64);
+  const exchangedToken = path.join(trustedTokenDirectory, "service.token");
+  fs.writeFileSync(exchangedToken, `${originalToken}\n`, { mode: 0o600 });
+  fs.writeFileSync(
+    path.join(replacementTokenDirectory, "service.token"),
+    `${replacementToken}\n`,
+    { mode: 0o600 }
+  );
+  const originalExchangeLstatSync = fs.lstatSync;
+  const originalExchangeOpenSync = fs.openSync;
+  let exchangedTokenDirectory = false;
+  let restoredTokenDirectory = false;
+  fs.lstatSync = (candidate, ...options) => {
+    const details = originalExchangeLstatSync(candidate, ...options);
+    if (path.basename(candidate) === path.basename(exchangedToken) && !exchangedTokenDirectory) {
+      fs.renameSync(trustedTokenDirectory, `${trustedTokenDirectory}-old`);
+      fs.renameSync(replacementTokenDirectory, trustedTokenDirectory);
+      exchangedTokenDirectory = true;
+    }
+    return details;
+  };
+  fs.openSync = (candidate, ...options) => {
+    const descriptor = originalExchangeOpenSync(candidate, ...options);
+    if (path.basename(candidate) === path.basename(exchangedToken)
+        && exchangedTokenDirectory && !restoredTokenDirectory) {
+      fs.renameSync(trustedTokenDirectory, `${trustedTokenDirectory}-replacement`);
+      fs.renameSync(`${trustedTokenDirectory}-old`, trustedTokenDirectory);
+      restoredTokenDirectory = true;
+    }
+    return descriptor;
+  };
+  try {
+    assert.equal(readProtectedServiceToken(exchangedToken), originalToken);
+  } finally {
+    fs.lstatSync = originalExchangeLstatSync;
+    fs.openSync = originalExchangeOpenSync;
+  }
+  assert.equal(
+    fs.readFileSync(path.join(`${trustedTokenDirectory}-replacement`, "service.token"), "utf8"),
+    `${replacementToken}\n`
+  );
 }
 
 const protectedHome = path.join(temporary, "protected-home");

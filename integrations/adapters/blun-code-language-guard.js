@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const {
   LanguageGuardBlocked,
@@ -36,34 +37,158 @@ function validateServiceTokenStats(stats) {
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) throw new Error("service token has the wrong owner");
 }
 
-function readProtectedServiceToken(destination) {
-  const before = fs.lstatSync(destination);
-  validateServiceTokenStats(before);
+function serviceTokenDirectoryIdentity(stats) {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    mode: stats.mode,
+    uid: stats.uid,
+    gid: stats.gid,
+  };
+}
+
+function sameServiceTokenDirectory(stats, expected) {
+  return stats.dev === expected.dev && stats.ino === expected.ino
+    && stats.mode === expected.mode && stats.uid === expected.uid
+    && stats.gid === expected.gid;
+}
+
+function validateServiceTokenDirectoryStats(stats, directory) {
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`service token directory must be a directory: ${directory}`);
+  }
+  if (process.platform !== "win32" && (stats.mode & 0o022) !== 0) {
+    throw new Error(`service token directory is writable outside its owner: ${directory}`);
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error(`service token directory has the wrong owner: ${directory}`);
+  }
+}
+
+function existingServiceTokenDirectoryAnchor(directory) {
+  let candidate = directory;
+  while (true) {
+    try {
+      fs.lstatSync(candidate);
+      return candidate;
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+      const parent = path.dirname(candidate);
+      if (parent === candidate) {
+        throw new Error(`service token directory has no existing anchor: ${directory}`);
+      }
+      candidate = parent;
+    }
+  }
+}
+
+function openServiceTokenDirectory(destination) {
+  const absoluteFile = path.resolve(destination);
+  const directory = path.dirname(absoluteFile);
+  if (process.platform === "win32") {
+    const details = fs.lstatSync(directory);
+    validateServiceTokenDirectoryStats(details, directory);
+    return {
+      accessPath: absoluteFile,
+      descriptor: null,
+      directory,
+      identity: serviceTokenDirectoryIdentity(details),
+    };
+  }
+  const home = path.resolve(os.homedir());
+  const underHome = directory === home || directory.startsWith(`${home}${path.sep}`);
+  const anchor = underHome ? home : existingServiceTokenDirectoryAnchor(directory);
+  const relative = path.relative(anchor, directory);
+  const components = relative ? relative.split(path.sep) : [];
   const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  const directoryOnly = typeof fs.constants.O_DIRECTORY === "number" ? fs.constants.O_DIRECTORY : 0;
+  const flags = fs.constants.O_RDONLY | noFollow | directoryOnly;
+  const descriptorRoot = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
+  let descriptor = null;
+  let current = anchor;
   try {
-    const opened = fs.fstatSync(descriptor);
-    validateServiceTokenStats(opened);
-    if (!sameProtectedFile(opened, protectedFileIdentity(before)) || opened.nlink !== before.nlink) {
-      throw new Error("service token changed while opening");
+    descriptor = fs.openSync(anchor, flags);
+    validateServiceTokenDirectoryStats(fs.fstatSync(descriptor), anchor);
+    for (const component of components) {
+      current = path.join(current, component);
+      const child = fs.openSync(path.join(descriptorRoot, String(descriptor), component), flags);
+      try {
+        validateServiceTokenDirectoryStats(fs.fstatSync(child), current);
+      } catch (error) {
+        fs.closeSync(child);
+        throw error;
+      }
+      fs.closeSync(descriptor);
+      descriptor = child;
     }
-    const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
-    let size = 0;
-    while (size < buffer.length) {
-      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
-      if (count === 0) break;
-      size += count;
+    const identity = serviceTokenDirectoryIdentity(fs.fstatSync(descriptor));
+    const accessPath = path.join(descriptorRoot, String(descriptor), path.basename(absoluteFile));
+    return { accessPath, descriptor, directory, identity };
+  } catch (error) {
+    if (descriptor !== null) fs.closeSync(descriptor);
+    if (error && String(error.message || "").startsWith("service token directory")) throw error;
+    throw new Error(`service token directory cannot be opened safely: ${current}`);
+  }
+}
+
+function closeServiceTokenDirectory(protectedDirectory) {
+  if (protectedDirectory.descriptor === null) {
+    const current = fs.lstatSync(protectedDirectory.directory);
+    validateServiceTokenDirectoryStats(current, protectedDirectory.directory);
+    if (!sameServiceTokenDirectory(current, protectedDirectory.identity)) {
+      throw new Error(`service token directory changed while reading: ${protectedDirectory.directory}`);
     }
-    const after = fs.fstatSync(descriptor);
-    if (!sameProtectedFile(after, protectedFileIdentity(opened)) || after.nlink !== opened.nlink) {
-      throw new Error("service token changed while reading");
+    return;
+  }
+  try {
+    const held = fs.fstatSync(protectedDirectory.descriptor);
+    const current = fs.lstatSync(protectedDirectory.directory);
+    validateServiceTokenDirectoryStats(current, protectedDirectory.directory);
+    if (!sameServiceTokenDirectory(held, protectedDirectory.identity)
+        || !sameServiceTokenDirectory(current, protectedDirectory.identity)) {
+      throw new Error(`service token directory changed while reading: ${protectedDirectory.directory}`);
     }
-    if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
-    const token = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "").trim();
-    if (token.length < 32) throw new Error("service token is invalid");
-    return token;
   } finally {
-    fs.closeSync(descriptor);
+    fs.closeSync(protectedDirectory.descriptor);
+  }
+}
+
+function readProtectedServiceToken(destination) {
+  const protectedDirectory = openServiceTokenDirectory(destination);
+  const tokenFile = protectedDirectory.accessPath;
+  try {
+    const before = fs.lstatSync(tokenFile);
+    validateServiceTokenStats(before);
+    const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+    const descriptor = fs.openSync(tokenFile, fs.constants.O_RDONLY | noFollow);
+    try {
+      const opened = fs.fstatSync(descriptor);
+      validateServiceTokenStats(opened);
+      if (!sameProtectedFile(opened, protectedFileIdentity(before)) || opened.nlink !== before.nlink) {
+        throw new Error("service token changed while opening");
+      }
+      const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
+      let size = 0;
+      while (size < buffer.length) {
+        const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+        if (count === 0) break;
+        size += count;
+      }
+      const after = fs.fstatSync(descriptor);
+      const afterPath = fs.lstatSync(tokenFile);
+      if (!sameProtectedFile(after, protectedFileIdentity(opened)) || after.nlink !== opened.nlink
+          || !sameProtectedFile(afterPath, protectedFileIdentity(opened)) || afterPath.nlink !== opened.nlink) {
+        throw new Error("service token changed while reading");
+      }
+      if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
+      const token = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "").trim();
+      if (token.length < 32) throw new Error("service token is invalid");
+      return token;
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } finally {
+    closeServiceTokenDirectory(protectedDirectory);
   }
 }
 
