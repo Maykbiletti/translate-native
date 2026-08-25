@@ -267,6 +267,106 @@ async function main() {
       '{"grant":"replacement"}\n'
     );
 
+    const identitySessionInvalidateDirectory = path.join(temporary, "identity-session-invalidate-directory");
+    const identitySessionInvalidateReplacement = path.join(
+      temporary, "identity-session-invalidate-replacement"
+    );
+    fs.mkdirSync(identitySessionInvalidateDirectory, { mode: 0o700 });
+    fs.mkdirSync(identitySessionInvalidateReplacement, { mode: 0o700 });
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = identitySessionInvalidateDirectory;
+    const identitySessionInvalidateInput = {
+      session_id: "session-invalidate-file-race",
+      agent_id: "main"
+    };
+    const identitySessionInvalidateRecordName = `${crypto.createHash("sha256")
+      .update("session-invalidate-file-race\0main").digest("hex")}.json`;
+    const identitySessionInvalidateRecord = path.join(
+      identitySessionInvalidateDirectory, identitySessionInvalidateRecordName
+    );
+    fs.writeFileSync(identitySessionInvalidateRecord, '{"grant":"original"}\n', { mode: 0o600 });
+    fs.writeFileSync(
+      path.join(identitySessionInvalidateReplacement, identitySessionInvalidateRecordName),
+      '{"grant":"replacement"}\n',
+      { mode: 0o600 }
+    );
+    const originalIdentitySessionInvalidateLstatSync = fs.lstatSync;
+    let identitySessionInvalidateRecordChecks = 0;
+    let exchangedIdentitySessionInvalidateRecord = false;
+    fs.lstatSync = (candidate, ...options) => {
+      if (path.basename(String(candidate)) === identitySessionInvalidateRecordName
+          && ++identitySessionInvalidateRecordChecks === 2) {
+        fs.renameSync(identitySessionInvalidateRecord, `${identitySessionInvalidateRecord}.old`);
+        fs.renameSync(
+          path.join(identitySessionInvalidateReplacement, identitySessionInvalidateRecordName),
+          identitySessionInvalidateRecord
+        );
+        exchangedIdentitySessionInvalidateRecord = true;
+      }
+      return originalIdentitySessionInvalidateLstatSync(candidate, ...options);
+    };
+    try {
+      assert.throws(
+        () => invalidateSessionRecords(identitySessionInvalidateInput),
+        /changed before consumption/
+      );
+    } finally {
+      fs.lstatSync = originalIdentitySessionInvalidateLstatSync;
+      if (exchangedIdentitySessionInvalidateRecord) {
+        fs.renameSync(
+          identitySessionInvalidateRecord,
+          path.join(identitySessionInvalidateReplacement, `${identitySessionInvalidateRecordName}.after`)
+        );
+        fs.renameSync(`${identitySessionInvalidateRecord}.old`, identitySessionInvalidateRecord);
+      }
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
+    assert(
+      exchangedIdentitySessionInvalidateRecord,
+      "the session grant must be exchanged before identity-bound invalidation"
+    );
+    assert.strictEqual(fs.readFileSync(identitySessionInvalidateRecord, "utf8"), '{"grant":"original"}\n');
+    assert.strictEqual(
+      fs.readFileSync(
+        path.join(identitySessionInvalidateReplacement, `${identitySessionInvalidateRecordName}.after`),
+        "utf8"
+      ),
+      '{"grant":"replacement"}\n'
+    );
+
+    const linkedSessionInvalidateDirectory = path.join(temporary, "linked-session-invalidate-directory");
+    fs.mkdirSync(linkedSessionInvalidateDirectory, { mode: 0o700 });
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = linkedSessionInvalidateDirectory;
+    const linkedSessionInvalidateInput = {
+      session_id: "session-invalidate-hard-link",
+      agent_id: "main"
+    };
+    const linkedSessionInvalidateRecordName = `${crypto.createHash("sha256")
+      .update("session-invalidate-hard-link\0main").digest("hex")}.json`;
+    const linkedSessionInvalidateRecord = path.join(
+      linkedSessionInvalidateDirectory, linkedSessionInvalidateRecordName
+    );
+    const linkedSessionInvalidateAlias = `${linkedSessionInvalidateRecord}.alias`;
+    fs.writeFileSync(linkedSessionInvalidateRecord, '{"grant":"linked"}\n', { mode: 0o600 });
+    fs.linkSync(linkedSessionInvalidateRecord, linkedSessionInvalidateAlias);
+    try {
+      assert.throws(
+        () => invalidateSessionRecords(linkedSessionInvalidateInput),
+        /hard links/
+      );
+      assert(
+        fs.existsSync(linkedSessionInvalidateRecord),
+        "hard-linked session invalidation must preserve the original grant"
+      );
+      assert(
+        fs.existsSync(linkedSessionInvalidateAlias),
+        "hard-linked session invalidation must preserve the alias"
+      );
+    } finally {
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
+
     const writableSessionInvalidateDirectory = path.join(temporary, "writable-session-invalidate-directory");
     fs.mkdirSync(writableSessionInvalidateDirectory, { mode: 0o700 });
     const writableSessionInvalidateRecord = path.join(

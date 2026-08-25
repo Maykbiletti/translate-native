@@ -541,16 +541,19 @@ function readProtectedRecord(destination) {
   }
 }
 
+function removeExactRecordFile(stateFile, expected) {
+  const current = fs.lstatSync(stateFile);
+  validateRecordStats(current);
+  if (!sameRecordIdentity(current, expected)) {
+    throw new Error("delivery grant state changed before consumption");
+  }
+  fs.unlinkSync(stateFile);
+}
+
 function removeExactRecord(destination, expected) {
   const protectedDirectory = openProtectedDirectory(destination, "Claude hook state");
-  const stateFile = protectedDirectory.accessPath;
   try {
-    const current = fs.lstatSync(stateFile);
-    validateRecordStats(current);
-    if (!sameRecordIdentity(current, expected)) {
-      throw new Error("delivery grant state changed before consumption");
-    }
-    fs.unlinkSync(stateFile);
+    removeExactRecordFile(protectedDirectory.accessPath, expected);
   } finally {
     closeProtectedDirectory(protectedDirectory, "Claude hook state");
   }
@@ -623,24 +626,14 @@ function invalidateSessionRecords(input) {
     for (const entry of entries) {
       if ((!entry.isFile() && !entry.isSymbolicLink()) || !entry.name.endsWith(".json")) continue;
       const candidate = path.join(stateAccessDirectory, entry.name);
-      let belongsToSession = entry.name === legacyMainRecordName;
-      if (!belongsToSession) {
-        try {
-          const { record } = readProtectedRecordFile(candidate);
-          const legacyGrant = typeof record.session_sha256 !== "string"
-            && typeof record.delivery_grant === "string"
-            && Number.isFinite(record.authorized_at);
-          belongsToSession = record.session_sha256 === expectedSession || legacyGrant;
-        } catch (_) {
-          continue;
-        }
-      }
+      const { record, fileIdentity } = readProtectedRecordFile(candidate);
+      const legacyGrant = typeof record.session_sha256 !== "string"
+        && typeof record.delivery_grant === "string"
+        && Number.isFinite(record.authorized_at);
+      const belongsToSession = entry.name === legacyMainRecordName
+        || record.session_sha256 === expectedSession || legacyGrant;
       if (!belongsToSession) continue;
-      try {
-        fs.unlinkSync(candidate);
-      } catch (error) {
-        if (!error || error.code !== "ENOENT") throw error;
-      }
+      removeExactRecordFile(candidate, fileIdentity);
     }
   } finally {
     closeProtectedDirectory(protectedDirectory, "Claude hook state");
