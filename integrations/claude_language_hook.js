@@ -599,7 +599,8 @@ function invalidateAgentRecord(input) {
   const stateFile = protectedDirectory.accessPath;
   try {
     try {
-      fs.unlinkSync(stateFile);
+      const { fileIdentity } = readProtectedRecordFile(stateFile);
+      removeExactRecordFile(stateFile, fileIdentity);
     } catch (error) {
       if (!error || error.code !== "ENOENT") throw error;
     }

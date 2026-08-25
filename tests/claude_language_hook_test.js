@@ -205,6 +205,85 @@ async function main() {
       '{"grant":"replacement"}\n'
     );
 
+    const identityInvalidateDirectory = path.join(temporary, "identity-invalidate-directory");
+    const identityInvalidateReplacement = path.join(temporary, "identity-invalidate-replacement");
+    fs.mkdirSync(identityInvalidateDirectory, { mode: 0o700 });
+    fs.mkdirSync(identityInvalidateReplacement, { mode: 0o700 });
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = identityInvalidateDirectory;
+    const identityInvalidateInput = { session_id: "invalidate-file-race", agent_id: "main" };
+    const identityInvalidateRecordName = `${crypto.createHash("sha256")
+      .update("invalidate-file-race\0main").digest("hex")}.json`;
+    const identityInvalidateRecord = path.join(identityInvalidateDirectory, identityInvalidateRecordName);
+    fs.writeFileSync(identityInvalidateRecord, '{"grant":"original"}\n', { mode: 0o600 });
+    fs.writeFileSync(
+      path.join(identityInvalidateReplacement, identityInvalidateRecordName),
+      '{"grant":"replacement"}\n',
+      { mode: 0o600 }
+    );
+    const originalIdentityInvalidateLstatSync = fs.lstatSync;
+    let identityInvalidateRecordChecks = 0;
+    let exchangedIdentityInvalidateRecord = false;
+    fs.lstatSync = (candidate, ...options) => {
+      if (path.basename(String(candidate)) === identityInvalidateRecordName
+          && ++identityInvalidateRecordChecks === 2) {
+        fs.renameSync(identityInvalidateRecord, `${identityInvalidateRecord}.old`);
+        fs.renameSync(
+          path.join(identityInvalidateReplacement, identityInvalidateRecordName),
+          identityInvalidateRecord
+        );
+        exchangedIdentityInvalidateRecord = true;
+      }
+      return originalIdentityInvalidateLstatSync(candidate, ...options);
+    };
+    try {
+      assert.throws(
+        () => invalidateAgentRecord(identityInvalidateInput),
+        /changed before consumption/
+      );
+    } finally {
+      fs.lstatSync = originalIdentityInvalidateLstatSync;
+      if (exchangedIdentityInvalidateRecord) {
+        fs.renameSync(
+          identityInvalidateRecord,
+          path.join(identityInvalidateReplacement, `${identityInvalidateRecordName}.after`)
+        );
+        fs.renameSync(`${identityInvalidateRecord}.old`, identityInvalidateRecord);
+      }
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
+    assert(
+      exchangedIdentityInvalidateRecord,
+      "the agent grant must be exchanged before identity-bound invalidation"
+    );
+    assert.strictEqual(fs.readFileSync(identityInvalidateRecord, "utf8"), '{"grant":"original"}\n');
+    assert.strictEqual(
+      fs.readFileSync(
+        path.join(identityInvalidateReplacement, `${identityInvalidateRecordName}.after`),
+        "utf8"
+      ),
+      '{"grant":"replacement"}\n'
+    );
+
+    const linkedInvalidateDirectory = path.join(temporary, "linked-invalidate-directory");
+    fs.mkdirSync(linkedInvalidateDirectory, { mode: 0o700 });
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = linkedInvalidateDirectory;
+    const linkedInvalidateInput = { session_id: "invalidate-hard-link", agent_id: "main" };
+    const linkedInvalidateRecordName = `${crypto.createHash("sha256")
+      .update("invalidate-hard-link\0main").digest("hex")}.json`;
+    const linkedInvalidateRecord = path.join(linkedInvalidateDirectory, linkedInvalidateRecordName);
+    const linkedInvalidateAlias = `${linkedInvalidateRecord}.alias`;
+    fs.writeFileSync(linkedInvalidateRecord, '{"grant":"linked"}\n', { mode: 0o600 });
+    fs.linkSync(linkedInvalidateRecord, linkedInvalidateAlias);
+    try {
+      assert.throws(() => invalidateAgentRecord(linkedInvalidateInput), /hard links/);
+      assert(fs.existsSync(linkedInvalidateRecord), "hard-linked invalidation must preserve the grant");
+      assert(fs.existsSync(linkedInvalidateAlias), "hard-linked invalidation must preserve the alias");
+    } finally {
+      if (previousInvalidateStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousInvalidateStateDirectory;
+    }
+
     const trustedSessionInvalidateDirectory = path.join(temporary, "trusted-session-invalidate-directory");
     const replacementSessionInvalidateDirectory = path.join(temporary, "replacement-session-invalidate-directory");
     fs.mkdirSync(trustedSessionInvalidateDirectory, { mode: 0o700 });
