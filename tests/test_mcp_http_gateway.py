@@ -259,6 +259,77 @@ class MCPHTTPGatewayTests(unittest.TestCase):
 
 
 class MCPAuthHeadersTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX gateway-token directory safety test")
+    def test_gateway_rejects_unsafe_token_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            redirected = root / "redirected"
+            redirected.mkdir()
+            redirected_token = redirected / "token"
+            redirected_token.write_text("r" * 64 + "\n", encoding="ascii")
+            redirected_token.chmod(0o600)
+            linked = root / "linked"
+            linked.symlink_to(redirected, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "token directory"):
+                GATEWAY.load_access_token(linked / "token")
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable_token = writable / "token"
+            writable_token.write_text("w" * 64 + "\n", encoding="ascii")
+            writable_token.chmod(0o600)
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside"):
+                    GATEWAY.load_access_token(writable_token)
+            finally:
+                writable.chmod(0o700)
+
+    def test_gateway_does_not_create_missing_token_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing" / "nested" / "token"
+
+            with self.assertRaises(FileNotFoundError):
+                GATEWAY.load_access_token(path)
+
+            self.assertFalse(path.parent.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX gateway-token directory identity test")
+    def test_gateway_detects_token_parent_exchange_after_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            token_path = trusted / "token"
+            token_path.write_text("t" * 64 + "\n", encoding="ascii")
+            token_path.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            replacement_token = replacement / "token"
+            replacement_token.write_text("x" * 64 + "\n", encoding="ascii")
+            replacement_token.chmod(0o600)
+            displaced = root / "displaced"
+            real_validate = GATEWAY._validate_access_token_file
+            calls = 0
+
+            def exchange_after_open(path, details) -> None:
+                nonlocal calls
+                real_validate(path, details)
+                calls += 1
+                if calls == 2:
+                    trusted.rename(displaced)
+                    replacement.rename(trusted)
+
+            with mock.patch.object(
+                GATEWAY, "_validate_access_token_file", side_effect=exchange_after_open
+            ):
+                with self.assertRaisesRegex(RuntimeError, "token directory changed"):
+                    GATEWAY.load_access_token(token_path)
+
+            self.assertEqual((trusted / "token").read_text(encoding="ascii").strip(), "x" * 64)
+            self.assertEqual((displaced / "token").read_text(encoding="ascii").strip(), "t" * 64)
+
     def test_helper_reads_owner_only_token_and_emits_one_header(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "token"
@@ -420,8 +491,15 @@ class MCPAuthHeadersTests(unittest.TestCase):
                     replacement.chmod(0o600)
                 opened = token.stat()
                 changed = replacement.stat()
-                owner = module if hasattr(module, "_token_fstat") else module.os
-                attribute = "_token_fstat" if owner is module else "fstat"
+                if hasattr(module, "_token_fstat"):
+                    owner = module
+                    attribute = "_token_fstat"
+                elif hasattr(module, "_access_token_fstat"):
+                    owner = module
+                    attribute = "_access_token_fstat"
+                else:
+                    owner = module.os
+                    attribute = "fstat"
                 with self.subTest(consumer=consumer.__module__), mock.patch.object(
                     owner, attribute, side_effect=(opened, changed)
                 ):
