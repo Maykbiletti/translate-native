@@ -52,10 +52,11 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-def _token_file_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _token_file_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
@@ -158,6 +159,8 @@ def _open_access_token_directory(path: Path) -> Iterator[int | None]:
 def _validate_access_token_file(path: Path, details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"MCP access-token path is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"MCP access-token path has additional hard links: {path}")
     if details.st_size < 32 or details.st_size > MAX_ACCESS_TOKEN_BYTES:
         raise RuntimeError(f"MCP access token has an invalid size: {path}")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:

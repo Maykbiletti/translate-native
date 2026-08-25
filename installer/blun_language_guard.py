@@ -642,10 +642,11 @@ def ensure_service_token(path: Path | None = None) -> None:
             os.close(descriptor)
 
 
-def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
@@ -655,6 +656,8 @@ def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, in
 def _validate_mcp_http_token_details(path: Path, details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"MCP access-token path is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"MCP access-token path has additional hard links: {path}")
     if details.st_size < 32 or details.st_size > MAX_MCP_HTTP_TOKEN_BYTES:
         raise RuntimeError(f"MCP access token has an invalid size: {path}")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -689,6 +692,10 @@ def _open_mcp_http_token_file(
     return os.open(target, flags, mode, **kwargs)
 
 
+def _mcp_http_token_fstat(descriptor: int) -> os.stat_result:
+    return os.fstat(descriptor)
+
+
 def _read_protected_mcp_http_token_at(path: Path, directory: int | None) -> str:
     before = _mcp_http_token_lstat(path, directory)
     _validate_mcp_http_token_details(path, before)
@@ -698,13 +705,13 @@ def _read_protected_mcp_http_token_at(path: Path, directory: int | None) -> str:
         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
     )
     try:
-        opened = os.fstat(descriptor)
+        opened = _mcp_http_token_fstat(descriptor)
         _validate_mcp_http_token_details(path, opened)
         if _mcp_http_token_identity(opened) != _mcp_http_token_identity(before):
             raise RuntimeError(f"MCP access token changed while opening: {path}")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             raw = handle.read(MAX_MCP_HTTP_TOKEN_BYTES + 1)
-        after_read = os.fstat(descriptor)
+        after_read = _mcp_http_token_fstat(descriptor)
         after_path = _mcp_http_token_lstat(path, directory)
     finally:
         os.close(descriptor)

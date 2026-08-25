@@ -3235,6 +3235,24 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.ensure_mcp_http_token(token)
             self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
 
+    @unittest.skipIf(os.name == "nt", "POSIX MCP-token hard-link test")
+    def test_mcp_http_token_creation_and_reader_reject_hard_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "mcp-http.token"
+            token.write_text("h" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            alias = root / "mcp-http-token-alias"
+            os.link(token, alias)
+
+            for consumer in (
+                INSTALLER.ensure_mcp_http_token,
+                INSTALLER._read_protected_mcp_http_token,
+            ):
+                with self.subTest(consumer=consumer.__name__):
+                    with self.assertRaisesRegex(RuntimeError, "additional hard links"):
+                        consumer(token)
+
     @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
     def test_mcp_http_token_rejects_unsafe_parent_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

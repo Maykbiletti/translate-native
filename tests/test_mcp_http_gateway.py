@@ -506,6 +506,57 @@ class MCPAuthHeadersTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "changed while reading"):
                         consumer(token)
 
+    @unittest.skipIf(os.name == "nt", "POSIX MCP-token hard-link test")
+    def test_gateway_and_header_helper_reject_hard_links(self) -> None:
+        consumers = (GATEWAY.load_access_token, HEADERS.load_token)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "token"
+            token.write_text("h" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            alias = root / "token-alias"
+            os.link(token, alias)
+
+            for consumer in consumers:
+                with self.subTest(consumer=consumer.__module__):
+                    with self.assertRaisesRegex(RuntimeError, "additional hard links"):
+                        consumer(token)
+
+    @unittest.skipIf(os.name == "nt", "POSIX MCP-token hard-link race test")
+    def test_all_mcp_token_readers_detect_new_hard_link_while_reading(self) -> None:
+        consumers = (
+            (
+                GATEWAY,
+                GATEWAY.load_access_token,
+                "_access_token_lstat",
+                "_access_token_fstat",
+            ),
+            (HEADERS, HEADERS.load_token, "_token_lstat", "_token_fstat"),
+            (
+                INSTALLER,
+                INSTALLER._read_protected_mcp_http_token,
+                "_mcp_http_token_lstat",
+                "_mcp_http_token_fstat",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, (module, consumer, lstat_name, fstat_name) in enumerate(consumers):
+                token = root / f"token-{index}"
+                token.write_text("r" * 64 + "\n", encoding="ascii")
+                token.chmod(0o600)
+                before_link = token.stat()
+                os.link(token, root / f"token-alias-{index}")
+                after_link = token.stat()
+
+                with self.subTest(consumer=consumer.__module__), mock.patch.object(
+                    module, lstat_name, side_effect=(before_link, after_link)
+                ), mock.patch.object(
+                    module, fstat_name, side_effect=(before_link, after_link)
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                        consumer(token)
+
 
 if __name__ == "__main__":
     unittest.main()
