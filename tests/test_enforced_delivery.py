@@ -203,6 +203,11 @@ class EnforcedDeliveryTests(unittest.TestCase):
         linked.symlink_to(policy_path)
         with self.assertRaisesRegex(MODULE.DeliveryBlocked, "regular file"):
             MODULE.load_installed_service_policy(linked)
+        hardlink = root / "hardlinked-policy.json"
+        os.link(policy_path, hardlink)
+        with self.assertRaisesRegex(MODULE.DeliveryBlocked, "hard links"):
+            MODULE.load_installed_service_policy(policy_path)
+        hardlink.unlink()
         policy_path.chmod(0o644)
         with self.assertRaisesRegex(MODULE.DeliveryBlocked, "owner-only"):
             MODULE.load_installed_service_policy(policy_path)
@@ -248,6 +253,20 @@ class EnforcedDeliveryTests(unittest.TestCase):
             st_mtime_ns=before.st_mtime_ns + 1,
         )
         with mock.patch.object(Path, "lstat", side_effect=[before, exchanged]):
+            with self.assertRaisesRegex(MODULE.DeliveryBlocked, "changed while reading"):
+                MODULE.load_installed_service_policy(policy_path)
+
+        relinked = mock.Mock(
+            st_mode=before.st_mode,
+            st_uid=before.st_uid,
+            st_dev=before.st_dev,
+            st_ino=before.st_ino,
+            st_nlink=before.st_nlink + 1,
+            st_size=before.st_size,
+            st_ctime_ns=before.st_ctime_ns,
+            st_mtime_ns=before.st_mtime_ns,
+        )
+        with mock.patch.object(MODULE.os, "fstat", side_effect=(before, relinked)):
             with self.assertRaisesRegex(MODULE.DeliveryBlocked, "changed while reading"):
                 MODULE.load_installed_service_policy(policy_path)
 

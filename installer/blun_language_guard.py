@@ -782,6 +782,7 @@ def install_delivery_boundary(root: Path) -> None:
         "audit_file": str(AUDIT_LOG),
     }
     _atomic_json(DELIVERY_POLICY, policy)
+    _load_delivery_policy()
     print(f"Mandatory delivery command: {DELIVERY_COMMAND}")
     print(f"Fail-closed delivery policy: {DELIVERY_POLICY}")
 
@@ -2196,10 +2197,17 @@ def _protected_state_identity(
 
 
 def _validate_protected_state_details(
-    path: Path, label: str, maximum_bytes: int, details: os.stat_result,
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    details: os.stat_result,
+    *,
+    require_single_link: bool = False,
 ) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"Unsafe {label} file type: {path}")
+    if require_single_link and details.st_nlink != 1:
+        raise RuntimeError(f"{label.capitalize()} has additional hard links: {path}")
     if details.st_size > maximum_bytes:
         raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -2209,7 +2217,11 @@ def _validate_protected_state_details(
 
 
 def _read_protected_state_json(
-    path: Path, label: str, maximum_bytes: int,
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    *,
+    require_single_link: bool = False,
 ) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
     """Read one bounded owner-only JSON state file without following links."""
     try:
@@ -2218,15 +2230,29 @@ def _read_protected_state_json(
         return None, None
     except OSError as error:
         raise RuntimeError(f"Unreadable {label}: {path}") from error
-    _validate_protected_state_details(path, label, maximum_bytes, before)
+    _validate_protected_state_details(
+        path,
+        label,
+        maximum_bytes,
+        before,
+        require_single_link=require_single_link,
+    )
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
-            _validate_protected_state_details(path, label, maximum_bytes, opened)
-            if not _same_file_identity(before, opened):
+            _validate_protected_state_details(
+                path,
+                label,
+                maximum_bytes,
+                opened,
+                require_single_link=require_single_link,
+            )
+            if not _same_file_identity(before, opened) or (
+                require_single_link and opened.st_nlink != before.st_nlink
+            ):
                 raise RuntimeError(f"{label.capitalize()} changed while opening: {path}")
             raw = handle.read(maximum_bytes + 1)
             after_read = os.fstat(handle.fileno())
@@ -2240,6 +2266,13 @@ def _read_protected_state_json(
     if (
         not _same_file_identity(opened, after_read)
         or not _same_file_identity(opened, after_path)
+        or (
+            require_single_link
+            and (
+                after_read.st_nlink != opened.st_nlink
+                or after_path.st_nlink != opened.st_nlink
+            )
+        )
     ):
         raise RuntimeError(f"{label.capitalize()} changed while reading: {path}")
     try:
@@ -2251,8 +2284,19 @@ def _read_protected_state_json(
     return value, _protected_state_identity(after_path)
 
 
-def _load_protected_state_json(path: Path, label: str, maximum_bytes: int) -> dict | None:
-    value, _identity = _read_protected_state_json(path, label, maximum_bytes)
+def _load_protected_state_json(
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    *,
+    require_single_link: bool = False,
+) -> dict | None:
+    value, _identity = _read_protected_state_json(
+        path,
+        label,
+        maximum_bytes,
+        require_single_link=require_single_link,
+    )
     return value
 
 
@@ -2313,7 +2357,10 @@ def _load_health_config() -> dict | None:
 
 def _load_delivery_policy() -> dict | None:
     value = _load_protected_state_json(
-        DELIVERY_POLICY, "delivery policy", MAX_DELIVERY_POLICY_BYTES
+        DELIVERY_POLICY,
+        "delivery policy",
+        MAX_DELIVERY_POLICY_BYTES,
+        require_single_link=True,
     )
     if value is None:
         return None

@@ -175,10 +175,11 @@ def load_verification_key(path: Path) -> bytes:
         raise DeliveryBlocked("signing key is invalid") from error
 
 
-def _policy_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _policy_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
@@ -194,6 +195,8 @@ def _read_protected_policy(path: Path) -> dict[str, Any] | None:
         raise DeliveryBlocked("installed delivery policy is unreadable") from error
     if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
         raise DeliveryBlocked("installed delivery policy must be a regular file")
+    if before.st_nlink != 1:
+        raise DeliveryBlocked("installed delivery policy must not have additional hard links")
     if before.st_size > MAX_POLICY_BYTES:
         raise DeliveryBlocked("installed delivery policy exceeds the size limit")
     if os.name != "nt" and stat.S_IMODE(before.st_mode) & 0o077:

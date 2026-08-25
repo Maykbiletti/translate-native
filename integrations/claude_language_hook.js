@@ -37,6 +37,7 @@ function hasNaturalLanguage(value) {
 
 function validatePolicyStats(stats) {
   if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("delivery policy must be a regular file");
+  if (stats.nlink !== 1) throw new Error("delivery policy must not have additional hard links");
   if (stats.size < 2 || stats.size > MAX_POLICY_BYTES) throw new Error("delivery policy has an invalid size");
   if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
     throw new Error("delivery policy permissions are too broad");
@@ -56,7 +57,7 @@ function readProtectedDeliveryPolicy(file) {
   try {
     opened = fs.fstatSync(descriptor);
     validatePolicyStats(opened);
-    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+    if (!sameRecordIdentity(opened, recordIdentity(before)) || opened.nlink !== before.nlink) {
       throw new Error("delivery policy changed while opening");
     }
     const buffer = Buffer.alloc(MAX_POLICY_BYTES + 1);
@@ -67,7 +68,7 @@ function readProtectedDeliveryPolicy(file) {
       size += count;
     }
     const afterRead = fs.fstatSync(descriptor);
-    if (!sameRecordIdentity(afterRead, recordIdentity(opened))) {
+    if (!sameRecordIdentity(afterRead, recordIdentity(opened)) || afterRead.nlink !== opened.nlink) {
       throw new Error("delivery policy changed while reading");
     }
     if (size > MAX_POLICY_BYTES) throw new Error("delivery policy has an invalid size");
@@ -75,7 +76,8 @@ function readProtectedDeliveryPolicy(file) {
   } finally {
     fs.closeSync(descriptor);
   }
-  if (!sameRecordIdentity(fs.lstatSync(file), recordIdentity(opened))) {
+  const afterPath = fs.lstatSync(file);
+  if (!sameRecordIdentity(afterPath, recordIdentity(opened)) || afterPath.nlink !== opened.nlink) {
     throw new Error("delivery policy changed while reading");
   }
   const parsed = JSON.parse(raw);

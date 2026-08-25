@@ -193,6 +193,10 @@ async function main() {
     const linkedPolicy = path.join(temporary, "linked-policy.json");
     fs.symlinkSync(policyFile, linkedPolicy);
     assert.throws(() => readProtectedDeliveryPolicy(linkedPolicy), /regular file/);
+    const hardlinkedPolicy = path.join(temporary, "hardlinked-policy.json");
+    fs.linkSync(policyFile, hardlinkedPolicy);
+    assert.throws(() => readProtectedDeliveryPolicy(policyFile), /hard links/);
+    fs.unlinkSync(hardlinkedPolicy);
     fs.chmodSync(policyFile, 0o644);
     assert.throws(() => readProtectedDeliveryPolicy(policyFile), /permissions/);
     fs.chmodSync(policyFile, 0o600);
@@ -213,6 +217,22 @@ async function main() {
     assert.throws(() => readProtectedDeliveryPolicy(policyFile), /changed while reading/);
   } finally {
     fs.lstatSync = originalLstatSync;
+  }
+  const stablePolicyStats = fs.statSync(policyFile);
+  const relinkedPolicyStats = new Proxy(stablePolicyStats, {
+    get(target, property) {
+      if (property === "nlink") return target.nlink + 1;
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const originalPolicyFstatSync = fs.fstatSync;
+  let policyFstatCalls = 0;
+  fs.fstatSync = (...args) => (++policyFstatCalls === 1 ? stablePolicyStats : relinkedPolicyStats);
+  try {
+    assert.throws(() => readProtectedDeliveryPolicy(policyFile), /changed while reading/);
+  } finally {
+    fs.fstatSync = originalPolicyFstatSync;
   }
 
   const environment = { BLUN_LANGUAGE_GUARD_RUNTIME: temporary };

@@ -2998,6 +2998,50 @@ class InstallerTests(unittest.TestCase):
                     sentinel.read_text(encoding="utf-8"),
                     '{"do_not_replace": true}\n',
                 )
+
+                INSTALLER.DELIVERY_POLICY.unlink()
+                os.link(sentinel, INSTALLER.DELIVERY_POLICY)
+                with mock.patch.object(INSTALLER, "atomic_symlink") as command_install, \
+                     mock.patch.object(INSTALLER, "ensure_signing_key") as key_install:
+                    with self.assertRaisesRegex(RuntimeError, "hard links"):
+                        INSTALLER.install_delivery_boundary(ROOT)
+                command_install.assert_not_called()
+                key_install.assert_not_called()
+
+                INSTALLER.DELIVERY_POLICY.unlink()
+                policy = {
+                    "mandatory": True,
+                    "fail_closed": True,
+                    "direct_delivery_allowed": False,
+                    "raw_streaming_allowed": False,
+                    "on_guard_error": "block",
+                    "isolated_service": {
+                        "required": True,
+                        "endpoint": "tcp:127.0.0.1:47631",
+                        "token_file": str(temporary / "service.token"),
+                        "audit_file": str(temporary / "audit.jsonl"),
+                    },
+                }
+                INSTALLER.DELIVERY_POLICY.write_text(
+                    INSTALLER.json.dumps(policy), encoding="utf-8"
+                )
+                INSTALLER.DELIVERY_POLICY.chmod(0o600)
+                stable = INSTALLER.DELIVERY_POLICY.stat()
+                relinked = SimpleNamespace(
+                    st_mode=stable.st_mode,
+                    st_uid=stable.st_uid,
+                    st_dev=stable.st_dev,
+                    st_ino=stable.st_ino,
+                    st_nlink=stable.st_nlink + 1,
+                    st_size=stable.st_size,
+                    st_ctime_ns=stable.st_ctime_ns,
+                    st_mtime_ns=stable.st_mtime_ns,
+                )
+                with mock.patch.object(
+                    INSTALLER.os, "fstat", side_effect=(stable, relinked)
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                        INSTALLER._load_delivery_policy()
             finally:
                 (
                     INSTALLER.DELIVERY_COMMAND,
