@@ -3049,6 +3049,96 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.SIGNING_KEY,
                 ) = originals
 
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_install_delivery_boundary_rejects_unsafe_policy_parent_before_mutation(self) -> None:
+        originals = (
+            INSTALLER.DELIVERY_COMMAND,
+            INSTALLER.DELIVERY_POLICY,
+            INSTALLER.SIGNING_KEY,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            target = temporary / "target"
+            target.mkdir()
+            linked = temporary / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+            INSTALLER.DELIVERY_COMMAND = temporary / "bin" / "blun-language-deliver"
+            INSTALLER.DELIVERY_POLICY = linked / "delivery-policy.json"
+            INSTALLER.SIGNING_KEY = temporary / "config" / "signing.key"
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink") as command_install, \
+                     mock.patch.object(INSTALLER, "ensure_signing_key") as key_install:
+                    with self.assertRaisesRegex(RuntimeError, "safely open"):
+                        INSTALLER.install_delivery_boundary(ROOT)
+                command_install.assert_not_called()
+                key_install.assert_not_called()
+                self.assertFalse((target / "delivery-policy.json").exists())
+
+                writable = temporary / "writable"
+                writable.mkdir()
+                writable.chmod(0o777)
+                INSTALLER.DELIVERY_POLICY = writable / "delivery-policy.json"
+                try:
+                    with mock.patch.object(INSTALLER, "atomic_symlink") as command_install, \
+                         mock.patch.object(INSTALLER, "ensure_signing_key") as key_install:
+                        with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                            INSTALLER.install_delivery_boundary(ROOT)
+                    command_install.assert_not_called()
+                    key_install.assert_not_called()
+                    self.assertFalse(INSTALLER.DELIVERY_POLICY.exists())
+                finally:
+                    writable.chmod(0o700)
+            finally:
+                (
+                    INSTALLER.DELIVERY_COMMAND,
+                    INSTALLER.DELIVERY_POLICY,
+                    INSTALLER.SIGNING_KEY,
+                ) = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_install_delivery_boundary_pins_policy_parent_during_write(self) -> None:
+        originals = (
+            INSTALLER.DELIVERY_COMMAND,
+            INSTALLER.DELIVERY_POLICY,
+            INSTALLER.SIGNING_KEY,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            trusted = temporary / "config"
+            trusted.mkdir()
+            replacement = temporary / "replacement"
+            replacement.mkdir()
+            INSTALLER.DELIVERY_COMMAND = temporary / "bin" / "blun-language-deliver"
+            INSTALLER.DELIVERY_POLICY = trusted / "delivery-policy.json"
+            INSTALLER.SIGNING_KEY = trusted / "signing.key"
+
+            exchanged = False
+
+            def exchange_parent(_size: int) -> str:
+                nonlocal exchanged
+                if not exchanged:
+                    trusted.rename(temporary / "config-old")
+                    replacement.rename(trusted)
+                    exchanged = True
+                return "fixed-policy-temporary"
+
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink"), \
+                     mock.patch.object(INSTALLER, "ensure_signing_key"), \
+                     mock.patch.object(INSTALLER.secrets, "token_hex", side_effect=exchange_parent):
+                    with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                        INSTALLER.install_delivery_boundary(ROOT)
+                self.assertFalse(INSTALLER.DELIVERY_POLICY.exists())
+                self.assertTrue(
+                    (temporary / "config-old" / "delivery-policy.json").is_file()
+                )
+            finally:
+                (
+                    INSTALLER.DELIVERY_COMMAND,
+                    INSTALLER.DELIVERY_POLICY,
+                    INSTALLER.SIGNING_KEY,
+                ) = originals
+
     def test_guard_runtime_installs_command_and_owner_only_token(self) -> None:
         originals = (
             INSTALLER.SERVICE_COMMAND,

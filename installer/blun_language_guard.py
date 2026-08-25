@@ -769,20 +769,39 @@ def install_delivery_boundary(root: Path) -> None:
     source = root / "integrations" / "enforced_delivery.py"
     if not source.is_file():
         raise RuntimeError(f"Missing delivery boundary: {source}")
-    if DELIVERY_POLICY.exists() or DELIVERY_POLICY.is_symlink():
-        _load_delivery_policy()
-    source.chmod(source.stat().st_mode | 0o111)
-    atomic_symlink(source, DELIVERY_COMMAND)
-    ensure_signing_key()
-    policy = json.loads((root / "integrations" / "delivery-policy.example.json").read_text(encoding="utf-8"))
-    policy["isolated_service"] = {
-        "required": True,
-        "endpoint": SERVICE_ENDPOINT,
-        "token_file": str(SERVICE_TOKEN),
-        "audit_file": str(AUDIT_LOG),
-    }
-    _atomic_json(DELIVERY_POLICY, policy)
-    _load_delivery_policy()
+    with _open_trust_state_directory(DELIVERY_POLICY) as policy_directory:
+        existing, expected = _read_protected_state_json(
+            DELIVERY_POLICY,
+            "delivery policy",
+            MAX_DELIVERY_POLICY_BYTES,
+            require_single_link=True,
+            directory=policy_directory,
+        )
+        _validate_delivery_policy(existing)
+        source.chmod(source.stat().st_mode | 0o111)
+        atomic_symlink(source, DELIVERY_COMMAND)
+        ensure_signing_key()
+        policy = json.loads(
+            (root / "integrations" / "delivery-policy.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        policy["isolated_service"] = {
+            "required": True,
+            "endpoint": SERVICE_ENDPOINT,
+            "token_file": str(SERVICE_TOKEN),
+            "audit_file": str(AUDIT_LOG),
+        }
+        _write_protected_state_json_at(
+            DELIVERY_POLICY,
+            policy,
+            "delivery policy",
+            MAX_DELIVERY_POLICY_BYTES,
+            policy_directory,
+            expected,
+            require_single_link=True,
+        )
+        _load_delivery_policy(directory=policy_directory)
     print(f"Mandatory delivery command: {DELIVERY_COMMAND}")
     print(f"Fail-closed delivery policy: {DELIVERY_POLICY}")
 
@@ -2216,16 +2235,36 @@ def _validate_protected_state_details(
         raise RuntimeError(f"{label.capitalize()} owner is invalid: {path}")
 
 
+def _protected_state_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_protected_state_file(
+    path: Path,
+    directory: int | None,
+    flags: int,
+    mode: int | None = None,
+) -> int:
+    target: str | Path = path if directory is None else path.name
+    kwargs = {} if directory is None else {"dir_fd": directory}
+    if mode is None:
+        return os.open(target, flags, **kwargs)
+    return os.open(target, flags, mode, **kwargs)
+
+
 def _read_protected_state_json(
     path: Path,
     label: str,
     maximum_bytes: int,
     *,
     require_single_link: bool = False,
+    directory: int | None = None,
 ) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
     """Read one bounded owner-only JSON state file without following links."""
     try:
-        before = path.lstat()
+        before = _protected_state_lstat(path, directory)
     except FileNotFoundError:
         return None, None
     except OSError as error:
@@ -2240,7 +2279,7 @@ def _read_protected_state_json(
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = _open_protected_state_file(path, directory, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
             _validate_protected_state_details(
@@ -2256,7 +2295,7 @@ def _read_protected_state_json(
                 raise RuntimeError(f"{label.capitalize()} changed while opening: {path}")
             raw = handle.read(maximum_bytes + 1)
             after_read = os.fstat(handle.fileno())
-        after_path = path.lstat()
+        after_path = _protected_state_lstat(path, directory)
     except (OSError, RuntimeError) as error:
         if isinstance(error, RuntimeError):
             raise
@@ -2284,18 +2323,132 @@ def _read_protected_state_json(
     return value, _protected_state_identity(after_path)
 
 
+def _assert_protected_state_at_unchanged(
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    directory: int | None,
+    expected: tuple[int, int, int, int, int, int] | None,
+    *,
+    require_single_link: bool = False,
+) -> None:
+    try:
+        current = _protected_state_lstat(path, directory)
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"{label.capitalize()} disappeared before replacement: {path}")
+    except OSError as error:
+        raise RuntimeError(f"{label.capitalize()} cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"{label.capitalize()} appeared before replacement: {path}")
+    _validate_protected_state_details(
+        path,
+        label,
+        maximum_bytes,
+        current,
+        require_single_link=require_single_link,
+    )
+    if _protected_state_identity(current) != expected:
+        raise RuntimeError(f"{label.capitalize()} changed before replacement: {path}")
+
+
+def _write_protected_state_json_at(
+    path: Path,
+    payload: dict,
+    label: str,
+    maximum_bytes: int,
+    directory: int | None,
+    expected: tuple[int, int, int, int, int, int] | None,
+    *,
+    require_single_link: bool = False,
+) -> None:
+    encoded = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    if len(encoded) > maximum_bytes:
+        raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
+    if directory is None:
+        _atomic_json(
+            path,
+            payload,
+            before_replace=lambda: _assert_protected_state_at_unchanged(
+                path,
+                label,
+                maximum_bytes,
+                directory,
+                expected,
+                require_single_link=require_single_link,
+            ),
+        )
+        return
+
+    temporary_name = ""
+    descriptor = None
+    for _attempt in range(16):
+        candidate = f".{path.name}.{secrets.token_hex(16)}.tmp"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = _open_protected_state_file(
+                Path(candidate), directory, flags, 0o600
+            )
+        except FileExistsError:
+            continue
+        temporary_name = candidate
+        break
+    else:
+        raise RuntimeError(f"Cannot reserve temporary {label}: {path}")
+    try:
+        assert descriptor is not None
+        opened_descriptor = descriptor
+        descriptor = None
+        with os.fdopen(opened_descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _assert_protected_state_at_unchanged(
+            path,
+            label,
+            maximum_bytes,
+            directory,
+            expected,
+            require_single_link=require_single_link,
+        )
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        )
+        temporary_name = ""
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+
+
 def _load_protected_state_json(
     path: Path,
     label: str,
     maximum_bytes: int,
     *,
     require_single_link: bool = False,
+    directory: int | None = None,
 ) -> dict | None:
     value, _identity = _read_protected_state_json(
         path,
         label,
         maximum_bytes,
         require_single_link=require_single_link,
+        directory=directory,
     )
     return value
 
@@ -2355,13 +2508,7 @@ def _load_health_config() -> dict | None:
     return value
 
 
-def _load_delivery_policy() -> dict | None:
-    value = _load_protected_state_json(
-        DELIVERY_POLICY,
-        "delivery policy",
-        MAX_DELIVERY_POLICY_BYTES,
-        require_single_link=True,
-    )
+def _validate_delivery_policy(value: dict | None) -> dict | None:
     if value is None:
         return None
     isolated = value.get("isolated_service")
@@ -2382,6 +2529,17 @@ def _load_delivery_policy() -> dict | None:
                 f"Invalid delivery policy field isolated_service.{field}: {DELIVERY_POLICY}"
             )
     return value
+
+
+def _load_delivery_policy(*, directory: int | None = None) -> dict | None:
+    value = _load_protected_state_json(
+        DELIVERY_POLICY,
+        "delivery policy",
+        MAX_DELIVERY_POLICY_BYTES,
+        require_single_link=True,
+        directory=directory,
+    )
+    return _validate_delivery_policy(value)
 
 
 def _validate_health_state(value: dict | None) -> dict | None:
