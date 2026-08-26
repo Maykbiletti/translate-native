@@ -18,6 +18,12 @@ const MAX_POLICY_BYTES = 64 * 1024;
 const MAX_RECORD_AGE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNTIME = path.join(os.homedir(), ".config", "blun-language-guard");
 const EXACT_LANGUAGE = /^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/;
+const NON_LANGUAGE_NAMED_REFERENCES = new Set([
+  "AMP", "GT", "LT", "QUOT", "amp", "apos", "bull", "copy", "emsp", "ensp",
+  "gt", "hairsp", "hellip", "laquo", "ldquo", "lrm", "lsquo", "lt", "mdash",
+  "middot", "nbsp", "ndash", "quot", "raquo", "rdquo", "reg", "rlm", "rsquo",
+  "shy", "thinsp", "trade", "zwj", "zwnj"
+]);
 let currentHookInput = null;
 
 function canonicalText(value) {
@@ -40,7 +46,7 @@ function containsLanguageCharacters(value) {
 
 function hasNaturalLanguage(value) {
   let encodedNaturalLanguage = false;
-  const text = String(value || "").replace(
+  const textWithoutNumericReferences = String(value || "").replace(
     /&#(?:0*(\d{1,7})(?!\d)|x0*([0-9a-f]{1,6})(?![0-9a-f]));?/gi,
     (entity, decimal, hexadecimal) => {
       const codePoint = Number.parseInt(decimal || hexadecimal, decimal ? 10 : 16);
@@ -50,6 +56,10 @@ function hasNaturalLanguage(value) {
       }
       return "";
     }
+  );
+  const text = textWithoutNumericReferences.replace(
+    /&([A-Za-z][A-Za-z0-9]{1,31});/g,
+    (entity, name) => NON_LANGUAGE_NAMED_REFERENCES.has(name) ? "" : entity
   );
   return encodedNaturalLanguage || containsLanguageCharacters(text);
 }

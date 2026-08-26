@@ -47,6 +47,13 @@ async function main() {
   for (const emoji of ["❤️", "☹️", "✈️", "1️⃣", "&#10084;&#65039;", "&#49;&#65039;&#8419;", "&#49 &#65039 &#8419", "&#00000049;&#000065039;&#000008419;"]) {
     assert(!hasNaturalLanguage(emoji), `${emoji} must remain an emoji-only output`);
   }
+  assert(
+    !hasNaturalLanguage("&nbsp;&amp;&hellip;&mdash;&copy;"),
+    "named spacing, punctuation, and symbol references must not become language false positives"
+  );
+  for (const linguisticEntity of ["&Auml;", "&aring;", "&unknown;"]) {
+    assert(hasNaturalLanguage(linguisticEntity), `${linguisticEntity} must remain fail-closed`);
+  }
 
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "blun-claude-hook-"));
   const replacedRecord = path.join(temporary, "replaced-record.json");
@@ -1676,6 +1683,14 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(encodedKeycapStop.stdout, "");
+
+  const namedPunctuationStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "&nbsp;&amp;&hellip;&mdash;&copy;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(namedPunctuationStop.stdout, "");
 
   const policyEnvironment = {
     ...environment,
