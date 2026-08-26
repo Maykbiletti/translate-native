@@ -559,12 +559,39 @@ function removeExactRecord(destination, expected) {
   }
 }
 
+function inspectRecordPublicationTarget(stateFile) {
+  try {
+    return readProtectedRecordFile(stateFile).fileIdentity;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function assertRecordPublicationTarget(stateFile, expected) {
+  let current;
+  try {
+    current = fs.lstatSync(stateFile);
+  } catch (error) {
+    if (error && error.code === "ENOENT" && expected === null) return;
+    if (error && error.code === "ENOENT") {
+      throw new Error("delivery grant state changed before publication");
+    }
+    throw error;
+  }
+  validateRecordStats(current);
+  if (expected === null || !sameRecordIdentity(current, expected)) {
+    throw new Error("delivery grant state changed before publication");
+  }
+}
+
 function writeRecord(input, record) {
   const destination = statePath(input);
   const protectedDirectory = openProtectedDirectory(destination, "delivery grant state");
   const stateFile = protectedDirectory.accessPath;
   const temporary = `${stateFile}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
   try {
+    const existingIdentity = inspectRecordPublicationTarget(stateFile);
     let descriptor;
     try {
       descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
@@ -572,6 +599,7 @@ function writeRecord(input, record) {
       fs.fsyncSync(descriptor);
       fs.closeSync(descriptor);
       descriptor = undefined;
+      assertRecordPublicationTarget(stateFile, existingIdentity);
       fs.renameSync(temporary, stateFile);
       try { fs.chmodSync(stateFile, 0o600); } catch (_) {}
     } finally {

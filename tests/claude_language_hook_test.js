@@ -541,6 +541,59 @@ async function main() {
       "replacement\n"
     );
 
+    const hardlinkedWriteInput = { session_id: "write-hard-link", agent_id: "main" };
+    const hardlinkedWriteRecordName = `${crypto.createHash("sha256").update("write-hard-link\0main").digest("hex")}.json`;
+    const hardlinkedWriteRecord = path.join(trustedWriteDirectory, hardlinkedWriteRecordName);
+    const hardlinkedWriteAlias = `${hardlinkedWriteRecord}.alias`;
+    fs.writeFileSync(hardlinkedWriteRecord, '{"grant":"preserve"}\n', { mode: 0o600 });
+    fs.linkSync(hardlinkedWriteRecord, hardlinkedWriteAlias);
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedWriteDirectory;
+    try {
+      assert.throws(() => writeRecord(hardlinkedWriteInput, { grant: "blocked" }), /hard links/);
+      assert.strictEqual(fs.readFileSync(hardlinkedWriteRecord, "utf8"), '{"grant":"preserve"}\n');
+      assert.strictEqual(fs.readFileSync(hardlinkedWriteAlias, "utf8"), '{"grant":"preserve"}\n');
+    } finally {
+      if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+    }
+
+    const exchangedWriteInput = { session_id: "write-file-race", agent_id: "main" };
+    const exchangedWriteRecordName = `${crypto.createHash("sha256").update("write-file-race\0main").digest("hex")}.json`;
+    const exchangedWriteRecord = path.join(trustedWriteDirectory, exchangedWriteRecordName);
+    const exchangedWriteOriginal = `${exchangedWriteRecord}.old`;
+    const exchangedWriteReplacement = `${exchangedWriteRecord}.replacement`;
+    fs.writeFileSync(exchangedWriteRecord, '{"grant":"original"}\n', { mode: 0o600 });
+    fs.writeFileSync(exchangedWriteReplacement, '{"grant":"replacement"}\n', { mode: 0o600 });
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedWriteDirectory;
+    const originalWriteLstatSync = fs.lstatSync;
+    let writeTargetInspections = 0;
+    let exchangedWriteTarget = false;
+    fs.lstatSync = (candidate, ...options) => {
+      if (path.basename(String(candidate)) === exchangedWriteRecordName) {
+        writeTargetInspections += 1;
+        if (writeTargetInspections === 2) {
+          fs.renameSync(exchangedWriteRecord, exchangedWriteOriginal);
+          fs.renameSync(exchangedWriteReplacement, exchangedWriteRecord);
+          exchangedWriteTarget = true;
+        }
+      }
+      return originalWriteLstatSync(candidate, ...options);
+    };
+    try {
+      assert.throws(() => writeRecord(exchangedWriteInput, { grant: "blocked" }), /changed before publication/);
+    } finally {
+      fs.lstatSync = originalWriteLstatSync;
+      if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+    }
+    assert(exchangedWriteTarget, "the existing grant must be exchanged before publication");
+    assert.strictEqual(fs.readFileSync(exchangedWriteOriginal, "utf8"), '{"grant":"original"}\n');
+    assert.strictEqual(fs.readFileSync(exchangedWriteRecord, "utf8"), '{"grant":"replacement"}\n');
+    assert(
+      !fs.readdirSync(trustedWriteDirectory).some((entry) => entry.startsWith(`${exchangedWriteRecordName}.`) && entry.endsWith(".tmp")),
+      "blocked publication must remove its temporary grant"
+    );
+
     const missingWriteDirectory = path.join(temporary, "missing-write-directory");
     process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = missingWriteDirectory;
     try {
