@@ -476,19 +476,37 @@ async function beginSessionEpoch(input) {
     }
     const temporary = `${epochFile}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.tmp`;
     let descriptor;
+    let createdIdentity;
     try {
       descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      createdIdentity = temporaryFileIdentity(fs.fstatSync(descriptor));
       fs.writeFileSync(descriptor, `${epoch}\n`, "utf8");
       if (process.platform !== "win32") fs.fchmodSync(descriptor, 0o600);
       fs.fsyncSync(descriptor);
-      validateSessionEpochStats(fs.fstatSync(descriptor));
+      const sealedStats = fs.fstatSync(descriptor);
+      validateSessionEpochStats(sealedStats);
+      const sealedIdentity = recordIdentity(sealedStats);
+      assertSessionEpochPublicationTargetAbsent(epochFile);
+      assertProtectedPublicationFile(
+        temporary,
+        sealedIdentity,
+        validateSessionEpochStats,
+        "session epoch temporary file changed before publication"
+      );
+      fs.renameSync(temporary, epochFile);
+      const publishedStats = fs.fstatSync(descriptor);
+      validateSessionEpochStats(publishedStats);
+      assertProtectedPublicationFile(
+        epochFile,
+        recordIdentity(publishedStats),
+        validateSessionEpochStats,
+        "session epoch changed during publication"
+      );
       fs.closeSync(descriptor);
       descriptor = undefined;
-      assertSessionEpochPublicationTargetAbsent(epochFile);
-      fs.renameSync(temporary, epochFile);
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);
-      try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+      removeCreatedTemporaryFile(temporary, createdIdentity, "session epoch");
     }
     return epoch;
   } finally {
@@ -533,6 +551,43 @@ function sameRecordIdentity(stats, expected) {
   return expected && stats.dev === expected.dev && stats.ino === expected.ino
     && stats.nlink === expected.nlink && stats.size === expected.size && stats.ctimeMs === expected.ctimeMs
     && stats.mtimeMs === expected.mtimeMs;
+}
+
+function temporaryFileIdentity(stats) {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    nlink: stats.nlink,
+    birthtimeMs: stats.birthtimeMs
+  };
+}
+
+function sameTemporaryFileIdentity(stats, expected) {
+  return expected && stats.dev === expected.dev && stats.ino === expected.ino
+    && stats.nlink === expected.nlink && stats.birthtimeMs === expected.birthtimeMs;
+}
+
+function assertProtectedPublicationFile(file, expected, validate, message) {
+  const current = fs.lstatSync(file);
+  validate(current);
+  if (!sameRecordIdentity(current, expected)) throw new Error(message);
+}
+
+function removeCreatedTemporaryFile(file, expected, label) {
+  if (!expected) return;
+  let current;
+  try {
+    current = fs.lstatSync(file);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return;
+    throw error;
+  }
+  if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1
+      || (typeof process.getuid === "function" && current.uid !== process.getuid())
+      || !sameTemporaryFileIdentity(current, expected)) {
+    throw new Error(`${label} temporary file changed before cleanup`);
+  }
+  fs.unlinkSync(file);
 }
 
 function readProtectedRecordFile(recordFile) {
@@ -618,19 +673,37 @@ function writeRecord(input, record) {
   try {
     const existingIdentity = inspectRecordPublicationTarget(stateFile);
     let descriptor;
+    let createdIdentity;
     try {
       descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      createdIdentity = temporaryFileIdentity(fs.fstatSync(descriptor));
       fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, "utf8");
       if (process.platform !== "win32") fs.fchmodSync(descriptor, 0o600);
       fs.fsyncSync(descriptor);
-      validateRecordStats(fs.fstatSync(descriptor));
+      const sealedStats = fs.fstatSync(descriptor);
+      validateRecordStats(sealedStats);
+      const sealedIdentity = recordIdentity(sealedStats);
+      assertRecordPublicationTarget(stateFile, existingIdentity);
+      assertProtectedPublicationFile(
+        temporary,
+        sealedIdentity,
+        validateRecordStats,
+        "delivery grant temporary file changed before publication"
+      );
+      fs.renameSync(temporary, stateFile);
+      const publishedStats = fs.fstatSync(descriptor);
+      validateRecordStats(publishedStats);
+      assertProtectedPublicationFile(
+        stateFile,
+        recordIdentity(publishedStats),
+        validateRecordStats,
+        "delivery grant state changed during publication"
+      );
       fs.closeSync(descriptor);
       descriptor = undefined;
-      assertRecordPublicationTarget(stateFile, existingIdentity);
-      fs.renameSync(temporary, stateFile);
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);
-      try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+      removeCreatedTemporaryFile(temporary, createdIdentity, "delivery grant");
     }
   } finally {
     closeProtectedDirectory(protectedDirectory, "delivery grant state");

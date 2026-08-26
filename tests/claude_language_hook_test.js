@@ -558,6 +558,40 @@ async function main() {
       "replacement\n"
     );
 
+    const temporaryRaceWriteInput = { session_id: "write-temporary-race", agent_id: "main" };
+    const temporaryRaceWriteName = `${crypto.createHash("sha256")
+      .update("write-temporary-race\0main").digest("hex")}.json`;
+    const temporaryRaceWriteTarget = path.join(trustedWriteDirectory, temporaryRaceWriteName);
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedWriteDirectory;
+    const originalTemporaryRaceWriteLstatSync = fs.lstatSync;
+    let temporaryRaceWritePath;
+    let temporaryRaceWriteOriginal;
+    fs.lstatSync = (candidate, ...options) => {
+      const candidateText = String(candidate);
+      if (!temporaryRaceWritePath && candidateText.endsWith(".tmp")
+          && path.basename(candidateText).startsWith(`${temporaryRaceWriteName}.`)) {
+        temporaryRaceWritePath = path.join(trustedWriteDirectory, path.basename(candidateText));
+        temporaryRaceWriteOriginal = `${temporaryRaceWritePath}.old`;
+        fs.renameSync(candidateText, `${candidateText}.old`);
+        fs.writeFileSync(candidateText, '{"grant":"replacement"}\n', { mode: 0o600 });
+      }
+      return originalTemporaryRaceWriteLstatSync(candidate, ...options);
+    };
+    try {
+      assert.throws(
+        () => writeRecord(temporaryRaceWriteInput, { grant: "original" }),
+        /temporary file changed before cleanup/
+      );
+    } finally {
+      fs.lstatSync = originalTemporaryRaceWriteLstatSync;
+      if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+    }
+    assert(temporaryRaceWritePath, "the grant temporary source must be exchanged");
+    assert(!fs.existsSync(temporaryRaceWriteTarget), "an exchanged temporary grant must not be published");
+    assert.strictEqual(fs.readFileSync(temporaryRaceWriteOriginal, "utf8"), '{"grant":"original"}\n');
+    assert.strictEqual(fs.readFileSync(temporaryRaceWritePath, "utf8"), '{"grant":"replacement"}\n');
+
     const hardlinkedWriteInput = { session_id: "write-hard-link", agent_id: "main" };
     const hardlinkedWriteRecordName = `${crypto.createHash("sha256").update("write-hard-link\0main").digest("hex")}.json`;
     const hardlinkedWriteRecord = path.join(trustedWriteDirectory, hardlinkedWriteRecordName);
@@ -1081,6 +1115,40 @@ async function main() {
         fs.readFileSync(path.join(`${trustedEpochWriteDirectory}-replacement`, "sentinel"), "utf8"),
         "replacement\n"
       );
+
+      const temporaryRaceEpochInput = { session_id: "epoch-temporary-race", cwd: temporary };
+      const temporaryRaceEpochName = `session-${crypto.createHash("sha256")
+        .update(temporaryRaceEpochInput.session_id).digest("hex")}.epoch`;
+      const temporaryRaceEpochTarget = path.join(trustedEpochWriteDirectory, temporaryRaceEpochName);
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      const originalTemporaryRaceEpochLstatSync = fs.lstatSync;
+      let temporaryRaceEpochPath;
+      let temporaryRaceEpochOriginal;
+      fs.lstatSync = (candidate, ...options) => {
+        const candidateText = String(candidate);
+        if (!temporaryRaceEpochPath && candidateText.endsWith(".tmp")
+            && path.basename(candidateText).startsWith(`${temporaryRaceEpochName}.`)) {
+          temporaryRaceEpochPath = path.join(trustedEpochWriteDirectory, path.basename(candidateText));
+          temporaryRaceEpochOriginal = `${temporaryRaceEpochPath}.old`;
+          fs.renameSync(candidateText, `${candidateText}.old`);
+          fs.writeFileSync(candidateText, `${"e".repeat(64)}\n`, { mode: 0o600 });
+        }
+        return originalTemporaryRaceEpochLstatSync(candidate, ...options);
+      };
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch(temporaryRaceEpochInput),
+          /temporary file changed before cleanup/
+        );
+      } finally {
+        fs.lstatSync = originalTemporaryRaceEpochLstatSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(temporaryRaceEpochPath, "the epoch temporary source must be exchanged");
+      assert(!fs.existsSync(temporaryRaceEpochTarget), "an exchanged temporary epoch must not be published");
+      assert.match(fs.readFileSync(temporaryRaceEpochOriginal, "utf8"), /^[a-f0-9]{64}\n$/);
+      assert.strictEqual(fs.readFileSync(temporaryRaceEpochPath, "utf8"), `${"e".repeat(64)}\n`);
 
       const hardlinkedEpochInput = { session_id: "epoch-renew-hard-link", cwd: temporary };
       const hardlinkedEpochName = `session-${crypto.createHash("sha256")
