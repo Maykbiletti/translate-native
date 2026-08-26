@@ -731,6 +731,50 @@ async function main() {
     assert.strictEqual(fs.readFileSync(temporaryRaceWriteOriginal, "utf8"), '{"grant":"original"}\n');
     assert.strictEqual(fs.readFileSync(temporaryRaceWritePath, "utf8"), '{"grant":"replacement"}\n');
 
+    const lateCleanupWriteInput = { session_id: "write-late-cleanup-race", agent_id: "main" };
+    const lateCleanupWriteName = `${crypto.createHash("sha256")
+      .update("write-late-cleanup-race\0main").digest("hex")}.json`;
+    const lateCleanupWriteTarget = path.join(trustedWriteDirectory, lateCleanupWriteName);
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedWriteDirectory;
+    const originalLateCleanupWriteFsyncSync = fs.fsyncSync;
+    const originalLateCleanupWriteRenameSync = fs.renameSync;
+    let lateCleanupWritePath;
+    let lateCleanupWriteOriginal;
+    let lateCleanupWriteQuarantine;
+    fs.fsyncSync = (descriptor) => {
+      originalLateCleanupWriteFsyncSync(descriptor);
+      throw new Error("force delivery grant cleanup");
+    };
+    fs.renameSync = (source, destination, ...options) => {
+      const sourceText = String(source);
+      const destinationText = String(destination);
+      if (!lateCleanupWritePath && sourceText.endsWith(".tmp")
+          && destinationText.endsWith(".cleanup")
+          && path.basename(sourceText).startsWith(`${lateCleanupWriteName}.`)) {
+        lateCleanupWritePath = path.join(trustedWriteDirectory, path.basename(sourceText));
+        lateCleanupWriteOriginal = `${lateCleanupWritePath}.old`;
+        lateCleanupWriteQuarantine = path.join(trustedWriteDirectory, path.basename(destinationText));
+        originalLateCleanupWriteRenameSync(source, lateCleanupWriteOriginal);
+        fs.writeFileSync(source, '{"grant":"replacement"}\n', { mode: 0o600 });
+      }
+      return originalLateCleanupWriteRenameSync(source, destination, ...options);
+    };
+    try {
+      assert.throws(
+        () => writeRecord(lateCleanupWriteInput, { grant: "original" }),
+        /temporary file changed during cleanup/
+      );
+    } finally {
+      fs.fsyncSync = originalLateCleanupWriteFsyncSync;
+      fs.renameSync = originalLateCleanupWriteRenameSync;
+      if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+    }
+    assert(lateCleanupWritePath, "the grant temporary source must be exchanged during cleanup");
+    assert(!fs.existsSync(lateCleanupWriteTarget), "a late-exchanged temporary grant must not be published");
+    assert.strictEqual(fs.readFileSync(lateCleanupWriteOriginal, "utf8"), '{"grant":"original"}\n');
+    assert.strictEqual(fs.readFileSync(lateCleanupWriteQuarantine, "utf8"), '{"grant":"replacement"}\n');
+
     const temporaryHardlinkWriteInput = { session_id: "write-temporary-hard-link", agent_id: "main" };
     const temporaryHardlinkWriteName = `${crypto.createHash("sha256")
       .update("write-temporary-hard-link\0main").digest("hex")}.json`;
@@ -1439,6 +1483,50 @@ async function main() {
       assert(!fs.existsSync(temporaryRaceEpochTarget), "an exchanged temporary epoch must not be published");
       assert.match(fs.readFileSync(temporaryRaceEpochOriginal, "utf8"), /^[a-f0-9]{64}\n$/);
       assert.strictEqual(fs.readFileSync(temporaryRaceEpochPath, "utf8"), `${"e".repeat(64)}\n`);
+
+      const lateCleanupEpochInput = { session_id: "epoch-late-cleanup-race", cwd: temporary };
+      const lateCleanupEpochName = `session-${crypto.createHash("sha256")
+        .update(lateCleanupEpochInput.session_id).digest("hex")}.epoch`;
+      const lateCleanupEpochTarget = path.join(trustedEpochWriteDirectory, lateCleanupEpochName);
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      const originalLateCleanupEpochFsyncSync = fs.fsyncSync;
+      const originalLateCleanupEpochRenameSync = fs.renameSync;
+      let lateCleanupEpochPath;
+      let lateCleanupEpochOriginal;
+      let lateCleanupEpochQuarantine;
+      fs.fsyncSync = (descriptor) => {
+        originalLateCleanupEpochFsyncSync(descriptor);
+        throw new Error("force session epoch cleanup");
+      };
+      fs.renameSync = (source, destination, ...options) => {
+        const sourceText = String(source);
+        const destinationText = String(destination);
+        if (!lateCleanupEpochPath && sourceText.endsWith(".tmp")
+            && destinationText.endsWith(".cleanup")
+            && path.basename(sourceText).startsWith(`${lateCleanupEpochName}.`)) {
+          lateCleanupEpochPath = path.join(trustedEpochWriteDirectory, path.basename(sourceText));
+          lateCleanupEpochOriginal = `${lateCleanupEpochPath}.old`;
+          lateCleanupEpochQuarantine = path.join(trustedEpochWriteDirectory, path.basename(destinationText));
+          originalLateCleanupEpochRenameSync(source, lateCleanupEpochOriginal);
+          fs.writeFileSync(source, `${"e".repeat(64)}\n`, { mode: 0o600 });
+        }
+        return originalLateCleanupEpochRenameSync(source, destination, ...options);
+      };
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch(lateCleanupEpochInput),
+          /temporary file changed during cleanup/
+        );
+      } finally {
+        fs.fsyncSync = originalLateCleanupEpochFsyncSync;
+        fs.renameSync = originalLateCleanupEpochRenameSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(lateCleanupEpochPath, "the epoch temporary source must be exchanged during cleanup");
+      assert(!fs.existsSync(lateCleanupEpochTarget), "a late-exchanged temporary epoch must not be published");
+      assert.match(fs.readFileSync(lateCleanupEpochOriginal, "utf8"), /^[a-f0-9]{64}\n$/);
+      assert.strictEqual(fs.readFileSync(lateCleanupEpochQuarantine, "utf8"), `${"e".repeat(64)}\n`);
 
       const temporaryHardlinkEpochInput = { session_id: "epoch-temporary-hard-link", cwd: temporary };
       const temporaryHardlinkEpochName = `session-${crypto.createHash("sha256")

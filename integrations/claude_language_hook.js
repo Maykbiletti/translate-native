@@ -654,8 +654,11 @@ async function beginSessionEpoch(input) {
       fs.closeSync(descriptor);
       descriptor = undefined;
     } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
-      removeCreatedTemporaryFile(temporary, createdIdentity, "session epoch");
+      try {
+        removeCreatedTemporaryFile(temporary, createdIdentity, "session epoch", descriptor);
+      } finally {
+        if (descriptor !== undefined) fs.closeSync(descriptor);
+      }
     }
     return epoch;
   } finally {
@@ -761,7 +764,15 @@ function assertProtectedPublicationFile(file, expected, validate, message) {
   if (!sameRecordIdentity(current, expected)) throw new Error(message);
 }
 
-function removeCreatedTemporaryFile(file, expected, label) {
+function validateCreatedTemporaryFile(stats, expected, label) {
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1
+      || (typeof process.getuid === "function" && stats.uid !== process.getuid())
+      || !sameTemporaryFileIdentity(stats, expected)) {
+    throw new Error(`${label} temporary file changed before cleanup`);
+  }
+}
+
+function removeCreatedTemporaryFile(file, expected, label, descriptor) {
   if (!expected) return;
   let current;
   try {
@@ -770,12 +781,30 @@ function removeCreatedTemporaryFile(file, expected, label) {
     if (error && error.code === "ENOENT") return;
     throw error;
   }
-  if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1
-      || (typeof process.getuid === "function" && current.uid !== process.getuid())
-      || !sameTemporaryFileIdentity(current, expected)) {
-    throw new Error(`${label} temporary file changed before cleanup`);
+  validateCreatedTemporaryFile(current, expected, label);
+  if (descriptor === undefined) {
+    throw new Error(`${label} temporary file descriptor unavailable during cleanup`);
   }
-  fs.unlinkSync(file);
+  validateCreatedTemporaryFile(fs.fstatSync(descriptor), expected, label);
+  const quarantine = `${file}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.cleanup`;
+  try {
+    fs.lstatSync(quarantine);
+    throw new Error(`${label} temporary cleanup quarantine already exists`);
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+  fs.renameSync(file, quarantine);
+  const held = fs.fstatSync(descriptor);
+  const moved = fs.lstatSync(quarantine);
+  if (!sameTemporaryFileIdentity(held, expected)
+      || !sameTemporaryFileIdentity(moved, expected)
+      || !sameTemporaryFileIdentity(moved, temporaryFileIdentity(held))) {
+    throw new Error(`${label} temporary file changed during cleanup`);
+  }
+  fs.unlinkSync(quarantine);
+  if (fs.fstatSync(descriptor).nlink !== 0) {
+    throw new Error(`${label} temporary file changed during cleanup`);
+  }
 }
 
 function readProtectedRecordFile(recordFile) {
@@ -897,8 +926,11 @@ function writeRecord(input, record) {
       fs.closeSync(descriptor);
       descriptor = undefined;
     } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
-      removeCreatedTemporaryFile(temporary, createdIdentity, "delivery grant");
+      try {
+        removeCreatedTemporaryFile(temporary, createdIdentity, "delivery grant", descriptor);
+      } finally {
+        if (descriptor !== undefined) fs.closeSync(descriptor);
+      }
     }
   } finally {
     closeProtectedDirectory(protectedDirectory, "delivery grant state");
