@@ -410,7 +410,13 @@ function readSessionEpochFile(epochFile) {
     if (!sameRecordIdentity(opened, recordIdentity(before))) {
       throw new Error("session epoch changed while opening");
     }
-    const epoch = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "").trim();
+    const rawEpoch = fs.readFileSync(descriptor, "utf8");
+    const finished = fs.fstatSync(descriptor);
+    validateSessionEpochStats(finished);
+    if (!sameRecordIdentity(finished, recordIdentity(opened))) {
+      throw new Error("session epoch changed while reading");
+    }
+    const epoch = rawEpoch.replace(/^\uFEFF/, "").trim();
     if (!/^[a-f0-9]{64}$/.test(epoch)) throw new Error("session epoch is invalid");
     return { epoch, fileIdentity: recordIdentity(opened) };
   } finally {
@@ -602,6 +608,11 @@ function readProtectedRecordFile(recordFile) {
       throw new Error("delivery grant state changed while opening");
     }
     const raw = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "");
+    const finished = fs.fstatSync(descriptor);
+    validateRecordStats(finished);
+    if (!sameRecordIdentity(finished, recordIdentity(opened))) {
+      throw new Error("delivery grant state changed while reading");
+    }
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("delivery grant state root must be an object");

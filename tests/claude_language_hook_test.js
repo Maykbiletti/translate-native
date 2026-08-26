@@ -129,6 +129,31 @@ async function main() {
       '{"grant":"replacement"}\n'
     );
 
+    const mutableRecord = path.join(trustedRecordDirectory, "mutable-delivery-grant.json");
+    fs.writeFileSync(mutableRecord, '{"grant":"original"}\n', { mode: 0o600 });
+    const originalMutableRecordReadFileSync = fs.readFileSync;
+    let mutatedRecordDuringRead = false;
+    fs.readFileSync = (candidate, ...options) => {
+      const contents = originalMutableRecordReadFileSync(candidate, ...options);
+      if (typeof candidate === "number" && !mutatedRecordDuringRead) {
+        fs.writeFileSync(mutableRecord, '{"grant":"modified"}\n', { mode: 0o600 });
+        const future = new Date(Date.now() + 2000);
+        fs.utimesSync(mutableRecord, future, future);
+        mutatedRecordDuringRead = true;
+      }
+      return contents;
+    };
+    try {
+      assert.throws(
+        () => readProtectedRecord(mutableRecord),
+        /delivery grant state changed while reading/
+      );
+    } finally {
+      fs.readFileSync = originalMutableRecordReadFileSync;
+    }
+    assert(mutatedRecordDuringRead, "the grant must be mutated while its descriptor is being read");
+    assert.strictEqual(fs.readFileSync(mutableRecord, "utf8"), '{"grant":"modified"}\n');
+
     const inspectedGrant = readProtectedRecord(trustedRecord);
     const replacementBeforeConsume = `${trustedRecordDirectory}-replacement`;
     const replacementAfterConsume = `${trustedRecordDirectory}-replacement-after-consume`;
@@ -1507,6 +1532,37 @@ async function main() {
         fs.readFileSync(path.join(`${trustedEpochDirectory}-replacement`, epochName), "utf8"),
         `${replacementEpoch}\n`
       );
+
+      const mutableEpochInput = { session_id: "epoch-read-mutation", cwd: temporary };
+      const mutableEpochName = `session-${crypto.createHash("sha256")
+        .update(mutableEpochInput.session_id).digest("hex")}.epoch`;
+      const mutableEpochFile = path.join(trustedEpochDirectory, mutableEpochName);
+      fs.writeFileSync(mutableEpochFile, `${"a".repeat(64)}\n`, { mode: 0o600 });
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochDirectory;
+      const originalMutableEpochReadFileSync = fs.readFileSync;
+      let mutatedEpochDuringRead = false;
+      fs.readFileSync = (candidate, ...options) => {
+        const contents = originalMutableEpochReadFileSync(candidate, ...options);
+        if (typeof candidate === "number" && !mutatedEpochDuringRead) {
+          fs.writeFileSync(mutableEpochFile, `${"b".repeat(64)}\n`, { mode: 0o600 });
+          const future = new Date(Date.now() + 2000);
+          fs.utimesSync(mutableEpochFile, future, future);
+          mutatedEpochDuringRead = true;
+        }
+        return contents;
+      };
+      try {
+        assert.throws(
+          () => readSessionEpoch(mutableEpochInput),
+          /session epoch changed while reading/
+        );
+      } finally {
+        fs.readFileSync = originalMutableEpochReadFileSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(mutatedEpochDuringRead, "the session epoch must be mutated while its descriptor is being read");
+      assert.strictEqual(fs.readFileSync(mutableEpochFile, "utf8"), `${"b".repeat(64)}\n`);
     }
   } finally {
     if (previousRuntime === undefined) delete process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
