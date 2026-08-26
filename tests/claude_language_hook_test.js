@@ -592,6 +592,48 @@ async function main() {
     assert.strictEqual(fs.readFileSync(temporaryRaceWriteOriginal, "utf8"), '{"grant":"original"}\n');
     assert.strictEqual(fs.readFileSync(temporaryRaceWritePath, "utf8"), '{"grant":"replacement"}\n');
 
+    const temporaryHardlinkWriteInput = { session_id: "write-temporary-hard-link", agent_id: "main" };
+    const temporaryHardlinkWriteName = `${crypto.createHash("sha256")
+      .update("write-temporary-hard-link\0main").digest("hex")}.json`;
+    const temporaryHardlinkWriteTarget = path.join(trustedWriteDirectory, temporaryHardlinkWriteName);
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedWriteDirectory;
+    const originalTemporaryHardlinkWriteOpenSync = fs.openSync;
+    const originalTemporaryHardlinkWriteFsyncSync = fs.fsyncSync;
+    let temporaryHardlinkWritePath;
+    let temporaryHardlinkWriteAlias;
+    fs.openSync = (candidate, ...options) => {
+      const descriptor = originalTemporaryHardlinkWriteOpenSync(candidate, ...options);
+      const candidateText = String(candidate);
+      if (!temporaryHardlinkWritePath && candidateText.endsWith(".tmp")
+          && path.basename(candidateText).startsWith(`${temporaryHardlinkWriteName}.`)) {
+        temporaryHardlinkWritePath = path.join(trustedWriteDirectory, path.basename(candidateText));
+        temporaryHardlinkWriteAlias = `${temporaryHardlinkWritePath}.alias`;
+      }
+      return descriptor;
+    };
+    fs.fsyncSync = (descriptor) => {
+      const result = originalTemporaryHardlinkWriteFsyncSync(descriptor);
+      if (temporaryHardlinkWritePath && !fs.existsSync(temporaryHardlinkWriteAlias)) {
+        fs.linkSync(temporaryHardlinkWritePath, temporaryHardlinkWriteAlias);
+      }
+      return result;
+    };
+    try {
+      assert.throws(
+        () => writeRecord(temporaryHardlinkWriteInput, { grant: "original" }),
+        /temporary file changed before cleanup/
+      );
+    } finally {
+      fs.openSync = originalTemporaryHardlinkWriteOpenSync;
+      fs.fsyncSync = originalTemporaryHardlinkWriteFsyncSync;
+      if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+    }
+    assert(temporaryHardlinkWritePath, "the temporary grant must be hard-linked during writing");
+    assert(!fs.existsSync(temporaryHardlinkWriteTarget), "a hard-linked temporary grant must not be published");
+    assert.strictEqual(fs.readFileSync(temporaryHardlinkWritePath, "utf8"), '{"grant":"original"}\n');
+    assert.strictEqual(fs.readFileSync(temporaryHardlinkWriteAlias, "utf8"), '{"grant":"original"}\n');
+
     const publishedRaceWriteInput = { session_id: "write-published-race", agent_id: "main" };
     const publishedRaceWriteName = `${crypto.createHash("sha256")
       .update("write-published-race\0main").digest("hex")}.json`;
@@ -1180,6 +1222,51 @@ async function main() {
       assert(!fs.existsSync(temporaryRaceEpochTarget), "an exchanged temporary epoch must not be published");
       assert.match(fs.readFileSync(temporaryRaceEpochOriginal, "utf8"), /^[a-f0-9]{64}\n$/);
       assert.strictEqual(fs.readFileSync(temporaryRaceEpochPath, "utf8"), `${"e".repeat(64)}\n`);
+
+      const temporaryHardlinkEpochInput = { session_id: "epoch-temporary-hard-link", cwd: temporary };
+      const temporaryHardlinkEpochName = `session-${crypto.createHash("sha256")
+        .update(temporaryHardlinkEpochInput.session_id).digest("hex")}.epoch`;
+      const temporaryHardlinkEpochTarget = path.join(trustedEpochWriteDirectory, temporaryHardlinkEpochName);
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      const originalTemporaryHardlinkEpochOpenSync = fs.openSync;
+      const originalTemporaryHardlinkEpochFsyncSync = fs.fsyncSync;
+      let temporaryHardlinkEpochPath;
+      let temporaryHardlinkEpochAlias;
+      fs.openSync = (candidate, ...options) => {
+        const descriptor = originalTemporaryHardlinkEpochOpenSync(candidate, ...options);
+        const candidateText = String(candidate);
+        if (!temporaryHardlinkEpochPath && candidateText.endsWith(".tmp")
+            && path.basename(candidateText).startsWith(`${temporaryHardlinkEpochName}.`)) {
+          temporaryHardlinkEpochPath = path.join(trustedEpochWriteDirectory, path.basename(candidateText));
+          temporaryHardlinkEpochAlias = `${temporaryHardlinkEpochPath}.alias`;
+        }
+        return descriptor;
+      };
+      fs.fsyncSync = (descriptor) => {
+        const result = originalTemporaryHardlinkEpochFsyncSync(descriptor);
+        if (temporaryHardlinkEpochPath && !fs.existsSync(temporaryHardlinkEpochAlias)) {
+          fs.linkSync(temporaryHardlinkEpochPath, temporaryHardlinkEpochAlias);
+        }
+        return result;
+      };
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch(temporaryHardlinkEpochInput),
+          /temporary file changed before cleanup/
+        );
+      } finally {
+        fs.openSync = originalTemporaryHardlinkEpochOpenSync;
+        fs.fsyncSync = originalTemporaryHardlinkEpochFsyncSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(temporaryHardlinkEpochPath, "the temporary epoch must be hard-linked during writing");
+      assert(!fs.existsSync(temporaryHardlinkEpochTarget), "a hard-linked temporary epoch must not be published");
+      assert.match(fs.readFileSync(temporaryHardlinkEpochPath, "utf8"), /^[a-f0-9]{64}\n$/);
+      assert.strictEqual(
+        fs.readFileSync(temporaryHardlinkEpochAlias, "utf8"),
+        fs.readFileSync(temporaryHardlinkEpochPath, "utf8")
+      );
 
       const publishedRaceEpochInput = { session_id: "epoch-published-race", cwd: temporary };
       const publishedRaceEpochName = `session-${crypto.createHash("sha256")
