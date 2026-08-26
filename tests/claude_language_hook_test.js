@@ -1197,6 +1197,84 @@ async function main() {
   try {
     if (process.platform !== "win32") {
       const previousStateDirectory = process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      const linkedEpochCreateTarget = path.join(temporary, "linked-epoch-create-target");
+      const linkedEpochCreateParent = path.join(temporary, "linked-epoch-create-parent");
+      fs.mkdirSync(linkedEpochCreateTarget, { mode: 0o700 });
+      fs.symlinkSync(linkedEpochCreateTarget, linkedEpochCreateParent, "dir");
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = path.join(linkedEpochCreateParent, "claude-hooks");
+      await assert.rejects(
+        () => beginSessionEpoch({ session_id: "linked-epoch-create-parent", cwd: temporary }),
+        /directory cannot be created safely/
+      );
+      assert(
+        !fs.existsSync(path.join(linkedEpochCreateTarget, "claude-hooks")),
+        "session startup must not create state through a linked parent"
+      );
+
+      const writableEpochCreateParent = path.join(temporary, "writable-epoch-create-parent");
+      fs.mkdirSync(writableEpochCreateParent, { mode: 0o700 });
+      fs.chmodSync(writableEpochCreateParent, 0o777);
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = path.join(writableEpochCreateParent, "claude-hooks");
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch({ session_id: "writable-epoch-create-parent", cwd: temporary }),
+          /directory is writable outside its owner/
+        );
+        assert(
+          !fs.existsSync(path.join(writableEpochCreateParent, "claude-hooks")),
+          "session startup must not create state below a writable parent"
+        );
+      } finally {
+        fs.chmodSync(writableEpochCreateParent, 0o700);
+      }
+
+      const safeEpochCreateParent = path.join(temporary, "safe-epoch-create-parent");
+      const safeEpochCreateDirectory = path.join(safeEpochCreateParent, "nested", "claude-hooks");
+      fs.mkdirSync(safeEpochCreateParent, { mode: 0o700 });
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = safeEpochCreateDirectory;
+      const safelyCreatedEpoch = await beginSessionEpoch({
+        session_id: "safe-epoch-create-parent",
+        cwd: temporary
+      });
+      assert.match(safelyCreatedEpoch, /^[a-f0-9]{64}$/);
+      assert(fs.lstatSync(safeEpochCreateDirectory).isDirectory());
+      assert.strictEqual(fs.lstatSync(safeEpochCreateDirectory).mode & 0o777, 0o700);
+
+      const racedEpochCreateParent = path.join(temporary, "raced-epoch-create-parent");
+      const racedEpochCreateReplacement = path.join(temporary, "raced-epoch-create-replacement");
+      const racedEpochCreateDirectory = path.join(racedEpochCreateParent, "claude-hooks");
+      fs.mkdirSync(racedEpochCreateParent, { mode: 0o700 });
+      fs.mkdirSync(racedEpochCreateReplacement, { mode: 0o700 });
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = racedEpochCreateDirectory;
+      const originalEpochCreateMkdirSync = fs.mkdirSync;
+      let exchangedEpochCreateParent = false;
+      fs.mkdirSync = (candidate, ...options) => {
+        const result = originalEpochCreateMkdirSync(candidate, ...options);
+        if (!exchangedEpochCreateParent && path.basename(String(candidate)) === "claude-hooks") {
+          fs.renameSync(racedEpochCreateParent, `${racedEpochCreateParent}-old`);
+          fs.renameSync(racedEpochCreateReplacement, racedEpochCreateParent);
+          exchangedEpochCreateParent = true;
+        }
+        return result;
+      };
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch({ session_id: "raced-epoch-create-parent", cwd: temporary }),
+          /directory cannot be created safely/
+        );
+      } finally {
+        fs.mkdirSync = originalEpochCreateMkdirSync;
+      }
+      assert(exchangedEpochCreateParent, "the epoch parent must be exchanged during creation");
+      assert(
+        !fs.existsSync(path.join(racedEpochCreateParent, "claude-hooks")),
+        "an exchanged destination parent must receive no state directory"
+      );
+      assert(
+        fs.lstatSync(path.join(`${racedEpochCreateParent}-old`, "claude-hooks")).isDirectory(),
+        "directory creation must stay bound to the held original parent"
+      );
+
       const trustedEpochWriteDirectory = path.join(temporary, "trusted-epoch-write-directory");
       const replacementEpochWriteDirectory = path.join(temporary, "replacement-epoch-write-directory");
       fs.mkdirSync(trustedEpochWriteDirectory, { mode: 0o700 });

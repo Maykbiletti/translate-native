@@ -148,6 +148,79 @@ function existingProtectedDirectoryAnchor(directory, label) {
   }
 }
 
+function ensureProtectedDirectory(directory, label) {
+  const absoluteDirectory = path.resolve(directory);
+  const home = path.resolve(os.homedir());
+  const underHome = absoluteDirectory === home || absoluteDirectory.startsWith(`${home}${path.sep}`);
+  const anchor = underHome ? home : existingProtectedDirectoryAnchor(absoluteDirectory, label);
+  const relative = path.relative(anchor, absoluteDirectory);
+  const components = relative ? relative.split(path.sep) : [];
+  if (process.platform === "win32") {
+    let current = anchor;
+    validateProtectedDirectoryStats(fs.lstatSync(current), current, label);
+    for (const component of components) {
+      current = path.join(current, component);
+      try {
+        validateProtectedDirectoryStats(fs.lstatSync(current), current, label);
+      } catch (error) {
+        if (!error || error.code !== "ENOENT") throw error;
+        try {
+          fs.mkdirSync(current, { mode: 0o700 });
+        } catch (mkdirError) {
+          if (!mkdirError || mkdirError.code !== "EEXIST") throw mkdirError;
+        }
+        validateProtectedDirectoryStats(fs.lstatSync(current), current, label);
+      }
+    }
+    return;
+  }
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const directoryOnly = typeof fs.constants.O_DIRECTORY === "number" ? fs.constants.O_DIRECTORY : 0;
+  const flags = fs.constants.O_RDONLY | noFollow | directoryOnly;
+  const descriptorRoot = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
+  let descriptor = null;
+  let current = anchor;
+  try {
+    descriptor = fs.openSync(anchor, flags);
+    validateProtectedDirectoryStats(fs.fstatSync(descriptor), anchor, label);
+    for (const component of components) {
+      current = path.join(current, component);
+      const accessPath = path.join(descriptorRoot, String(descriptor), component);
+      let child;
+      try {
+        child = fs.openSync(accessPath, flags);
+      } catch (error) {
+        if (!error || error.code !== "ENOENT") throw error;
+        try {
+          fs.mkdirSync(accessPath, { mode: 0o700 });
+        } catch (mkdirError) {
+          if (!mkdirError || mkdirError.code !== "EEXIST") throw mkdirError;
+        }
+        child = fs.openSync(accessPath, flags);
+      }
+      try {
+        validateProtectedDirectoryStats(fs.fstatSync(child), current, label);
+      } catch (error) {
+        fs.closeSync(child);
+        throw error;
+      }
+      fs.closeSync(descriptor);
+      descriptor = child;
+    }
+    const held = fs.fstatSync(descriptor);
+    const currentPath = fs.lstatSync(absoluteDirectory);
+    validateProtectedDirectoryStats(currentPath, absoluteDirectory, label);
+    if (!sameProtectedDirectoryIdentity(held, protectedDirectoryIdentity(currentPath))) {
+      throw new Error(`${label} directory changed while creating: ${absoluteDirectory}`);
+    }
+  } catch (error) {
+    if (error && String(error.message || "").startsWith(`${label} directory`)) throw error;
+    throw new Error(`${label} directory cannot be created safely: ${current}`);
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+}
+
 function openProtectedDirectory(file, label) {
   const absoluteFile = path.resolve(file);
   const directory = path.dirname(absoluteFile);
@@ -518,7 +591,7 @@ function assertSessionEpochPublicationTargetAbsent(epochFile) {
 
 async function beginSessionEpoch(input) {
   const directory = stateDirectory();
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  ensureProtectedDirectory(directory, "session epoch");
   const destination = sessionEpochPath(input);
   const protectedDirectory = openProtectedDirectory(destination, "session epoch");
   const epochFile = protectedDirectory.accessPath;
