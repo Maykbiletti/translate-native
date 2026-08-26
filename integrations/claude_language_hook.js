@@ -387,46 +387,73 @@ function sessionEpochPath(input) {
   return path.join(stateDirectory(), `session-${sessionHash(input)}.epoch`);
 }
 
+function validateSessionEpochStats(stats) {
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("session epoch must be a regular file");
+  if (stats.nlink !== 1) throw new Error("session epoch must not have additional hard links");
+  if (stats.size < 1 || stats.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("session epoch permissions are too broad");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error("session epoch has the wrong owner");
+  }
+}
+
+function readSessionEpochFile(epochFile) {
+  const before = fs.lstatSync(epochFile);
+  validateSessionEpochStats(before);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(epochFile, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validateSessionEpochStats(opened);
+    if (!sameRecordIdentity(opened, recordIdentity(before))) {
+      throw new Error("session epoch changed while opening");
+    }
+    const epoch = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "").trim();
+    if (!/^[a-f0-9]{64}$/.test(epoch)) throw new Error("session epoch is invalid");
+    return { epoch, fileIdentity: recordIdentity(opened) };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function readSessionEpoch(input) {
   const destination = sessionEpochPath(input);
   const protectedDirectory = openProtectedDirectory(destination, "session epoch");
-  const epochFile = protectedDirectory.accessPath;
   try {
-    const before = fs.lstatSync(epochFile);
-    if (!before.isFile() || before.isSymbolicLink()) throw new Error("session epoch must be a regular file");
-    if (before.nlink !== 1) throw new Error("session epoch must not have additional hard links");
-    if (before.size < 1 || before.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
-    if (process.platform !== "win32" && (before.mode & 0o077) !== 0) {
-      throw new Error("session epoch permissions are too broad");
-    }
-    if (typeof process.getuid === "function" && before.uid !== process.getuid()) {
-      throw new Error("session epoch has the wrong owner");
-    }
-    const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-    const descriptor = fs.openSync(epochFile, fs.constants.O_RDONLY | noFollow);
-    try {
-      const opened = fs.fstatSync(descriptor);
-      if (!opened.isFile() || opened.isSymbolicLink()) throw new Error("session epoch must be a regular file");
-      if (opened.nlink !== 1) throw new Error("session epoch must not have additional hard links");
-      if (opened.size < 1 || opened.size > MAX_EPOCH_BYTES) throw new Error("session epoch has an invalid size");
-      if (process.platform !== "win32" && (opened.mode & 0o077) !== 0) {
-        throw new Error("session epoch permissions are too broad");
-      }
-      if (typeof process.getuid === "function" && opened.uid !== process.getuid()) {
-        throw new Error("session epoch has the wrong owner");
-      }
-      if (!sameRecordIdentity(opened, recordIdentity(before))) {
-        throw new Error("session epoch changed while opening");
-      }
-      const epoch = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "").trim();
-      if (!/^[a-f0-9]{64}$/.test(epoch)) throw new Error("session epoch is invalid");
-      return { destination, epoch, fileIdentity: recordIdentity(opened) };
-    } finally {
-      fs.closeSync(descriptor);
-    }
+    return { destination, ...readSessionEpochFile(protectedDirectory.accessPath) };
   } finally {
     closeProtectedDirectory(protectedDirectory, "session epoch");
   }
+}
+
+function removeExistingSessionEpochFile(epochFile) {
+  let inspected;
+  try {
+    inspected = readSessionEpochFile(epochFile);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return;
+    throw error;
+  }
+  const current = fs.lstatSync(epochFile);
+  validateSessionEpochStats(current);
+  if (!sameRecordIdentity(current, inspected.fileIdentity)) {
+    throw new Error("session epoch changed before renewal");
+  }
+  fs.unlinkSync(epochFile);
+}
+
+function assertSessionEpochPublicationTargetAbsent(epochFile) {
+  let current;
+  try {
+    current = fs.lstatSync(epochFile);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return;
+    throw error;
+  }
+  validateSessionEpochStats(current);
+  throw new Error("session epoch changed before publication");
 }
 
 async function beginSessionEpoch(input) {
@@ -436,11 +463,7 @@ async function beginSessionEpoch(input) {
   const protectedDirectory = openProtectedDirectory(destination, "session epoch");
   const epochFile = protectedDirectory.accessPath;
   try {
-    try {
-      fs.unlinkSync(epochFile);
-    } catch (error) {
-      if (!error || error.code !== "ENOENT") throw error;
-    }
+    removeExistingSessionEpochFile(epochFile);
     invalidateSessionRecords(input);
     const epoch = crypto.randomBytes(32).toString("hex");
     const registration = await callGuard({
@@ -459,6 +482,7 @@ async function beginSessionEpoch(input) {
       fs.fsyncSync(descriptor);
       fs.closeSync(descriptor);
       descriptor = undefined;
+      assertSessionEpochPublicationTargetAbsent(epochFile);
       fs.renameSync(temporary, epochFile);
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);

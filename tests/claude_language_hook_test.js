@@ -1045,6 +1045,94 @@ async function main() {
         "replacement\n"
       );
 
+      const hardlinkedEpochInput = { session_id: "epoch-renew-hard-link", cwd: temporary };
+      const hardlinkedEpochName = `session-${crypto.createHash("sha256")
+        .update(hardlinkedEpochInput.session_id).digest("hex")}.epoch`;
+      const hardlinkedEpochFile = path.join(trustedEpochWriteDirectory, hardlinkedEpochName);
+      const hardlinkedEpochAlias = `${hardlinkedEpochFile}.alias`;
+      fs.writeFileSync(hardlinkedEpochFile, `${"a".repeat(64)}\n`, { mode: 0o600 });
+      fs.linkSync(hardlinkedEpochFile, hardlinkedEpochAlias);
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      try {
+        await assert.rejects(() => beginSessionEpoch(hardlinkedEpochInput), /hard links/);
+        assert.strictEqual(fs.readFileSync(hardlinkedEpochFile, "utf8"), `${"a".repeat(64)}\n`);
+        assert.strictEqual(fs.readFileSync(hardlinkedEpochAlias, "utf8"), `${"a".repeat(64)}\n`);
+      } finally {
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+
+      const removalRaceEpochInput = { session_id: "epoch-renew-removal-race", cwd: temporary };
+      const removalRaceEpochName = `session-${crypto.createHash("sha256")
+        .update(removalRaceEpochInput.session_id).digest("hex")}.epoch`;
+      const removalRaceEpochFile = path.join(trustedEpochWriteDirectory, removalRaceEpochName);
+      const removalRaceEpochOriginal = `${removalRaceEpochFile}.old`;
+      const removalRaceEpochReplacement = `${removalRaceEpochFile}.replacement`;
+      fs.writeFileSync(removalRaceEpochFile, `${"c".repeat(64)}\n`, { mode: 0o600 });
+      fs.writeFileSync(removalRaceEpochReplacement, `${"d".repeat(64)}\n`, { mode: 0o600 });
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      const originalEpochRemovalLstatSync = fs.lstatSync;
+      let epochRemovalInspections = 0;
+      let exchangedEpochRemovalTarget = false;
+      fs.lstatSync = (candidate, ...options) => {
+        if (path.basename(String(candidate)) === removalRaceEpochName
+            && ++epochRemovalInspections === 2) {
+          fs.renameSync(removalRaceEpochFile, removalRaceEpochOriginal);
+          fs.renameSync(removalRaceEpochReplacement, removalRaceEpochFile);
+          exchangedEpochRemovalTarget = true;
+        }
+        return originalEpochRemovalLstatSync(candidate, ...options);
+      };
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch(removalRaceEpochInput),
+          /changed before renewal/
+        );
+      } finally {
+        fs.lstatSync = originalEpochRemovalLstatSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(exchangedEpochRemovalTarget, "the inspected epoch must be exchanged before removal");
+      assert.strictEqual(fs.readFileSync(removalRaceEpochOriginal, "utf8"), `${"c".repeat(64)}\n`);
+      assert.strictEqual(fs.readFileSync(removalRaceEpochFile, "utf8"), `${"d".repeat(64)}\n`);
+
+      const exchangedEpochInput = { session_id: "epoch-renew-file-race", cwd: temporary };
+      const exchangedEpochName = `session-${crypto.createHash("sha256")
+        .update(exchangedEpochInput.session_id).digest("hex")}.epoch`;
+      const exchangedEpochFile = path.join(trustedEpochWriteDirectory, exchangedEpochName);
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      const originalEpochWriteLstatSync = fs.lstatSync;
+      let epochTargetInspections = 0;
+      let insertedEpochTarget = false;
+      fs.lstatSync = (candidate, ...options) => {
+        if (path.basename(String(candidate)) === exchangedEpochName) {
+          epochTargetInspections += 1;
+          if (epochTargetInspections === 2) {
+            fs.writeFileSync(exchangedEpochFile, `${"b".repeat(64)}\n`, { mode: 0o600 });
+            insertedEpochTarget = true;
+          }
+        }
+        return originalEpochWriteLstatSync(candidate, ...options);
+      };
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch(exchangedEpochInput),
+          /changed before publication/
+        );
+      } finally {
+        fs.lstatSync = originalEpochWriteLstatSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(insertedEpochTarget, "a replacement epoch must appear before publication");
+      assert.strictEqual(fs.readFileSync(exchangedEpochFile, "utf8"), `${"b".repeat(64)}\n`);
+      assert(
+        !fs.readdirSync(trustedEpochWriteDirectory)
+          .some((entry) => entry.startsWith(`${exchangedEpochName}.`) && entry.endsWith(".tmp")),
+        "blocked epoch publication must remove its temporary marker"
+      );
+
       const writableEpochWriteDirectory = path.join(temporary, "writable-epoch-write-directory");
       fs.mkdirSync(writableEpochWriteDirectory, { mode: 0o777 });
       fs.chmodSync(writableEpochWriteDirectory, 0o777);
