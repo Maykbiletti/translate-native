@@ -41,7 +41,7 @@ function containsLanguageCharacters(value) {
 function hasNaturalLanguage(value) {
   let encodedNaturalLanguage = false;
   const text = String(value || "").replace(
-    /&#(?:(\d{1,7})|x([0-9a-f]{1,6}));/gi,
+    /&#(?:(\d{1,7})(?!\d)|x([0-9a-f]{1,6})(?![0-9a-f]));?/gi,
     (entity, decimal, hexadecimal) => {
       const codePoint = Number.parseInt(decimal || hexadecimal, decimal ? 10 : 16);
       if (Number.isSafeInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF) {

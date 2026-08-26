@@ -30,11 +30,17 @@ function runHook(mode, input, environment) {
 
 async function main() {
   assert(hasNaturalLanguage("&#78;&#97;&#116;&#252;&#114;&#108;&#105;&#99;&#104;"));
+  assert(
+    hasNaturalLanguage("&#78 &#97 &#116 &#252 &#114 &#108 &#105 &#99 &#104"),
+    "semicolonless decimal language entities must require verification"
+  );
   assert(hasNaturalLanguage("\u0308"), "a standalone combining mark must require verification");
   assert(hasNaturalLanguage("&#776;"), "an encoded combining mark must require verification");
+  assert(hasNaturalLanguage("&#776"), "a semicolonless combining mark must require verification");
+  assert(!hasNaturalLanguage("&#99999999"), "an overlong decimal entity must not be decoded in parts");
   assert(!hasNaturalLanguage("&#128512;"), "a decimal emoji entity must not become a language false positive");
   assert(!hasNaturalLanguage("&#x1F600;"), "a hexadecimal emoji entity must not become a language false positive");
-  for (const emoji of ["❤️", "☹️", "✈️", "1️⃣", "&#10084;&#65039;", "&#49;&#65039;&#8419;"]) {
+  for (const emoji of ["❤️", "☹️", "✈️", "1️⃣", "&#10084;&#65039;", "&#49;&#65039;&#8419;", "&#49 &#65039 &#8419"]) {
     assert(!hasNaturalLanguage(emoji), `${emoji} must remain an emoji-only output`);
   }
 
@@ -1631,6 +1637,18 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(encodedNaturalLanguageStop.stdout).decision, "block");
 
+  const semicolonlessEncodedNaturalLanguageSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-semicolonless-entity",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#78 &#97 &#116 &#252 &#114 &#108 &#105 &#99 &#104",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(
+    JSON.parse(semicolonlessEncodedNaturalLanguageSubagentStop.stdout).decision,
+    "block"
+  );
+
   const encodedEmojiStop = await runHook("stop", {
     ...common,
     hook_event_name: "Stop",
@@ -1642,7 +1660,7 @@ async function main() {
   const encodedKeycapStop = await runHook("stop", {
     ...common,
     hook_event_name: "Stop",
-    last_assistant_message: "&#49;&#65039;&#8419;",
+    last_assistant_message: "&#49 &#65039 &#8419",
     stop_hook_active: false
   }, environment);
   assert.strictEqual(encodedKeycapStop.stdout, "");
