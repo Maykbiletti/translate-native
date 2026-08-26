@@ -24,6 +24,13 @@ const NON_LANGUAGE_NAMED_REFERENCES = new Set([
   "middot", "nbsp", "ndash", "quot", "raquo", "rdquo", "reg", "rlm", "rsquo",
   "shy", "thinsp", "trade", "zwj", "zwnj"
 ]);
+const LEGACY_NON_LANGUAGE_NAMED_REFERENCES = [
+  "brvbar", "divide", "frac12", "frac14", "frac34", "iquest", "middot", "plusmn",
+  "pound", "acute", "curren", "iexcl", "laquo", "nbsp", "para", "raquo", "sect",
+  "times", "cedil", "cent", "copy", "macr", "quot", "shy", "sup1", "sup2",
+  "sup3", "AMP", "COPY", "QUOT", "REG", "amp", "deg", "GT", "gt", "LT", "lt",
+  "not", "reg", "uml", "yen"
+].sort((left, right) => right.length - left.length);
 let currentHookInput = null;
 
 function canonicalText(value) {
@@ -58,8 +65,15 @@ function hasNaturalLanguage(value) {
     }
   );
   const text = textWithoutNumericReferences.replace(
-    /&([A-Za-z][A-Za-z0-9]{1,31});/g,
-    (entity, name) => NON_LANGUAGE_NAMED_REFERENCES.has(name) ? "" : entity
+    /&([A-Za-z][A-Za-z0-9]{1,31})(;?)/g,
+    (entity, name, semicolon) => {
+      if (semicolon && NON_LANGUAGE_NAMED_REFERENCES.has(name)) return "";
+      const legacyReference = LEGACY_NON_LANGUAGE_NAMED_REFERENCES.find(
+        (reference) => name.startsWith(reference)
+      );
+      if (!legacyReference) return entity;
+      return `${name.slice(legacyReference.length)}${semicolon}`;
+    }
   );
   return encodedNaturalLanguage || containsLanguageCharacters(text);
 }

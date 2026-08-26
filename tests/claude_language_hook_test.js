@@ -51,7 +51,12 @@ async function main() {
     !hasNaturalLanguage("&nbsp;&amp;&hellip;&mdash;&copy;"),
     "named spacing, punctuation, and symbol references must not become language false positives"
   );
-  for (const linguisticEntity of ["&Auml;", "&aring;", "&unknown;"]) {
+  assert(
+    !hasNaturalLanguage("&nbsp&amp&copy&reg&gt&lt&quot&frac12&times"),
+    "legacy non-language references without semicolons must not become language false positives"
+  );
+  assert(!hasNaturalLanguage("&nbsp123"), "numeric suffixes after legacy references must remain allowed");
+  for (const linguisticEntity of ["&Auml;", "&aring;", "&unknown;", "&Auml", "&aring", "&hellip", "&notin", "&nbspText"]) {
     assert(hasNaturalLanguage(linguisticEntity), `${linguisticEntity} must remain fail-closed`);
   }
 
@@ -1691,6 +1696,14 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(namedPunctuationStop.stdout, "");
+
+  const legacyNamedPunctuationStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "&nbsp&amp&copy&reg&gt&lt&quot&frac12&times",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(legacyNamedPunctuationStop.stdout, "");
 
   const policyEnvironment = {
     ...environment,
