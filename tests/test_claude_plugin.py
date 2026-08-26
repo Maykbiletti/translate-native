@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
@@ -11,6 +12,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ClaudePluginTests(unittest.TestCase):
+    def test_active_plugin_version_is_synchronized(self) -> None:
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        skill = (ROOT / "translate-native" / "SKILL.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertEqual(plugin["version"], version)
+        self.assertEqual(
+            set(re.findall(r"Version (\d+\.\d+\.\d+) `translate-native` plugin", skill)),
+            {version},
+        )
+        self.assertIn(f"### Version {version}:", readme)
+        self.assertIn(f"current Version {version} plugin", readme)
+
     def test_manifests_expose_skill_mcp_and_mandatory_hooks(self) -> None:
         plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
