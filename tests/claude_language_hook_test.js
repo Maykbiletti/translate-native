@@ -41,6 +41,18 @@ async function main() {
   assert(hasNaturalLanguage("\u0308"), "a standalone combining mark must require verification");
   assert(hasNaturalLanguage("&#776;"), "an encoded combining mark must require verification");
   assert(hasNaturalLanguage("&#776"), "a semicolonless combining mark must require verification");
+  assert(
+    hasNaturalLanguage("&#x8A;&#140;&#x9E;&#159;"),
+    "HTML C1 references that render as letters must require verification"
+  );
+  assert(
+    hasNaturalLanguage("&#00000138 &#00000154"),
+    "zero-padded semicolonless HTML C1 letter references must require verification"
+  );
+  assert(
+    !hasNaturalLanguage("&#128;&#130;&#132;&#133;&#134;&#135;&#137;&#145;&#146;&#147;&#148;&#149;&#150;&#151;&#153;"),
+    "HTML C1 references that render only punctuation or symbols must remain allowed"
+  );
   assert(!hasNaturalLanguage("&#99999999"), "an overlong decimal entity must not be decoded in parts");
   assert(!hasNaturalLanguage("&#128512;"), "a decimal emoji entity must not become a language false positive");
   assert(!hasNaturalLanguage("&#x1F600;"), "a hexadecimal emoji entity must not become a language false positive");
@@ -1672,6 +1684,34 @@ async function main() {
     JSON.parse(semicolonlessEncodedNaturalLanguageSubagentStop.stdout).decision,
     "block"
   );
+
+  const c1EncodedNaturalLanguageStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "&#x8A;&#x9A;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(c1EncodedNaturalLanguageStop.stdout).decision, "block");
+
+  const semicolonlessC1NaturalLanguageSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-c1-entity",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#138 &#154",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(
+    JSON.parse(semicolonlessC1NaturalLanguageSubagentStop.stdout).decision,
+    "block"
+  );
+
+  const c1PunctuationStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "&#128;&#130;&#133;&#145;&#146;&#147;&#148;&#150;&#151;&#153;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(c1PunctuationStop.stdout, "");
 
   const encodedEmojiStop = await runHook("stop", {
     ...common,
