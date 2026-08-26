@@ -592,6 +592,37 @@ async function main() {
     assert.strictEqual(fs.readFileSync(temporaryRaceWriteOriginal, "utf8"), '{"grant":"original"}\n');
     assert.strictEqual(fs.readFileSync(temporaryRaceWritePath, "utf8"), '{"grant":"replacement"}\n');
 
+    const publishedRaceWriteInput = { session_id: "write-published-race", agent_id: "main" };
+    const publishedRaceWriteName = `${crypto.createHash("sha256")
+      .update("write-published-race\0main").digest("hex")}.json`;
+    const publishedRaceWriteTarget = path.join(trustedWriteDirectory, publishedRaceWriteName);
+    const publishedRaceWriteOriginal = `${publishedRaceWriteTarget}.old`;
+    process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedWriteDirectory;
+    const originalPublishedRaceWriteRenameSync = fs.renameSync;
+    let exchangedPublishedWriteTarget = false;
+    fs.renameSync = (source, destination, ...options) => {
+      const result = originalPublishedRaceWriteRenameSync(source, destination, ...options);
+      if (!exchangedPublishedWriteTarget && path.basename(String(destination)) === publishedRaceWriteName) {
+        originalPublishedRaceWriteRenameSync(destination, `${destination}.old`);
+        fs.writeFileSync(destination, '{"grant":"replacement"}\n', { mode: 0o600 });
+        exchangedPublishedWriteTarget = true;
+      }
+      return result;
+    };
+    try {
+      assert.throws(
+        () => writeRecord(publishedRaceWriteInput, { grant: "original" }),
+        /delivery grant state changed during publication/
+      );
+    } finally {
+      fs.renameSync = originalPublishedRaceWriteRenameSync;
+      if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+      else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+    }
+    assert(exchangedPublishedWriteTarget, "the published grant must be exchanged before final validation");
+    assert.strictEqual(fs.readFileSync(publishedRaceWriteOriginal, "utf8"), '{"grant":"original"}\n');
+    assert.strictEqual(fs.readFileSync(publishedRaceWriteTarget, "utf8"), '{"grant":"replacement"}\n');
+
     const hardlinkedWriteInput = { session_id: "write-hard-link", agent_id: "main" };
     const hardlinkedWriteRecordName = `${crypto.createHash("sha256").update("write-hard-link\0main").digest("hex")}.json`;
     const hardlinkedWriteRecord = path.join(trustedWriteDirectory, hardlinkedWriteRecordName);
@@ -1149,6 +1180,37 @@ async function main() {
       assert(!fs.existsSync(temporaryRaceEpochTarget), "an exchanged temporary epoch must not be published");
       assert.match(fs.readFileSync(temporaryRaceEpochOriginal, "utf8"), /^[a-f0-9]{64}\n$/);
       assert.strictEqual(fs.readFileSync(temporaryRaceEpochPath, "utf8"), `${"e".repeat(64)}\n`);
+
+      const publishedRaceEpochInput = { session_id: "epoch-published-race", cwd: temporary };
+      const publishedRaceEpochName = `session-${crypto.createHash("sha256")
+        .update(publishedRaceEpochInput.session_id).digest("hex")}.epoch`;
+      const publishedRaceEpochTarget = path.join(trustedEpochWriteDirectory, publishedRaceEpochName);
+      const publishedRaceEpochOriginal = `${publishedRaceEpochTarget}.old`;
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      const originalPublishedRaceEpochRenameSync = fs.renameSync;
+      let exchangedPublishedEpochTarget = false;
+      fs.renameSync = (source, destination, ...options) => {
+        const result = originalPublishedRaceEpochRenameSync(source, destination, ...options);
+        if (!exchangedPublishedEpochTarget && path.basename(String(destination)) === publishedRaceEpochName) {
+          originalPublishedRaceEpochRenameSync(destination, `${destination}.old`);
+          fs.writeFileSync(destination, `${"e".repeat(64)}\n`, { mode: 0o600 });
+          exchangedPublishedEpochTarget = true;
+        }
+        return result;
+      };
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch(publishedRaceEpochInput),
+          /session epoch changed during publication/
+        );
+      } finally {
+        fs.renameSync = originalPublishedRaceEpochRenameSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(exchangedPublishedEpochTarget, "the published epoch must be exchanged before final validation");
+      assert.match(fs.readFileSync(publishedRaceEpochOriginal, "utf8"), /^[a-f0-9]{64}\n$/);
+      assert.strictEqual(fs.readFileSync(publishedRaceEpochTarget, "utf8"), `${"e".repeat(64)}\n`);
 
       const hardlinkedEpochInput = { session_id: "epoch-renew-hard-link", cwd: temporary };
       const hardlinkedEpochName = `session-${crypto.createHash("sha256")
