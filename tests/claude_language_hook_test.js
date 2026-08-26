@@ -63,6 +63,20 @@ async function main() {
     !hasNaturalLanguage("&nbsp;&amp;&hellip;&mdash;&copy;"),
     "named spacing, punctuation, and symbol references must not become language false positives"
   );
+  const formattingReferences = [
+    "Tab", "NewLine", "ZeroWidthSpace", "NegativeVeryThinSpace", "NegativeThinSpace",
+    "NegativeMediumSpace", "NegativeThickSpace", "MediumSpace", "ThickSpace", "VeryThinSpace",
+    "ThinSpace", "NonBreakingSpace", "NoBreak", "ApplyFunction", "InvisibleTimes", "InvisibleComma"
+  ];
+  assert(
+    !hasNaturalLanguage(formattingReferences.map((name) => `&${name};`).join("")),
+    "named invisible controls and spacing must not become language false positives"
+  );
+  for (const name of formattingReferences) {
+    assert(hasNaturalLanguage(`&${name}`), `semicolonless &${name} must remain fail-closed`);
+  }
+  assert(hasNaturalLanguage("&InvisibleTime;"), "a formatting-entity near miss must remain fail-closed");
+  assert(hasNaturalLanguage("&Tab;Text"), "natural language beside formatting entities must remain protected");
   assert(
     !hasNaturalLanguage("&nbsp&amp&copy&reg&gt&lt&quot&frac12&times"),
     "legacy non-language references without semicolons must not become language false positives"
@@ -1940,6 +1954,26 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(namedPunctuationStop.stdout, "");
+
+  const namedFormattingStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "&Tab;&NewLine;&ZeroWidthSpace;&NegativeThinSpace;&InvisibleTimes;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(namedFormattingStop.stdout, "");
+
+  const semicolonlessFormattingSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-formatting-entity",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&InvisibleTimes",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(
+    JSON.parse(semicolonlessFormattingSubagentStop.stdout).decision,
+    "block"
+  );
 
   const legacyNamedPunctuationStop = await runHook("stop", {
     ...common,
