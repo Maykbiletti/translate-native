@@ -53,6 +53,18 @@ function textHash(value) {
   return crypto.createHash("sha256").update(canonicalText(value), "utf8").digest("hex");
 }
 
+function readBoundedUtf8Descriptor(descriptor, maximumBytes, label) {
+  const buffer = Buffer.alloc(maximumBytes + 1);
+  let size = 0;
+  while (size < buffer.length) {
+    const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+    if (count === 0) break;
+    size += count;
+  }
+  if (size > maximumBytes) throw new Error(`${label} has an invalid size`);
+  return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size));
+}
+
 function containsLanguageCharacters(value) {
   const text = String(value || "");
   if (/\p{L}/u.test(text)) return true;
@@ -537,7 +549,7 @@ function readSessionEpochFile(epochFile) {
     if (!sameRecordIdentity(opened, recordIdentity(before))) {
       throw new Error("session epoch changed while opening");
     }
-    const rawEpoch = fs.readFileSync(descriptor, "utf8");
+    const rawEpoch = readBoundedUtf8Descriptor(descriptor, MAX_EPOCH_BYTES, "session epoch");
     const finished = fs.fstatSync(descriptor);
     validateSessionEpochStats(finished);
     if (!sameRecordIdentity(finished, recordIdentity(opened))) {
@@ -774,7 +786,8 @@ function readProtectedRecordFile(recordFile) {
     if (!sameRecordIdentity(opened, recordIdentity(before))) {
       throw new Error("delivery grant state changed while opening");
     }
-    const raw = fs.readFileSync(descriptor, "utf8").replace(/^\uFEFF/, "");
+    const raw = readBoundedUtf8Descriptor(descriptor, MAX_RECORD_BYTES, "delivery grant state")
+      .replace(/^\uFEFF/, "");
     const finished = fs.fstatSync(descriptor);
     validateRecordStats(finished);
     if (!sameRecordIdentity(finished, recordIdentity(opened))) {

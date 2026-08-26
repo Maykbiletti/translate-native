@@ -209,17 +209,17 @@ async function main() {
 
     const mutableRecord = path.join(trustedRecordDirectory, "mutable-delivery-grant.json");
     fs.writeFileSync(mutableRecord, '{"grant":"original"}\n', { mode: 0o600 });
-    const originalMutableRecordReadFileSync = fs.readFileSync;
+    const originalMutableRecordReadSync = fs.readSync;
     let mutatedRecordDuringRead = false;
-    fs.readFileSync = (candidate, ...options) => {
-      const contents = originalMutableRecordReadFileSync(candidate, ...options);
-      if (typeof candidate === "number" && !mutatedRecordDuringRead) {
+    fs.readSync = (descriptor, ...options) => {
+      const count = originalMutableRecordReadSync(descriptor, ...options);
+      if (!mutatedRecordDuringRead) {
         fs.writeFileSync(mutableRecord, '{"grant":"modified"}\n', { mode: 0o600 });
         const future = new Date(Date.now() + 2000);
         fs.utimesSync(mutableRecord, future, future);
         mutatedRecordDuringRead = true;
       }
-      return contents;
+      return count;
     };
     try {
       assert.throws(
@@ -227,10 +227,32 @@ async function main() {
         /delivery grant state changed while reading/
       );
     } finally {
-      fs.readFileSync = originalMutableRecordReadFileSync;
+      fs.readSync = originalMutableRecordReadSync;
     }
     assert(mutatedRecordDuringRead, "the grant must be mutated while its descriptor is being read");
     assert.strictEqual(fs.readFileSync(mutableRecord, "utf8"), '{"grant":"modified"}\n');
+
+    const growingRecord = path.join(trustedRecordDirectory, "growing-delivery-grant.json");
+    fs.writeFileSync(growingRecord, '{"grant":"bounded"}\n', { mode: 0o600 });
+    const originalGrowingRecordReadSync = fs.readSync;
+    let grewRecordDuringRead = false;
+    let maximumRecordReadRequest = 0;
+    fs.readSync = (descriptor, buffer, offset, length, position) => {
+      maximumRecordReadRequest = Math.max(maximumRecordReadRequest, length);
+      const count = originalGrowingRecordReadSync(descriptor, buffer, offset, length, position);
+      if (!grewRecordDuringRead) {
+        fs.appendFileSync(growingRecord, "x".repeat(70 * 1024));
+        grewRecordDuringRead = true;
+      }
+      return count;
+    };
+    try {
+      assert.throws(() => readProtectedRecord(growingRecord), /delivery grant state has an invalid size/);
+    } finally {
+      fs.readSync = originalGrowingRecordReadSync;
+    }
+    assert(grewRecordDuringRead, "the grant must grow after its bounded descriptor read begins");
+    assert(maximumRecordReadRequest <= 64 * 1024 + 1, "grant reads must remain bounded by the state limit");
 
     const inspectedGrant = readProtectedRecord(trustedRecord);
     const replacementBeforeConsume = `${trustedRecordDirectory}-replacement`;
@@ -1736,17 +1758,17 @@ async function main() {
       const mutableEpochFile = path.join(trustedEpochDirectory, mutableEpochName);
       fs.writeFileSync(mutableEpochFile, `${"a".repeat(64)}\n`, { mode: 0o600 });
       process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochDirectory;
-      const originalMutableEpochReadFileSync = fs.readFileSync;
+      const originalMutableEpochReadSync = fs.readSync;
       let mutatedEpochDuringRead = false;
-      fs.readFileSync = (candidate, ...options) => {
-        const contents = originalMutableEpochReadFileSync(candidate, ...options);
-        if (typeof candidate === "number" && !mutatedEpochDuringRead) {
+      fs.readSync = (descriptor, ...options) => {
+        const count = originalMutableEpochReadSync(descriptor, ...options);
+        if (!mutatedEpochDuringRead) {
           fs.writeFileSync(mutableEpochFile, `${"b".repeat(64)}\n`, { mode: 0o600 });
           const future = new Date(Date.now() + 2000);
           fs.utimesSync(mutableEpochFile, future, future);
           mutatedEpochDuringRead = true;
         }
-        return contents;
+        return count;
       };
       try {
         assert.throws(
@@ -1754,12 +1776,40 @@ async function main() {
           /session epoch changed while reading/
         );
       } finally {
-        fs.readFileSync = originalMutableEpochReadFileSync;
+        fs.readSync = originalMutableEpochReadSync;
         if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
         else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
       }
       assert(mutatedEpochDuringRead, "the session epoch must be mutated while its descriptor is being read");
       assert.strictEqual(fs.readFileSync(mutableEpochFile, "utf8"), `${"b".repeat(64)}\n`);
+
+      const growingEpochInput = { session_id: "epoch-read-growth", cwd: temporary };
+      const growingEpochName = `session-${crypto.createHash("sha256")
+        .update(growingEpochInput.session_id).digest("hex")}.epoch`;
+      const growingEpochFile = path.join(trustedEpochDirectory, growingEpochName);
+      fs.writeFileSync(growingEpochFile, `${"c".repeat(64)}\n`, { mode: 0o600 });
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochDirectory;
+      const originalGrowingEpochReadSync = fs.readSync;
+      let grewEpochDuringRead = false;
+      let maximumEpochReadRequest = 0;
+      fs.readSync = (descriptor, buffer, offset, length, position) => {
+        maximumEpochReadRequest = Math.max(maximumEpochReadRequest, length);
+        const count = originalGrowingEpochReadSync(descriptor, buffer, offset, length, position);
+        if (!grewEpochDuringRead) {
+          fs.appendFileSync(growingEpochFile, "x".repeat(256));
+          grewEpochDuringRead = true;
+        }
+        return count;
+      };
+      try {
+        assert.throws(() => readSessionEpoch(growingEpochInput), /session epoch has an invalid size/);
+      } finally {
+        fs.readSync = originalGrowingEpochReadSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(grewEpochDuringRead, "the session epoch must grow after its bounded descriptor read begins");
+      assert(maximumEpochReadRequest <= 129, "session epoch reads must remain bounded by the epoch limit");
     }
   } finally {
     if (previousRuntime === undefined) delete process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
