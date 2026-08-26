@@ -479,7 +479,9 @@ async function beginSessionEpoch(input) {
     try {
       descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
       fs.writeFileSync(descriptor, `${epoch}\n`, "utf8");
+      if (process.platform !== "win32") fs.fchmodSync(descriptor, 0o600);
       fs.fsyncSync(descriptor);
+      validateSessionEpochStats(fs.fstatSync(descriptor));
       fs.closeSync(descriptor);
       descriptor = undefined;
       assertSessionEpochPublicationTargetAbsent(epochFile);
@@ -488,7 +490,6 @@ async function beginSessionEpoch(input) {
       if (descriptor !== undefined) fs.closeSync(descriptor);
       try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
     }
-    try { fs.chmodSync(epochFile, 0o600); } catch (_) {}
     return epoch;
   } finally {
     closeProtectedDirectory(protectedDirectory, "session epoch");
@@ -620,12 +621,13 @@ function writeRecord(input, record) {
     try {
       descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
       fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, "utf8");
+      if (process.platform !== "win32") fs.fchmodSync(descriptor, 0o600);
       fs.fsyncSync(descriptor);
+      validateRecordStats(fs.fstatSync(descriptor));
       fs.closeSync(descriptor);
       descriptor = undefined;
       assertRecordPublicationTarget(stateFile, existingIdentity);
       fs.renameSync(temporary, stateFile);
-      try { fs.chmodSync(stateFile, 0o600); } catch (_) {}
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);
       try { fs.unlinkSync(temporary); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }

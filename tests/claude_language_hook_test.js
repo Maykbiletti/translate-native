@@ -511,7 +511,11 @@ async function main() {
     const writeInput = { session_id: "write-parent-race", agent_id: "main" };
     const writeRecordName = `${crypto.createHash("sha256").update("write-parent-race\0main").digest("hex")}.json`;
     const originalWriteRenameSync = fs.renameSync;
+    const originalWriteFchmodSync = fs.fchmodSync;
+    const originalWriteChmodSync = fs.chmodSync;
     let exchangedWriteDirectory = false;
+    let hardenedWriteDescriptor = false;
+    let writePathChmodAttempted = false;
     fs.renameSync = (source, destination, ...options) => {
       if (path.basename(String(destination)) === writeRecordName && !exchangedWriteDirectory) {
         originalWriteRenameSync(trustedWriteDirectory, `${trustedWriteDirectory}-old`);
@@ -524,14 +528,27 @@ async function main() {
       }
       return originalWriteRenameSync(source, destination, ...options);
     };
+    fs.fchmodSync = (descriptor, mode) => {
+      assert.strictEqual(mode, 0o600);
+      hardenedWriteDescriptor = true;
+      return originalWriteFchmodSync(descriptor, mode);
+    };
+    fs.chmodSync = (candidate, ...options) => {
+      if (path.basename(String(candidate)) === writeRecordName) writePathChmodAttempted = true;
+      return originalWriteChmodSync(candidate, ...options);
+    };
     try {
       writeRecord(writeInput, { grant: "original" });
     } finally {
       fs.renameSync = originalWriteRenameSync;
+      fs.fchmodSync = originalWriteFchmodSync;
+      fs.chmodSync = originalWriteChmodSync;
       if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
       else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
     }
     assert(exchangedWriteDirectory, "the grant parent must be exchanged during publication");
+    assert(hardenedWriteDescriptor, "grant permissions must be applied to the open temporary descriptor");
+    assert(!writePathChmodAttempted, "grant publication must not chmod the published path");
     assert.strictEqual(
       fs.readFileSync(path.join(trustedWriteDirectory, writeRecordName), "utf8"),
       '{"grant":"original"}\n'
@@ -1014,7 +1031,11 @@ async function main() {
       const epochWriteInput = { session_id: "epoch-write-parent-race", cwd: temporary };
       const epochWriteName = `session-${crypto.createHash("sha256").update(epochWriteInput.session_id).digest("hex")}.epoch`;
       const originalEpochWriteRenameSync = fs.renameSync;
+      const originalEpochWriteFchmodSync = fs.fchmodSync;
+      const originalEpochWriteChmodSync = fs.chmodSync;
       let exchangedEpochWriteDirectory = false;
+      let hardenedEpochWriteDescriptor = false;
+      let epochWritePathChmodAttempted = false;
       fs.renameSync = (source, destination, ...options) => {
         if (path.basename(String(destination)) === epochWriteName && !exchangedEpochWriteDirectory) {
           originalEpochWriteRenameSync(trustedEpochWriteDirectory, `${trustedEpochWriteDirectory}-old`);
@@ -1027,15 +1048,31 @@ async function main() {
         }
         return originalEpochWriteRenameSync(source, destination, ...options);
       };
+      fs.fchmodSync = (descriptor, mode) => {
+        assert.strictEqual(mode, 0o600);
+        hardenedEpochWriteDescriptor = true;
+        return originalEpochWriteFchmodSync(descriptor, mode);
+      };
+      fs.chmodSync = (candidate, ...options) => {
+        if (path.basename(String(candidate)) === epochWriteName) epochWritePathChmodAttempted = true;
+        return originalEpochWriteChmodSync(candidate, ...options);
+      };
       let writtenEpoch;
       try {
         writtenEpoch = await beginSessionEpoch(epochWriteInput);
       } finally {
         fs.renameSync = originalEpochWriteRenameSync;
+        fs.fchmodSync = originalEpochWriteFchmodSync;
+        fs.chmodSync = originalEpochWriteChmodSync;
         if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
         else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
       }
       assert(exchangedEpochWriteDirectory, "the epoch parent must be exchanged during publication");
+      assert(
+        hardenedEpochWriteDescriptor,
+        "epoch permissions must be applied to the open temporary descriptor"
+      );
+      assert(!epochWritePathChmodAttempted, "epoch publication must not chmod the published path");
       assert.strictEqual(
         fs.readFileSync(path.join(trustedEpochWriteDirectory, epochWriteName), "utf8"),
         `${writtenEpoch}\n`
