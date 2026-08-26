@@ -31,6 +31,13 @@ function textHash(value) {
   return crypto.createHash("sha256").update(canonicalText(value), "utf8").digest("hex");
 }
 
+function containsLanguageCharacters(value) {
+  const text = String(value || "");
+  if (/\p{L}/u.test(text)) return true;
+  const withoutEmojiFormatting = text.replace(/[\u20E3\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, "");
+  return /\p{M}/u.test(withoutEmojiFormatting);
+}
+
 function hasNaturalLanguage(value) {
   let encodedNaturalLanguage = false;
   const text = String(value || "").replace(
@@ -39,12 +46,12 @@ function hasNaturalLanguage(value) {
       const codePoint = Number.parseInt(decimal || hexadecimal, decimal ? 10 : 16);
       if (Number.isSafeInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF) {
         const decoded = String.fromCodePoint(codePoint);
-        if (/[\p{L}\p{M}]/u.test(decoded)) encodedNaturalLanguage = true;
+        if (containsLanguageCharacters(decoded)) encodedNaturalLanguage = true;
       }
       return "";
     }
   );
-  return encodedNaturalLanguage || /[\p{L}\p{M}]/u.test(text);
+  return encodedNaturalLanguage || containsLanguageCharacters(text);
 }
 
 function validatePolicyStats(stats) {
