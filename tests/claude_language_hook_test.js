@@ -34,13 +34,17 @@ async function main() {
     hasNaturalLanguage("&#78 &#97 &#116 &#252 &#114 &#108 &#105 &#99 &#104"),
     "semicolonless decimal language entities must require verification"
   );
+  assert(
+    hasNaturalLanguage("&#00000078;&#00000097;&#00000116;&#00000252;&#00000114;&#00000108;&#00000105;&#00000099;&#00000104;"),
+    "zero-padded decimal language entities must require verification"
+  );
   assert(hasNaturalLanguage("\u0308"), "a standalone combining mark must require verification");
   assert(hasNaturalLanguage("&#776;"), "an encoded combining mark must require verification");
   assert(hasNaturalLanguage("&#776"), "a semicolonless combining mark must require verification");
   assert(!hasNaturalLanguage("&#99999999"), "an overlong decimal entity must not be decoded in parts");
   assert(!hasNaturalLanguage("&#128512;"), "a decimal emoji entity must not become a language false positive");
   assert(!hasNaturalLanguage("&#x1F600;"), "a hexadecimal emoji entity must not become a language false positive");
-  for (const emoji of ["❤️", "☹️", "✈️", "1️⃣", "&#10084;&#65039;", "&#49;&#65039;&#8419;", "&#49 &#65039 &#8419"]) {
+  for (const emoji of ["❤️", "☹️", "✈️", "1️⃣", "&#10084;&#65039;", "&#49;&#65039;&#8419;", "&#49 &#65039 &#8419", "&#00000049;&#000065039;&#000008419;"]) {
     assert(!hasNaturalLanguage(emoji), `${emoji} must remain an emoji-only output`);
   }
 
@@ -1636,6 +1640,14 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(JSON.parse(encodedNaturalLanguageStop.stdout).decision, "block");
+
+  const zeroPaddedEncodedNaturalLanguageStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "&#00000078;&#00000097;&#00000116;&#00000252;&#00000114;&#00000108;&#00000105;&#00000099;&#00000104;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(zeroPaddedEncodedNaturalLanguageStop.stdout).decision, "block");
 
   const semicolonlessEncodedNaturalLanguageSubagentStop = await runHook("stop", {
     ...common,
