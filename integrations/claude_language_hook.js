@@ -32,7 +32,19 @@ function textHash(value) {
 }
 
 function hasNaturalLanguage(value) {
-  return /\p{L}/u.test(String(value || ""));
+  let encodedNaturalLanguage = false;
+  const text = String(value || "").replace(
+    /&#(?:(\d{1,7})|x([0-9a-f]{1,6}));/gi,
+    (entity, decimal, hexadecimal) => {
+      const codePoint = Number.parseInt(decimal || hexadecimal, decimal ? 10 : 16);
+      if (Number.isSafeInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF) {
+        const decoded = String.fromCodePoint(codePoint);
+        if (/[\p{L}\p{M}]/u.test(decoded)) encodedNaturalLanguage = true;
+      }
+      return "";
+    }
+  );
+  return encodedNaturalLanguage || /[\p{L}\p{M}]/u.test(text);
 }
 
 function validatePolicyStats(stats) {

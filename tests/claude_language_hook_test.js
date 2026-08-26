@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
-const { beginSessionEpoch, invalidateAgentRecord, invalidateSessionRecords, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
+const { beginSessionEpoch, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -29,6 +29,11 @@ function runHook(mode, input, environment) {
 }
 
 async function main() {
+  assert(hasNaturalLanguage("&#78;&#97;&#116;&#252;&#114;&#108;&#105;&#99;&#104;"));
+  assert(hasNaturalLanguage("\u0308"), "a standalone combining mark must require verification");
+  assert(!hasNaturalLanguage("&#128512;"), "a decimal emoji entity must not become a language false positive");
+  assert(!hasNaturalLanguage("&#x1F600;"), "a hexadecimal emoji entity must not become a language false positive");
+
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "blun-claude-hook-"));
   const replacedRecord = path.join(temporary, "replaced-record.json");
   fs.writeFileSync(replacedRecord, '{"grant":"first"}\n', { mode: 0o600 });
@@ -1613,6 +1618,22 @@ async function main() {
   const malformedSubagentHardStop = JSON.parse(malformedRepeatedSubagentStop.stdout);
   assert.strictEqual(malformedSubagentHardStop.continue, false);
   assert.match(malformedSubagentHardStop.stopReason, /stopped an unverified response/);
+
+  const encodedNaturalLanguageStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "&#78;&#97;&#116;&#252;&#114;&#108;&#105;&#99;&#104;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(encodedNaturalLanguageStop.stdout).decision, "block");
+
+  const encodedEmojiStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "&#128512;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(encodedEmojiStop.stdout, "");
 
   const policyEnvironment = {
     ...environment,
