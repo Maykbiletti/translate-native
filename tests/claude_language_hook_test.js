@@ -85,6 +85,41 @@ async function main() {
   assert(fs.existsSync(replacedRecord), "a replacement record must not be removed");
   fs.unlinkSync(replacedRecord);
   fs.unlinkSync(`${replacedRecord}.old`);
+
+  const lateSwapRecord = path.join(temporary, "late-swap-record.json");
+  const lateSwapOriginal = `${lateSwapRecord}.old`;
+  const lateSwapReplacement = `${lateSwapRecord}.replacement`;
+  fs.writeFileSync(lateSwapRecord, '{"grant":"original"}\n', { mode: 0o600 });
+  fs.writeFileSync(lateSwapReplacement, '{"grant":"replacement"}\n', { mode: 0o600 });
+  const inspectedLateSwapRecord = readProtectedRecord(lateSwapRecord);
+  const originalLateSwapRenameSync = fs.renameSync;
+  let exchangedLateSwapRecord = false;
+  fs.renameSync = (source, destination, ...options) => {
+    if (!exchangedLateSwapRecord && path.basename(String(source)) === path.basename(lateSwapRecord)
+        && String(destination).endsWith(".remove")) {
+      originalLateSwapRenameSync(lateSwapRecord, lateSwapOriginal);
+      originalLateSwapRenameSync(lateSwapReplacement, lateSwapRecord);
+      exchangedLateSwapRecord = true;
+    }
+    return originalLateSwapRenameSync(source, destination, ...options);
+  };
+  try {
+    assert.throws(
+      () => removeExactRecord(lateSwapRecord, inspectedLateSwapRecord.fileIdentity),
+      /changed while quarantining/
+    );
+  } finally {
+    fs.renameSync = originalLateSwapRenameSync;
+  }
+  assert(exchangedLateSwapRecord, "the grant must be exchanged at the final removal boundary");
+  const quarantinedLateSwapRecord = fs.readdirSync(temporary)
+    .find((entry) => entry.startsWith(`${path.basename(lateSwapRecord)}.`) && entry.endsWith(".remove"));
+  assert(quarantinedLateSwapRecord, "the exchanged grant must remain quarantined instead of being deleted");
+  assert.strictEqual(fs.readFileSync(lateSwapOriginal, "utf8"), '{"grant":"original"}\n');
+  assert.strictEqual(
+    fs.readFileSync(path.join(temporary, quarantinedLateSwapRecord), "utf8"),
+    '{"grant":"replacement"}\n'
+  );
   if (process.platform !== "win32") {
     const hardlinkedRecord = path.join(temporary, "hardlinked-record.json");
     const hardlinkedRecordAlias = `${hardlinkedRecord}.alias`;
@@ -215,7 +250,7 @@ async function main() {
     };
     fs.unlinkSync = (candidate, ...options) => {
       const result = originalConsumeUnlinkSync(candidate, ...options);
-      if (path.basename(String(candidate)) === recordName
+      if (String(candidate).endsWith(".remove")
           && exchangedConsumeDirectory && !restoredConsumeDirectory) {
         fs.renameSync(trustedRecordDirectory, replacementAfterConsume);
         fs.renameSync(`${trustedRecordDirectory}-consume-old`, trustedRecordDirectory);
@@ -248,7 +283,7 @@ async function main() {
     const originalInvalidateUnlinkSync = fs.unlinkSync;
     let exchangedInvalidateDirectory = false;
     fs.unlinkSync = (candidate, ...options) => {
-      if (path.basename(String(candidate)) === invalidateRecordName && !exchangedInvalidateDirectory) {
+      if (String(candidate).endsWith(".remove") && !exchangedInvalidateDirectory) {
         fs.renameSync(trustedInvalidateDirectory, `${trustedInvalidateDirectory}-old`);
         fs.renameSync(replacementInvalidateDirectory, trustedInvalidateDirectory);
         const result = originalInvalidateUnlinkSync(candidate, ...options);
@@ -379,7 +414,7 @@ async function main() {
     const originalSessionInvalidateUnlinkSync = fs.unlinkSync;
     let exchangedSessionInvalidateDirectory = false;
     fs.unlinkSync = (candidate, ...options) => {
-      if (path.basename(String(candidate)) === sessionInvalidateRecordName
+      if (String(candidate).endsWith(".remove")
           && !exchangedSessionInvalidateDirectory) {
         fs.renameSync(trustedSessionInvalidateDirectory, `${trustedSessionInvalidateDirectory}-old`);
         fs.renameSync(replacementSessionInvalidateDirectory, trustedSessionInvalidateDirectory);
@@ -1496,6 +1531,47 @@ async function main() {
       assert(exchangedEpochRemovalTarget, "the inspected epoch must be exchanged before removal");
       assert.strictEqual(fs.readFileSync(removalRaceEpochOriginal, "utf8"), `${"c".repeat(64)}\n`);
       assert.strictEqual(fs.readFileSync(removalRaceEpochFile, "utf8"), `${"d".repeat(64)}\n`);
+
+      const lateRemovalRaceEpochInput = { session_id: "epoch-renew-late-removal-race", cwd: temporary };
+      const lateRemovalRaceEpochName = `session-${crypto.createHash("sha256")
+        .update(lateRemovalRaceEpochInput.session_id).digest("hex")}.epoch`;
+      const lateRemovalRaceEpochFile = path.join(trustedEpochWriteDirectory, lateRemovalRaceEpochName);
+      const lateRemovalRaceEpochOriginal = `${lateRemovalRaceEpochFile}.old`;
+      const lateRemovalRaceEpochReplacement = `${lateRemovalRaceEpochFile}.replacement`;
+      fs.writeFileSync(lateRemovalRaceEpochFile, `${"e".repeat(64)}\n`, { mode: 0o600 });
+      fs.writeFileSync(lateRemovalRaceEpochReplacement, `${"f".repeat(64)}\n`, { mode: 0o600 });
+      process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = trustedEpochWriteDirectory;
+      const originalLateEpochRemovalRenameSync = fs.renameSync;
+      let exchangedLateEpochRemovalTarget = false;
+      fs.renameSync = (source, destination, ...options) => {
+        if (!exchangedLateEpochRemovalTarget
+            && path.basename(String(source)) === lateRemovalRaceEpochName
+            && String(destination).endsWith(".remove")) {
+          originalLateEpochRemovalRenameSync(lateRemovalRaceEpochFile, lateRemovalRaceEpochOriginal);
+          originalLateEpochRemovalRenameSync(lateRemovalRaceEpochReplacement, lateRemovalRaceEpochFile);
+          exchangedLateEpochRemovalTarget = true;
+        }
+        return originalLateEpochRemovalRenameSync(source, destination, ...options);
+      };
+      try {
+        await assert.rejects(
+          () => beginSessionEpoch(lateRemovalRaceEpochInput),
+          /changed while quarantining/
+        );
+      } finally {
+        fs.renameSync = originalLateEpochRemovalRenameSync;
+        if (previousStateDirectory === undefined) delete process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR;
+        else process.env.BLUN_LANGUAGE_GUARD_HOOK_STATE_DIR = previousStateDirectory;
+      }
+      assert(exchangedLateEpochRemovalTarget, "the epoch must be exchanged at the final removal boundary");
+      const quarantinedLateEpoch = fs.readdirSync(trustedEpochWriteDirectory)
+        .find((entry) => entry.startsWith(`${lateRemovalRaceEpochName}.`) && entry.endsWith(".remove"));
+      assert(quarantinedLateEpoch, "the exchanged epoch must remain quarantined instead of being deleted");
+      assert.strictEqual(fs.readFileSync(lateRemovalRaceEpochOriginal, "utf8"), `${"e".repeat(64)}\n`);
+      assert.strictEqual(
+        fs.readFileSync(path.join(trustedEpochWriteDirectory, quarantinedLateEpoch), "utf8"),
+        `${"f".repeat(64)}\n`
+      );
 
       const exchangedEpochInput = { session_id: "epoch-renew-file-race", cwd: temporary };
       const exchangedEpochName = `session-${crypto.createHash("sha256")

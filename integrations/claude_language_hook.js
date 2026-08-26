@@ -569,12 +569,13 @@ function removeExistingSessionEpochFile(epochFile) {
     if (error && error.code === "ENOENT") return;
     throw error;
   }
-  const current = fs.lstatSync(epochFile);
-  validateSessionEpochStats(current);
-  if (!sameRecordIdentity(current, inspected.fileIdentity)) {
-    throw new Error("session epoch changed before renewal");
-  }
-  fs.unlinkSync(epochFile);
+  quarantineAndRemoveExactFile(
+    epochFile,
+    inspected.fileIdentity,
+    validateSessionEpochStats,
+    "session epoch changed before renewal",
+    "session epoch changed while quarantining"
+  );
 }
 
 function assertSessionEpochPublicationTargetAbsent(epochFile) {
@@ -686,6 +687,45 @@ function sameRecordIdentity(stats, expected) {
     && stats.mtimeMs === expected.mtimeMs;
 }
 
+function sameRenamedRecordIdentity(stats, expected) {
+  return expected && stats.dev === expected.dev && stats.ino === expected.ino
+    && stats.nlink === expected.nlink && stats.size === expected.size && stats.mtimeMs === expected.mtimeMs;
+}
+
+function quarantineAndRemoveExactFile(file, expected, validate, changedBeforeMessage, changedDuringMessage) {
+  const current = fs.lstatSync(file);
+  validate(current);
+  if (!sameRecordIdentity(current, expected)) throw new Error(changedBeforeMessage);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
+  const quarantine = `${file}.${process.pid}.${crypto.randomBytes(12).toString("hex")}.remove`;
+  try {
+    const opened = fs.fstatSync(descriptor);
+    validate(opened);
+    if (!sameRecordIdentity(opened, expected)) throw new Error(changedBeforeMessage);
+    try {
+      fs.lstatSync(quarantine);
+      throw new Error(`${changedDuringMessage}: quarantine target already exists`);
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+    }
+    fs.renameSync(file, quarantine);
+    const held = fs.fstatSync(descriptor);
+    const moved = fs.lstatSync(quarantine);
+    validate(held);
+    validate(moved);
+    if (!sameRenamedRecordIdentity(held, expected)
+        || !sameRecordIdentity(moved, recordIdentity(held))) {
+      throw new Error(changedDuringMessage);
+    }
+    fs.unlinkSync(quarantine);
+    const removed = fs.fstatSync(descriptor);
+    if (removed.nlink !== 0) throw new Error(changedDuringMessage);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function temporaryFileIdentity(stats) {
   return {
     dev: stats.dev,
@@ -760,12 +800,13 @@ function readProtectedRecord(destination) {
 }
 
 function removeExactRecordFile(stateFile, expected) {
-  const current = fs.lstatSync(stateFile);
-  validateRecordStats(current);
-  if (!sameRecordIdentity(current, expected)) {
-    throw new Error("delivery grant state changed before consumption");
-  }
-  fs.unlinkSync(stateFile);
+  quarantineAndRemoveExactFile(
+    stateFile,
+    expected,
+    validateRecordStats,
+    "delivery grant state changed before consumption",
+    "delivery grant state changed while quarantining"
+  );
 }
 
 function removeExactRecord(destination, expected) {
