@@ -71,6 +71,7 @@ function containsLanguageCharacters(value) {
   if (/\p{L}/u.test(text)) return true;
   let enclosedEmojiLetters = 0;
   let brailleCells = 0;
+  let signWritingSymbols = 0;
   let regionalIndicatorRun = 0;
   let unpairedRegionalIndicators = 0;
   const finishRegionalIndicatorRun = () => {
@@ -81,6 +82,10 @@ function containsLanguageCharacters(value) {
     const codePoint = character.codePointAt(0);
     if (codePoint >= 0x2801 && codePoint <= 0x28FF) {
       brailleCells += 1;
+      continue;
+    }
+    if (codePoint >= 0x1D800 && codePoint <= 0x1DA86 && codePoint !== 0x1DA84) {
+      signWritingSymbols += 1;
       continue;
     }
     if (codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF) {
@@ -96,6 +101,7 @@ function containsLanguageCharacters(value) {
     enclosedEmojiLetters += 1;
   }
   finishRegionalIndicatorRun();
+  if (signWritingSymbols >= 2) return true;
   if (brailleCells >= 2) return true;
   if (unpairedRegionalIndicators >= 2) return true;
   if (enclosedEmojiLetters >= 2) return true;

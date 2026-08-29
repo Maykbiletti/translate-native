@@ -107,6 +107,22 @@ async function main() {
   for (const brailleSymbol of ["⠀", "⠀⠀", "⠓", "&#10240;", "&#x2813;"]) {
     assert(!hasNaturalLanguage(brailleSymbol), `${brailleSymbol} must remain non-language output`);
   }
+  for (const signWritingText of [
+    "𝠀𝠁𝠂",
+    "𝠀 𝠁",
+    "&#120832;&#120833;",
+    "&#x1D800;&#x1D801;",
+    "𝠀 &#120833;"
+  ]) {
+    assert(hasNaturalLanguage(signWritingText), `${signWritingText} must require verification`);
+  }
+  for (const signWritingSymbol of ["𝠀", "&#120832;", "&#x1D801;", "𝪇𝪈"]) {
+    assert(!hasNaturalLanguage(signWritingSymbol), `${signWritingSymbol} must remain non-language output`);
+  }
+  assert(
+    hasNaturalLanguage("\u{1DA84}"),
+    "the SignWriting combining location mark must retain the general mark protection"
+  );
   assert(
     !hasNaturalLanguage("&nbsp;&amp;&hellip;&mdash;&copy;"),
     "named spacing, punctuation, and symbol references must not become language false positives"
@@ -2149,6 +2165,34 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(singleBrailleCellStop.stdout, "");
+
+  const signWritingStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "𝠀𝠁𝠂",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(signWritingStop.stdout).decision, "block");
+
+  const encodedSignWritingSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-signwriting",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#120832;&#120833;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(
+    JSON.parse(encodedSignWritingSubagentStop.stdout).decision,
+    "block"
+  );
+
+  const singleSignWritingSymbolStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "𝠀",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(singleSignWritingSymbolStop.stdout, "");
 
   const encodedEmojiStop = await runHook("stop", {
     ...common,
