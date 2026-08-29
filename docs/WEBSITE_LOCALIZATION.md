@@ -141,3 +141,31 @@ review, leak the source into the native-only judgment, return convincing but
 unstructured prose, or pass a candidate with a broken placeholder. Exact
 phase and locale schemas, separate inputs, ordered calls, version matching,
 response hashes, and the final local integrity gate make each case fail closed.
+
+## Queue-to-worker execution
+
+`integrations/website_localization_runner.py` is the narrow bridge between the
+durable queue and the provider-neutral worker. One call claims at most one
+locale, resolves its exact provider and versioned assets through host-supplied
+callbacks, executes the three quality stages, and performs one lease-bound
+queue transition. A successful transition stores the unsigned worker result;
+it still cannot publish, replace a last-known-good translation, or make the
+overall website version ready.
+
+The runner renews the lease after dependency resolution and after every
+validated worker phase. If a provider call outlives the lease, a stale worker
+cannot record its output. Retryable failures use deterministic bounded
+exponential backoff and become terminal at the job's attempt ceiling.
+Non-retryable failures stop only that locale. Status output contains stable
+codes and opaque finding hashes, never provider exceptions, reviewer prose, or
+candidate text. Mixed success and failure therefore remains visible per locale
+while publication stays blocked until a later release coordinator verifies all
+required signed approvals.
+
+Premortem: the bridge could acknowledge output after losing its lease, retry a
+permanent configuration error forever, expose source text through exception
+messages, or let one failed locale erase a successful sibling. Exact lease
+tokens guard every transition; typed dependency and worker failures preserve
+retryability without prose; attempts are bounded; and each invocation mutates
+only its claimed locale. Regression tests exercise lease expiry, retry
+exhaustion, opaque errors, and partial provider failure.

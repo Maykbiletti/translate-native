@@ -17,7 +17,7 @@ import sys
 import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 
 WORKER_SCHEMA = "blun.website-localization-worker.v1"
@@ -432,8 +432,17 @@ def run_localization_job(
     job_payload: Any,
     assets: LocalizationAssets,
     provider: LocalizationProvider,
+    *,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run one locale through creation, native review, fidelity review, and integrity."""
+    if progress_callback is not None and not callable(progress_callback):
+        raise LocalizationWorkerBlocked("worker.progress.invalid", retryable=False)
+
+    def progress(phase: str) -> None:
+        if progress_callback is not None:
+            progress_callback(phase)
+
     job = _validated_job(job_payload)
     assets = _validated_assets(job, assets)
     locale = job["target"]["locale"]
@@ -464,6 +473,7 @@ def run_localization_job(
         "response_sha256": response_hash,
         "status": "PASS",
     })
+    progress("transcreation")
 
     native_request = _request(job, "target_native", _TARGET_REVIEW_SYSTEM, {
         **base,
@@ -492,6 +502,7 @@ def run_localization_job(
         "response_sha256": response_hash,
         "status": "PASS",
     })
+    progress("target_native")
 
     fidelity_request = _request(job, "source_fidelity", _FIDELITY_REVIEW_SYSTEM, {
         **base,
@@ -521,6 +532,7 @@ def run_localization_job(
         "response_sha256": response_hash,
         "status": "PASS",
     })
+    progress("source_fidelity")
 
     integrity_errors = _integrity_errors(job["source"]["text"], candidate)
     if integrity_errors:
@@ -529,6 +541,7 @@ def run_localization_job(
             retryable=True,
             finding_hashes=tuple(_hash_text(item) for item in integrity_errors),
         )
+    progress("integrity")
 
     return {
         "schema": RESULT_SCHEMA,

@@ -121,6 +121,21 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
         self.assertEqual(len(result["quality_passes"]), 3)
         self.assertTrue(result["release_required"])
 
+    def test_progress_callback_follows_only_validated_phase_boundaries(self):
+        progress = []
+        WORKER.run_localization_job(
+            job(),
+            assets(),
+            self.successful_provider(),
+            progress_callback=progress.append,
+        )
+        self.assertEqual(progress, [
+            "transcreation",
+            "target_native",
+            "source_fidelity",
+            "integrity",
+        ])
+
     def test_target_only_review_never_receives_source_or_source_glossary_terms(self):
         provider = self.successful_provider()
         WORKER.run_localization_job(job(), assets(), provider)
