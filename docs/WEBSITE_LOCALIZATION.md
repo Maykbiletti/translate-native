@@ -95,3 +95,49 @@ lease token changes on every attempt, expiry consumes the abandoned attempt,
 the configured attempt ceiling becomes terminal, and every collision or
 payload-integrity failure blocks transactionally. Cross-connection and crash
 recovery regressions prove those boundaries.
+
+## Provider-neutral worker contract
+
+`integrations/website_localization_worker.py` consumes exactly one locale job
+and calls a host-supplied adapter implementing `invoke(ProviderRequest)`. The
+contract contains no BLUN.ai, OpenAI, Anthropic, or other provider-specific
+transport. An adapter maps the immutable request to its own API and either
+returns strict JSON or raises the content-free `ProviderCallFailed` with a
+stable error code and retryability decision.
+
+Every worker attempt has three ordered calls:
+
+1. `transcreation` receives the complete source, one exact BCP-47 target,
+   content-specific guidance, and the resolved glossary, audience, tone, and
+   protected terms;
+2. `target_native` receives only the candidate and target-side terminology—no
+   source text, source locale, or source glossary terms—and rejects unnatural
+   wording, translationese, register, script, orthography, and locale errors;
+3. `source_fidelity` runs only after the native review passes and checks the
+   candidate against the complete source for meaning, completeness,
+   terminology, and protected syntax.
+
+The trusted host resolves `LocalizationAssets` from immutable registries. Its
+glossary and policy versions must exactly match the versions already bound to
+the job; stale assets block before any provider call. The policy version owns
+the audience, tone profile, prompt rules, and review standard. Provider
+responses must use the exact phase, locale, and schema, contain no extra
+fields, and use NFC text. A wrong locale, malformed response, failed review,
+provider exception, or changed job binding blocks without producing a queue
+result.
+
+After both LLM reviews pass, the bundled local translation guard independently
+checks Unicode NFC, HTML/JSON/XML structure, placeholders, links, code,
+protected tokens, untranslated segments, and major omissions. Worker results
+bind source and target hashes, locales, content type, glossary and policy
+versions, provider/model identity, software version, and hashes of all three
+requests and responses. They retain no reviewer prose and still set
+`release_required: true`; queue success therefore remains neither a signed
+release nor publication permission. Legal content additionally sets
+`human_review_required: true`.
+
+Premortem: a provider could answer in the wrong locale, merge creation and
+review, leak the source into the native-only judgment, return convincing but
+unstructured prose, or pass a candidate with a broken placeholder. Exact
+phase and locale schemas, separate inputs, ordered calls, version matching,
+response hashes, and the final local integrity gate make each case fail closed.
