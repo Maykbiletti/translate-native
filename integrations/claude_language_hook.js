@@ -1159,6 +1159,13 @@ function blockedStop(input, reason) {
   };
 }
 
+function malformedStopState() {
+  return {
+    continue: false,
+    stopReason: "BLUN Language Guard stopped a response after receiving invalid Claude stop state. Repair or reconnect the hook, then retry the response."
+  };
+}
+
 function startupMessage(eventName, healthy) {
   const subject = eventName === "SubagentStart" ? "This subagent" : "This Claude session";
   const policyInstruction = hostPolicyInstruction();
@@ -1381,6 +1388,10 @@ function postToolFailure(input) {
 async function stop(input, expectedEvent) {
   if (!input || input.hook_event_name !== expectedEvent) {
     emit(blockedStop(input, `The BLUN hook route expected ${expectedEvent} input and cannot trust this mismatched event. Fail closed and retry through the configured Claude hook.`));
+    return;
+  }
+  if (typeof input.stop_hook_active !== "boolean") {
+    emit(malformedStopState());
     return;
   }
   if (!input || typeof input.last_assistant_message !== "string") {

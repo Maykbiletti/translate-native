@@ -2088,6 +2088,66 @@ async function main() {
     reason: "subagent parent isolation regression complete"
   }, environment)).stdout, "");
 
+  const stopStateSession = { ...common, session_id: "strict-stop-continuation-state" };
+  const stopStateStarted = await runHook("session-start", stopStateSession, environment);
+  assert.strictEqual(stopStateStarted.code, 0, stopStateStarted.stderr);
+  const stopStateMainTool = {
+    ...tool,
+    ...stopStateSession,
+    tool_use_id: "tool-strict-stop-state-main"
+  };
+  const stopStateChildTool = {
+    ...tool,
+    ...stopStateSession,
+    agent_id: "strict-stop-state-child",
+    tool_use_id: "tool-strict-stop-state-child"
+  };
+  assert.strictEqual((await runHook("post-tool", stopStateMainTool, environment)).stdout, "");
+  assert.strictEqual((await runHook("post-tool", stopStateChildTool, environment)).stdout, "");
+  for (const invalidStopState of [undefined, null, 0, 1, "false", "true", {}, []]) {
+    const malformedStateInput = {
+      ...stopStateSession,
+      hook_event_name: "Stop",
+      last_assistant_message: clean
+    };
+    if (invalidStopState !== undefined) malformedStateInput.stop_hook_active = invalidStopState;
+    const malformedStateStop = await runHook("stop", malformedStateInput, environment);
+    const malformedStateHardStop = JSON.parse(malformedStateStop.stdout);
+    assert.strictEqual(malformedStateHardStop.continue, false);
+    assert.strictEqual(malformedStateHardStop.decision, undefined);
+    assert.match(malformedStateHardStop.stopReason, /invalid Claude stop state/);
+    assert(!malformedStateHardStop.stopReason.includes(clean), "invalid-state stop reason must not expose candidate text");
+  }
+  const malformedChildStateStop = await runHook("subagent-stop", {
+    ...stopStateSession,
+    agent_id: "strict-stop-state-child",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: clean,
+    stop_hook_active: "true"
+  }, environment);
+  const malformedChildStateHardStop = JSON.parse(malformedChildStateStop.stdout);
+  assert.strictEqual(malformedChildStateHardStop.continue, false);
+  assert.strictEqual(malformedChildStateHardStop.decision, undefined);
+  assert.match(malformedChildStateHardStop.stopReason, /invalid Claude stop state/);
+  assert.strictEqual((await runHook("stop", {
+    ...stopStateSession,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment)).stdout, "", "malformed stop state must not consume the main grant");
+  assert.strictEqual((await runHook("subagent-stop", {
+    ...stopStateSession,
+    agent_id: "strict-stop-state-child",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment)).stdout, "", "malformed stop state must not consume the child grant");
+  assert.strictEqual((await runHook("session-end", {
+    ...stopStateSession,
+    hook_event_name: "SessionEnd",
+    reason: "strict stop continuation state regression complete"
+  }, environment)).stdout, "");
+
   for (const invalidMessage of [undefined, null, { text: clean }]) {
     const malformedInput = {
       ...common,
