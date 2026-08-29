@@ -11,7 +11,7 @@ const { spawn } = require("child_process");
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
 const NON_LANGUAGE_HTML_ENTITIES = require(path.join(ROOT, "integrations", "non_language_html_entities.js"));
-const { beginSessionEpoch, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
+const { beginSessionEpoch, hasNaturalLanguage, hookIdentity, invalidateAgentRecord, invalidateSessionRecords, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -30,6 +30,29 @@ function runHook(mode, input, environment) {
 }
 
 async function main() {
+  assert.deepStrictEqual(hookIdentity({ session_id: "session", agent_id: "agent" }), {
+    session: "session",
+    agent: "agent"
+  });
+  assert.deepStrictEqual(hookIdentity({ session_id: "session" }), {
+    session: "session",
+    agent: "main"
+  });
+  for (const malformedIdentity of [
+    {},
+    { session_id: "" },
+    { session_id: 7 },
+    { session_id: {} },
+    { session_id: [] },
+    { session_id: "session\0agent" },
+    { session_id: "session", agent_id: "" },
+    { session_id: "session", agent_id: 7 },
+    { session_id: "session", agent_id: {} },
+    { session_id: "session", agent_id: [] },
+    { session_id: "session", agent_id: "agent\0suffix" }
+  ]) {
+    assert.throws(() => hookIdentity(malformedIdentity), /identity|session_id|agent_id|NUL/);
+  }
   assert.strictEqual(
     NON_LANGUAGE_HTML_ENTITIES.length,
     1478,
@@ -2036,6 +2059,60 @@ async function main() {
   const malformedSubagentHardStop = JSON.parse(malformedRepeatedSubagentStop.stdout);
   assert.strictEqual(malformedSubagentHardStop.continue, false);
   assert.match(malformedSubagentHardStop.stopReason, /stopped an unverified response/);
+
+  const collisionSession = { ...common, session_id: "[object Object]" };
+  const collisionSessionStarted = await runHook("session-start", collisionSession, environment);
+  assert.strictEqual(collisionSessionStarted.code, 0, collisionSessionStarted.stderr);
+  const collisionSessionTool = {
+    ...tool,
+    ...collisionSession,
+    tool_use_id: "tool-session-identity-collision"
+  };
+  assert.strictEqual((await runHook("post-tool", collisionSessionTool, environment)).stdout, "");
+  const malformedSessionCollision = await runHook("stop", {
+    ...common,
+    session_id: {},
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(malformedSessionCollision.stdout).decision, "block");
+  const legitimateSessionCollision = await runHook("stop", {
+    ...collisionSession,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(legitimateSessionCollision.stdout, "");
+  const collisionSessionEnded = await runHook("session-end", {
+    ...collisionSession,
+    hook_event_name: "SessionEnd",
+    reason: "identity collision regression complete"
+  }, environment);
+  assert.strictEqual(collisionSessionEnded.stdout, "");
+
+  const collisionAgentTool = {
+    ...tool,
+    agent_id: "[object Object]",
+    tool_use_id: "tool-agent-identity-collision"
+  };
+  assert.strictEqual((await runHook("post-tool", collisionAgentTool, environment)).stdout, "");
+  const malformedAgentCollision = await runHook("stop", {
+    ...common,
+    agent_id: {},
+    hook_event_name: "SubagentStop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(malformedAgentCollision.stdout).decision, "block");
+  const legitimateAgentCollision = await runHook("stop", {
+    ...common,
+    agent_id: "[object Object]",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(legitimateAgentCollision.stdout, "");
 
   const encodedNaturalLanguageStop = await runHook("stop", {
     ...common,

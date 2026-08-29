@@ -541,16 +541,32 @@ function stateDirectory() {
   return path.join(runtimeConfig().runtime, "claude-hooks");
 }
 
+function hookIdentity(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Claude hook input has no valid identity");
+  }
+  const session = input.session_id;
+  const hasAgent = Object.prototype.hasOwnProperty.call(input, "agent_id");
+  const agent = hasAgent ? input.agent_id : "main";
+  if (typeof session !== "string" || session.length === 0) {
+    throw new Error("Claude hook input has no valid session_id");
+  }
+  if (typeof agent !== "string" || agent.length === 0) {
+    throw new Error("Claude hook input has no valid agent_id");
+  }
+  if (session.includes("\0") || agent.includes("\0")) {
+    throw new Error("Claude hook identity fields must not contain NUL characters");
+  }
+  return { session, agent };
+}
+
 function identity(input) {
-  const session = String(input.session_id || "");
-  const agent = String(input.agent_id || "main");
-  if (!session) throw new Error("Claude hook input has no session_id");
+  const { session, agent } = hookIdentity(input);
   return crypto.createHash("sha256").update(`${session}\0${agent}`, "utf8").digest("hex");
 }
 
 function sessionHash(input) {
-  const session = String(input.session_id || "");
-  if (!session) throw new Error("Claude hook input has no session_id");
+  const { session } = hookIdentity(input);
   return crypto.createHash("sha256").update(session, "utf8").digest("hex");
 }
 
@@ -635,6 +651,7 @@ function assertSessionEpochPublicationTargetAbsent(epochFile) {
 }
 
 async function beginSessionEpoch(input) {
+  const { session } = hookIdentity(input);
   const directory = stateDirectory();
   ensureProtectedDirectory(directory, "session epoch");
   const destination = sessionEpochPath(input);
@@ -646,7 +663,7 @@ async function beginSessionEpoch(input) {
     const epoch = crypto.randomBytes(32).toString("hex");
     const registration = await callGuard({
       operation: "register_session_epoch",
-      session_id: String(input.session_id || ""),
+      session_id: session,
       session_epoch: epoch
     }, 3000);
     if (registration.status !== "PASS" || registration.registered !== true) {
@@ -1210,6 +1227,12 @@ async function stopFailure(input) {
 }
 
 async function sessionEnd(input) {
+  let session;
+  try {
+    session = hookIdentity(input).session;
+  } catch (_) {
+    return;
+  }
   let previousEpoch = "";
   try {
     const current = readSessionEpoch(input);
@@ -1221,7 +1244,7 @@ async function sessionEnd(input) {
   try {
     await callGuard({
       operation: "retire_session_epoch",
-      session_id: String(input.session_id || ""),
+      session_id: session,
       session_epoch: previousEpoch
     }, 700);
   } catch (_) {
@@ -1253,6 +1276,7 @@ async function postTool(input) {
   const purpose = toolName.endsWith("__release_translation") ? "translation"
     : toolName.endsWith("__release_response") ? "response" : "";
   if (!purpose) return;
+  const { session, agent } = hookIdentity(input);
   if (!invalidateReleaseState(
     input,
     "BLUN Language Guard could not clear the prior release before processing a new attempt. The new receipt is not trusted; repair protected state and release the exact final text again."
@@ -1298,8 +1322,8 @@ async function postTool(input) {
     release_token: release.release_token,
     content_type: typeof args.content_type === "string" ? args.content_type : "prose",
     short_text_reviewed: args.short_text_reviewed === true,
-    agent_id: String(input.agent_id || "main"),
-    session_id: String(input.session_id || ""),
+    agent_id: agent,
+    session_id: session,
     session_epoch: sessionEpoch,
     channel: "claude-hook"
   };
@@ -1353,6 +1377,7 @@ async function stop(input) {
   const target = input.last_assistant_message;
   const naturalLanguage = hasNaturalLanguage(target);
   try {
+    const { session, agent } = hookIdentity(input);
     const { destination, record, fileIdentity } = readRecord(input);
     const { epoch: sessionEpoch } = readSessionEpoch(input);
     const fresh = record && Number.isFinite(record.authorized_at)
@@ -1372,8 +1397,8 @@ async function stop(input) {
           task_kind: record.task_kind,
           content_type: record.content_type,
           short_text_reviewed: record.short_text_reviewed === true,
-          session_id: String(input.session_id || ""),
-          agent_id: String(input.agent_id || "main"),
+          session_id: session,
+          agent_id: agent,
           session_epoch: sessionEpoch,
           channel: record.channel
         });
@@ -1430,4 +1455,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash, writeRecord };
+module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hookIdentity, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash, writeRecord };

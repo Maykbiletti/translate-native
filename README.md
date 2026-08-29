@@ -147,6 +147,10 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.42.12: exact Claude hook identities
+
+Version 6.42.12 accepts Claude's documented `session_id` and optional `agent_id` only as non-empty strings. Object, array, numeric, empty, and NUL-bearing values now block before protected grant state is read, written, invalidated, or sent to the isolated verifier. This prevents JavaScript coercion from mapping a malformed identity such as `{}` onto the valid string identity `"[object Object]"`; the legitimate session or subagent retains its own one-time grant and remains independently deliverable.
+
 ### Version 6.42.11: SignWriting output bypass
 
 Version 6.42.11 classifies two or more Unicode SignWriting symbols as natural language in Claude's complete `Stop` and `SubagentStop` output. Literal, spaced, numerically HTML-encoded, and mixed sign-language writing can no longer bypass the exact-response grant merely because Unicode categorizes its handshape, movement, and location symbols outside the letter category. One isolated SignWriting symbol and pure SignWriting punctuation remain compatible as non-language output.
@@ -680,7 +684,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.42.11 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.42.12 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
