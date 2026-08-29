@@ -10,6 +10,7 @@ const { spawn } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
+const NON_LANGUAGE_HTML_ENTITIES = require(path.join(ROOT, "integrations", "non_language_html_entities.js"));
 const { beginSessionEpoch, hasNaturalLanguage, invalidateAgentRecord, invalidateSessionRecords, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
@@ -29,6 +30,16 @@ function runHook(mode, input, environment) {
 }
 
 async function main() {
+  assert.strictEqual(
+    NON_LANGUAGE_HTML_ENTITIES.length,
+    1478,
+    "the complete semicolon-terminated WHATWG non-language allowlist must be bundled"
+  );
+  assert.strictEqual(
+    new Set(NON_LANGUAGE_HTML_ENTITIES).size,
+    NON_LANGUAGE_HTML_ENTITIES.length,
+    "the WHATWG non-language allowlist must not contain duplicates"
+  );
   assert(hasNaturalLanguage("&#78;&#97;&#116;&#252;&#114;&#108;&#105;&#99;&#104;"));
   assert(
     hasNaturalLanguage("&#78 &#97 &#116 &#252 &#114 &#108 &#105 &#99 &#104"),
@@ -72,6 +83,13 @@ async function main() {
     !hasNaturalLanguage(formattingReferences.map((name) => `&${name};`).join("")),
     "named invisible controls and spacing must not become language false positives"
   );
+  const mathematicalAndSymbolReferences = [
+    "sum", "ne", "rarr", "boxVH", "clubsuit", "numsp", "af", "ic", "it"
+  ];
+  assert(
+    !hasNaturalLanguage(mathematicalAndSymbolReferences.map((name) => `&${name};`).join("")),
+    "standardized mathematical, box-drawing, suit, spacing, and invisible aliases must not become language false positives"
+  );
   for (const name of formattingReferences) {
     assert(hasNaturalLanguage(`&${name}`), `semicolonless &${name} must remain fail-closed`);
   }
@@ -82,7 +100,10 @@ async function main() {
     "legacy non-language references without semicolons must not become language false positives"
   );
   assert(!hasNaturalLanguage("&nbsp123"), "numeric suffixes after legacy references must remain allowed");
-  for (const linguisticEntity of ["&Auml;", "&aring;", "&unknown;", "&Auml", "&aring", "&hellip", "&notin", "&nbspText"]) {
+  for (const linguisticEntity of [
+    "&Auml;", "&aring;", "&Alpha;", "&fjlig;", "&DownBreve;", "&unknown;",
+    "&Auml", "&aring", "&sum", "&hellip", "&notin", "&nbspText", "&sum;Text"
+  ]) {
     assert(hasNaturalLanguage(linguisticEntity), `${linguisticEntity} must remain fail-closed`);
   }
 

@@ -27,15 +27,7 @@ const HTML_C1_NUMERIC_REFERENCE_REPLACEMENTS = new Map([
   [0x98, 0x02DC], [0x99, 0x2122], [0x9A, 0x0161], [0x9B, 0x203A],
   [0x9C, 0x0153], [0x9E, 0x017E], [0x9F, 0x0178]
 ]);
-const NON_LANGUAGE_NAMED_REFERENCES = new Set([
-  "AMP", "ApplyFunction", "GT", "InvisibleComma", "InvisibleTimes", "LT", "MediumSpace",
-  "NegativeMediumSpace", "NegativeThickSpace", "NegativeThinSpace", "NegativeVeryThinSpace",
-  "NewLine", "NoBreak", "NonBreakingSpace", "QUOT", "Tab", "ThickSpace", "ThinSpace",
-  "VeryThinSpace", "ZeroWidthSpace", "amp", "apos", "bull", "copy", "emsp", "ensp", "gt",
-  "hairsp", "hellip", "laquo", "ldquo", "lrm", "lsquo", "lt", "mdash", "middot", "nbsp",
-  "ndash", "quot", "raquo", "rdquo", "reg", "rlm", "rsquo", "shy", "thinsp", "trade",
-  "zwj", "zwnj"
-]);
+const NON_LANGUAGE_NAMED_REFERENCES = new Set(require("./non_language_html_entities"));
 const LEGACY_NON_LANGUAGE_NAMED_REFERENCES = [
   "brvbar", "divide", "frac12", "frac14", "frac34", "iquest", "middot", "plusmn",
   "pound", "acute", "curren", "iexcl", "laquo", "nbsp", "para", "raquo", "sect",

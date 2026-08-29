@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import html.entities
 import json
 import re
 import shutil
 import subprocess
 import unittest
+import unicodedata
 from pathlib import Path
 
 
@@ -12,6 +14,41 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ClaudePluginTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for entity-table validation")
+    def test_non_language_html_entities_match_the_whatwg_table(self) -> None:
+        result = subprocess.run(
+            [
+                "node",
+                "-e",
+                "process.stdout.write(JSON.stringify(require('./integrations/non_language_html_entities.js')))",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        bundled = json.loads(result.stdout)
+        ignored_marks = {
+            0x20E3,
+            *range(0xFE00, 0xFE10),
+            *range(0xE0100, 0xE01F0),
+        }
+        expected = sorted(
+            raw_name[:-1]
+            for raw_name, rendered in html.entities.html5.items()
+            if raw_name.endswith(";")
+            and not any(
+                ord(character) not in ignored_marks
+                and unicodedata.category(character)[0] in {"L", "M"}
+                for character in rendered
+            )
+        )
+
+        self.assertEqual(len(expected), 1478)
+        self.assertEqual(bundled, expected)
+
     def test_active_plugin_version_is_synchronized(self) -> None:
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
