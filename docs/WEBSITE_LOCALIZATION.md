@@ -169,3 +169,40 @@ tokens guard every transition; typed dependency and worker failures preserve
 retryability without prose; attempts are bounded; and each invocation mutates
 only its claimed locale. Regression tests exercise lease expiry, retry
 exhaustion, opaque errors, and partial provider failure.
+
+## Signed translation memory and website readiness
+
+`integrations/website_localization_release.py` turns a completed queue result
+into an append-only translation-memory entry only after a host-owned verifier
+accepts a quality receipt for the exact source, target, and locale. The module
+never reads a signing key. Instead, a trusted `ApprovalAuthority` signs and
+immediately verifies the canonical approval bytes outside the worker's
+authority. Production hosts should implement that interface with an isolated
+service or hardware-backed signer; the repository tests use HMAC only as a
+deterministic test double.
+
+Every approval binds the exact source and target hashes, source and target
+locales, content type, glossary and policy versions, provider/model identity,
+worker schema, software version, queue-result hash, quality-receipt hash,
+approval lifetime, and signing-key identity. Legal content additionally needs
+a separately verified human-review receipt. Raw receipts are never stored.
+Approvals for one deterministic job may be reused across different plan
+compositions, but a changed source, policy, glossary, provider, model, or
+software version produces a different job and therefore a cache miss. An
+already approved job can never be overwritten with a different target hash.
+
+Before any publication adapter receives content, `readiness` revalidates every
+stored result, approval payload, expiry, and signature for the plan's exact
+required locale set. `publication_bundle` returns content only when all
+required locales pass; a missing, expired, altered, or invalid approval blocks
+the whole website version without deleting an older known-good entry. The
+release store uses its own trusted host-supplied SQLite connection, separate
+from the queue connection, and performs no network or publication action.
+
+Premortem: a signature might be replayed after policy drift, a database edit
+might swap the target, or a partial rollout might be mistaken for completion.
+The deterministic job binding invalidates drift, append-only target hashes and
+canonical payload signatures expose tampering, and readiness requires exact
+set equality across all policy-required locales. Tests cover source, policy,
+model and software invalidation, signature/result corruption, expiry, legal
+review, partial readiness, and cross-plan translation-memory reuse.

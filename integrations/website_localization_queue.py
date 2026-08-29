@@ -575,6 +575,32 @@ class LocalizationQueue:
             raise LocalizationQueueBlocked("unknown localization job")
         return JobStatus(plan_ids=self._plan_ids(job_id), **dict(row))
 
+    def result(self, job_id: Any) -> dict[str, Any]:
+        """Return one completed result only after rechecking its stored bytes."""
+        job_id = _field("job_id", job_id)
+        row = self.connection.execute("""
+            SELECT status, result_json, result_sha256
+            FROM localization_jobs WHERE job_id = ?
+        """, (job_id,)).fetchone()
+        if row is None:
+            raise LocalizationQueueBlocked("unknown localization job")
+        if row["status"] != "succeeded":
+            raise LocalizationQueueBlocked("localization job has no completed result")
+        if not isinstance(row["result_json"], str) or not isinstance(row["result_sha256"], str):
+            raise LocalizationQueueBlocked("completed result is missing")
+        if _hash_text(row["result_json"]) != row["result_sha256"]:
+            raise LocalizationQueueBlocked("completed result failed its integrity check")
+        try:
+            result = json.loads(row["result_json"])
+        except json.JSONDecodeError as error:
+            raise LocalizationQueueBlocked("completed result is no longer valid JSON") from error
+        if not isinstance(result, dict) or result.get("job_id") != job_id:
+            raise LocalizationQueueBlocked("completed result has the wrong job identity")
+        _validate_unicode(result, field="worker result")
+        if _canonical_json(result) != row["result_json"]:
+            raise LocalizationQueueBlocked("completed result is not canonical JSON")
+        return result
+
     def plan_counts(self, plan_id: Any) -> dict[str, int]:
         plan_id = _field("plan_id", plan_id)
         counts = {status: 0 for status in _STATUSES}

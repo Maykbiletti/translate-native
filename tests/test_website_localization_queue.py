@@ -151,6 +151,28 @@ class WebsiteLocalizationQueueTests(unittest.TestCase):
         with self.assertRaises(QUEUE.LocalizationQueueBlocked):
             self.queue.complete(claim, {"candidate": "Replay"}, now=102)
 
+    def test_completed_result_is_read_back_only_after_integrity_checks(self) -> None:
+        current = plan(("sv-SE",))
+        self.queue.enqueue_plan(current, now=100)
+        claim = self.queue.claim("worker-a", now=100, lease_seconds=10)
+        result = {"job_id": claim.job_id, "candidate": "Bygg ditt företag med BLUN."}
+        self.queue.complete(claim, result, now=101)
+        self.assertEqual(self.queue.result(claim.job_id), result)
+
+        self.connection.execute(
+            "UPDATE localization_jobs SET result_json = '{}' WHERE job_id = ?",
+            (claim.job_id,),
+        )
+        self.connection.commit()
+        with self.assertRaises(QUEUE.LocalizationQueueBlocked):
+            self.queue.result(claim.job_id)
+
+    def test_pending_job_has_no_readable_result(self) -> None:
+        current = plan(("sv-SE",))
+        self.queue.enqueue_plan(current, now=100)
+        with self.assertRaises(QUEUE.LocalizationQueueBlocked):
+            self.queue.result(current.jobs[0].job_id)
+
     def test_retry_waits_until_due_and_stops_at_attempt_limit(self) -> None:
         current = plan(("sv-SE",))
         self.queue.enqueue_plan(current, max_attempts=2, now=100)
