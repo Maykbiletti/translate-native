@@ -148,7 +148,7 @@
             "command": "node",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/integrations/claude_language_hook.js",
-              "stop"
+              "subagent-stop"
             ],
             "timeout": 8
           }

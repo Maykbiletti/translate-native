@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -58,6 +59,8 @@ def _b64decode(data: str) -> bytes:
 def _validate_signing_key_stat(details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise ValueError("signing key must be a regular file")
+    if details.st_nlink != 1:
+        raise ValueError("signing key must have exactly one hard link")
     if details.st_size < 32 or details.st_size > MAX_SIGNING_KEY_BYTES:
         raise ValueError("signing key has an invalid size")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -66,28 +69,165 @@ def _validate_signing_key_stat(details: os.stat_result) -> None:
         raise ValueError("signing key has the wrong owner")
 
 
-def _signing_key_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _signing_key_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
     )
 
 
-def load_existing_key(path: Path) -> bytes:
-    before = os.lstat(path)
-    _validate_signing_key_stat(before)
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+def _signing_key_directory_identity(
+    details: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_uid,
+        details.st_gid,
+    )
+
+
+def _validate_signing_key_directory(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise ValueError(f"signing-key directory is not a directory: {path}")
+    if stat.S_IMODE(details.st_mode) & 0o022:
+        raise ValueError(f"signing-key directory is writable outside its owner: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise ValueError(f"signing-key directory has the wrong owner: {path}")
+
+
+def _assert_signing_key_directory_unchanged(
+    path: Path, expected: tuple[int, int, int, int, int],
+) -> None:
     try:
-        opened = os.fstat(descriptor)
+        current = path.lstat()
+    except OSError as error:
+        raise ValueError(f"signing-key directory cannot be rechecked: {path}") from error
+    _validate_signing_key_directory(path, current)
+    if _signing_key_directory_identity(current) != expected:
+        raise ValueError(f"signing-key directory changed during operation: {path}")
+
+
+def _existing_signing_key_directory_anchor(path: Path) -> Path:
+    candidate = path
+    while True:
+        try:
+            candidate.lstat()
+            return candidate
+        except FileNotFoundError:
+            parent = candidate.parent
+            if parent == candidate:
+                raise ValueError(f"signing-key directory has no existing anchor: {path}")
+            candidate = parent
+
+
+@contextlib.contextmanager
+def _open_signing_key_directory(path: Path, *, create: bool):
+    if os.name == "nt":
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        yield None
+        return
+    anchor = Path.home()
+    try:
+        relative = path.parent.relative_to(anchor)
+    except ValueError:
+        anchor = _existing_signing_key_directory_anchor(path.parent)
+        relative = path.parent.relative_to(anchor)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = None
+    current_path = anchor
+    try:
+        try:
+            descriptor = os.open(anchor, flags)
+            _validate_signing_key_directory(
+                anchor, os.fstat(descriptor),
+            )
+            for component in relative.parts:
+                current_path = current_path / component
+                try:
+                    child = os.open(component, flags, dir_fd=descriptor)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
+                    child = os.open(component, flags, dir_fd=descriptor)
+                try:
+                    _validate_signing_key_directory(
+                        current_path, os.fstat(child),
+                    )
+                except Exception:
+                    os.close(child)
+                    raise
+                os.close(descriptor)
+                descriptor = child
+            expected = _signing_key_directory_identity(
+                os.fstat(descriptor),
+            )
+        except ValueError:
+            raise
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise ValueError(
+                f"cannot safely open signing-key directory: {current_path}"
+            ) from error
+        try:
+            yield descriptor
+        finally:
+            _assert_signing_key_directory_unchanged(path.parent, expected)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _signing_key_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return os.lstat(path)
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_signing_key_file(
+    path: Path, directory: int | None, flags: int, mode: int = 0o600,
+) -> int:
+    if directory is None:
+        return os.open(path, flags, mode)
+    return os.open(path.name, flags, mode, dir_fd=directory)
+
+
+def _signing_key_fstat(descriptor: int) -> os.stat_result:
+    return os.fstat(descriptor)
+
+
+def _load_existing_key_at(path: Path, directory: int | None) -> bytes:
+    before = _signing_key_lstat(path, directory)
+    _validate_signing_key_stat(before)
+    descriptor = _open_signing_key_file(
+        path,
+        directory,
+        os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = _signing_key_fstat(descriptor)
         _validate_signing_key_stat(opened)
         if _signing_key_identity(opened) != _signing_key_identity(before):
             raise ValueError("signing key changed while opening")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             key = handle.read(MAX_SIGNING_KEY_BYTES + 1)
-        after = os.fstat(descriptor)
+        after = _signing_key_fstat(descriptor)
         if _signing_key_identity(after) != _signing_key_identity(opened):
             raise ValueError("signing key changed while reading")
     finally:
@@ -97,29 +237,40 @@ def load_existing_key(path: Path) -> bytes:
     return key
 
 
+def load_existing_key(path: Path) -> bytes:
+    with _open_signing_key_directory(path, create=False) as directory:
+        return _load_existing_key_at(path, directory)
+
+
 def load_or_create_key(path: Path) -> bytes:
     env_key = os.environ.get("BLUN_LANGUAGE_GUARD_KEY")
     if env_key:
         return hashlib.sha256(env_key.encode("utf-8")).digest()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        return load_existing_key(path)
-    except FileNotFoundError:
-        pass
-    key = os.urandom(32)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        return load_existing_key(path)
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(key)
-            handle.flush()
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    return key
+    with _open_signing_key_directory(path, create=True) as directory:
+        try:
+            return _load_existing_key_at(path, directory)
+        except FileNotFoundError:
+            pass
+        key = os.urandom(32)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = _open_signing_key_file(path, directory, flags)
+        except FileExistsError:
+            return _load_existing_key_at(path, directory)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(key)
+                handle.flush()
+                os.fsync(descriptor)
+            opened = _signing_key_fstat(descriptor)
+            _validate_signing_key_stat(opened)
+            installed = _signing_key_lstat(path, directory)
+            _validate_signing_key_stat(installed)
+            if _signing_key_identity(installed) != _signing_key_identity(opened):
+                raise ValueError("signing key changed while creating")
+        finally:
+            os.close(descriptor)
+        return key
 
 
 def issue_receipt(

@@ -2803,6 +2803,147 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.ensure_signing_key(key)
             self.assertEqual(sentinel.read_bytes(), b"s" * 32)
 
+    @unittest.skipIf(os.name == "nt", "POSIX hard-link test")
+    def test_signing_key_rejects_hard_links_during_install_and_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key = root / "signing.key"
+            alias = root / "signing-key-alias"
+            key.write_bytes(b"k" * 32)
+            key.chmod(0o600)
+            os.link(key, alias)
+
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard link"):
+                INSTALLER.ensure_signing_key(key)
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard link"):
+                INSTALLER._inspect_protected_signing_key(key)
+            self.assertEqual(alias.read_bytes(), b"k" * 32)
+
+            key.unlink()
+            alias.unlink()
+
+            def link_during_creation(_descriptor: int) -> None:
+                os.link(key, alias)
+
+            with mock.patch.object(INSTALLER.os, "fsync", side_effect=link_during_creation):
+                with self.assertRaisesRegex(RuntimeError, "exactly one hard link"):
+                    INSTALLER.ensure_signing_key(key)
+            self.assertEqual(alias.read_bytes(), key.read_bytes())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_signing_key_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER.ensure_signing_key(linked / "signing.key")
+            self.assertFalse((target / "signing.key").exists())
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER.ensure_signing_key(writable / "signing.key")
+                self.assertFalse((writable / "signing.key").exists())
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_signing_key_parent_exchange_during_creation_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            replacement = root / "replacement"
+            replacement.mkdir()
+            key = trusted / "signing.key"
+            original_open = INSTALLER._open_signing_key_file
+
+            def exchange_parent(
+                path: Path, directory_handle: int | None, flags: int, mode: int,
+            ) -> int:
+                trusted.rename(root / "guard-old")
+                replacement.rename(trusted)
+                return original_open(path, directory_handle, flags, mode)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_open_signing_key_file",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                    INSTALLER.ensure_signing_key(key)
+
+            self.assertFalse(key.exists())
+            self.assertEqual((root / "guard-old" / "signing.key").stat().st_size, 32)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_signing_key_inspection_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            target_key = target / "signing.key"
+            target_key.write_bytes(b"a" * 32)
+            target_key.chmod(0o600)
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER._inspect_protected_signing_key(linked / "signing.key")
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable_key = writable / "signing.key"
+            writable_key.write_bytes(b"b" * 32)
+            writable_key.chmod(0o600)
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER._inspect_protected_signing_key(writable_key)
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_signing_key_inspection_detects_parent_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            key = trusted / "signing.key"
+            key.write_bytes(b"a" * 32)
+            key.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            replacement_key = replacement / "signing.key"
+            replacement_key.write_bytes(b"b" * 32)
+            replacement_key.chmod(0o600)
+            original_lstat = INSTALLER._signing_key_lstat
+
+            def exchange_parent(
+                path: Path, directory_handle: int | None,
+            ) -> os.stat_result:
+                details = original_lstat(path, directory_handle)
+                trusted.rename(root / "guard-old")
+                replacement.rename(trusted)
+                return details
+
+            with mock.patch.object(
+                INSTALLER,
+                "_signing_key_lstat",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                    INSTALLER._inspect_protected_signing_key(key)
+
+            self.assertEqual(key.read_bytes(), b"b" * 32)
+            self.assertEqual((root / "guard-old" / "signing.key").read_bytes(), b"a" * 32)
+
     def test_install_delivery_boundary_creates_command_policy_and_key(self) -> None:
         originals = (
             INSTALLER.DELIVERY_COMMAND,
@@ -2857,12 +2998,259 @@ class InstallerTests(unittest.TestCase):
                     sentinel.read_text(encoding="utf-8"),
                     '{"do_not_replace": true}\n',
                 )
+
+                INSTALLER.DELIVERY_POLICY.unlink()
+                os.link(sentinel, INSTALLER.DELIVERY_POLICY)
+                with mock.patch.object(INSTALLER, "atomic_symlink") as command_install, \
+                     mock.patch.object(INSTALLER, "ensure_signing_key") as key_install:
+                    with self.assertRaisesRegex(RuntimeError, "hard links"):
+                        INSTALLER.install_delivery_boundary(ROOT)
+                command_install.assert_not_called()
+                key_install.assert_not_called()
+
+                INSTALLER.DELIVERY_POLICY.unlink()
+                policy = {
+                    "mandatory": True,
+                    "fail_closed": True,
+                    "direct_delivery_allowed": False,
+                    "raw_streaming_allowed": False,
+                    "on_guard_error": "block",
+                    "isolated_service": {
+                        "required": True,
+                        "endpoint": "tcp:127.0.0.1:47631",
+                        "token_file": str(temporary / "service.token"),
+                        "audit_file": str(temporary / "audit.jsonl"),
+                    },
+                }
+                INSTALLER.DELIVERY_POLICY.write_text(
+                    INSTALLER.json.dumps(policy), encoding="utf-8"
+                )
+                INSTALLER.DELIVERY_POLICY.chmod(0o600)
+                stable = INSTALLER.DELIVERY_POLICY.stat()
+                relinked = SimpleNamespace(
+                    st_mode=stable.st_mode,
+                    st_uid=stable.st_uid,
+                    st_dev=stable.st_dev,
+                    st_ino=stable.st_ino,
+                    st_nlink=stable.st_nlink + 1,
+                    st_size=stable.st_size,
+                    st_ctime_ns=stable.st_ctime_ns,
+                    st_mtime_ns=stable.st_mtime_ns,
+                )
+                with mock.patch.object(
+                    INSTALLER,
+                    "_protected_state_lstat",
+                    side_effect=(stable, relinked),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                        INSTALLER._load_delivery_policy()
             finally:
                 (
                     INSTALLER.DELIVERY_COMMAND,
                     INSTALLER.DELIVERY_POLICY,
                     INSTALLER.SIGNING_KEY,
                 ) = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_install_delivery_boundary_rejects_unsafe_policy_parent_before_mutation(self) -> None:
+        originals = (
+            INSTALLER.DELIVERY_COMMAND,
+            INSTALLER.DELIVERY_POLICY,
+            INSTALLER.SIGNING_KEY,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            target = temporary / "target"
+            target.mkdir()
+            linked = temporary / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+            INSTALLER.DELIVERY_COMMAND = temporary / "bin" / "blun-language-deliver"
+            INSTALLER.DELIVERY_POLICY = linked / "delivery-policy.json"
+            INSTALLER.SIGNING_KEY = temporary / "config" / "signing.key"
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink") as command_install, \
+                     mock.patch.object(INSTALLER, "ensure_signing_key") as key_install:
+                    with self.assertRaisesRegex(RuntimeError, "safely open"):
+                        INSTALLER.install_delivery_boundary(ROOT)
+                command_install.assert_not_called()
+                key_install.assert_not_called()
+                self.assertFalse((target / "delivery-policy.json").exists())
+
+                writable = temporary / "writable"
+                writable.mkdir()
+                writable.chmod(0o777)
+                INSTALLER.DELIVERY_POLICY = writable / "delivery-policy.json"
+                try:
+                    with mock.patch.object(INSTALLER, "atomic_symlink") as command_install, \
+                         mock.patch.object(INSTALLER, "ensure_signing_key") as key_install:
+                        with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                            INSTALLER.install_delivery_boundary(ROOT)
+                    command_install.assert_not_called()
+                    key_install.assert_not_called()
+                    self.assertFalse(INSTALLER.DELIVERY_POLICY.exists())
+                finally:
+                    writable.chmod(0o700)
+            finally:
+                (
+                    INSTALLER.DELIVERY_COMMAND,
+                    INSTALLER.DELIVERY_POLICY,
+                    INSTALLER.SIGNING_KEY,
+                ) = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_install_delivery_boundary_pins_policy_parent_during_write(self) -> None:
+        originals = (
+            INSTALLER.DELIVERY_COMMAND,
+            INSTALLER.DELIVERY_POLICY,
+            INSTALLER.SIGNING_KEY,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            trusted = temporary / "config"
+            trusted.mkdir()
+            replacement = temporary / "replacement"
+            replacement.mkdir()
+            INSTALLER.DELIVERY_COMMAND = temporary / "bin" / "blun-language-deliver"
+            INSTALLER.DELIVERY_POLICY = trusted / "delivery-policy.json"
+            INSTALLER.SIGNING_KEY = trusted / "signing.key"
+
+            exchanged = False
+
+            def exchange_parent(_size: int) -> str:
+                nonlocal exchanged
+                if not exchanged:
+                    trusted.rename(temporary / "config-old")
+                    replacement.rename(trusted)
+                    exchanged = True
+                return "fixed-policy-temporary"
+
+            try:
+                with mock.patch.object(INSTALLER, "atomic_symlink"), \
+                     mock.patch.object(INSTALLER, "ensure_signing_key"), \
+                     mock.patch.object(INSTALLER.secrets, "token_hex", side_effect=exchange_parent):
+                    with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                        INSTALLER.install_delivery_boundary(ROOT)
+                self.assertFalse(INSTALLER.DELIVERY_POLICY.exists())
+                self.assertTrue(
+                    (temporary / "config-old" / "delivery-policy.json").is_file()
+                )
+            finally:
+                (
+                    INSTALLER.DELIVERY_COMMAND,
+                    INSTALLER.DELIVERY_POLICY,
+                    INSTALLER.SIGNING_KEY,
+                ) = originals
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_delivery_policy_reader_rejects_unsafe_parents_without_creating_missing_paths(self) -> None:
+        original = INSTALLER.DELIVERY_POLICY
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            policy = {
+                "mandatory": True,
+                "fail_closed": True,
+                "direct_delivery_allowed": False,
+                "raw_streaming_allowed": False,
+                "on_guard_error": "block",
+                "isolated_service": {
+                    "required": True,
+                    "endpoint": "tcp:127.0.0.1:47631",
+                    "token_file": str(temporary / "service.token"),
+                    "audit_file": str(temporary / "audit.jsonl"),
+                },
+            }
+            target = temporary / "target"
+            target.mkdir()
+            target_policy = target / "delivery-policy.json"
+            target_policy.write_text(INSTALLER.json.dumps(policy), encoding="utf-8")
+            target_policy.chmod(0o600)
+            linked = temporary / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+            try:
+                INSTALLER.DELIVERY_POLICY = linked / "delivery-policy.json"
+                with self.assertRaisesRegex(RuntimeError, "safely open"):
+                    INSTALLER._load_delivery_policy()
+
+                writable = temporary / "writable"
+                writable.mkdir()
+                writable_policy = writable / "delivery-policy.json"
+                writable_policy.write_text(INSTALLER.json.dumps(policy), encoding="utf-8")
+                writable_policy.chmod(0o600)
+                writable.chmod(0o777)
+                INSTALLER.DELIVERY_POLICY = writable_policy
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                        INSTALLER._load_delivery_policy()
+                finally:
+                    writable.chmod(0o700)
+
+                missing = temporary / "missing" / "config" / "delivery-policy.json"
+                INSTALLER.DELIVERY_POLICY = missing
+                self.assertIsNone(INSTALLER._load_delivery_policy())
+                self.assertFalse(missing.parent.exists())
+            finally:
+                INSTALLER.DELIVERY_POLICY = original
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_delivery_policy_reader_detects_parent_exchange(self) -> None:
+        original_policy_path = INSTALLER.DELIVERY_POLICY
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            trusted = temporary / "config"
+            trusted.mkdir()
+            replacement = temporary / "replacement"
+            replacement.mkdir()
+            policy_path = trusted / "delivery-policy.json"
+            policy = {
+                "mandatory": True,
+                "fail_closed": True,
+                "direct_delivery_allowed": False,
+                "raw_streaming_allowed": False,
+                "on_guard_error": "block",
+                "isolated_service": {
+                    "required": True,
+                    "endpoint": "tcp:127.0.0.1:47631",
+                    "token_file": str(temporary / "service.token"),
+                    "audit_file": str(temporary / "audit.jsonl"),
+                },
+            }
+            policy_path.write_text(INSTALLER.json.dumps(policy), encoding="utf-8")
+            policy_path.chmod(0o600)
+            replacement_policy = replacement / "delivery-policy.json"
+            replacement_policy.write_text("{}", encoding="utf-8")
+            replacement_policy.chmod(0o600)
+            original_lstat = INSTALLER._protected_state_lstat
+            exchanged = False
+
+            def exchange_parent(
+                path: Path, directory_handle: int | None,
+            ) -> os.stat_result:
+                nonlocal exchanged
+                details = original_lstat(path, directory_handle)
+                if not exchanged:
+                    trusted.rename(temporary / "config-old")
+                    replacement.rename(trusted)
+                    exchanged = True
+                return details
+
+            INSTALLER.DELIVERY_POLICY = policy_path
+            try:
+                with mock.patch.object(
+                    INSTALLER,
+                    "_protected_state_lstat",
+                    side_effect=exchange_parent,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                        INSTALLER._load_delivery_policy()
+                self.assertEqual(policy_path.read_text(encoding="utf-8"), "{}")
+                self.assertIn(
+                    '"mandatory": true',
+                    (temporary / "config-old" / "delivery-policy.json").read_text(
+                        encoding="utf-8"
+                    ),
+                )
+            finally:
+                INSTALLER.DELIVERY_POLICY = original_policy_path
 
     def test_guard_runtime_installs_command_and_owner_only_token(self) -> None:
         originals = (
@@ -2921,6 +3309,161 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.ensure_service_token(token)
             self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
 
+            token.unlink()
+            token.write_text("t" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            hardlink = root / "hardlinked-service.token"
+            os.link(token, hardlink)
+            with self.assertRaisesRegex(RuntimeError, "hard links"):
+                INSTALLER.ensure_service_token(token)
+            with self.assertRaisesRegex(RuntimeError, "hard links"):
+                INSTALLER._read_protected_service_token(token)
+            hardlink.unlink()
+
+            stable = token.stat()
+            linked_during_read = SimpleNamespace(
+                st_mode=stable.st_mode,
+                st_size=stable.st_size,
+                st_uid=stable.st_uid,
+                st_dev=stable.st_dev,
+                st_ino=stable.st_ino,
+                st_nlink=stable.st_nlink + 1,
+                st_ctime_ns=stable.st_ctime_ns,
+                st_mtime_ns=stable.st_mtime_ns,
+            )
+            with mock.patch.object(
+                INSTALLER.os, "fstat", side_effect=(stable, linked_during_read)
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER._read_protected_service_token_at(token, None)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_service_token_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER.ensure_service_token(linked / "service.token")
+            self.assertFalse((target / "service.token").exists())
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER.ensure_service_token(writable / "service.token")
+                self.assertFalse((writable / "service.token").exists())
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_service_token_parent_exchange_during_creation_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            replacement = root / "replacement"
+            replacement.mkdir()
+            token = trusted / "service.token"
+            original_open = INSTALLER._open_service_token_file
+            calls = 0
+
+            def exchange_parent(
+                path: Path,
+                directory_handle: int | None,
+                flags: int,
+                mode: int | None = None,
+            ) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    trusted.rename(root / "guard-old")
+                    replacement.rename(trusted)
+                return original_open(path, directory_handle, flags, mode)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_open_service_token_file",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                    INSTALLER.ensure_service_token(token)
+
+            self.assertFalse(token.exists())
+            old_token = root / "guard-old" / "service.token"
+            self.assertGreaterEqual(len(old_token.read_text(encoding="ascii").strip()), 32)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_service_token_reader_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            target_token = target / "service.token"
+            target_token.write_text("a" * 64 + "\n", encoding="ascii")
+            target_token.chmod(0o600)
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER._read_protected_service_token(linked / "service.token")
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable_token = writable / "service.token"
+            writable_token.write_text("b" * 64 + "\n", encoding="ascii")
+            writable_token.chmod(0o600)
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER._read_protected_service_token(writable_token)
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_service_token_reader_detects_parent_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            token = trusted / "service.token"
+            token.write_text("a" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            replacement_token = replacement / "service.token"
+            replacement_token.write_text("b" * 64 + "\n", encoding="ascii")
+            replacement_token.chmod(0o600)
+            original_open = INSTALLER._open_service_token_file
+
+            def exchange_parent(
+                path: Path,
+                directory_handle: int | None,
+                flags: int,
+                mode: int | None = None,
+            ) -> int:
+                trusted.rename(root / "guard-old")
+                replacement.rename(trusted)
+                return original_open(path, directory_handle, flags, mode)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_open_service_token_file",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                    INSTALLER._read_protected_service_token(token)
+
+            self.assertEqual(token.read_text(encoding="ascii"), "b" * 64 + "\n")
+            self.assertEqual(
+                (root / "guard-old" / "service.token").read_text(encoding="ascii"),
+                "a" * 64 + "\n",
+            )
+
     def test_mcp_http_runtime_installs_commands_and_owner_only_token(self) -> None:
         originals = (
             INSTALLER.MCP_HTTP_COMMAND,
@@ -2971,6 +3514,80 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER.ensure_mcp_http_token(token)
             self.assertEqual(sentinel.read_text(encoding="ascii"), "s" * 64 + "\n")
 
+    @unittest.skipIf(os.name == "nt", "POSIX MCP-token hard-link test")
+    def test_mcp_http_token_creation_and_reader_reject_hard_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token = root / "mcp-http.token"
+            token.write_text("h" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            alias = root / "mcp-http-token-alias"
+            os.link(token, alias)
+
+            for consumer in (
+                INSTALLER.ensure_mcp_http_token,
+                INSTALLER._read_protected_mcp_http_token,
+            ):
+                with self.subTest(consumer=consumer.__name__):
+                    with self.assertRaisesRegex(RuntimeError, "additional hard links"):
+                        consumer(token)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_mcp_http_token_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER.ensure_mcp_http_token(linked / "mcp-http.token")
+            self.assertFalse((target / "mcp-http.token").exists())
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER.ensure_mcp_http_token(writable / "mcp-http.token")
+                self.assertFalse((writable / "mcp-http.token").exists())
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_mcp_http_token_parent_exchange_during_creation_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            replacement = root / "replacement"
+            replacement.mkdir()
+            token = trusted / "mcp-http.token"
+            original_open = INSTALLER._open_mcp_http_token_file
+
+            def exchange_parent(
+                path: Path,
+                directory_handle: int | None,
+                flags: int,
+                mode: int | None = None,
+            ) -> int:
+                trusted.rename(root / "guard-old")
+                replacement.rename(trusted)
+                return original_open(path, directory_handle, flags, mode)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_open_mcp_http_token_file",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
+                    INSTALLER.ensure_mcp_http_token(token)
+
+            self.assertFalse(token.exists())
+            old_token = root / "guard-old" / "mcp-http.token"
+            self.assertGreaterEqual(len(old_token.read_text(encoding="ascii").strip()), 32)
+
     def test_installer_mcp_http_token_reader_is_bounded_and_identity_stable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2991,7 +3608,74 @@ class InstallerTests(unittest.TestCase):
             changed = replacement.stat()
             with mock.patch.object(INSTALLER.os, "fstat", side_effect=(opened, changed)):
                 with self.assertRaisesRegex(RuntimeError, "changed while reading"):
+                    INSTALLER._read_protected_mcp_http_token_at(token, None)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory safety test")
+    def test_mcp_http_token_reader_rejects_unsafe_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            target_token = target / "mcp-http.token"
+            target_token.write_text("a" * 64 + "\n", encoding="ascii")
+            target_token.chmod(0o600)
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "safely open"):
+                INSTALLER._read_protected_mcp_http_token(linked / "mcp-http.token")
+
+            writable = root / "writable"
+            writable.mkdir()
+            writable_token = writable / "mcp-http.token"
+            writable_token.write_text("b" * 64 + "\n", encoding="ascii")
+            writable_token.chmod(0o600)
+            writable.chmod(0o777)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "writable outside its owner"):
+                    INSTALLER._read_protected_mcp_http_token(writable_token)
+            finally:
+                writable.chmod(0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory identity test")
+    def test_mcp_http_token_reader_detects_parent_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "guard"
+            trusted.mkdir()
+            token = trusted / "mcp-http.token"
+            token.write_text("a" * 64 + "\n", encoding="ascii")
+            token.chmod(0o600)
+            replacement = root / "replacement"
+            replacement.mkdir()
+            replacement_token = replacement / "mcp-http.token"
+            replacement_token.write_text("b" * 64 + "\n", encoding="ascii")
+            replacement_token.chmod(0o600)
+            original_open = INSTALLER._open_mcp_http_token_file
+
+            def exchange_parent(
+                path: Path,
+                directory_handle: int | None,
+                flags: int,
+                mode: int | None = None,
+            ) -> int:
+                trusted.rename(root / "guard-old")
+                replacement.rename(trusted)
+                return original_open(path, directory_handle, flags, mode)
+
+            with mock.patch.object(
+                INSTALLER,
+                "_open_mcp_http_token_file",
+                side_effect=exchange_parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory changed"):
                     INSTALLER._read_protected_mcp_http_token(token)
+
+            self.assertEqual(token.read_text(encoding="ascii"), "b" * 64 + "\n")
+            self.assertEqual(
+                (root / "guard-old" / "mcp-http.token").read_text(encoding="ascii"),
+                "a" * 64 + "\n",
+            )
 
     @unittest.skipIf(os.name == "nt", "POSIX link test")
     def test_mcp_probe_rejects_linked_access_token_before_network(self) -> None:
@@ -3359,6 +4043,8 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
             INSTALLER.OPERATION_LOCK.write_text("stale", encoding="utf-8")
+            if os.name != "nt":
+                INSTALLER.OPERATION_LOCK.chmod(0o600)
             os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
             try:
                 token = INSTALLER._acquire_operation_lock(
@@ -3371,6 +4057,76 @@ class InstallerTests(unittest.TestCase):
                 INSTALLER._release_operation_lock(token)
             finally:
                 INSTALLER.OPERATION_LOCK = original
+
+    @unittest.skipUnless(os.name != "nt", "POSIX ownership and link semantics")
+    def test_unsafe_operation_lock_paths_block_without_removal(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = root / "operation.lock"
+            sentinel = root / "sentinel"
+            payload = b'{"operation":"update","pid":999999,"started_at":1,"token":"' + b"a" * 32 + b'"}\n'
+            sentinel.write_bytes(payload)
+            sentinel.chmod(0o600)
+            try:
+                for unsafe in ("symlink", "hardlink", "permissions"):
+                    lock.unlink(missing_ok=True)
+                    if unsafe == "symlink":
+                        lock.symlink_to(sentinel)
+                    elif unsafe == "hardlink":
+                        os.link(sentinel, lock)
+                    else:
+                        lock.write_bytes(payload)
+                        lock.chmod(0o644)
+                    os.utime(lock, (100, 100), follow_symlinks=False)
+                    INSTALLER.OPERATION_LOCK = lock
+
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor",
+                        now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1,
+                    )
+
+                    self.assertIsNone(token, unsafe)
+                    self.assertTrue(lock.exists() or lock.is_symlink(), unsafe)
+                    self.assertEqual(sentinel.read_bytes(), payload, unsafe)
+                    if unsafe == "symlink":
+                        self.assertTrue(lock.is_symlink())
+                    elif unsafe == "hardlink":
+                        self.assertEqual(lock.stat().st_ino, sentinel.stat().st_ino)
+                    else:
+                        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o644)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    @unittest.skipUnless(os.name != "nt", "POSIX directory and symlink semantics")
+    def test_unsafe_operation_lock_parent_directories_block_without_redirecting(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        try:
+            for unsafe in ("symlink", "permissions"):
+                with self.subTest(unsafe=unsafe), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    home = root / "home"
+                    home.mkdir(mode=0o700)
+                    config = home / ".config"
+                    redirected = root / "redirected"
+                    redirected.mkdir(mode=0o700)
+                    if unsafe == "symlink":
+                        config.symlink_to(redirected, target_is_directory=True)
+                    else:
+                        config.mkdir(mode=0o700)
+                        config.chmod(0o777)
+                    INSTALLER.OPERATION_LOCK = config / "blun-language-guard" / "operation.lock"
+
+                    with mock.patch.object(INSTALLER.Path, "home", return_value=home):
+                        token = INSTALLER._acquire_operation_lock("update", now=100)
+
+                    self.assertIsNone(token)
+                    self.assertFalse((redirected / "blun-language-guard" / "operation.lock").exists())
+                    if unsafe == "permissions":
+                        self.assertFalse(INSTALLER.OPERATION_LOCK.exists())
+                        self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o777)
+        finally:
+            INSTALLER.OPERATION_LOCK = original
 
     def test_old_operation_lock_owned_by_living_process_is_never_stolen(self) -> None:
         original = INSTALLER.OPERATION_LOCK
@@ -3529,9 +4285,11 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             INSTALLER.OPERATION_LOCK = Path(directory) / "operation.lock"
             INSTALLER.OPERATION_LOCK.write_text("stale", encoding="utf-8")
+            if os.name != "nt":
+                INSTALLER.OPERATION_LOCK.chmod(0o600)
             os.utime(INSTALLER.OPERATION_LOCK, (100, 100))
 
-            def replace_lock(_metadata: os.stat_result) -> bool:
+            def replace_lock(_metadata: os.stat_result, **_kwargs) -> bool:
                 INSTALLER.OPERATION_LOCK.unlink()
                 INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
                     "operation": "rollback", "pid": os.getpid(), "started_at": 200, "token": "replacement",
@@ -3559,7 +4317,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIsNotNone(token)
                 original_value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
 
-                def replace_after_read(_metadata: os.stat_result) -> dict:
+                def replace_after_read(_metadata: os.stat_result, **_kwargs) -> dict:
                     INSTALLER.OPERATION_LOCK.unlink()
                     INSTALLER._atomic_json(INSTALLER.OPERATION_LOCK, {
                         "operation": "rollback", "pid": os.getpid(), "started_at": 200, "token": "replacement",
@@ -3573,6 +4331,108 @@ class InstallerTests(unittest.TestCase):
                 value = INSTALLER.json.loads(INSTALLER.OPERATION_LOCK.read_text(encoding="utf-8"))
                 self.assertEqual(value["operation"], "rollback")
                 self.assertEqual(value["token"], "replacement")
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_operation_lock_parent_exchange_during_release_preserves_replacement(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "locks"
+            parent.mkdir(mode=0o700)
+            detached = root / "detached-locks"
+            lock = parent / "operation.lock"
+            replacement = b"replacement-parent-lock\n"
+            INSTALLER.OPERATION_LOCK = lock
+            try:
+                token = INSTALLER._acquire_operation_lock("update", now=100)
+                self.assertIsNotNone(token)
+                real_unlink = INSTALLER._unlink_operation_lock
+
+                def exchange_parent_then_unlink(directory_handle: int | None) -> None:
+                    parent.rename(detached)
+                    parent.mkdir(mode=0o700)
+                    lock.write_bytes(replacement)
+                    if os.name != "nt":
+                        lock.chmod(0o600)
+                    real_unlink(directory_handle)
+
+                with mock.patch.object(
+                    INSTALLER,
+                    "_unlink_operation_lock",
+                    side_effect=exchange_parent_then_unlink,
+                ):
+                    assert token is not None
+                    INSTALLER._release_operation_lock(token)
+
+                self.assertEqual(lock.read_bytes(), replacement)
+                self.assertFalse((detached / "operation.lock").exists())
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_operation_lock_changed_while_reading_is_preserved(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = root / "operation.lock"
+            INSTALLER.OPERATION_LOCK = lock
+            INSTALLER._atomic_json(lock, {
+                "operation": "update", "pid": 999999, "started_at": 100, "token": "a" * 32,
+            })
+            os.utime(lock, (100, 100))
+            replacement = {
+                "operation": "rollback", "pid": os.getpid(), "started_at": 200,
+                "token": "b" * 32,
+            }
+            real_fstat = INSTALLER.os.fstat
+            stat_calls = 0
+
+            def exchange_during_read(descriptor: int) -> os.stat_result:
+                nonlocal stat_calls
+                stat_calls += 1
+                if stat_calls == 2:
+                    lock.write_text(INSTALLER.json.dumps(replacement) + "\n", encoding="utf-8")
+                    if os.name != "nt":
+                        lock.chmod(0o600)
+                return real_fstat(descriptor)
+
+            try:
+                with mock.patch.object(INSTALLER.os, "fstat", side_effect=exchange_during_read):
+                    token = INSTALLER._acquire_operation_lock(
+                        "health-monitor",
+                        now=100 + INSTALLER.OPERATION_LOCK_STALE_SECONDS + 1,
+                    )
+                self.assertIsNone(token)
+                self.assertEqual(INSTALLER.json.loads(lock.read_text(encoding="utf-8")), replacement)
+            finally:
+                INSTALLER.OPERATION_LOCK = original
+
+    def test_operation_lock_replaced_during_creation_is_not_claimed(self) -> None:
+        original = INSTALLER.OPERATION_LOCK
+        with tempfile.TemporaryDirectory() as directory:
+            lock = Path(directory) / "operation.lock"
+            INSTALLER.OPERATION_LOCK = lock
+            replacement = b"replacement-lock\n"
+            real_lstat = INSTALLER._operation_lock_lstat
+            exchanged = False
+
+            def exchange_before_install_check(directory: int | None) -> os.stat_result:
+                nonlocal exchanged
+                if not exchanged:
+                    exchanged = True
+                    lock.unlink()
+                    lock.write_bytes(replacement)
+                    if os.name != "nt":
+                        lock.chmod(0o600)
+                return real_lstat(directory)
+
+            try:
+                with mock.patch.object(
+                    INSTALLER, "_operation_lock_lstat", side_effect=exchange_before_install_check,
+                ):
+                    token = INSTALLER._acquire_operation_lock("update", now=100)
+                self.assertIsNone(token)
+                self.assertEqual(lock.read_bytes(), replacement)
             finally:
                 INSTALLER.OPERATION_LOCK = original
 

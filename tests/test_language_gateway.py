@@ -138,6 +138,7 @@ class LanguageGatewayTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertFalse(missing.exists())
+                self.assertFalse(missing.parent.exists())
                 self.assertIn("verification fails closed", result.stdout)
 
     @unittest.skipIf(os.name == "nt", "POSIX permission bits are not authoritative on Windows")

@@ -435,43 +435,126 @@ def _write_service_definition(path: Path, content: str, *, home: Path | None = N
     )
 
 
+def _existing_trust_state_directory_anchor(path: Path) -> Path:
+    """Return the nearest existing ancestor used to open a test/embedded path."""
+    candidate = path
+    while True:
+        try:
+            candidate.lstat()
+            return candidate
+        except FileNotFoundError:
+            parent = candidate.parent
+            if parent == candidate:
+                raise RuntimeError(f"Trust-state directory has no existing anchor: {path}")
+            candidate = parent
+
+
+@contextlib.contextmanager
+def _open_trust_state_directory(
+    path: Path,
+    *,
+    create: bool = True,
+    missing_ok: bool = False,
+):
+    """Hold one owner-controlled trust-state directory through an operation."""
+    if os.name == "nt":
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        elif not path.parent.exists():
+            if missing_ok:
+                yield None
+                return
+            raise RuntimeError(f"Trust-state directory is missing: {path.parent}")
+        yield None
+        return
+    home = Path.home()
+    try:
+        path.parent.relative_to(home)
+    except ValueError:
+        # Tests and embedders may inject a path outside the account home. Start
+        # at its nearest existing ancestor while retaining the same checks.
+        home = _existing_trust_state_directory_anchor(path.parent)
+    with _open_service_definition_directory(
+        path.parent,
+        home,
+        create=create,
+        missing_ok=missing_ok,
+    ) as directory:
+        yield directory
+
+
+@contextlib.contextmanager
+def _open_signing_key_directory(path: Path):
+    """Hold the owner-controlled signing-key directory through one operation."""
+    with _open_trust_state_directory(path) as directory:
+        yield directory
+
+
+def _signing_key_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_signing_key_file(
+    path: Path, directory: int | None, flags: int, mode: int,
+) -> int:
+    if directory is None:
+        return os.open(path, flags, mode)
+    return os.open(path.name, flags, mode, dir_fd=directory)
+
+
+def _validate_signing_key_details(path: Path, details: os.stat_result) -> None:
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        raise RuntimeError(f"Signing-key path is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"Signing key must have exactly one hard link: {path}")
+    if details.st_size < 32 or details.st_size > 64 * 1024:
+        raise RuntimeError(f"Signing key has an invalid size: {path}")
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        raise RuntimeError(f"Signing-key permissions must be owner-only: {path}")
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        raise RuntimeError(f"Signing-key owner is invalid: {path}")
+
+
+def _inspect_protected_signing_key(path: Path) -> None:
+    """Validate one existing key while retaining its trusted parent directory."""
+    with _open_signing_key_directory(path) as directory:
+        _validate_signing_key_details(path, _signing_key_lstat(path, directory))
+
+
 def ensure_signing_key(path: Path | None = None) -> None:
     """Create the local trust key once and never replace an existing key."""
     path = path or SIGNING_KEY
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        details = path.lstat()
-    except FileNotFoundError:
-        details = None
-    if details is not None:
-        if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
-            raise RuntimeError(f"Signing-key path is not a regular file: {path}")
-        if details.st_size < 32 or details.st_size > 64 * 1024:
-            raise RuntimeError(f"Signing key has an invalid size: {path}")
-        if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
-            raise RuntimeError(f"Signing-key permissions must be owner-only: {path}")
-        if hasattr(os, "getuid") and details.st_uid != os.getuid():
-            raise RuntimeError(f"Signing-key owner is invalid: {path}")
-        return
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        ensure_signing_key(path)
-        return
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(os.urandom(32))
-            handle.flush()
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    with _open_signing_key_directory(path) as directory:
+        try:
+            details = _signing_key_lstat(path, directory)
+        except FileNotFoundError:
+            details = None
+        if details is not None:
+            _validate_signing_key_details(path, details)
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = _open_signing_key_file(path, directory, flags, 0o600)
+        except FileExistsError:
+            _validate_signing_key_details(path, _signing_key_lstat(path, directory))
+            return
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(os.urandom(32))
+                handle.flush()
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _validate_signing_key_details(path, _signing_key_lstat(path, directory))
 
 
-def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
@@ -481,6 +564,8 @@ def _service_token_identity(details: os.stat_result) -> tuple[int, int, int, int
 def _validate_service_token_details(path: Path, details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"Service-token path is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"Service token must not have additional hard links: {path}")
     if details.st_size < 32 or details.st_size > 64 * 1024:
         raise RuntimeError(f"Service token has an invalid size: {path}")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -489,10 +574,40 @@ def _validate_service_token_details(path: Path, details: os.stat_result) -> None
         raise RuntimeError(f"Service-token owner is invalid: {path}")
 
 
-def _read_protected_service_token(path: Path) -> str:
-    before = path.lstat()
+@contextlib.contextmanager
+def _open_service_token_directory(path: Path):
+    """Hold the owner-controlled service-token directory through one operation."""
+    with _open_trust_state_directory(path) as directory:
+        yield directory
+
+
+def _service_token_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_service_token_file(
+    path: Path,
+    directory: int | None,
+    flags: int,
+    mode: int | None = None,
+) -> int:
+    target: str | Path = path if directory is None else path.name
+    kwargs = {} if directory is None else {"dir_fd": directory}
+    if mode is None:
+        return os.open(target, flags, **kwargs)
+    return os.open(target, flags, mode, **kwargs)
+
+
+def _read_protected_service_token_at(path: Path, directory: int | None) -> str:
+    before = _service_token_lstat(path, directory)
     _validate_service_token_details(path, before)
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = _open_service_token_file(
+        path,
+        directory,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
         opened = os.fstat(descriptor)
         _validate_service_token_details(path, opened)
@@ -516,35 +631,42 @@ def _read_protected_service_token(path: Path) -> str:
     return token
 
 
+def _read_protected_service_token(path: Path) -> str:
+    with _open_service_token_directory(path) as directory:
+        return _read_protected_service_token_at(path, directory)
+
+
 def ensure_service_token(path: Path | None = None) -> None:
     """Create a stable text token used only by host adapters and the MCP process."""
     path = path or SERVICE_TOKEN
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _read_protected_service_token(path)
-        return
-    except FileNotFoundError:
-        pass
-    token = os.urandom(32).hex().encode("ascii") + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        _read_protected_service_token(path)
-        return
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(token)
-            handle.flush()
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    with _open_service_token_directory(path) as directory:
+        try:
+            _read_protected_service_token_at(path, directory)
+            return
+        except FileNotFoundError:
+            pass
+        token = os.urandom(32).hex().encode("ascii") + b"\n"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = _open_service_token_file(path, directory, flags, 0o600)
+        except FileExistsError:
+            _read_protected_service_token_at(path, directory)
+            return
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _read_protected_service_token_at(path, directory)
 
 
-def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_ctime_ns,
         details.st_mtime_ns,
@@ -554,6 +676,8 @@ def _mcp_http_token_identity(details: os.stat_result) -> tuple[int, int, int, in
 def _validate_mcp_http_token_details(path: Path, details: os.stat_result) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"MCP access-token path is not a regular file: {path}")
+    if details.st_nlink != 1:
+        raise RuntimeError(f"MCP access-token path has additional hard links: {path}")
     if details.st_size < 32 or details.st_size > MAX_MCP_HTTP_TOKEN_BYTES:
         raise RuntimeError(f"MCP access token has an invalid size: {path}")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -562,19 +686,53 @@ def _validate_mcp_http_token_details(path: Path, details: os.stat_result) -> Non
         raise RuntimeError(f"MCP access-token owner is invalid: {path}")
 
 
-def _read_protected_mcp_http_token(path: Path) -> str:
-    before = path.lstat()
+@contextlib.contextmanager
+def _open_mcp_http_token_directory(path: Path):
+    """Hold the owner-controlled MCP token directory through one operation."""
+    with _open_trust_state_directory(path) as directory:
+        yield directory
+
+
+def _mcp_http_token_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_mcp_http_token_file(
+    path: Path,
+    directory: int | None,
+    flags: int,
+    mode: int | None = None,
+) -> int:
+    target: str | Path = path if directory is None else path.name
+    kwargs = {} if directory is None else {"dir_fd": directory}
+    if mode is None:
+        return os.open(target, flags, **kwargs)
+    return os.open(target, flags, mode, **kwargs)
+
+
+def _mcp_http_token_fstat(descriptor: int) -> os.stat_result:
+    return os.fstat(descriptor)
+
+
+def _read_protected_mcp_http_token_at(path: Path, directory: int | None) -> str:
+    before = _mcp_http_token_lstat(path, directory)
     _validate_mcp_http_token_details(path, before)
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = _open_mcp_http_token_file(
+        path,
+        directory,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
-        opened = os.fstat(descriptor)
+        opened = _mcp_http_token_fstat(descriptor)
         _validate_mcp_http_token_details(path, opened)
         if _mcp_http_token_identity(opened) != _mcp_http_token_identity(before):
             raise RuntimeError(f"MCP access token changed while opening: {path}")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             raw = handle.read(MAX_MCP_HTTP_TOKEN_BYTES + 1)
-        after_read = os.fstat(descriptor)
-        after_path = path.lstat()
+        after_read = _mcp_http_token_fstat(descriptor)
+        after_path = _mcp_http_token_lstat(path, directory)
     finally:
         os.close(descriptor)
     if len(raw) > MAX_MCP_HTTP_TOKEN_BYTES:
@@ -593,48 +751,73 @@ def _read_protected_mcp_http_token(path: Path) -> str:
     return token
 
 
+def _read_protected_mcp_http_token(path: Path) -> str:
+    with _open_mcp_http_token_directory(path) as directory:
+        return _read_protected_mcp_http_token_at(path, directory)
+
+
 def ensure_mcp_http_token(path: Path | None = None) -> None:
     """Create a stable bearer token for the loopback HTTP MCP endpoint."""
     path = path or MCP_HTTP_TOKEN
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _read_protected_mcp_http_token(path)
-        return
-    except FileNotFoundError:
-        pass
-    token = os.urandom(32).hex().encode("ascii") + b"\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        _read_protected_mcp_http_token(path)
-        return
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(token)
-            handle.flush()
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    with _open_mcp_http_token_directory(path) as directory:
+        try:
+            _read_protected_mcp_http_token_at(path, directory)
+            return
+        except FileNotFoundError:
+            pass
+        token = os.urandom(32).hex().encode("ascii") + b"\n"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = _open_mcp_http_token_file(path, directory, flags, 0o600)
+        except FileExistsError:
+            _read_protected_mcp_http_token_at(path, directory)
+            return
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def install_delivery_boundary(root: Path) -> None:
     source = root / "integrations" / "enforced_delivery.py"
     if not source.is_file():
         raise RuntimeError(f"Missing delivery boundary: {source}")
-    if DELIVERY_POLICY.exists() or DELIVERY_POLICY.is_symlink():
-        _load_delivery_policy()
-    source.chmod(source.stat().st_mode | 0o111)
-    atomic_symlink(source, DELIVERY_COMMAND)
-    ensure_signing_key()
-    policy = json.loads((root / "integrations" / "delivery-policy.example.json").read_text(encoding="utf-8"))
-    policy["isolated_service"] = {
-        "required": True,
-        "endpoint": SERVICE_ENDPOINT,
-        "token_file": str(SERVICE_TOKEN),
-        "audit_file": str(AUDIT_LOG),
-    }
-    _atomic_json(DELIVERY_POLICY, policy)
+    with _open_trust_state_directory(DELIVERY_POLICY) as policy_directory:
+        existing, expected = _read_protected_state_json(
+            DELIVERY_POLICY,
+            "delivery policy",
+            MAX_DELIVERY_POLICY_BYTES,
+            require_single_link=True,
+            directory=policy_directory,
+        )
+        _validate_delivery_policy(existing)
+        source.chmod(source.stat().st_mode | 0o111)
+        atomic_symlink(source, DELIVERY_COMMAND)
+        ensure_signing_key()
+        policy = json.loads(
+            (root / "integrations" / "delivery-policy.example.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        policy["isolated_service"] = {
+            "required": True,
+            "endpoint": SERVICE_ENDPOINT,
+            "token_file": str(SERVICE_TOKEN),
+            "audit_file": str(AUDIT_LOG),
+        }
+        _write_protected_state_json_at(
+            DELIVERY_POLICY,
+            policy,
+            "delivery policy",
+            MAX_DELIVERY_POLICY_BYTES,
+            policy_directory,
+            expected,
+            require_single_link=True,
+        )
+        _load_delivery_policy(directory=policy_directory)
     print(f"Mandatory delivery command: {DELIVERY_COMMAND}")
     print(f"Fail-closed delivery policy: {DELIVERY_POLICY}")
 
@@ -1519,7 +1702,11 @@ def doctor() -> int:
         DELIVERY_COMMAND.is_symlink() and DELIVERY_COMMAND.resolve() == delivery_source.resolve(),
         str(DELIVERY_COMMAND),
     ))
-    key_secure = SIGNING_KEY.is_file() and (os.name == "nt" or SIGNING_KEY.stat().st_mode & 0o077 == 0)
+    try:
+        _inspect_protected_signing_key(SIGNING_KEY)
+        key_secure = True
+    except (OSError, RuntimeError):
+        key_secure = False
     checks.append(("signing key", key_secure, str(SIGNING_KEY)))
     service_source = root / "integrations" / "guard_service.py"
     checks.append((
@@ -2045,10 +2232,17 @@ def _protected_state_identity(
 
 
 def _validate_protected_state_details(
-    path: Path, label: str, maximum_bytes: int, details: os.stat_result,
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    details: os.stat_result,
+    *,
+    require_single_link: bool = False,
 ) -> None:
     if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
         raise RuntimeError(f"Unsafe {label} file type: {path}")
+    if require_single_link and details.st_nlink != 1:
+        raise RuntimeError(f"{label.capitalize()} has additional hard links: {path}")
     if details.st_size > maximum_bytes:
         raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
     if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
@@ -2057,29 +2251,67 @@ def _validate_protected_state_details(
         raise RuntimeError(f"{label.capitalize()} owner is invalid: {path}")
 
 
+def _protected_state_lstat(path: Path, directory: int | None) -> os.stat_result:
+    if directory is None:
+        return path.lstat()
+    return os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_protected_state_file(
+    path: Path,
+    directory: int | None,
+    flags: int,
+    mode: int | None = None,
+) -> int:
+    target: str | Path = path if directory is None else path.name
+    kwargs = {} if directory is None else {"dir_fd": directory}
+    if mode is None:
+        return os.open(target, flags, **kwargs)
+    return os.open(target, flags, mode, **kwargs)
+
+
 def _read_protected_state_json(
-    path: Path, label: str, maximum_bytes: int,
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    *,
+    require_single_link: bool = False,
+    directory: int | None = None,
 ) -> tuple[dict | None, tuple[int, int, int, int, int, int] | None]:
     """Read one bounded owner-only JSON state file without following links."""
     try:
-        before = path.lstat()
+        before = _protected_state_lstat(path, directory)
     except FileNotFoundError:
         return None, None
     except OSError as error:
         raise RuntimeError(f"Unreadable {label}: {path}") from error
-    _validate_protected_state_details(path, label, maximum_bytes, before)
+    _validate_protected_state_details(
+        path,
+        label,
+        maximum_bytes,
+        before,
+        require_single_link=require_single_link,
+    )
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = _open_protected_state_file(path, directory, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
-            _validate_protected_state_details(path, label, maximum_bytes, opened)
-            if not _same_file_identity(before, opened):
+            _validate_protected_state_details(
+                path,
+                label,
+                maximum_bytes,
+                opened,
+                require_single_link=require_single_link,
+            )
+            if not _same_file_identity(before, opened) or (
+                require_single_link and opened.st_nlink != before.st_nlink
+            ):
                 raise RuntimeError(f"{label.capitalize()} changed while opening: {path}")
             raw = handle.read(maximum_bytes + 1)
             after_read = os.fstat(handle.fileno())
-        after_path = path.lstat()
+        after_path = _protected_state_lstat(path, directory)
     except (OSError, RuntimeError) as error:
         if isinstance(error, RuntimeError):
             raise
@@ -2089,6 +2321,13 @@ def _read_protected_state_json(
     if (
         not _same_file_identity(opened, after_read)
         or not _same_file_identity(opened, after_path)
+        or (
+            require_single_link
+            and (
+                after_read.st_nlink != opened.st_nlink
+                or after_path.st_nlink != opened.st_nlink
+            )
+        )
     ):
         raise RuntimeError(f"{label.capitalize()} changed while reading: {path}")
     try:
@@ -2100,8 +2339,133 @@ def _read_protected_state_json(
     return value, _protected_state_identity(after_path)
 
 
-def _load_protected_state_json(path: Path, label: str, maximum_bytes: int) -> dict | None:
-    value, _identity = _read_protected_state_json(path, label, maximum_bytes)
+def _assert_protected_state_at_unchanged(
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    directory: int | None,
+    expected: tuple[int, int, int, int, int, int] | None,
+    *,
+    require_single_link: bool = False,
+) -> None:
+    try:
+        current = _protected_state_lstat(path, directory)
+    except FileNotFoundError:
+        if expected is None:
+            return
+        raise RuntimeError(f"{label.capitalize()} disappeared before replacement: {path}")
+    except OSError as error:
+        raise RuntimeError(f"{label.capitalize()} cannot be rechecked: {path}") from error
+    if expected is None:
+        raise RuntimeError(f"{label.capitalize()} appeared before replacement: {path}")
+    _validate_protected_state_details(
+        path,
+        label,
+        maximum_bytes,
+        current,
+        require_single_link=require_single_link,
+    )
+    if _protected_state_identity(current) != expected:
+        raise RuntimeError(f"{label.capitalize()} changed before replacement: {path}")
+
+
+def _write_protected_state_json_at(
+    path: Path,
+    payload: dict,
+    label: str,
+    maximum_bytes: int,
+    directory: int | None,
+    expected: tuple[int, int, int, int, int, int] | None,
+    *,
+    require_single_link: bool = False,
+) -> None:
+    encoded = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    if len(encoded) > maximum_bytes:
+        raise RuntimeError(f"{label.capitalize()} exceeds size limit: {path}")
+    if directory is None:
+        _atomic_json(
+            path,
+            payload,
+            before_replace=lambda: _assert_protected_state_at_unchanged(
+                path,
+                label,
+                maximum_bytes,
+                directory,
+                expected,
+                require_single_link=require_single_link,
+            ),
+        )
+        return
+
+    temporary_name = ""
+    descriptor = None
+    for _attempt in range(16):
+        candidate = f".{path.name}.{secrets.token_hex(16)}.tmp"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = _open_protected_state_file(
+                Path(candidate), directory, flags, 0o600
+            )
+        except FileExistsError:
+            continue
+        temporary_name = candidate
+        break
+    else:
+        raise RuntimeError(f"Cannot reserve temporary {label}: {path}")
+    try:
+        assert descriptor is not None
+        opened_descriptor = descriptor
+        descriptor = None
+        with os.fdopen(opened_descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _assert_protected_state_at_unchanged(
+            path,
+            label,
+            maximum_bytes,
+            directory,
+            expected,
+            require_single_link=require_single_link,
+        )
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        )
+        temporary_name = ""
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+
+
+def _load_protected_state_json(
+    path: Path,
+    label: str,
+    maximum_bytes: int,
+    *,
+    require_single_link: bool = False,
+    directory: int | None = None,
+) -> dict | None:
+    value, _identity = _read_protected_state_json(
+        path,
+        label,
+        maximum_bytes,
+        require_single_link=require_single_link,
+        directory=directory,
+    )
     return value
 
 
@@ -2160,10 +2524,7 @@ def _load_health_config() -> dict | None:
     return value
 
 
-def _load_delivery_policy() -> dict | None:
-    value = _load_protected_state_json(
-        DELIVERY_POLICY, "delivery policy", MAX_DELIVERY_POLICY_BYTES
-    )
+def _validate_delivery_policy(value: dict | None) -> dict | None:
     if value is None:
         return None
     isolated = value.get("isolated_service")
@@ -2184,6 +2545,26 @@ def _load_delivery_policy() -> dict | None:
                 f"Invalid delivery policy field isolated_service.{field}: {DELIVERY_POLICY}"
             )
     return value
+
+
+def _load_delivery_policy(*, directory: int | None = None) -> dict | None:
+    if directory is None and os.name != "nt":
+        with _open_trust_state_directory(
+            DELIVERY_POLICY,
+            create=False,
+            missing_ok=True,
+        ) as protected_directory:
+            if protected_directory is None:
+                return None
+            return _load_delivery_policy(directory=protected_directory)
+    value = _load_protected_state_json(
+        DELIVERY_POLICY,
+        "delivery policy",
+        MAX_DELIVERY_POLICY_BYTES,
+        require_single_link=True,
+        directory=directory,
+    )
+    return _validate_delivery_policy(value)
 
 
 def _validate_health_state(value: dict | None) -> dict | None:
@@ -2418,21 +2799,70 @@ def _process_start_identity(pid: int) -> str | None:
     return _posix_process_start_identity(pid)
 
 
-def _read_operation_lock(metadata: os.stat_result) -> dict | None:
+@contextlib.contextmanager
+def _open_operation_lock_directory():
+    """Hold the owner-controlled lock directory for one complete lock transition."""
+    if os.name == "nt":
+        OPERATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        yield None
+        return
+    home = Path.home()
+    try:
+        OPERATION_LOCK.parent.relative_to(home)
+    except ValueError:
+        # Tests and embedders may place the lock outside the account home. The
+        # final parent still receives the same no-follow and identity checks.
+        home = OPERATION_LOCK.parent
+    with _open_service_definition_directory(OPERATION_LOCK.parent, home) as directory:
+        yield directory
+
+
+def _operation_lock_lstat(directory: int | None) -> os.stat_result:
+    if directory is None:
+        return OPERATION_LOCK.lstat()
+    return os.stat(OPERATION_LOCK.name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_operation_lock_file(directory: int | None, flags: int, mode: int | None = None) -> int:
+    path: str | Path = OPERATION_LOCK if directory is None else OPERATION_LOCK.name
+    kwargs = {} if directory is None else {"dir_fd": directory}
+    if mode is None:
+        return os.open(path, flags, **kwargs)
+    return os.open(path, flags, mode, **kwargs)
+
+
+def _unlink_operation_lock(directory: int | None) -> None:
+    if directory is None:
+        OPERATION_LOCK.unlink()
+        return
+    os.unlink(OPERATION_LOCK.name, dir_fd=directory)
+
+
+def _read_operation_lock(
+    metadata: os.stat_result, *, directory: int | None = None,
+) -> dict | None:
     """Read the exact bounded lock instance described by metadata."""
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_OPERATION_LOCK_BYTES:
+    if not _operation_lock_details_safe(metadata):
         return None
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(OPERATION_LOCK, flags)
+        descriptor = _open_operation_lock_file(directory, flags)
         with os.fdopen(descriptor, "rb") as handle:
             opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode) or not _same_file_identity(metadata, opened):
+            if not _operation_lock_details_safe(opened) or not _same_file_identity(metadata, opened):
                 return None
             raw = handle.read(MAX_OPERATION_LOCK_BYTES + 1)
+            after_read = os.fstat(handle.fileno())
+        after_path = _operation_lock_lstat(directory)
     except OSError:
         return None
-    if len(raw) > MAX_OPERATION_LOCK_BYTES:
+    if (
+        len(raw) > MAX_OPERATION_LOCK_BYTES
+        or not _operation_lock_details_safe(after_read)
+        or not _operation_lock_details_safe(after_path)
+        or not _same_file_identity(opened, after_read)
+        or not _same_file_identity(opened, after_path)
+    ):
         return None
     try:
         value = json.loads(raw.decode("utf-8"))
@@ -2443,9 +2873,24 @@ def _read_operation_lock(metadata: os.stat_result) -> dict | None:
     return value
 
 
-def _operation_lock_owner_alive(metadata: os.stat_result) -> bool | None:
+def _operation_lock_details_safe(details: os.stat_result) -> bool:
+    """Accept only one owner-controlled regular maintenance-lock inode."""
+    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        return False
+    if details.st_nlink != 1 or details.st_size > MAX_OPERATION_LOCK_BYTES:
+        return False
+    if os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077:
+        return False
+    if hasattr(os, "getuid") and details.st_uid != os.getuid():
+        return False
+    return True
+
+
+def _operation_lock_owner_alive(
+    metadata: os.stat_result, *, directory: int | None = None,
+) -> bool | None:
     """Return the validated owner's liveness, or None for an untrusted lock body."""
-    value = _read_operation_lock(metadata)
+    value = _read_operation_lock(metadata, directory=directory)
     if value is None:
         return None
     pid = value.get("pid")
@@ -2481,27 +2926,45 @@ def _operation_lock_owner_alive(metadata: os.stat_result) -> bool | None:
 
 def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | None:
     """Take a same-user cross-platform lock without racing a living owner."""
+    try:
+        with _open_operation_lock_directory() as directory:
+            return _acquire_operation_lock_at(directory, operation, now=now)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _acquire_operation_lock_at(
+    directory: int | None, operation: str, *, now: int | None = None,
+) -> str | None:
     timestamp = int(time.time()) if now is None else now
     token = os.urandom(16).hex()
-    OPERATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(2):
         try:
-            descriptor = os.open(OPERATION_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            descriptor = _open_operation_lock_file(
+                directory,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
         except FileExistsError:
             try:
-                metadata = OPERATION_LOCK.lstat()
+                metadata = _operation_lock_lstat(directory)
+                if not _operation_lock_details_safe(metadata):
+                    return None
                 stale = timestamp - int(metadata.st_mtime) > OPERATION_LOCK_STALE_SECONDS
             except OSError:
                 stale = False
             if not stale or attempt:
                 return None
-            if _operation_lock_owner_alive(metadata) is True:
+            if _operation_lock_owner_alive(metadata, directory=directory) is True:
                 return None
             try:
-                current = OPERATION_LOCK.lstat()
-                if not _same_file_identity(metadata, current):
+                current = _operation_lock_lstat(directory)
+                if (
+                    not _operation_lock_details_safe(current)
+                    or not _same_file_identity(metadata, current)
+                ):
                     return None
-                OPERATION_LOCK.unlink()
+                _unlink_operation_lock(directory)
             except OSError:
                 return None
             continue
@@ -2509,9 +2972,24 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
         process_start_id = _process_start_identity(os.getpid())
         if process_start_id is not None:
             lock_value["process_start_id"] = process_start_id
+        created = os.fstat(descriptor)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(lock_value, handle)
             handle.write("\n")
+            handle.flush()
+            written = os.fstat(handle.fileno())
+        try:
+            installed = _operation_lock_lstat(directory)
+        except OSError:
+            return None
+        if (
+            not _operation_lock_details_safe(created)
+            or not _operation_lock_details_safe(written)
+            or not _operation_lock_details_safe(installed)
+            or (created.st_dev, created.st_ino) != (written.st_dev, written.st_ino)
+            or not _same_file_identity(written, installed)
+        ):
+            return None
         return token
     return None
 
@@ -2519,16 +2997,26 @@ def _acquire_operation_lock(operation: str, *, now: int | None = None) -> str | 
 def _release_operation_lock(token: str) -> None:
     """Release only the lock instance acquired by this process."""
     try:
-        metadata = OPERATION_LOCK.lstat()
+        with _open_operation_lock_directory() as directory:
+            _release_operation_lock_at(directory, token)
+    except (OSError, RuntimeError):
+        return
+
+
+def _release_operation_lock_at(directory: int | None, token: str) -> None:
+    try:
+        metadata = _operation_lock_lstat(directory)
     except OSError:
         return
-    value = _read_operation_lock(metadata)
+    if not _operation_lock_details_safe(metadata):
+        return
+    value = _read_operation_lock(metadata, directory=directory)
     if value is None or value.get("token") != token:
         return
     try:
-        current = OPERATION_LOCK.lstat()
-        if _same_file_identity(metadata, current):
-            OPERATION_LOCK.unlink()
+        current = _operation_lock_lstat(directory)
+        if _operation_lock_details_safe(current) and _same_file_identity(metadata, current):
+            _unlink_operation_lock(directory)
     except OSError:
         return
 

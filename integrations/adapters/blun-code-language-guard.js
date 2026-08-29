@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const {
   LanguageGuardBlocked,
@@ -30,35 +31,180 @@ function sameProtectedFile(stats, expected) {
 
 function validateServiceTokenStats(stats) {
   if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("service token must be a regular file");
+  if (stats.nlink !== 1) throw new Error("service token must not have additional hard links");
   if (stats.size < 32 || stats.size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
   if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) throw new Error("service token permissions are too broad");
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) throw new Error("service token has the wrong owner");
 }
 
-function readProtectedServiceToken(destination) {
-  const before = fs.lstatSync(destination);
-  validateServiceTokenStats(before);
-  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
-  try {
-    const opened = fs.fstatSync(descriptor);
-    validateServiceTokenStats(opened);
-    if (!sameProtectedFile(opened, protectedFileIdentity(before))) throw new Error("service token changed while opening");
-    const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
-    let size = 0;
-    while (size < buffer.length) {
-      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
-      if (count === 0) break;
-      size += count;
+function protectedDirectoryIdentity(stats) {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    mode: stats.mode,
+    uid: stats.uid,
+    gid: stats.gid,
+  };
+}
+
+function sameProtectedDirectory(stats, expected) {
+  return stats.dev === expected.dev && stats.ino === expected.ino
+    && stats.mode === expected.mode && stats.uid === expected.uid
+    && stats.gid === expected.gid;
+}
+
+function validateProtectedDirectoryStats(stats, directory, label) {
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`${label} directory must be a directory: ${directory}`);
+  }
+  if (process.platform !== "win32" && (stats.mode & 0o022) !== 0) {
+    throw new Error(`${label} directory is writable outside its owner: ${directory}`);
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+    throw new Error(`${label} directory has the wrong owner: ${directory}`);
+  }
+}
+
+function existingProtectedDirectoryAnchor(directory, label) {
+  let candidate = directory;
+  while (true) {
+    try {
+      fs.lstatSync(candidate);
+      return candidate;
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+      const parent = path.dirname(candidate);
+      if (parent === candidate) {
+        throw new Error(`${label} directory has no existing anchor: ${directory}`);
+      }
+      candidate = parent;
     }
-    const after = fs.fstatSync(descriptor);
-    if (!sameProtectedFile(after, protectedFileIdentity(opened))) throw new Error("service token changed while reading");
-    if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
-    const token = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "").trim();
-    if (token.length < 32) throw new Error("service token is invalid");
-    return token;
+  }
+}
+
+function openProtectedDirectory(destination, label, { allowMissing = false } = {}) {
+  const absoluteFile = path.resolve(destination);
+  const directory = path.dirname(absoluteFile);
+  if (process.platform === "win32") {
+    let details;
+    try {
+      details = fs.lstatSync(directory);
+    } catch (error) {
+      if (allowMissing && error && error.code === "ENOENT") return null;
+      throw error;
+    }
+    validateProtectedDirectoryStats(details, directory, label);
+    return {
+      accessPath: absoluteFile,
+      descriptor: null,
+      directory,
+      identity: protectedDirectoryIdentity(details),
+    };
+  }
+  const home = path.resolve(os.homedir());
+  const underHome = directory === home || directory.startsWith(`${home}${path.sep}`);
+  const anchor = underHome ? home : existingProtectedDirectoryAnchor(directory, label);
+  const relative = path.relative(anchor, directory);
+  const components = relative ? relative.split(path.sep) : [];
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const directoryOnly = typeof fs.constants.O_DIRECTORY === "number" ? fs.constants.O_DIRECTORY : 0;
+  const flags = fs.constants.O_RDONLY | noFollow | directoryOnly;
+  const descriptorRoot = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
+  let descriptor = null;
+  let current = anchor;
+  try {
+    descriptor = fs.openSync(anchor, flags);
+    validateProtectedDirectoryStats(fs.fstatSync(descriptor), anchor, label);
+    for (const component of components) {
+      current = path.join(current, component);
+      let child;
+      try {
+        child = fs.openSync(path.join(descriptorRoot, String(descriptor), component), flags);
+      } catch (error) {
+        if (allowMissing && error && error.code === "ENOENT") {
+          fs.closeSync(descriptor);
+          descriptor = null;
+          return null;
+        }
+        throw error;
+      }
+      try {
+        validateProtectedDirectoryStats(fs.fstatSync(child), current, label);
+      } catch (error) {
+        fs.closeSync(child);
+        throw error;
+      }
+      fs.closeSync(descriptor);
+      descriptor = child;
+    }
+    const identity = protectedDirectoryIdentity(fs.fstatSync(descriptor));
+    const accessPath = path.join(descriptorRoot, String(descriptor), path.basename(absoluteFile));
+    return { accessPath, descriptor, directory, identity };
+  } catch (error) {
+    if (descriptor !== null) fs.closeSync(descriptor);
+    if (error && String(error.message || "").startsWith(`${label} directory`)) throw error;
+    throw new Error(`${label} directory cannot be opened safely: ${current}`);
+  }
+}
+
+function closeProtectedDirectory(protectedDirectory, label) {
+  if (protectedDirectory.descriptor === null) {
+    const current = fs.lstatSync(protectedDirectory.directory);
+    validateProtectedDirectoryStats(current, protectedDirectory.directory, label);
+    if (!sameProtectedDirectory(current, protectedDirectory.identity)) {
+      throw new Error(`${label} directory changed while reading: ${protectedDirectory.directory}`);
+    }
+    return;
+  }
+  try {
+    const held = fs.fstatSync(protectedDirectory.descriptor);
+    const current = fs.lstatSync(protectedDirectory.directory);
+    validateProtectedDirectoryStats(current, protectedDirectory.directory, label);
+    if (!sameProtectedDirectory(held, protectedDirectory.identity)
+        || !sameProtectedDirectory(current, protectedDirectory.identity)) {
+      throw new Error(`${label} directory changed while reading: ${protectedDirectory.directory}`);
+    }
   } finally {
-    fs.closeSync(descriptor);
+    fs.closeSync(protectedDirectory.descriptor);
+  }
+}
+
+function readProtectedServiceToken(destination) {
+  const protectedDirectory = openProtectedDirectory(destination, "service token");
+  const tokenFile = protectedDirectory.accessPath;
+  try {
+    const before = fs.lstatSync(tokenFile);
+    validateServiceTokenStats(before);
+    const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+    const descriptor = fs.openSync(tokenFile, fs.constants.O_RDONLY | noFollow);
+    try {
+      const opened = fs.fstatSync(descriptor);
+      validateServiceTokenStats(opened);
+      if (!sameProtectedFile(opened, protectedFileIdentity(before)) || opened.nlink !== before.nlink) {
+        throw new Error("service token changed while opening");
+      }
+      const buffer = Buffer.alloc(MAX_SERVICE_TOKEN_BYTES + 1);
+      let size = 0;
+      while (size < buffer.length) {
+        const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+        if (count === 0) break;
+        size += count;
+      }
+      const after = fs.fstatSync(descriptor);
+      const afterPath = fs.lstatSync(tokenFile);
+      if (!sameProtectedFile(after, protectedFileIdentity(opened)) || after.nlink !== opened.nlink
+          || !sameProtectedFile(afterPath, protectedFileIdentity(opened)) || afterPath.nlink !== opened.nlink) {
+        throw new Error("service token changed while reading");
+      }
+      if (size > MAX_SERVICE_TOKEN_BYTES) throw new Error("service token has an invalid size");
+      const token = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "").trim();
+      if (token.length < 32) throw new Error("service token is invalid");
+      return token;
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } finally {
+    closeProtectedDirectory(protectedDirectory, "service token");
   }
 }
 
@@ -75,40 +221,51 @@ function validateLegacyConfigStats(stats) {
 }
 
 function readProtectedLegacyConfig(destination) {
-  let before;
-  try { before = fs.lstatSync(destination); }
-  catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
-  validateLegacyConfigStats(before);
-  const expected = protectedFileIdentity(before);
-  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-  const descriptor = fs.openSync(destination, fs.constants.O_RDONLY | noFollow);
+  const protectedDirectory = openProtectedDirectory(
+    destination,
+    "BLUN MCP configuration",
+    { allowMissing: true },
+  );
+  if (protectedDirectory === null) return null;
+  const configFile = protectedDirectory.accessPath;
   try {
-    const opened = fs.fstatSync(descriptor);
-    validateLegacyConfigStats(opened);
-    if (!sameProtectedFile(opened, expected) || opened.nlink !== before.nlink) {
-      throw new Error("BLUN MCP configuration changed while opening");
+    let before;
+    try { before = fs.lstatSync(configFile); }
+    catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
     }
-    const buffer = Buffer.alloc(MAX_BLUN_MCP_CONFIG_BYTES + 1);
-    let size = 0;
-    while (size < buffer.length) {
-      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
-      if (count === 0) break;
-      size += count;
+    validateLegacyConfigStats(before);
+    const expected = protectedFileIdentity(before);
+    const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+    const descriptor = fs.openSync(configFile, fs.constants.O_RDONLY | noFollow);
+    try {
+      const opened = fs.fstatSync(descriptor);
+      validateLegacyConfigStats(opened);
+      if (!sameProtectedFile(opened, expected) || opened.nlink !== before.nlink) {
+        throw new Error("BLUN MCP configuration changed while opening");
+      }
+      const buffer = Buffer.alloc(MAX_BLUN_MCP_CONFIG_BYTES + 1);
+      let size = 0;
+      while (size < buffer.length) {
+        const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+        if (count === 0) break;
+        size += count;
+      }
+      const after = fs.fstatSync(descriptor);
+      const afterPath = fs.lstatSync(configFile);
+      if (
+        !sameProtectedFile(after, expected) || after.nlink !== before.nlink
+        || !sameProtectedFile(afterPath, expected) || afterPath.nlink !== before.nlink
+      ) throw new Error("BLUN MCP configuration changed while reading");
+      if (size > MAX_BLUN_MCP_CONFIG_BYTES) throw new Error("BLUN MCP configuration exceeds the size limit");
+      return new TextDecoder("utf-8", { fatal: true })
+        .decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "");
+    } finally {
+      fs.closeSync(descriptor);
     }
-    const after = fs.fstatSync(descriptor);
-    const afterPath = fs.lstatSync(destination);
-    if (
-      !sameProtectedFile(after, expected) || after.nlink !== before.nlink
-      || !sameProtectedFile(afterPath, expected) || afterPath.nlink !== before.nlink
-    ) throw new Error("BLUN MCP configuration changed while reading");
-    if (size > MAX_BLUN_MCP_CONFIG_BYTES) throw new Error("BLUN MCP configuration exceeds the size limit");
-    return new TextDecoder("utf-8", { fatal: true })
-      .decode(buffer.subarray(0, size)).replace(/^\uFEFF/, "");
   } finally {
-    fs.closeSync(descriptor);
+    closeProtectedDirectory(protectedDirectory, "BLUN MCP configuration");
   }
 }
 

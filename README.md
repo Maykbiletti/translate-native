@@ -147,6 +147,64 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.42.13: isolated SubagentStop identity
+
+Version 6.42.13 routes Claude's `SubagentStop` event through a dedicated hook mode and requires its documented `agent_id` explicitly. The trusted route and the reported hook event must match before any protected state is read, so a malformed child stop cannot omit its identity, claim the main-thread route, or consume the parent's one-time grant. Ordinary `Stop` inputs retain the documented absent-`agent_id` fallback to `main` for compatibility.
+
+### Version 6.42.12: exact Claude hook identities
+
+Version 6.42.12 accepts Claude's documented `session_id` and optional `agent_id` only as non-empty strings. Object, array, numeric, empty, and NUL-bearing values now block before protected grant state is read, written, invalidated, or sent to the isolated verifier. This prevents JavaScript coercion from mapping a malformed identity such as `{}` onto the valid string identity `"[object Object]"`; the legitimate session or subagent retains its own one-time grant and remains independently deliverable.
+
+### Version 6.42.11: SignWriting output bypass
+
+Version 6.42.11 classifies two or more Unicode SignWriting symbols as natural language in Claude's complete `Stop` and `SubagentStop` output. Literal, spaced, numerically HTML-encoded, and mixed sign-language writing can no longer bypass the exact-response grant merely because Unicode categorizes its handshape, movement, and location symbols outside the letter category. One isolated SignWriting symbol and pure SignWriting punctuation remain compatible as non-language output.
+
+### Version 6.42.10: Braille output bypass
+
+Version 6.42.10 classifies two or more nonblank Unicode Braille cells as natural language in Claude's complete `Stop` and `SubagentStop` output. Literal, spaced, numerically HTML-encoded, and mixed Braille text can no longer bypass the exact-response grant merely because Unicode categorizes Braille patterns as symbols rather than letters. One isolated cell and the blank Braille pattern remain compatible as non-language output, avoiding false positives for individual markers and spacing.
+
+### Version 6.42.9: regional-indicator output bypass
+
+Version 6.42.9 classifies two or more unpaired Unicode regional indicator symbols as natural language in Claude's complete `Stop` and `SubagentStop` output. Spaced, zero-width-separated, numerically HTML-encoded, and mixed sequences such as `🇭 🇪 🇱 🇱 🇴` can no longer spell readable words outside Unicode's letter category to bypass the exact-response grant. Adjacent pairs remain compatible as ordinary flag emoji, including multiple neighboring or separated flags; one isolated indicator also remains emoji-only. Numeric references are decoded into one visible classification stream without recursively interpreting entity-like replacement text.
+
+### Version 6.42.8: enclosed alphabetic output bypass
+
+Version 6.42.8 classifies Unicode parenthesized, circled, squared, negative-circled, and negative-squared Latin letters as natural language in Claude's complete `Stop` and `SubagentStop` output. Readable text such as `Ⓗⓔⓛⓛⓞ` or `🅗🅔🅛🅛🅞` can no longer bypass the exact-response grant merely because Unicode categorizes the visible letters as symbols. A single enclosed character that Unicode explicitly marks as emoji, such as `Ⓜ️` or `🅰️`, remains compatible as emoji-only output; a sequence of two or more enclosed letter buttons requires verification so short words cannot use the emoji subset as a bypass.
+
+### Version 6.42.7: complete non-language WHATWG references
+
+Version 6.42.7 avoids false positives for every semicolon-terminated named reference in the [WHATWG HTML entity table](https://html.spec.whatwg.org/entities.json) whose complete rendered value contains neither a Unicode letter nor a linguistic combining mark. Mathematical operators, arrows, box-drawing characters, card suits, spacing, and invisible aliases can now pass `Stop` and `SubagentStop` without a translation grant when they contain no prose. Unknown references, language-bearing or linguistic combining-mark references, non-legacy names without a semicolon, and safe references followed by natural language remain fail-closed.
+
+### Version 6.42.6: quarantined temporary Claude cleanup
+
+Version 6.42.6 keeps the creation descriptor open while cleaning up a failed temporary Claude delivery grant or session epoch. The hook first moves the pathname to an unpredictable cleanup quarantine and then proves that the expected creation identity, open descriptor, and quarantined path still identify the same file before unlinking it. A replacement introduced at the former check-to-unlink boundary is preserved under quarantine alongside the original file, and publication blocks fail-closed.
+
+### Version 6.42.5: non-language HTML formatting references
+
+Version 6.42.5 avoids false positives when Claude's complete `Stop` or `SubagentStop` output consists only of standardized named HTML controls and spacing such as `&Tab;`, `&ZeroWidthSpace;`, or `&InvisibleTimes;`. The hook accepts only an exact, case-sensitive, semicolon-terminated set whose rendered values contain neither Unicode letters nor linguistic marks. Semicolonless forms, near misses, unknown names, language-bearing entities, and mixed prose remain fail-closed.
+
+### Version 6.42.4: bounded Claude state reads
+
+Version 6.42.4 bounds the bytes actually read from every Claude delivery-grant and session-epoch descriptor. A file that grows after its initial metadata check can no longer make `readFileSync` consume unbounded data before the final identity check: the hook reads at most the configured limit plus one byte, rejects growth past that limit, and decodes the complete bounded payload as strict UTF-8. Existing BOM handling and exact state validation remain unchanged.
+
+### Version 6.42.3: quarantined Claude state removal
+
+Version 6.42.3 removes the old direct pathname delete after identity validation of a Claude delivery grant or session epoch. The hook now moves the candidate to an unpredictable quarantine name inside the retained protected directory, proves that the open descriptor and quarantined path still identify the inspected file, and only then removes it. A replacement introduced at the former removal boundary is preserved under quarantine and the operation blocks fail-closed instead of deleting the substituted file.
+
+### Version 6.42.2: protected first-use Claude state creation
+
+Version 6.42.2 removes the last recursive path creation from Claude session startup. When the hook state directory does not exist yet, every missing component is now created relative to a retained, no-follow opened, owner-controlled parent-directory handle before any session epoch is registered or published. Linked and broadly writable parents block without receiving a new directory; a parent exchanged during creation receives no state, while safe nested first-use creation remains compatible.
+
+### Version 6.42.1: HTML C1 numeric-reference parity
+
+Version 6.42.1 closes a rendered-output gap in the Claude `Stop` and `SubagentStop` classifier. HTML parsers replace selected numeric C1 control references through the Windows-1252 compatibility table: for example, `&#x8A;` renders as `Š`, even though the raw code point is not a Unicode letter. The hook now classifies the rendered replacement, so decimal, hexadecimal, zero-padded, and semicolonless C1 references that become letters require a release grant. References that render only currency, punctuation, or symbols remain compatible without a natural-language false positive.
+
+### Version 6.42.0: hardened Claude hooks become update-visible
+
+Version 6.42 publishes the accumulated Stop and SubagentStop hardening under a new plugin cache key. Claude Code uses the explicit manifest version to decide whether an installed marketplace plugin needs an update; leaving the version at 6.41.1 would make existing installations report that they were current while retaining the older cached hooks.
+
+`VERSION`, the Claude manifest, the active skill contract, and this README now identify Version 6.42.0 consistently. A repository regression prevents those active version declarations from drifting apart again; every later plugin release must still advance the explicit version with its changed bytes. See Anthropic's official [plugin version-management reference](https://code.claude.com/docs/en/plugins-reference#version-management).
+
 ### Version 6.41.1: strict Claude plugin paths
 
 Version 6.41.1 fixes the two remaining path violations reported by Claude's strict plugin validator. The marketplace now declares its repository-root source as `./`, satisfying Claude's requirement that relative marketplace sources start with `./`. The manifest's `skills` entry now names the `./translate-native` directory that contains `SKILL.md`, rather than naming the Markdown file as if it were a skill directory.
@@ -630,7 +688,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.41.1 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.42.13 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
