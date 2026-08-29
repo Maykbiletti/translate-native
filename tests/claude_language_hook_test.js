@@ -172,6 +172,19 @@ async function main() {
   ]) {
     assert(!hasNaturalLanguage(morseDecoration), `${morseDecoration} must remain non-language output`);
   }
+  for (const romanText of [
+    "ⅭⅠⅤⅠⅭ",
+    "ⅬⅠⅤⅠⅮ",
+    "ⅽⅰⅴⅰⅽ",
+    "ⅭⅣⅠⅭ",
+    "&#8557;&#8544;&#8548;&#8544;&#8557;",
+    "&#x216D;&#x2160;&#x2164;&#x2160;&#x216D;"
+  ]) {
+    assert(hasNaturalLanguage(romanText), `${romanText} must require verification`);
+  }
+  for (const romanNumber of ["Ⅰ", "Ⅻ", "ⅯⅯⅩⅩⅥ", "ⅠⅡⅢ", "ⅯⅯⅯⅯ", "ⅤⅠⅤ"]) {
+    assert(!hasNaturalLanguage(romanNumber), `${romanNumber} must remain a numeric output`);
+  }
   assert(
     hasNaturalLanguage("\u{1DA84}"),
     "the SignWriting combining location mark must retain the general mark protection"
@@ -2425,6 +2438,31 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(morseDecorationStop.stdout, "");
+
+  const disguisedRomanStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "\u216D\u2160\u2164\u2160\u216D",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(disguisedRomanStop.stdout).decision, "block");
+
+  const encodedDisguisedRomanSubagentStop = await runHook("subagent-stop", {
+    ...common,
+    agent_id: "child-disguised-roman",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#x216D;&#x2160;&#x2164;&#x2160;&#x216D;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(encodedDisguisedRomanSubagentStop.stdout).decision, "block");
+
+  const romanNumberStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "\u216F\u216F\u2169\u2169\u2165",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(romanNumberStop.stdout, "");
 
   const signWritingStop = await runHook("stop", {
     ...common,

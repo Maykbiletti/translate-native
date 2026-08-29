@@ -46,6 +46,10 @@ const MORSE_LETTER_CODES = new Set([
   "-.-", ".-..", "--", "-.", "---", ".--.", "--.-", ".-.", "...", "-", "..-",
   "...-", ".--", "-..-", "-.--", "--.."
 ]);
+const ROMAN_NUMERAL_VALUES = new Map([
+  ["I", 1], ["V", 5], ["X", 10], ["L", 50], ["C", 100], ["D", 500], ["M", 1000]
+]);
+const ROMAN_SUBTRACTIVE_PAIRS = new Set(["IV", "IX", "XL", "XC", "CD", "CM"]);
 let currentHookInput = null;
 
 function canonicalText(value) {
@@ -71,6 +75,25 @@ function readBoundedUtf8Descriptor(descriptor, maximumBytes, label) {
   return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size));
 }
 
+function isRomanNumber(value) {
+  let previousToken = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < value.length;) {
+    const current = ROMAN_NUMERAL_VALUES.get(value[index]);
+    const next = ROMAN_NUMERAL_VALUES.get(value[index + 1]);
+    let token = current;
+    if (next > current) {
+      if (!ROMAN_SUBTRACTIVE_PAIRS.has(value.slice(index, index + 2))) return false;
+      token = next - current;
+      index += 2;
+    } else {
+      index += 1;
+    }
+    if (token > previousToken) return false;
+    previousToken = token;
+  }
+  return true;
+}
+
 function containsLanguageCharacters(value) {
   const text = String(value || "");
   if (/\p{L}/u.test(text)) return true;
@@ -83,6 +106,12 @@ function containsLanguageCharacters(value) {
     const tokens = match[1].trim().split(/[\s/]+/u).filter(Boolean);
     if (tokens.length < 3 || !tokens.every((token) => MORSE_LETTER_CODES.has(token))) continue;
     if (tokens.some((token) => token.includes(".")) && tokens.some((token) => token.includes("-"))) {
+      return true;
+    }
+  }
+  for (const match of text.matchAll(/[\u2160-\u217F]+/gu)) {
+    const romanText = match[0].normalize("NFKC").toUpperCase();
+    if ([...match[0]].length >= 2 && romanText.length >= 3 && !isRomanNumber(romanText)) {
       return true;
     }
   }
