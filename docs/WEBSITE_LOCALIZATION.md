@@ -206,3 +206,82 @@ canonical payload signatures expose tampering, and readiness requires exact
 set equality across all policy-required locales. Tests cover source, policy,
 model and software invalidation, signature/result corruption, expiry, legal
 review, partial readiness, and cross-plan translation-memory reuse.
+
+## CMS change and publication contract
+
+`integrations/website_localization_cms.py` connects the pipeline to a CMS
+without choosing a vendor or network library. The host supplies three isolated
+capabilities: an inbound signature verifier, an outbound signing authority,
+and a publisher implementing `publish(CMSPublicationRequest)`. The bridge does
+not read keys, open sockets, choose credentials, or update live CMS state by
+itself.
+
+An inbound `blun.cms-content-change.v1` event has exactly these fields:
+
+```json
+{
+  "schema": "blun.cms-content-change.v1",
+  "event_id": "cms-event-184",
+  "site_id": "blun-marketing",
+  "website_version": "website-2026-08-29.1",
+  "localization": {
+    "source_id": "homepage.hero",
+    "source_revision": "cms-184",
+    "source_text": "Build your business with BLUN.",
+    "source_locale": "en-IE",
+    "content_type": "headline",
+    "glossary_version": "blun-glossary-3",
+    "policy_version": "native-web-1",
+    "provider_id": "customer-llm",
+    "model_id": "king",
+    "model_version": "2026-08-29",
+    "software_version": "6.43.0-dev",
+    "target_locales": ["de-AT", "sv-SE"]
+  }
+}
+```
+
+The CMS signs the canonical UTF-8 JSON bytes outside the envelope. The bridge
+verifies the signature before its first write, derives the deterministic plan,
+and persists the event before enqueuing it. If the process stops between those
+two transactions, replaying the exact event resumes queue insertion safely.
+The same `event_id` with different canonical bytes is an idempotency collision
+and cannot add work.
+
+After every required locale has a valid signed approval, `prepare_delivery`
+creates one `blun.cms-localization-publication.v1` payload for the complete
+locale set. It includes the site and website version, source identity and hash,
+and, for each locale, the exact target text and hash, approval ID, and expiry.
+Its deterministic `delivery_id` is an idempotency key over those immutable
+bytes. The host-owned publication authority signs and immediately verifies the
+payload before the durable outbox accepts it. A partial, changed, expired, or
+invalid approval creates no publication entry.
+
+Outbox workers claim a delivery through an owner- and token-bound lease. The
+publisher must return exactly:
+
+```json
+{
+  "schema": "blun.cms-localization-publication-ack.v1",
+  "delivery_id": "blun-cms-delivery-…",
+  "payload_sha256": "…",
+  "status": "accepted"
+}
+```
+
+Wrong or malformed acknowledgements retry with bounded exponential backoff;
+explicit permanent rejections become terminal. Crashed leases are recovered,
+but stale workers cannot acknowledge a later attempt. Free-form transport
+details are stored only as SHA-256 hashes. Delivery is at least once, so a CMS
+adapter must make the stable `delivery_id` idempotent: acceptance followed by a
+crash may send the exact same signed payload again. A failed new website
+version never deletes or overwrites an older successful delivery.
+
+Premortem: an attacker could reuse an event ID with changed content, a partial
+locale set could reach the CMS, an acknowledgement could name another payload,
+or a worker could wake after its lease or approval expired. Canonical inbound
+signatures and collision checks block changed events; the release gate creates
+only complete bundles; exact signed payload hashes bind acknowledgements; and
+both leases and approval expiries are rechecked immediately before delivery.
+Regression tests cover replay, collision, partial readiness, tampering, exact
+acknowledgements, bounded retries, opaque failures, and crash recovery.
