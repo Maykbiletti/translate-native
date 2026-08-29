@@ -67,8 +67,14 @@ async function main() {
   assert(!hasNaturalLanguage("&#99999999"), "an overlong decimal entity must not be decoded in parts");
   assert(!hasNaturalLanguage("&#128512;"), "a decimal emoji entity must not become a language false positive");
   assert(!hasNaturalLanguage("&#x1F600;"), "a hexadecimal emoji entity must not become a language false positive");
+  for (const enclosedText of ["Ⓗⓔⓛⓛⓞ", "⒩⒜⒯⒰⒭⒧⒤⒞⒣", "🄷🄴🄻🄻🄾", "🅗🅔🅛🅛🅞", "🅷🅴🅻🅻🅾", "🅱️🅾️🅾️"]) {
+    assert(hasNaturalLanguage(enclosedText), `${enclosedText} must require verification`);
+  }
   for (const emoji of ["❤️", "☹️", "✈️", "1️⃣", "&#10084;&#65039;", "&#49;&#65039;&#8419;", "&#49 &#65039 &#8419", "&#00000049;&#000065039;&#000008419;"]) {
     assert(!hasNaturalLanguage(emoji), `${emoji} must remain an emoji-only output`);
+  }
+  for (const enclosedEmoji of ["Ⓜ️", "🅰️", "🅱️", "🅾️", "🅿️"]) {
+    assert(!hasNaturalLanguage(enclosedEmoji), `${enclosedEmoji} must remain an emoji-only output`);
   }
   assert(
     !hasNaturalLanguage("&nbsp;&amp;&hellip;&mdash;&copy;"),
@@ -2039,6 +2045,23 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(c1PunctuationStop.stdout, "");
+
+  const enclosedAlphabeticStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "Ⓗⓔⓛⓛⓞ",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(enclosedAlphabeticStop.stdout).decision, "block");
+
+  const enclosedAlphabeticSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-enclosed-alphabetic",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "🅗🅔🅛🅛🅞",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(enclosedAlphabeticSubagentStop.stdout).decision, "block");
 
   const encodedEmojiStop = await runHook("stop", {
     ...common,

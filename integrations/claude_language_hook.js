@@ -35,6 +35,12 @@ const LEGACY_NON_LANGUAGE_NAMED_REFERENCES = [
   "sup3", "AMP", "COPY", "QUOT", "REG", "amp", "deg", "GT", "gt", "LT", "lt",
   "not", "reg", "uml", "yen"
 ].sort((left, right) => right.length - left.length);
+const ENCLOSED_LATIN_LETTER_RANGES = [
+  [0x249C, 0x24E9],
+  [0x1F130, 0x1F149],
+  [0x1F150, 0x1F169],
+  [0x1F170, 0x1F189]
+];
 let currentHookInput = null;
 
 function canonicalText(value) {
@@ -63,6 +69,17 @@ function readBoundedUtf8Descriptor(descriptor, maximumBytes, label) {
 function containsLanguageCharacters(value) {
   const text = String(value || "");
   if (/\p{L}/u.test(text)) return true;
+  let enclosedEmojiLetters = 0;
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    const enclosedLatinLetter = ENCLOSED_LATIN_LETTER_RANGES.some(
+      ([start, end]) => codePoint >= start && codePoint <= end
+    );
+    if (!enclosedLatinLetter) continue;
+    if (!/\p{Emoji}/u.test(character)) return true;
+    enclosedEmojiLetters += 1;
+  }
+  if (enclosedEmojiLetters >= 2) return true;
   const withoutEmojiFormatting = text.replace(/[\u20E3\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, "");
   return /\p{M}/u.test(withoutEmojiFormatting);
 }
