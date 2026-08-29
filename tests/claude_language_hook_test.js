@@ -95,6 +95,18 @@ async function main() {
     hasNaturalLanguage("&#38;copy;"),
     "decoded numeric ampersands must not recursively consume visible entity-like text"
   );
+  for (const brailleText of [
+    "⠓⠑⠇⠇⠕",
+    "⠓ ⠑ ⠚",
+    "&#10259;&#10257;&#10247;&#10247;&#10261;",
+    "&#x2813;&#x2811;&#x2807;&#x2807;&#x2815;",
+    "⠓ &#10257; ⠚"
+  ]) {
+    assert(hasNaturalLanguage(brailleText), `${brailleText} must require verification`);
+  }
+  for (const brailleSymbol of ["⠀", "⠀⠀", "⠓", "&#10240;", "&#x2813;"]) {
+    assert(!hasNaturalLanguage(brailleSymbol), `${brailleSymbol} must remain non-language output`);
+  }
   assert(
     !hasNaturalLanguage("&nbsp;&amp;&hellip;&mdash;&copy;"),
     "named spacing, punctuation, and symbol references must not become language false positives"
@@ -2109,6 +2121,34 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(flagEmojiStop.stdout, "");
+
+  const brailleAlphabeticStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "⠓⠑⠇⠇⠕",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(brailleAlphabeticStop.stdout).decision, "block");
+
+  const encodedBrailleAlphabeticSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-braille-alphabetic",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#10259;&#10257;&#10247;&#10247;&#10261;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(
+    JSON.parse(encodedBrailleAlphabeticSubagentStop.stdout).decision,
+    "block"
+  );
+
+  const singleBrailleCellStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "⠓",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(singleBrailleCellStop.stdout, "");
 
   const encodedEmojiStop = await runHook("stop", {
     ...common,

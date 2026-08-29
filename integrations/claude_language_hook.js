@@ -70,6 +70,7 @@ function containsLanguageCharacters(value) {
   const text = String(value || "");
   if (/\p{L}/u.test(text)) return true;
   let enclosedEmojiLetters = 0;
+  let brailleCells = 0;
   let regionalIndicatorRun = 0;
   let unpairedRegionalIndicators = 0;
   const finishRegionalIndicatorRun = () => {
@@ -78,6 +79,10 @@ function containsLanguageCharacters(value) {
   };
   for (const character of text) {
     const codePoint = character.codePointAt(0);
+    if (codePoint >= 0x2801 && codePoint <= 0x28FF) {
+      brailleCells += 1;
+      continue;
+    }
     if (codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF) {
       regionalIndicatorRun += 1;
       continue;
@@ -91,6 +96,7 @@ function containsLanguageCharacters(value) {
     enclosedEmojiLetters += 1;
   }
   finishRegionalIndicatorRun();
+  if (brailleCells >= 2) return true;
   if (unpairedRegionalIndicators >= 2) return true;
   if (enclosedEmojiLetters >= 2) return true;
   const withoutEmojiFormatting = text.replace(/[\u20E3\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, "");
