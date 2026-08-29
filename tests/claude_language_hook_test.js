@@ -157,11 +157,19 @@ async function main() {
     "... --- ...",
     "···· · ·−·· ·−·· −−−",
     "&#46;&#46;&#46; &#45;&#45;&#45; &#46;&#46;&#46;",
-    "✅ ... --- ..."
+    "✅ ... --- ...",
+    "(... --- ...)",
+    "... --- ...!",
+    "... --- ...✅",
+    "...---...",
+    "(···−−−···)",
+    "(&#46;&#46;&#46;&#45;&#45;&#45;&#46;&#46;&#46;)"
   ]) {
     assert(hasNaturalLanguage(morseText), `${morseText} must require verification`);
   }
-  for (const morseDecoration of [".", "...", "---", ". -", "--- ---", "... ..."]) {
+  for (const morseDecoration of [
+    ".", "...", "---", ". -", "--- ---", "... ...", "...---", "---...", "...---...---..."
+  ]) {
     assert(!hasNaturalLanguage(morseDecoration), `${morseDecoration} must remain non-language output`);
   }
   assert(
@@ -2392,6 +2400,23 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(JSON.parse(encodedMorseSubagentStop.stdout).decision, "block");
+
+  const wrappedMorseStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "(... --- ...)✅",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(wrappedMorseStop.stdout).decision, "block");
+
+  const compactMorseSubagentStop = await runHook("subagent-stop", {
+    ...common,
+    agent_id: "child-compact-morse",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "(&#46;&#46;&#46;&#45;&#45;&#45;&#46;&#46;&#46;)!",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(compactMorseSubagentStop.stdout).decision, "block");
 
   const morseDecorationStop = await runHook("stop", {
     ...common,

@@ -77,7 +77,8 @@ function containsLanguageCharacters(value) {
   const normalizedMorse = text
     .replace(/[\u00B7\u2022]/gu, ".")
     .replace(/[\u2010-\u2015\u2212]/gu, "-");
-  const morseRun = /(?:^|[^.\-])((?:[.\-]{1,4}(?:[\t\n\r /]+|$)){3,})/g;
+  if (/(?:^|[^.\-])\.\.\.---\.\.\.(?=$|[^.\-])/.test(normalizedMorse)) return true;
+  const morseRun = /(?:^|[^.\-])((?:[.\-]{1,4}[\t\n\r /]+){2,}[.\-]{1,4})(?=$|[^.\-])/g;
   for (const match of normalizedMorse.matchAll(morseRun)) {
     const tokens = match[1].trim().split(/[\s/]+/u).filter(Boolean);
     if (tokens.length < 3 || !tokens.every((token) => MORSE_LETTER_CODES.has(token))) continue;
