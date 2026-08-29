@@ -39,9 +39,14 @@ async function main() {
     agent: "main"
   });
   assert.throws(
-    () => hookIdentity({ session_id: "session" }, true),
+    () => hookIdentity({ session_id: "session" }, "required"),
     /explicit agent_id/,
     "SubagentStop identity resolution must never fall back to the main agent"
+  );
+  assert.throws(
+    () => hookIdentity({ session_id: "session", agent_id: "child" }, "forbidden"),
+    /unexpected agent_id/,
+    "main-thread Stop identity resolution must never address a subagent"
   );
   for (const malformedIdentity of [
     {},
@@ -2144,6 +2149,15 @@ async function main() {
     tool_use_id: "tool-agent-identity-collision"
   };
   assert.strictEqual((await runHook("post-tool", collisionAgentTool, environment)).stdout, "");
+  const forgedMainAgentCollision = await runHook("stop", {
+    ...common,
+    agent_id: "[object Object]",
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(forgedMainAgentCollision.stdout).decision, "block");
+  assert.match(JSON.parse(forgedMainAgentCollision.stdout).reason, /explicit Claude identity/);
   const malformedAgentCollision = await runHook("subagent-stop", {
     ...common,
     agent_id: {},

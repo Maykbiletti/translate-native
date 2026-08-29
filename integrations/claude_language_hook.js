@@ -541,14 +541,20 @@ function stateDirectory() {
   return path.join(runtimeConfig().runtime, "claude-hooks");
 }
 
-function hookIdentity(input, requireExplicitAgent = false) {
+function hookIdentity(input, agentPolicy = "optional") {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Claude hook input has no valid identity");
   }
+  if (!["optional", "required", "forbidden"].includes(agentPolicy)) {
+    throw new Error("Claude hook identity has no valid agent policy");
+  }
   const session = input.session_id;
   const hasAgent = Object.prototype.hasOwnProperty.call(input, "agent_id");
-  if (requireExplicitAgent && !hasAgent) {
+  if (agentPolicy === "required" && !hasAgent) {
     throw new Error("Claude hook input has no explicit agent_id");
+  }
+  if (agentPolicy === "forbidden" && hasAgent) {
+    throw new Error("Claude hook input has an unexpected agent_id");
   }
   const agent = hasAgent ? input.agent_id : "main";
   if (typeof session !== "string" || session.length === 0) {
@@ -1383,7 +1389,7 @@ async function stop(input, expectedEvent) {
   }
   let hook;
   try {
-    hook = hookIdentity(input, expectedEvent === "SubagentStop");
+    hook = hookIdentity(input, expectedEvent === "SubagentStop" ? "required" : "forbidden");
   } catch (_) {
     emit(blockedStop(input, "The BLUN hook received no valid explicit Claude identity for this stop event. Fail closed and retry after Claude supplies the documented identity fields."));
     return;

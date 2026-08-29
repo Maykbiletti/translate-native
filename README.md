@@ -147,6 +147,10 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.42.14: symmetric Stop identity isolation
+
+Version 6.42.14 rejects `agent_id` on the dedicated main-thread `Stop` route, matching Anthropic's event schema where the field is added specifically for `SubagentStop`. Together with the existing child-route requirement, neither stop boundary can address the other's grant namespace: a forged main stop carrying a child ID blocks before protected state is read, and the exact child retains its independently consumable one-time grant.
+
 ### Version 6.42.13: isolated SubagentStop identity
 
 Version 6.42.13 routes Claude's `SubagentStop` event through a dedicated hook mode and requires its documented `agent_id` explicitly. The trusted route and the reported hook event must match before any protected state is read, so a malformed child stop cannot omit its identity, claim the main-thread route, or consume the parent's one-time grant. Ordinary `Stop` inputs retain the documented absent-`agent_id` fallback to `main` for compatibility.
@@ -688,7 +692,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.42.13 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.42.14 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
