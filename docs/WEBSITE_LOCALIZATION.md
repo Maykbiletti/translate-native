@@ -68,3 +68,30 @@ a changed source, glossary, policy, provider, model, or runtime. Later workers
 must keep the two declared reviews separate—target-only native quality first,
 source-aware fidelity second—and obtain a signed Translate Native release
 before publication.
+
+## Durable queue state
+
+`integrations/website_localization_queue.py` persists planner jobs through a
+trusted host-supplied `sqlite3.Connection`. Enqueuing a complete plan is one
+transaction: an exact repeat inserts nothing, while a reused job ID with
+different bytes rolls the entire operation back. Workers claim one locale at a
+time through a random, owner-bound lease. Lease expiry recovers work after a
+crash, but stale claims cannot acknowledge a newer attempt.
+
+The queue records `pending`, `leased`, `retry_wait`, `succeeded`, and `failed`
+states, bounded attempt counts, the next eligible attempt time, result hashes,
+and stable error codes. Free-form error detail is represented only by a
+SHA-256 hash so status inspection does not disclose customer prose. Payloads
+are hashed on insertion and checked again before a worker receives them.
+
+Queue `succeeded` means only that a worker returned finite, NFC JSON. It is not
+a native-quality attestation, signed release, or publication permission. The
+later review and release stages must still perform the ordered target-only and
+source-aware checks and verify a purpose-bound Translate Native receipt.
+
+Premortem: a worker may crash while leased, retry forever, replay a stale
+claim, or collide with different content under the same idempotency key. The
+lease token changes on every attempt, expiry consumes the abandoned attempt,
+the configured attempt ceiling becomes terminal, and every collision or
+payload-integrity failure blocks transactionally. Cross-connection and crash
+recovery regressions prove those boundaries.
