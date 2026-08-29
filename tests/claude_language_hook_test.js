@@ -76,6 +76,25 @@ async function main() {
   for (const enclosedEmoji of ["Ⓜ️", "🅰️", "🅱️", "🅾️", "🅿️"]) {
     assert(!hasNaturalLanguage(enclosedEmoji), `${enclosedEmoji} must remain an emoji-only output`);
   }
+  for (const regionalText of [
+    "🇭 🇪 🇱 🇱 🇴",
+    "🇭\u200b🇪\u200b🇱\u200b🇱\u200b🇴",
+    "&#127469; &#127466; &#127473; &#127473; &#127476;",
+    "&#x1F1ED; &#x1F1EA; &#x1F1F1; &#x1F1F1; &#x1F1F4;",
+    "🇭 &#127466; 🇱 &#x1F1F1; 🇴"
+  ]) {
+    assert(hasNaturalLanguage(regionalText), `${regionalText} must require verification`);
+  }
+  for (const flagOutput of [
+    "🇦", "🇦🇹", "🇦🇹🇸🇪", "🇦🇹 🇸🇪",
+    "&#127462;&#127481;", "&#x1F1E6;&#x1F1F9;&#x1F1F8;&#x1F1EA;"
+  ]) {
+    assert(!hasNaturalLanguage(flagOutput), `${flagOutput} must remain emoji-only output`);
+  }
+  assert(
+    hasNaturalLanguage("&#38;copy;"),
+    "decoded numeric ampersands must not recursively consume visible entity-like text"
+  );
   assert(
     !hasNaturalLanguage("&nbsp;&amp;&hellip;&mdash;&copy;"),
     "named spacing, punctuation, and symbol references must not become language false positives"
@@ -2062,6 +2081,34 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(JSON.parse(enclosedAlphabeticSubagentStop.stdout).decision, "block");
+
+  const regionalIndicatorAlphabeticStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "🇭 🇪 🇱 🇱 🇴",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(regionalIndicatorAlphabeticStop.stdout).decision, "block");
+
+  const encodedRegionalIndicatorAlphabeticSubagentStop = await runHook("stop", {
+    ...common,
+    agent_id: "child-regional-indicator-alphabetic",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#127469; &#127466; &#127473; &#127473; &#127476;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(
+    JSON.parse(encodedRegionalIndicatorAlphabeticSubagentStop.stdout).decision,
+    "block"
+  );
+
+  const flagEmojiStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "🇦🇹 🇸🇪",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(flagEmojiStop.stdout, "");
 
   const encodedEmojiStop = await runHook("stop", {
     ...common,

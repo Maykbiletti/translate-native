@@ -70,8 +70,19 @@ function containsLanguageCharacters(value) {
   const text = String(value || "");
   if (/\p{L}/u.test(text)) return true;
   let enclosedEmojiLetters = 0;
+  let regionalIndicatorRun = 0;
+  let unpairedRegionalIndicators = 0;
+  const finishRegionalIndicatorRun = () => {
+    unpairedRegionalIndicators += regionalIndicatorRun % 2;
+    regionalIndicatorRun = 0;
+  };
   for (const character of text) {
     const codePoint = character.codePointAt(0);
+    if (codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF) {
+      regionalIndicatorRun += 1;
+      continue;
+    }
+    finishRegionalIndicatorRun();
     const enclosedLatinLetter = ENCLOSED_LATIN_LETTER_RANGES.some(
       ([start, end]) => codePoint >= start && codePoint <= end
     );
@@ -79,29 +90,26 @@ function containsLanguageCharacters(value) {
     if (!/\p{Emoji}/u.test(character)) return true;
     enclosedEmojiLetters += 1;
   }
+  finishRegionalIndicatorRun();
+  if (unpairedRegionalIndicators >= 2) return true;
   if (enclosedEmojiLetters >= 2) return true;
   const withoutEmojiFormatting = text.replace(/[\u20E3\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, "");
   return /\p{M}/u.test(withoutEmojiFormatting);
 }
 
 function hasNaturalLanguage(value) {
-  let encodedNaturalLanguage = false;
-  const textWithoutNumericReferences = String(value || "").replace(
-    /&#(?:0*(\d{1,7})(?!\d)|x0*([0-9a-f]{1,6})(?![0-9a-f]));?/gi,
-    (entity, decimal, hexadecimal) => {
-      const parsedCodePoint = Number.parseInt(decimal || hexadecimal, decimal ? 10 : 16);
-      if (Number.isSafeInteger(parsedCodePoint) && parsedCodePoint >= 0 && parsedCodePoint <= 0x10FFFF) {
-        const renderedCodePoint = HTML_C1_NUMERIC_REFERENCE_REPLACEMENTS.get(parsedCodePoint)
-          ?? parsedCodePoint;
-        const decoded = String.fromCodePoint(renderedCodePoint);
-        if (containsLanguageCharacters(decoded)) encodedNaturalLanguage = true;
+  const text = String(value || "").replace(
+    /&#(?:0*(\d{1,7})(?!\d)|x0*([0-9a-f]{1,6})(?![0-9a-f]));?|&([A-Za-z][A-Za-z0-9]{1,31})(;?)/gi,
+    (entity, decimal, hexadecimal, name, semicolon) => {
+      if (decimal || hexadecimal) {
+        const parsedCodePoint = Number.parseInt(decimal || hexadecimal, decimal ? 10 : 16);
+        if (Number.isSafeInteger(parsedCodePoint) && parsedCodePoint >= 0 && parsedCodePoint <= 0x10FFFF) {
+          const renderedCodePoint = HTML_C1_NUMERIC_REFERENCE_REPLACEMENTS.get(parsedCodePoint)
+            ?? parsedCodePoint;
+          return String.fromCodePoint(renderedCodePoint);
+        }
+        return "";
       }
-      return "";
-    }
-  );
-  const text = textWithoutNumericReferences.replace(
-    /&([A-Za-z][A-Za-z0-9]{1,31})(;?)/g,
-    (entity, name, semicolon) => {
       if (semicolon && NON_LANGUAGE_NAMED_REFERENCES.has(name)) return "";
       const legacyReference = LEGACY_NON_LANGUAGE_NAMED_REFERENCES.find(
         (reference) => name.startsWith(reference)
@@ -110,7 +118,7 @@ function hasNaturalLanguage(value) {
       return `${name.slice(legacyReference.length)}${semicolon}`;
     }
   );
-  return encodedNaturalLanguage || containsLanguageCharacters(text);
+  return containsLanguageCharacters(text);
 }
 
 function validatePolicyStats(stats) {
