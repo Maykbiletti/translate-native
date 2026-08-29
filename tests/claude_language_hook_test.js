@@ -152,6 +152,18 @@ async function main() {
   for (const signWritingSymbol of ["𝠀", "&#120832;", "&#x1D801;", "𝪇𝪈"]) {
     assert(!hasNaturalLanguage(signWritingSymbol), `${signWritingSymbol} must remain non-language output`);
   }
+  for (const morseText of [
+    ".... . .-.. .-.. ---",
+    "... --- ...",
+    "···· · ·−·· ·−·· −−−",
+    "&#46;&#46;&#46; &#45;&#45;&#45; &#46;&#46;&#46;",
+    "✅ ... --- ..."
+  ]) {
+    assert(hasNaturalLanguage(morseText), `${morseText} must require verification`);
+  }
+  for (const morseDecoration of [".", "...", "---", ". -", "--- ---", "... ..."]) {
+    assert(!hasNaturalLanguage(morseDecoration), `${morseDecoration} must remain non-language output`);
+  }
   assert(
     hasNaturalLanguage("\u{1DA84}"),
     "the SignWriting combining location mark must retain the general mark protection"
@@ -2363,6 +2375,31 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(singleBrailleCellStop.stdout, "");
+
+  const morseAlphabeticStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: ".... . .-.. .-.. ---",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(morseAlphabeticStop.stdout).decision, "block");
+
+  const encodedMorseSubagentStop = await runHook("subagent-stop", {
+    ...common,
+    agent_id: "child-morse-alphabetic",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#46;&#46;&#46; &#45;&#45;&#45; &#46;&#46;&#46;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(encodedMorseSubagentStop.stdout).decision, "block");
+
+  const morseDecorationStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "--- ---",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(morseDecorationStop.stdout, "");
 
   const signWritingStop = await runHook("stop", {
     ...common,

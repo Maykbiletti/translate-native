@@ -41,6 +41,11 @@ const ENCLOSED_LATIN_LETTER_RANGES = [
   [0x1F150, 0x1F169],
   [0x1F170, 0x1F189]
 ];
+const MORSE_LETTER_CODES = new Set([
+  ".-", "-...", "-.-.", "-..", ".", "..-.", "--.", "....", "..", ".---",
+  "-.-", ".-..", "--", "-.", "---", ".--.", "--.-", ".-.", "...", "-", "..-",
+  "...-", ".--", "-..-", "-.--", "--.."
+]);
 let currentHookInput = null;
 
 function canonicalText(value) {
@@ -69,6 +74,17 @@ function readBoundedUtf8Descriptor(descriptor, maximumBytes, label) {
 function containsLanguageCharacters(value) {
   const text = String(value || "");
   if (/\p{L}/u.test(text)) return true;
+  const normalizedMorse = text
+    .replace(/[\u00B7\u2022]/gu, ".")
+    .replace(/[\u2010-\u2015\u2212]/gu, "-");
+  const morseRun = /(?:^|[^.\-])((?:[.\-]{1,4}(?:[\t\n\r /]+|$)){3,})/g;
+  for (const match of normalizedMorse.matchAll(morseRun)) {
+    const tokens = match[1].trim().split(/[\s/]+/u).filter(Boolean);
+    if (tokens.length < 3 || !tokens.every((token) => MORSE_LETTER_CODES.has(token))) continue;
+    if (tokens.some((token) => token.includes(".")) && tokens.some((token) => token.includes("-"))) {
+      return true;
+    }
+  }
   let enclosedEmojiLetters = 0;
   let brailleCells = 0;
   let signWritingSymbols = 0;
