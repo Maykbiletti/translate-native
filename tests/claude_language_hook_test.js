@@ -38,6 +38,11 @@ async function main() {
     session: "session",
     agent: "main"
   });
+  assert.throws(
+    () => hookIdentity({ session_id: "session" }, true),
+    /explicit agent_id/,
+    "SubagentStop identity resolution must never fall back to the main agent"
+  );
   for (const malformedIdentity of [
     {},
     { session_id: "" },
@@ -2036,6 +2041,48 @@ async function main() {
   assert.match(started.stdout, /SessionStart/);
   assert.match(started.stdout, /mandatory/);
 
+  const parentIsolationSession = { ...common, session_id: "subagent-parent-isolation" };
+  const parentIsolationStarted = await runHook("session-start", parentIsolationSession, environment);
+  assert.strictEqual(parentIsolationStarted.code, 0, parentIsolationStarted.stderr);
+  const parentIsolationTool = {
+    ...tool,
+    ...parentIsolationSession,
+    tool_use_id: "tool-subagent-parent-isolation"
+  };
+  assert.strictEqual((await runHook("post-tool", parentIsolationTool, environment)).stdout, "");
+  const childWithoutIdentity = await runHook("subagent-stop", {
+    ...parentIsolationSession,
+    hook_event_name: "SubagentStop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(childWithoutIdentity.stdout).decision, "block");
+  assert.match(JSON.parse(childWithoutIdentity.stdout).reason, /explicit Claude identity/);
+  const mismatchedChildRoute = await runHook("subagent-stop", {
+    ...parentIsolationSession,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(mismatchedChildRoute.stdout).decision, "block");
+  assert.match(JSON.parse(mismatchedChildRoute.stdout).reason, /mismatched event/);
+  const parentAfterMalformedChild = await runHook("stop", {
+    ...parentIsolationSession,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(
+    parentAfterMalformedChild.stdout,
+    "",
+    "a malformed SubagentStop must not consume the main agent's one-time grant"
+  );
+  assert.strictEqual((await runHook("session-end", {
+    ...parentIsolationSession,
+    hook_event_name: "SessionEnd",
+    reason: "subagent parent isolation regression complete"
+  }, environment)).stdout, "");
+
   for (const invalidMessage of [undefined, null, { text: clean }]) {
     const malformedInput = {
       ...common,
@@ -2049,7 +2096,7 @@ async function main() {
     assert.match(malformedBlock.reason, /last_assistant_message/);
   }
 
-  const malformedRepeatedSubagentStop = await runHook("stop", {
+  const malformedRepeatedSubagentStop = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-invalid-output",
     hook_event_name: "SubagentStop",
@@ -2097,7 +2144,7 @@ async function main() {
     tool_use_id: "tool-agent-identity-collision"
   };
   assert.strictEqual((await runHook("post-tool", collisionAgentTool, environment)).stdout, "");
-  const malformedAgentCollision = await runHook("stop", {
+  const malformedAgentCollision = await runHook("subagent-stop", {
     ...common,
     agent_id: {},
     hook_event_name: "SubagentStop",
@@ -2105,7 +2152,7 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(JSON.parse(malformedAgentCollision.stdout).decision, "block");
-  const legitimateAgentCollision = await runHook("stop", {
+  const legitimateAgentCollision = await runHook("subagent-stop", {
     ...common,
     agent_id: "[object Object]",
     hook_event_name: "SubagentStop",
@@ -2130,7 +2177,7 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(zeroPaddedEncodedNaturalLanguageStop.stdout).decision, "block");
 
-  const semicolonlessEncodedNaturalLanguageSubagentStop = await runHook("stop", {
+  const semicolonlessEncodedNaturalLanguageSubagentStop = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-semicolonless-entity",
     hook_event_name: "SubagentStop",
@@ -2150,7 +2197,7 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(c1EncodedNaturalLanguageStop.stdout).decision, "block");
 
-  const semicolonlessC1NaturalLanguageSubagentStop = await runHook("stop", {
+  const semicolonlessC1NaturalLanguageSubagentStop = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-c1-entity",
     hook_event_name: "SubagentStop",
@@ -2178,7 +2225,7 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(enclosedAlphabeticStop.stdout).decision, "block");
 
-  const enclosedAlphabeticSubagentStop = await runHook("stop", {
+  const enclosedAlphabeticSubagentStop = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-enclosed-alphabetic",
     hook_event_name: "SubagentStop",
@@ -2195,7 +2242,7 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(regionalIndicatorAlphabeticStop.stdout).decision, "block");
 
-  const encodedRegionalIndicatorAlphabeticSubagentStop = await runHook("stop", {
+  const encodedRegionalIndicatorAlphabeticSubagentStop = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-regional-indicator-alphabetic",
     hook_event_name: "SubagentStop",
@@ -2223,7 +2270,7 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(brailleAlphabeticStop.stdout).decision, "block");
 
-  const encodedBrailleAlphabeticSubagentStop = await runHook("stop", {
+  const encodedBrailleAlphabeticSubagentStop = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-braille-alphabetic",
     hook_event_name: "SubagentStop",
@@ -2251,7 +2298,7 @@ async function main() {
   }, environment);
   assert.strictEqual(JSON.parse(signWritingStop.stdout).decision, "block");
 
-  const encodedSignWritingSubagentStop = await runHook("stop", {
+  const encodedSignWritingSubagentStop = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-signwriting",
     hook_event_name: "SubagentStop",
@@ -2303,7 +2350,7 @@ async function main() {
   }, environment);
   assert.strictEqual(namedFormattingStop.stdout, "");
 
-  const semicolonlessFormattingSubagentStop = await runHook("stop", {
+  const semicolonlessFormattingSubagentStop = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-formatting-entity",
     hook_event_name: "SubagentStop",
@@ -2693,7 +2740,7 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(JSON.parse(mainAfterStopFailure.stdout).decision, "block");
-  const childAfterStopFailure = await runHook("stop", {
+  const childAfterStopFailure = await runHook("subagent-stop", {
     ...common,
     hook_event_name: "SubagentStop",
     agent_id: "child-agent",
@@ -2961,7 +3008,7 @@ async function main() {
   }, environment);
   assert.strictEqual(correctedDuringStopContinuation.stdout, "");
 
-  const stoppedSubagent = await runHook("stop", {
+  const stoppedSubagent = await runHook("subagent-stop", {
     ...common,
     agent_id: "child-agent",
     hook_event_name: "SubagentStop",

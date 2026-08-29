@@ -541,12 +541,15 @@ function stateDirectory() {
   return path.join(runtimeConfig().runtime, "claude-hooks");
 }
 
-function hookIdentity(input) {
+function hookIdentity(input, requireExplicitAgent = false) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Claude hook input has no valid identity");
   }
   const session = input.session_id;
   const hasAgent = Object.prototype.hasOwnProperty.call(input, "agent_id");
+  if (requireExplicitAgent && !hasAgent) {
+    throw new Error("Claude hook input has no explicit agent_id");
+  }
   const agent = hasAgent ? input.agent_id : "main";
   if (typeof session !== "string" || session.length === 0) {
     throw new Error("Claude hook input has no valid session_id");
@@ -1369,15 +1372,26 @@ function postToolFailure(input) {
   }
 }
 
-async function stop(input) {
+async function stop(input, expectedEvent) {
+  if (!input || input.hook_event_name !== expectedEvent) {
+    emit(blockedStop(input, `The BLUN hook route expected ${expectedEvent} input and cannot trust this mismatched event. Fail closed and retry through the configured Claude hook.`));
+    return;
+  }
   if (!input || typeof input.last_assistant_message !== "string") {
     emit(blockedStop(input, "The BLUN hook received no valid last_assistant_message and cannot verify the actual final response. Fail closed and retry after Claude supplies the documented Stop output field."));
+    return;
+  }
+  let hook;
+  try {
+    hook = hookIdentity(input, expectedEvent === "SubagentStop");
+  } catch (_) {
+    emit(blockedStop(input, "The BLUN hook received no valid explicit Claude identity for this stop event. Fail closed and retry after Claude supplies the documented identity fields."));
     return;
   }
   const target = input.last_assistant_message;
   const naturalLanguage = hasNaturalLanguage(target);
   try {
-    const { session, agent } = hookIdentity(input);
+    const { session, agent } = hook;
     const { destination, record, fileIdentity } = readRecord(input);
     const { epoch: sessionEpoch } = readSessionEpoch(input);
     const fresh = record && Number.isFinite(record.authorized_at)
@@ -1444,7 +1458,8 @@ async function main() {
   if (mode === "pre-tool") return preTool(input);
   if (mode === "post-tool") return postTool(input);
   if (mode === "post-tool-failure") return postToolFailure(input);
-  if (mode === "stop") return stop(input);
+  if (mode === "stop") return stop(input, "Stop");
+  if (mode === "subagent-stop") return stop(input, "SubagentStop");
   throw new Error("unknown Claude hook mode");
 }
 
