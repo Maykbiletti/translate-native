@@ -285,3 +285,54 @@ only complete bundles; exact signed payload hashes bind acknowledgements; and
 both leases and approval expiries are rechecked immediately before delivery.
 Regression tests cover replay, collision, partial readiness, tampering, exact
 acknowledgements, bounded retries, opaque failures, and crash recovery.
+
+## Read-only health and readiness monitor
+
+`integrations/website_localization_health.py` gives operators one
+provider-neutral, content-free view across the queue, signed translation
+memory, CMS events, publication outbox, and configured model endpoints. It
+accepts the same host-owned event, approval, and publication verifiers as the
+runtime plus an optional `ProviderHealthProbe`. A check performs no repair,
+retry, lease transition, signing action, or CMS call.
+
+The provider probe receives only `provider_id`, `model_id`, and
+`model_version`—never source text, target text, glossary terms, or reviewer
+findings—and must return exactly:
+
+```json
+{
+  "schema": "blun.localization-provider-health.v1",
+  "provider": {
+    "id": "customer-llm",
+    "model_id": "king",
+    "model_version": "2026-08-29"
+  },
+  "status": "healthy"
+}
+```
+
+For every check, the monitor verifies all three SQLite schemas and databases,
+queued payload and result hashes, stored approval bytes and signatures,
+authenticated CMS events, publication payload hashes and signatures, live
+lease times, and approval expiry before pending publication. Missing or
+malformed provider probes, signature failures, tampering, and unreadable state
+make the report `blocked`. Recoverable operational state such as expired
+leases, failed locales, retrying delivery, or an expired current approval is
+`degraded`. Ordinary pending work remains healthy.
+
+Each website version reports one lifecycle state: `processing`,
+`localization_failed`, `awaiting_approval`, `ready`, `publishing`,
+`publication_failed`, or `published`. The report includes only site, version,
+plan and event identifiers, counts, locale names, and stable failure codes.
+Source and target text, exception messages, provider responses, receipts, and
+transport details are never returned. Stable queue and outbox errors remain
+actionable, while free-form details stay represented only by their stored
+hashes.
+
+Premortem: a dashboard could report healthy after stored bytes were altered,
+mutate leases while merely observing them, or leak customer content through a
+provider exception. The monitor rechecks canonical bytes and isolated
+signatures, regression-tests that SQLite `total_changes` stays constant, and
+reduces all external failures to fixed codes. Tests also cover queue and CMS
+tampering, expired leases and approvals, missing providers, partial work,
+retrying acknowledgements, ready bundles, and successful publication.
