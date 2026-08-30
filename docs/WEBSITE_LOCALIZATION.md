@@ -170,6 +170,33 @@ retryability without prose; attempts are bounded; and each invocation mutates
 only its claimed locale. Regression tests exercise lease expiry, retry
 exhaustion, opaque errors, and partial provider failure.
 
+### Signed local fallback
+
+The runner's optional `result_cache` is deliberately consulted before asset or
+provider resolution. Production hosts should pass only
+`LocalizationReleaseStore.verified_result_cache(authority)`. That adapter
+loads the exact deterministic job from the local translation memory, rechecks
+the stored result hash, approval payload hash, complete job binding, approval
+ID, signing-key identity, signature, and expiry, and returns the already
+reviewed worker result only when every check passes. `RunOutcome.result_origin`
+then reports `translation_memory`; a new provider result reports `provider`.
+
+A missing or expired approval is a clean cache miss. The normal provider path
+must produce and review a new target, so an unavailable model still leaves the
+locale blocked without inventing text. Any malformed, altered, or unverifiable
+cache entry blocks that attempt before provider or asset lookup and follows the
+queue's bounded retry policy. Because job identity binds source, locale,
+content type, glossary, policy, provider/model, worker schema, and software
+version, changing any of them cannot reuse an older translation.
+
+Premortem: an offline deployment could mistake an expired translation for a
+safe fallback, silently use a signature from another source or policy, or call
+the provider after discovering local tampering. The adapter treats expiry as a
+miss, verifies every signed binding before returning content, and makes cache
+verification errors stop the attempt before any other resolver runs. Tests
+cover exact offline recovery, policy invalidation, expiry, and database
+tampering across separate queue and translation-memory connections.
+
 ## Signed translation memory and website readiness
 
 `integrations/website_localization_release.py` turns a completed queue result

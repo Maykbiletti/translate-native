@@ -49,6 +49,15 @@ class AssetsResolver(Protocol):
     def __call__(self, job_payload: dict[str, Any]) -> Any: ...
 
 
+class ResultCache(Protocol):
+    def resolve(
+        self,
+        job_payload: dict[str, Any],
+        *,
+        now: float,
+    ) -> dict[str, Any] | None: ...
+
+
 class RunnerDependencyFailed(RuntimeError):
     """Host-declared, content-free provider or asset lookup failure."""
 
@@ -75,6 +84,7 @@ class RunOutcome:
     error_code: str | None
     error_detail_hash: str | None
     result_sha256: str | None
+    result_origin: str | None
 
 
 def _duration(name: str, value: Any, *, allow_zero: bool = False) -> float:
@@ -98,7 +108,12 @@ def _now(clock: Callable[[], float]) -> float:
     return value
 
 
-def _outcome(claim: Any, status: Any) -> RunOutcome:
+def _outcome(
+    claim: Any,
+    status: Any,
+    *,
+    result_origin: str | None = None,
+) -> RunOutcome:
     return RunOutcome(
         job_id=status.job_id,
         target_locale=status.target_locale,
@@ -109,6 +124,7 @@ def _outcome(claim: Any, status: Any) -> RunOutcome:
         error_code=status.last_error_code,
         error_detail_hash=status.last_error_detail_hash,
         result_sha256=status.result_sha256,
+        result_origin=result_origin,
     )
 
 
@@ -126,6 +142,7 @@ def run_next_localization_job(
     lease_seconds: float | int = 300,
     retry_base_seconds: float | int = 5,
     retry_max_seconds: float | int = 3600,
+    result_cache: ResultCache | None = None,
 ) -> RunOutcome | None:
     """Claim and execute at most one locale, then transition it atomically.
 
@@ -137,6 +154,9 @@ def run_next_localization_job(
         raise TypeError("queue must be LocalizationQueue")
     if not callable(provider_resolver) or not callable(assets_resolver):
         raise TypeError("provider and asset resolvers must be callable")
+    cache_resolve = None if result_cache is None else getattr(result_cache, "resolve", None)
+    if result_cache is not None and not callable(cache_resolve):
+        raise TypeError("result_cache must provide resolve(job_payload, now=...)")
     if not callable(clock):
         raise TypeError("clock must be callable")
     lease_seconds = _duration("lease_seconds", lease_seconds)
@@ -163,7 +183,21 @@ def run_next_localization_job(
             lease_seconds=lease_seconds,
         )
 
+    stage = "cache"
     try:
+        if cache_resolve is not None:
+            cached = cache_resolve(claim.payload, now=_now(clock))
+            if cached is not None:
+                if not isinstance(cached, dict):
+                    raise TypeError("result cache returned an invalid value")
+                renew("translation_memory")
+                status = queue.complete(active_claim, cached, now=_now(clock))
+                return _outcome(
+                    claim,
+                    status,
+                    result_origin="translation_memory",
+                )
+        stage = "dependencies"
         assets = assets_resolver(claim.payload)
         provider = provider_resolver(claim.payload)
         renew("dependencies")
@@ -186,12 +220,16 @@ def run_next_localization_job(
     except _QUEUE.LocalizationQueueBlocked:
         raise
     except Exception:
-        failure_code = "runner.dependency.unexpected"
+        failure_code = (
+            "runner.cache.unexpected"
+            if stage == "cache"
+            else "runner.dependency.unexpected"
+        )
         retryable = True
         finding_detail = None
     else:
         status = queue.complete(active_claim, result, now=_now(clock))
-        return _outcome(claim, status)
+        return _outcome(claim, status, result_origin="provider")
 
     transition_now = _now(clock)
     if retryable:

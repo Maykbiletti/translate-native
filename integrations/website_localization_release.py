@@ -108,6 +108,22 @@ class WebsiteReadiness:
     blocked: tuple[tuple[str, str], ...]
 
 
+@dataclass(frozen=True)
+class VerifiedResultCache:
+    """Runner adapter for exact, signed translation-memory results."""
+
+    store: Any
+    authority: ApprovalAuthority
+
+    def resolve(
+        self,
+        job_payload: dict[str, Any],
+        *,
+        now: float,
+    ) -> dict[str, Any] | None:
+        return self.store.cached_result(job_payload, self.authority, now=now)
+
+
 def _canonical_json(value: Any) -> str:
     try:
         return json.dumps(
@@ -180,11 +196,14 @@ def _plan_job(plan: Any, job_id: str) -> tuple[str, dict[str, Any]]:
     payload = matches[0].as_payload()
     if not isinstance(payload, dict) or payload.get("job_id") != job_id:
         raise LocalizationReleaseBlocked("plan.job.invalid")
+    return plan_id, _validated_job_payload(payload)
+
+
+def _validated_job_payload(payload: Any) -> dict[str, Any]:
     try:
-        payload = _WORKER._validated_job(payload)
+        return _WORKER._validated_job(payload)
     except _WORKER.LocalizationWorkerBlocked:
         raise LocalizationReleaseBlocked("plan.job.invalid") from None
-    return plan_id, payload
 
 
 def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
@@ -417,8 +436,16 @@ class LocalizationReleaseStore:
         now: float,
     ) -> ApprovedLocalization:
         _, job = _plan_job(plan, row["job_id"])
-        if row["expires_at"] <= now:
-            raise LocalizationReleaseBlocked("approval.expired")
+        approved, _ = self._verified_row(row, job, authority, now)
+        return approved
+
+    def _verified_row(
+        self,
+        row: sqlite3.Row,
+        job: dict[str, Any],
+        authority: ApprovalAuthority,
+        now: float,
+    ) -> tuple[ApprovedLocalization, dict[str, Any]]:
         if _hash_text(row["result_json"]) != row["result_sha256"]:
             raise LocalizationReleaseBlocked("translation_memory.result_tampered")
         if _hash_text(row["approval_json"]) != row["approval_sha256"]:
@@ -486,6 +513,8 @@ class LocalizationReleaseStore:
             valid = False
         if not valid:
             raise LocalizationReleaseBlocked("approval.signature.invalid")
+        if row["expires_at"] <= now:
+            raise LocalizationReleaseBlocked("approval.expired")
         return ApprovedLocalization(
             approval_id=row["approval_id"],
             job_id=row["job_id"],
@@ -494,7 +523,38 @@ class LocalizationReleaseStore:
             candidate=result["candidate"],
             approved_at=float(row["approved_at"]),
             expires_at=float(row["expires_at"]),
-        )
+        ), result
+
+    def verified_result_cache(
+        self,
+        authority: ApprovalAuthority,
+    ) -> VerifiedResultCache:
+        """Bind the exact approval verifier for use by a queue runner."""
+        return VerifiedResultCache(self, authority)
+
+    def cached_result(
+        self,
+        job_payload: dict[str, Any],
+        authority: ApprovalAuthority,
+        *,
+        now: float | int,
+    ) -> dict[str, Any] | None:
+        """Return an exact verified result, or ``None`` for a clean cache miss."""
+        job = _validated_job_payload(job_payload)
+        now = _timestamp(now, "approval.time.invalid")
+        row = self.connection.execute("""
+            SELECT * FROM localization_approvals
+            WHERE job_id = ? ORDER BY approved_at DESC, approval_id DESC LIMIT 1
+        """, (job["job_id"],)).fetchone()
+        if row is None:
+            return None
+        try:
+            _, result = self._verified_row(row, job, authority, now)
+        except LocalizationReleaseBlocked as error:
+            if error.code == "approval.expired":
+                return None
+            raise
+        return json.loads(_canonical_json(result))
 
     def lookup(
         self,

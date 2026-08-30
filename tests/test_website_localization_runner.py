@@ -138,6 +138,7 @@ class WebsiteLocalizationRunnerTests(unittest.TestCase):
         outcome = self.execute(successful_provider("de-AT", "Baue dein Unternehmen mit BLUN auf."))
         self.assertEqual(outcome.status, "succeeded")
         self.assertEqual(outcome.target_locale, "de-AT")
+        self.assertEqual(outcome.result_origin, "provider")
         self.assertIsNotNone(outcome.result_sha256)
         self.assertEqual(self.queue.plan_counts(current.plan_id), {
             "pending": 1,
@@ -156,6 +157,7 @@ class WebsiteLocalizationRunnerTests(unittest.TestCase):
         self.assertEqual(outcome.status, "retry_wait")
         self.assertEqual(outcome.error_code, "provider.timeout")
         self.assertEqual(outcome.next_attempt_at, 107)
+        self.assertIsNone(outcome.result_origin)
         self.assertIsNone(outcome.result_sha256)
 
     def test_retryable_failure_becomes_terminal_at_attempt_ceiling(self):
