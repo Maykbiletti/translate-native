@@ -300,6 +300,13 @@ class LocalizationReleaseStore:
         if columns != _COLUMNS:
             raise LocalizationReleaseBlocked("release.schema.altered")
 
+    def validated_result(self, plan: Any, job_id: str) -> dict[str, Any]:
+        """Return an exact completed result only after all release checks pass."""
+        job_id = _text(job_id, "job.id.invalid")
+        _, job = _plan_job(plan, job_id)
+        result = _validate_result(job, self.queue.result(job_id))
+        return json.loads(_canonical_json(result))
+
     def approve(
         self,
         plan: Any,
@@ -315,7 +322,7 @@ class LocalizationReleaseStore:
     ) -> ApprovedLocalization:
         job_id = _text(job_id, "job.id.invalid")
         _, job = _plan_job(plan, job_id)
-        result = _validate_result(job, self.queue.result(job_id))
+        result = self.validated_result(plan, job_id)
         now = _timestamp(now, "approval.time.invalid")
         ttl = _timestamp(ttl_seconds, "approval.ttl.invalid")
         if ttl <= 0 or ttl > MAX_TTL_SECONDS:

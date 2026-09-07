@@ -272,6 +272,68 @@ set equality across all policy-required locales. Tests cover source, policy,
 model and software invalidation, signature/result corruption, expiry, legal
 review, partial readiness, and cross-plan translation-memory reuse.
 
+## Quality evidence and release coordination
+
+`integrations/website_localization_release_coordinator.py` joins completed
+locale jobs, external quality evidence, signed translation memory, and the CMS
+outbox without embedding a model or reviewer. Each invocation approves at
+most one completed locale. It creates a CMS delivery only after the release
+store independently revalidates every locale required by the plan. Pending,
+retrying, or terminally failed siblings therefore cannot leak a partial
+website version into the publication outbox.
+
+The host supplies a `QualityEvidenceProvider` implementing
+`obtain(QualityEvidenceRequest)`. One request contains exactly one complete
+source and target, plus their hashes, the CMS event, plan and job identities,
+source and target locales, content type, glossary and policy versions,
+provider/model identity, software version, and a host-chosen
+`evidence_revision`. Its deterministic `request_id` binds all non-text fields
+and the exact validated queue-result hash. The adapter may call an independent
+model, a qualified native reviewer, or a host-owned review service; no
+provider transport or credential is built into the coordinator.
+
+The adapter must return exactly this shape:
+
+```json
+{
+  "schema": "blun.localization-quality-evidence-response.v1",
+  "request_id": "blun-l10n-evidence-…",
+  "result_sha256": "…",
+  "quality_receipt": "host-verifiable-purpose-bound-receipt",
+  "human_review_receipt": null
+}
+```
+
+The response is rejected if the request object was mutated, a binding differs,
+the receipt is empty or malformed, or the trusted quality verifier rejects it.
+Legal content requires a non-null human receipt and a separate human-review
+verifier. A receipt is evidence for the existing two ordered reviews—first
+source-blind native quality, then source-aware fidelity—not permission to
+collapse them into one score. Low confidence or a major defect must remain
+blocked and be routed through a new evidence revision to an independent model
+adapter or qualified native reviewer.
+
+Exact retries are safe: approved locales are reused, the outbox has a stable
+delivery identity, and a crash after the final approval but before publication
+signing resumes without asking for the same evidence again. Adapters should
+treat `request_id` as their idempotency key because concurrent host invocations
+may still repeat the same evidence call. An expired partial approval requires
+new evidence and a new `evidence_revision`. A pending delivery with expired
+approvals is blocked; a previously acknowledged delivery remains immutable
+terminal history. Coordinator outcomes and exceptions contain only stable
+identifiers, status values, and error codes—not source text, target text,
+receipts, or provider exception prose.
+
+Premortem: two schedulers could request the same review, stale evidence could
+approve changed output, or the last successful locale could trigger a partial
+publication. Deterministic evidence IDs let the host deduplicate concurrent
+calls; exact result and policy bindings reject stale evidence; signed release
+readiness and the all-locale CMS transaction block partial publication. Tests
+cover one-locale progression, replay, crash recovery, expiry, legal review,
+tampering, provider failure, wrong bindings, and failed receipt verification.
+They prove the orchestration boundary, not native linguistic quality or
+superiority over an external translation service.
+
 ## CMS change and publication contract
 
 `integrations/website_localization_cms.py` connects the pipeline to a CMS
