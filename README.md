@@ -796,6 +796,18 @@ JSON, YAML, XML, PO, ARB, ICU MessageFormat, Android resources, Apple strings, M
 
 The key structure stays fixed. The Basque values read naturally. Every placeholder, URL, and HTML tag remains protected.
 
+## Provider-neutral CMS webhook
+
+The repository includes an authenticated WSGI adapter that turns one signed CMS
+content-change event into one durable queue job per required locale. It returns
+only identifiers and counts; accepting an event never approves or publishes a
+translation. See the [CMS localization webhook API v1](integrations/website-localization-api.md)
+for the exact request, signature, idempotency and failure contract.
+
+The host owns TLS, rate limiting, database connections and signature-key
+resolution. Worker quality checks, signed locale approvals and the all-locales
+publication gate remain separate mandatory stages.
+
 ## Install
 
 Clone the repository:
