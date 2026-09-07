@@ -292,6 +292,15 @@ and the exact validated queue-result hash. The adapter may call an independent
 model, a qualified native reviewer, or a host-owned review service; no
 provider transport or credential is built into the coordinator.
 
+The host must also supply a `QualityEvidenceStateStore` backed by its own
+trusted SQLite connection and a stable `evidence_worker_id`. Before source or
+target text reaches the evidence adapter, the store atomically claims the
+exact request through an owner- and token-bound lease. A second coordinator
+cannot call the provider while that lease is live. Lease expiry recovers an
+abandoned attempt after a crash; stale workers cannot finish a newer claim.
+Retryable failures use bounded exponential backoff and the configured attempt
+ceiling, while permanent evidence or receipt failures stop immediately.
+
 The adapter must return exactly this shape:
 
 ```json
@@ -314,23 +323,29 @@ blocked and be routed through a new evidence revision to an independent model
 adapter or qualified native reviewer.
 
 Exact retries are safe: approved locales are reused, the outbox has a stable
-delivery identity, and a crash after the final approval but before publication
-signing resumes without asking for the same evidence again. Adapters should
-treat `request_id` as their idempotency key because concurrent host invocations
-may still repeat the same evidence call. An expired partial approval requires
-new evidence and a new `evidence_revision`. A pending delivery with expired
-approvals is blocked; a previously acknowledged delivery remains immutable
-terminal history. Coordinator outcomes and exceptions contain only stable
-identifiers, status values, and error codes—not source text, target text,
-receipts, or provider exception prose.
+delivery identity, and a crash after signing an approval but before recording
+evidence completion is reconciled from that verified approval without another
+provider call. The deterministic `request_id` remains the adapter's external
+idempotency key for the narrow crash window after a provider accepts a request
+but before the local attempt is durably finished. An expired partial approval
+requires new evidence and a new `evidence_revision`. A pending delivery with
+expired approvals is blocked; a previously acknowledged delivery remains
+immutable terminal history.
+
+`statuses(event_id)` exposes the evidence state, attempt count, retry time,
+lease expiry, and stable last-error code for monitoring. It stores and returns
+no source text, target text, receipt, provider prose, or credential.
+Coordinator outcomes and exceptions follow the same content-free rule.
 
 Premortem: two schedulers could request the same review, stale evidence could
 approve changed output, or the last successful locale could trigger a partial
-publication. Deterministic evidence IDs let the host deduplicate concurrent
-calls; exact result and policy bindings reject stale evidence; signed release
-readiness and the all-locale CMS transaction block partial publication. Tests
-cover one-locale progression, replay, crash recovery, expiry, legal review,
-tampering, provider failure, wrong bindings, and failed receipt verification.
+publication. Transactional leases prevent concurrent provider calls;
+deterministic evidence IDs cover the remaining external crash window; exact
+result and policy bindings reject stale evidence; signed release readiness and
+the all-locale CMS transaction block partial publication. Tests cover
+exclusive claims, bounded retries, one-locale progression, replay, crash
+recovery, expiry, legal review, tampering, provider failure, wrong bindings,
+and failed receipt verification.
 They prove the orchestration boundary, not native linguistic quality or
 superiority over an external translation service.
 

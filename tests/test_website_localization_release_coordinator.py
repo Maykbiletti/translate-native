@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -198,6 +199,10 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.bridge = CMS.WebsiteLocalizationCMSBridge(
             self.cms_connection, self.queue, self.store,
         )
+        self.evidence_connection = sqlite3.connect(":memory:")
+        self.evidence_state = COORDINATOR.QualityEvidenceStateStore(
+            self.evidence_connection,
+        )
         self.event_authority = CMSAuthority(b"event-key")
         self.publication_authority = CMSAuthority(b"publication-key")
         self.approval_authority = ApprovalAuthority()
@@ -209,6 +214,7 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.evidence_connection.close()
         self.cms_connection.close()
         self.release_connection.close()
         self.queue_connection.close()
@@ -228,6 +234,22 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
                 now=111 + index,
             )
 
+    def evidence_request(self, locale="de-AT", revision="native-evidence-1"):
+        job = next(job for job in self.plan.jobs if job.target.locale == locale)
+        result = self.store.validated_result(self.plan, job.job_id)
+        result_sha256 = hashlib.sha256(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return COORDINATOR._request(
+            self.event, self.plan, job, result, result_sha256, revision,
+        )
+
     def run_release(self, provider, **overrides):
         values = {
             "evidence_revision": "native-evidence-1",
@@ -245,7 +267,9 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             quality,
             self.approval_authority,
             self.publication_authority,
+            evidence_state=self.evidence_state,
             human_review_verifier=human,
+            evidence_worker_id="quality-worker",
             **values,
         )
         return outcome, quality, human
@@ -284,6 +308,217 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertEqual(payload["provider"]["model_id"], "configured-model")
         self.assertTrue(payload["request_id"].startswith("blun-l10n-evidence-"))
         self.assertNotIn("target_locales", json.dumps(payload))
+
+    def test_active_evidence_lease_prevents_a_second_provider_call(self):
+        self.complete_all()
+        request = self.evidence_request()
+        first = self.evidence_state.claim(
+            request,
+            worker_id="first-worker",
+            now=200,
+            lease_seconds=10,
+            max_attempts=3,
+        )
+        self.assertIsNotNone(first)
+
+        duplicate = self.evidence_state.claim(
+            request,
+            worker_id="second-worker",
+            now=201,
+            lease_seconds=10,
+            max_attempts=3,
+        )
+
+        self.assertIsNone(duplicate)
+        status = self.evidence_state.statuses(self.event["event_id"])[0]
+        self.assertEqual((status.status, status.attempts), ("leased", 1))
+
+    def test_retryable_evidence_failure_backs_off_and_stops_at_attempt_limit(self):
+        self.complete_all()
+        provider = EvidenceProvider(error=COORDINATOR.QualityEvidenceUnavailable(
+            "timeout", retryable=True,
+        ))
+
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked):
+            self.run_release(provider, evidence_max_attempts=2)
+        waiting, _, _ = self.run_release(
+            provider, now=204, evidence_max_attempts=2,
+        )
+        self.assertEqual(waiting.status, "waiting")
+        self.assertEqual(len(provider.requests), 1)
+
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked):
+            self.run_release(provider, now=205, evidence_max_attempts=2)
+        status = self.evidence_state.statuses(self.event["event_id"])[0]
+        self.assertEqual((status.status, status.attempts), ("failed", 2))
+        self.assertEqual(status.last_error_code, "evidence.timeout")
+
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked) as caught:
+            self.run_release(provider, now=206, evidence_max_attempts=2)
+        self.assertEqual(caught.exception.code, "evidence.attempts_exhausted")
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_expired_evidence_lease_recovers_after_coordinator_crash(self):
+        self.complete_all()
+        request = self.evidence_request()
+        abandoned = self.evidence_state.claim(
+            request,
+            worker_id="crashed-worker",
+            now=200,
+            lease_seconds=5,
+            max_attempts=3,
+        )
+        self.assertIsNotNone(abandoned)
+        provider = EvidenceProvider()
+
+        waiting, _, _ = self.run_release(
+            provider,
+            now=204,
+            evidence_lease_seconds=5,
+            evidence_max_attempts=3,
+        )
+        self.assertEqual(waiting.status, "waiting")
+        self.assertEqual(provider.requests, [])
+
+        recovered, _, _ = self.run_release(
+            provider,
+            now=205,
+            evidence_lease_seconds=5,
+            evidence_max_attempts=3,
+        )
+        self.assertEqual((recovered.status, recovered.target_locale), ("approved", "de-AT"))
+        status = self.evidence_state.statuses(self.event["event_id"])[0]
+        self.assertEqual((status.status, status.attempts), ("succeeded", 2))
+
+    def test_abandoned_final_evidence_attempt_persists_terminal_failure(self):
+        self.complete_all()
+        request = self.evidence_request()
+        self.evidence_state.claim(
+            request,
+            worker_id="crashed-final-worker",
+            now=200,
+            lease_seconds=5,
+            max_attempts=1,
+        )
+
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked) as caught:
+            self.evidence_state.claim(
+                request,
+                worker_id="replacement-worker",
+                now=205,
+                lease_seconds=5,
+                max_attempts=1,
+            )
+
+        self.assertEqual(caught.exception.code, "evidence.attempts_exhausted")
+        status = self.evidence_state.statuses(self.event["event_id"])[0]
+        self.assertEqual((status.status, status.last_error_code), ("failed", "lease_expired"))
+
+    def test_evidence_lease_survives_database_reopen(self):
+        self.complete_all()
+        request = self.evidence_request()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.sqlite3"
+            first_connection = sqlite3.connect(path)
+            first = COORDINATOR.QualityEvidenceStateStore(first_connection)
+            abandoned = first.claim(
+                request,
+                worker_id="first-process",
+                now=200,
+                lease_seconds=5,
+                max_attempts=3,
+            )
+            self.assertIsNotNone(abandoned)
+            first_connection.close()
+
+            second_connection = sqlite3.connect(path)
+            reopened = COORDINATOR.QualityEvidenceStateStore(second_connection)
+            self.assertIsNone(reopened.claim(
+                request,
+                worker_id="second-process",
+                now=204,
+                lease_seconds=5,
+                max_attempts=3,
+            ))
+            recovered = reopened.claim(
+                request,
+                worker_id="second-process",
+                now=205,
+                lease_seconds=5,
+                max_attempts=3,
+            )
+            self.assertEqual((recovered.attempt, recovered.max_attempts), (2, 3))
+            second_connection.close()
+
+    def test_existing_approval_reconciles_a_crash_before_evidence_finish(self):
+        self.complete_all()
+        request = self.evidence_request()
+        claim = self.evidence_state.claim(
+            request,
+            worker_id="crashed-after-approval",
+            now=200,
+            lease_seconds=30,
+            max_attempts=5,
+        )
+        self.assertIsNotNone(claim)
+        provider = EvidenceProvider()
+        response = provider.obtain(request)
+        quality = ReceiptVerifier("quality", provider.requests)
+        self.store.approve(
+            self.plan,
+            request.job_id,
+            response["quality_receipt"],
+            quality,
+            self.approval_authority,
+            now=200,
+            ttl_seconds=1000,
+        )
+
+        recovered, _, _ = self.run_release(provider, now=201)
+
+        self.assertEqual((recovered.status, recovered.target_locale), ("delivery_ready", "sv-SE"))
+        self.assertEqual([item.target_locale for item in provider.requests], ["de-AT", "sv-SE"])
+        statuses = self.evidence_state.statuses(self.event["event_id"])
+        self.assertEqual([item.status for item in statuses], ["succeeded", "succeeded"])
+        self.evidence_state.succeed(claim, now=202)
+
+    def test_tampered_evidence_state_blocks_before_provider(self):
+        self.complete_all()
+        request = self.evidence_request()
+        self.evidence_state.claim(
+            request,
+            worker_id="quality-worker",
+            now=200,
+            lease_seconds=5,
+            max_attempts=5,
+        )
+        self.evidence_connection.execute("""
+            UPDATE localization_quality_evidence_state
+            SET result_sha256 = ? WHERE request_id = ?
+        """, ("0" * 64, request.request_id))
+        self.evidence_connection.commit()
+        provider = EvidenceProvider()
+
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked) as caught:
+            self.run_release(provider, now=205, evidence_lease_seconds=5)
+
+        self.assertEqual(caught.exception.code, "evidence.state.binding_mismatch")
+        self.assertEqual(provider.requests, [])
+
+    def test_evidence_status_is_visible_without_customer_text_or_receipts(self):
+        self.complete_all()
+        provider = EvidenceProvider(error=COORDINATOR.QualityEvidenceUnavailable(
+            "network", retryable=True,
+        ))
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked):
+            self.run_release(provider)
+
+        payload = self.evidence_state.statuses(self.event["event_id"])[0].as_payload()
+        serialized = json.dumps(payload)
+        self.assertEqual(payload["last_error_code"], "evidence.network")
+        self.assertNotIn(self.event["localization"]["source_text"], serialized)
+        self.assertNotIn("Bring dein Unternehmen", serialized)
+        self.assertNotIn("receipt", serialized)
 
     def test_replay_reuses_existing_delivery_without_evidence_or_resigning(self):
         self.complete_all()
@@ -418,15 +653,15 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
                 response["result_sha256"] = "0" * 64
                 return response
 
-        for provider, code in (
-            (WrongBinding(), "evidence.response.binding_mismatch"),
-            (EvidenceProvider(mutate=lambda request: object.__setattr__(
+        for revision, provider, code in (
+            ("wrong-binding", WrongBinding(), "evidence.response.binding_mismatch"),
+            ("mutated-request", EvidenceProvider(mutate=lambda request: object.__setattr__(
                 request, "target_text", "changed after binding",
             )), "evidence.request_mutated"),
         ):
             with self.subTest(code=code):
                 with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked) as caught:
-                    self.run_release(provider)
+                    self.run_release(provider, evidence_revision=revision)
                 self.assertEqual(caught.exception.code, code)
                 self.assertEqual(self.release_connection.execute(
                     "SELECT COUNT(*) FROM localization_approvals"
@@ -455,7 +690,9 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "evidence.human_receipt.required")
 
         provider = EvidenceProvider()
-        outcome, quality, human = self.run_release(provider)
+        outcome, quality, human = self.run_release(
+            provider, evidence_revision="legal-human-review-2",
+        )
         self.assertEqual(outcome.status, "delivery_ready")
         self.assertEqual(len(quality.calls), 1)
         self.assertEqual(len(human.calls), 1)
@@ -468,6 +705,10 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.cms_connection = sqlite3.connect(":memory:")
         self.bridge = CMS.WebsiteLocalizationCMSBridge(
             self.cms_connection, self.queue, self.store,
+        )
+        self.evidence_connection = sqlite3.connect(":memory:")
+        self.evidence_state = COORDINATOR.QualityEvidenceStateStore(
+            self.evidence_connection,
         )
         self.event_authority = CMSAuthority(b"event-key")
         self.publication_authority = CMSAuthority(b"publication-key")
