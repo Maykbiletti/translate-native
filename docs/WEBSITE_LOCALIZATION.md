@@ -479,10 +479,11 @@ Scripted adapters test enforcement, not real native quality or DeepL superiority
 
 `integrations/website_localization_health.py` gives operators one
 provider-neutral, content-free view across the queue, signed translation
-memory, CMS events, publication outbox, and configured model endpoints. It
-accepts the same host-owned event, approval, and publication verifiers as the
-runtime plus an optional `ProviderHealthProbe`. A check performs no repair,
-retry, lease transition, signing action, or CMS call.
+memory, quality-evidence state, CMS events, publication outbox, and configured
+model endpoints. It accepts the same host-owned event, approval, and
+publication verifiers as the runtime, an optional `ProviderHealthProbe`, and
+the coordinator's optional `QualityEvidenceStateStore`. A check performs no
+repair, retry, lease transition, signing action, or CMS call.
 
 The provider probe receives only `provider_id`, `model_id`, and
 `model_version`—never source text, target text, glossary terms, or reviewer
@@ -500,14 +501,16 @@ findings—and must return exactly:
 }
 ```
 
-For every check, the monitor verifies all three SQLite schemas and databases,
-queued payload and result hashes, stored approval bytes and signatures,
-authenticated CMS events, publication payload hashes and signatures, live
-lease times, and approval expiry before pending publication. Missing or
-malformed provider probes, signature failures, tampering, and unreadable state
-make the report `blocked`. Recoverable operational state such as expired
-leases, failed locales, retrying delivery, or an expired current approval is
-`degraded`. Ordinary pending work remains healthy.
+For every check, the monitor verifies every configured SQLite schema and
+database, queued payload and result hashes, evidence-to-event/plan/job/result
+bindings, deterministic evidence request IDs, stored approval bytes and
+signatures, authenticated CMS events, publication payload hashes and
+signatures, live lease times, and approval expiry before pending publication.
+Missing or malformed provider probes, signature failures, tampering, and
+unreadable state make the report `blocked`. Recoverable operational state such
+as an expired evidence or worker lease, failed evidence review, failed locale,
+retrying delivery, or an expired current approval is `degraded`. A live
+evidence lease and ordinary pending work remain healthy.
 
 Each website version reports one lifecycle state: `processing`,
 `localization_failed`, `awaiting_approval`, `ready`, `publishing`,
@@ -516,12 +519,16 @@ plan and event identifiers, counts, locale names, and stable failure codes.
 Source and target text, exception messages, provider responses, receipts, and
 transport details are never returned. Stable queue and outbox errors remain
 actionable, while free-form details stay represented only by their stored
-hashes.
+hashes. The separate `evidence` component reports pending, leased, retrying,
+succeeded, and failed counts plus stable reasons such as
+`evidence.lease_expired` or `evidence.review_failed`.
 
 Premortem: a dashboard could report healthy after stored bytes were altered,
 mutate leases while merely observing them, or leak customer content through a
 provider exception. The monitor rechecks canonical bytes and isolated
 signatures, regression-tests that SQLite `total_changes` stays constant, and
 reduces all external failures to fixed codes. Tests also cover queue and CMS
-tampering, expired leases and approvals, missing providers, partial work,
-retrying acknowledgements, ready bundles, and successful publication.
+tampering, altered evidence schemas and bindings, live and expired evidence
+leases, stable evidence failures, expired approvals, missing providers,
+partial work, retrying acknowledgements, ready bundles, and successful
+publication.

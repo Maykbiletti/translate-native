@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Read-only, content-free health and readiness monitor for localization.
 
-The monitor validates durable state, authenticated CMS metadata, signed
-approvals, publication outbox entries, and provider availability without ever
-returning source text, target text, reviewer prose, or transport exceptions.
+The monitor validates durable queue and quality-evidence state, authenticated
+CMS metadata, signed approvals, publication outbox entries, and provider
+availability without ever returning source text, target text, reviewer prose,
+or transport exceptions.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ SCHEMA = "blun.website-localization-health.v1"
 PROVIDER_HEALTH_SCHEMA = "blun.localization-provider-health.v1"
 QUEUE_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
 DELIVERY_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
+EVIDENCE_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
 
 
 def _load_module(name: str, path: Path):
@@ -41,6 +43,10 @@ _CMS = _load_module(
 )
 _QUEUE = _CMS._QUEUE
 _RELEASE = _CMS._RELEASE
+_COORDINATOR = _load_module(
+    "blun_website_localization_health_coordinator",
+    _ROOT / "integrations" / "website_localization_release_coordinator.py",
+)
 
 
 class LocalizationHealthBlocked(RuntimeError):
@@ -162,12 +168,17 @@ def _component(name: str, status: str, reasons: set[str], counts: dict[str, int]
 class LocalizationHealthMonitor:
     """Inspect a configured localization bridge without mutating its state."""
 
-    def __init__(self, bridge: Any):
+    def __init__(self, bridge: Any, evidence_state: Any | None = None):
         if not isinstance(bridge, _CMS.WebsiteLocalizationCMSBridge):
             raise LocalizationHealthBlocked("bridge must be WebsiteLocalizationCMSBridge")
+        if evidence_state is not None and not isinstance(
+            getattr(evidence_state, "connection", None), sqlite3.Connection,
+        ):
+            raise LocalizationHealthBlocked("evidence state must use SQLite")
         self.bridge = bridge
         self.queue = bridge.queue
         self.release_store = bridge.release_store
+        self.evidence_state = evidence_state
 
     @staticmethod
     def _quick_check(connection: sqlite3.Connection) -> bool:
@@ -195,11 +206,26 @@ class LocalizationHealthMonitor:
             self.bridge._verify_schema()
         except Exception:
             reasons.add("cms.schema_invalid")
-        for name, connection in (
+        if self.evidence_state is not None:
+            try:
+                columns = tuple(
+                    row["name"]
+                    for row in self.evidence_state.connection.execute(
+                        "PRAGMA table_info(localization_quality_evidence_state)"
+                    )
+                )
+                if columns != _COORDINATOR._EVIDENCE_COLUMNS:
+                    reasons.add("evidence.schema_invalid")
+            except Exception:
+                reasons.add("evidence.schema_invalid")
+        connections = [
             ("queue", self.queue.connection),
             ("release", self.release_store.connection),
             ("cms", self.bridge.connection),
-        ):
+        ]
+        if self.evidence_state is not None:
+            connections.append(("evidence", self.evidence_state.connection))
+        for name, connection in connections:
             try:
                 if not self._quick_check(connection):
                     reasons.add(f"{name}.database_invalid")
@@ -235,6 +261,71 @@ class LocalizationHealthMonitor:
                 reasons.add("queue.state_invalid")
         if counts["failed"]:
             reasons.add("queue.locale_failed")
+        return counts, reasons
+
+    def _check_evidence(
+        self,
+        event_verifier: Any,
+        now: float,
+    ) -> tuple[dict[str, int], set[str]]:
+        counts = {status: 0 for status in EVIDENCE_STATUSES}
+        reasons: set[str] = set()
+        if self.evidence_state is None:
+            return counts, reasons
+        connection = self.evidence_state.connection
+        counts = _counts(
+            connection,
+            "localization_quality_evidence_state",
+            EVIDENCE_STATUSES,
+        )
+        event_cache: dict[str, tuple[dict[str, Any], Any]] = {}
+        rows = connection.execute(
+            "SELECT * FROM localization_quality_evidence_state"
+        ).fetchall()
+        for row in rows:
+            try:
+                state = _COORDINATOR.QualityEvidenceStateStore._status_from_row(row)
+                if state.event_id not in event_cache:
+                    event_cache[state.event_id] = self.bridge._load_event(
+                        state.event_id, event_verifier,
+                    )
+                event, plan = event_cache[state.event_id]
+                if plan.plan_id != state.plan_id:
+                    raise ValueError
+                job = next(
+                    item for item in plan.jobs if item.job_id == state.job_id
+                )
+                result, result_sha256 = _COORDINATOR._validated_result(
+                    self.release_store, plan, job,
+                )
+                if result_sha256 != state.result_sha256:
+                    raise ValueError
+                expected = _COORDINATOR._request(
+                    event,
+                    plan,
+                    job,
+                    result,
+                    result_sha256,
+                    state.evidence_revision,
+                )
+                if expected.request_id != state.request_id:
+                    raise ValueError
+                approval = self.release_store.connection.execute("""
+                    SELECT 1 FROM localization_approvals
+                    WHERE job_id = ? AND result_sha256 = ?
+                """, (state.job_id, state.result_sha256)).fetchone()
+                if state.status == "succeeded" and approval is None:
+                    raise ValueError
+                if state.status != "succeeded" and approval is not None:
+                    reasons.add("evidence.approval_unreconciled")
+                if state.status == "leased" and state.lease_expires_at <= now:
+                    reasons.add("evidence.lease_expired")
+                if state.status in {"retry_wait", "failed"}:
+                    reasons.add("evidence.error." + state.last_error_code)
+                if state.status == "failed":
+                    reasons.add("evidence.review_failed")
+            except Exception:
+                reasons.add("evidence.state_invalid")
         return counts, reasons
 
     def _check_approvals(self, authority: Any, now: float) -> tuple[dict[str, int], set[str]]:
@@ -514,6 +605,7 @@ class LocalizationHealthMonitor:
         queue_counts: dict[str, int] = {status: 0 for status in QUEUE_STATUSES}
         approval_counts = {"total": 0, "current": 0, "expired": 0}
         delivery_counts: dict[str, int] = {status: 0 for status in DELIVERY_STATUSES}
+        evidence_counts: dict[str, int] = {status: 0 for status in EVIDENCE_STATUSES}
         workflow_reasons: set[str] = set()
         versions: tuple[WebsiteVersionHealth, ...] = ()
         provider_bindings: set[tuple[str, str, str]] = set()
@@ -521,6 +613,9 @@ class LocalizationHealthMonitor:
         if not storage_reasons:
             try:
                 queue_counts, queue_reasons = self._check_queue(now)
+                evidence_counts, evidence_reasons = self._check_evidence(
+                    event_verifier, now,
+                )
                 approval_counts, approval_reasons = self._check_approvals(
                     approval_authority, now,
                 )
@@ -531,6 +626,7 @@ class LocalizationHealthMonitor:
                     event_verifier, approval_authority, now,
                 )
                 workflow_reasons.update(queue_reasons)
+                workflow_reasons.update(evidence_reasons)
                 workflow_reasons.update(approval_reasons)
                 workflow_reasons.update(delivery_reasons)
                 workflow_reasons.update(event_reasons)
@@ -540,11 +636,15 @@ class LocalizationHealthMonitor:
         providers, provider_reasons = self._providers(provider_bindings, provider_probe)
         blocking_workflow = {
             "queue.state_invalid",
+            "evidence.state_invalid",
             "release.approval_invalid",
             "cms.delivery.invalid",
             "cms.event.invalid",
         }
         queue_reasons = {reason for reason in workflow_reasons if reason.startswith("queue.")}
+        evidence_reasons = {
+            reason for reason in workflow_reasons if reason.startswith("evidence.")
+        }
         release_reasons = {reason for reason in workflow_reasons if reason.startswith("release.")}
         cms_reasons = {reason for reason in workflow_reasons if reason.startswith("cms.")}
         components = (
@@ -552,7 +652,7 @@ class LocalizationHealthMonitor:
                 "storage",
                 "blocked" if storage_reasons else "healthy",
                 storage_reasons,
-                {"connections": 3},
+                {"connections": 3 + int(self.evidence_state is not None)},
             ),
             _component(
                 "queue",
@@ -561,6 +661,14 @@ class LocalizationHealthMonitor:
                 ),
                 queue_reasons,
                 queue_counts,
+            ),
+            _component(
+                "evidence",
+                "blocked" if evidence_reasons & blocking_workflow else (
+                    "degraded" if evidence_reasons else "healthy"
+                ),
+                evidence_reasons,
+                evidence_counts,
             ),
             _component(
                 "release",

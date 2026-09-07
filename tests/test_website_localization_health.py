@@ -31,6 +31,7 @@ PLANNER = CMS._PLANNER
 RELEASE = CMS._RELEASE
 QUEUE = CMS._QUEUE
 WORKER = RELEASE._WORKER
+COORDINATOR = HEALTH._COORDINATOR
 
 
 class CMSAuthority:
@@ -179,7 +180,13 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             self.queue,
             self.release_store,
         )
-        self.monitor = HEALTH.LocalizationHealthMonitor(self.bridge)
+        self.evidence_connection = sqlite3.connect(":memory:")
+        self.evidence_state = COORDINATOR.QualityEvidenceStateStore(
+            self.evidence_connection,
+        )
+        self.monitor = HEALTH.LocalizationHealthMonitor(
+            self.bridge, self.evidence_state,
+        )
         self.event_authority = CMSAuthority(b"event-key")
         self.publication_authority = CMSAuthority(b"publication-key")
         self.approval_authority = ApprovalAuthority()
@@ -187,6 +194,7 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         self.probe = ProviderProbe()
 
     def tearDown(self):
+        self.evidence_connection.close()
         self.cms_connection.close()
         self.release_connection.close()
         self.queue_connection.close()
@@ -204,7 +212,7 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         )
         return PLANNER.plan_from_mapping(current["localization"])
 
-    def complete(self, plan, ttl=1000):
+    def complete_jobs(self, plan):
         translations = {
             "de-AT": "Bring dein Unternehmen mit BLUN voran.",
             "sv-SE": "Ta ditt företag vidare med BLUN.",
@@ -219,6 +227,11 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
                 completed_result(job, translations[claim.target_locale]),
                 now=111 + index,
             )
+        return translations
+
+    def complete(self, plan, ttl=1000):
+        self.complete_jobs(plan)
+        for job in plan.jobs:
             self.release_store.approve(
                 plan,
                 job.job_id,
@@ -228,6 +241,23 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
                 now=200,
                 ttl_seconds=ttl,
             )
+
+    def evidence_request(self, plan, locale="de-AT", revision="evidence-v1"):
+        current = event()
+        job = next(item for item in plan.jobs if item.target.locale == locale)
+        result = self.release_store.validated_result(plan, job.job_id)
+        result_sha256 = hashlib.sha256(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return COORDINATOR._request(
+            current, plan, job, result, result_sha256, revision,
+        )
 
     def report(self, now=250, probe=None):
         return self.monitor.check(
@@ -245,15 +275,189 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
     def test_empty_config_is_healthy_and_check_is_read_only(self):
         before = tuple(connection.total_changes for connection in (
             self.queue_connection, self.release_connection, self.cms_connection,
+            self.evidence_connection,
         ))
         report = self.report()
         after = tuple(connection.total_changes for connection in (
             self.queue_connection, self.release_connection, self.cms_connection,
+            self.evidence_connection,
         ))
         self.assertEqual(report.status, "healthy")
         self.assertEqual(report.providers, ())
         self.assertEqual(report.website_versions, ())
         self.assertEqual(before, after)
+        self.assertEqual(
+            dict(self.component(report, "evidence").counts),
+            {status: 0 for status in HEALTH.EVIDENCE_STATUSES},
+        )
+
+    def test_monitor_without_evidence_store_remains_backward_compatible(self):
+        monitor = HEALTH.LocalizationHealthMonitor(self.bridge)
+
+        report = monitor.check(
+            event_verifier=self.event_authority,
+            approval_authority=self.approval_authority,
+            publication_authority=self.publication_authority,
+            provider_probe=self.probe,
+            now=250,
+        )
+
+        self.assertEqual(report.status, "healthy")
+        self.assertEqual(dict(self.component(report, "storage").counts), {
+            "connections": 3,
+        })
+        self.assertEqual(
+            dict(self.component(report, "evidence").counts),
+            {status: 0 for status in HEALTH.EVIDENCE_STATUSES},
+        )
+
+    def test_live_evidence_lease_is_healthy_and_expiry_is_read_only_degraded(self):
+        plan = self.ingest()
+        self.complete_jobs(plan)
+        request = self.evidence_request(plan)
+        self.evidence_state.claim(
+            request,
+            worker_id="quality-worker",
+            now=200,
+            lease_seconds=10,
+            max_attempts=3,
+        )
+
+        active = self.report(now=209)
+        self.assertEqual(active.status, "healthy")
+        self.assertEqual(dict(self.component(active, "evidence").counts)["leased"], 1)
+        before = self.evidence_connection.total_changes
+        expired = self.report(now=210)
+
+        self.assertEqual(expired.status, "degraded")
+        self.assertEqual(
+            self.component(expired, "evidence").reasons,
+            ("evidence.lease_expired",),
+        )
+        self.assertEqual(self.evidence_connection.total_changes, before)
+        self.assertEqual(
+            self.evidence_state.statuses(event()["event_id"])[0].status,
+            "leased",
+        )
+
+    def test_retrying_and_failed_evidence_expose_only_stable_codes(self):
+        plan = self.ingest()
+        self.complete_jobs(plan)
+        request = self.evidence_request(plan)
+        claim = self.evidence_state.claim(
+            request,
+            worker_id="quality-worker",
+            now=200,
+            lease_seconds=10,
+            max_attempts=1,
+        )
+        self.evidence_state.fail(
+            claim,
+            COORDINATOR.LocalizationReleaseCoordinatorBlocked(
+                "provider.timeout", retryable=True,
+            ),
+            now=201,
+        )
+
+        report = self.report(now=202)
+
+        self.assertEqual(report.status, "degraded")
+        evidence = self.component(report, "evidence")
+        self.assertEqual(dict(evidence.counts)["failed"], 1)
+        self.assertEqual(
+            evidence.reasons,
+            ("evidence.error.provider.timeout", "evidence.review_failed"),
+        )
+        payload = json.dumps(report.as_payload(), ensure_ascii=False)
+        self.assertNotIn("Build your business", payload)
+        self.assertNotIn("Bring dein Unternehmen", payload)
+        self.assertNotIn("quality-receipt", payload)
+
+    def test_evidence_binding_tamper_blocks_monitor(self):
+        plan = self.ingest()
+        self.complete_jobs(plan)
+        request = self.evidence_request(plan)
+        self.evidence_state.claim(
+            request,
+            worker_id="quality-worker",
+            now=200,
+            lease_seconds=10,
+            max_attempts=3,
+        )
+        self.evidence_connection.execute("""
+            UPDATE localization_quality_evidence_state
+            SET result_sha256 = ? WHERE request_id = ?
+        """, ("0" * 64, request.request_id))
+        self.evidence_connection.commit()
+
+        report = self.report(now=201)
+
+        self.assertEqual(report.status, "blocked")
+        self.assertEqual(
+            self.component(report, "evidence").reasons,
+            ("evidence.state_invalid",),
+        )
+
+    def test_succeeded_evidence_without_matching_approval_blocks(self):
+        plan = self.ingest()
+        self.complete_jobs(plan)
+        request = self.evidence_request(plan)
+        claim = self.evidence_state.claim(
+            request,
+            worker_id="quality-worker",
+            now=200,
+            lease_seconds=10,
+            max_attempts=3,
+        )
+        self.evidence_state.succeed(claim, now=201)
+
+        report = self.report(now=202)
+
+        self.assertEqual(report.status, "blocked")
+        self.assertEqual(
+            self.component(report, "evidence").reasons,
+            ("evidence.state_invalid",),
+        )
+
+    def test_approval_written_before_evidence_finish_is_recoverably_degraded(self):
+        plan = self.ingest()
+        self.complete_jobs(plan)
+        request = self.evidence_request(plan)
+        self.evidence_state.claim(
+            request,
+            worker_id="crashed-after-approval",
+            now=200,
+            lease_seconds=10,
+            max_attempts=3,
+        )
+        self.release_store.approve(
+            plan,
+            request.job_id,
+            "quality-receipt",
+            self.receipt_verifier,
+            self.approval_authority,
+            now=201,
+            ttl_seconds=1000,
+        )
+
+        report = self.report(now=202)
+
+        self.assertEqual(report.status, "degraded")
+        self.assertEqual(
+            self.component(report, "evidence").reasons,
+            ("evidence.approval_unreconciled",),
+        )
+
+    def test_evidence_schema_tamper_blocks_storage_without_state_read(self):
+        self.evidence_connection.execute(
+            "ALTER TABLE localization_quality_evidence_state ADD COLUMN injected TEXT"
+        )
+        self.evidence_connection.commit()
+
+        report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        self.assertIn("evidence.schema_invalid", self.component(report, "storage").reasons)
 
     def test_pending_locales_are_visible_without_degrading_service_health(self):
         plan = self.ingest()
