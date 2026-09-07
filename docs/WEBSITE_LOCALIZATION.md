@@ -355,8 +355,9 @@ superiority over an external translation service.
 without choosing a vendor or network library. The host supplies three isolated
 capabilities: an inbound signature verifier, an outbound signing authority,
 and a publisher implementing `publish(CMSPublicationRequest)`. The bridge does
-not read keys, open sockets, choose credentials, or update live CMS state by
-itself.
+not read keys, choose credentials, or update live CMS state by itself. A host
+can inject its own publisher or use the included provider-neutral HTTPS
+publisher described below.
 
 An inbound `blun.cms-content-change.v2` event has exactly these fields:
 
@@ -435,6 +436,65 @@ publisher must return exactly:
   "status": "accepted"
 }
 ```
+
+`integrations/website_localization_cms_http.py` is the concrete HTTP publisher
+for this contract. Its endpoint is trusted deployment configuration and must
+not be derived from an inbound event. It requires HTTPS; plain HTTP is
+available only through an explicit loopback-only development option. The
+adapter disables redirects, obtains authentication headers from a callback for
+each attempt, prevents that callback from replacing protocol headers, sends
+`Accept-Encoding: identity`, and bounds both timeout and response size. URL
+credentials, query-string secrets, control characters and ambiguous duplicate
+critical headers are rejected before acceptance.
+
+The request body contains the exact signed publication rather than another
+translation format:
+
+```json
+{
+  "schema": "blun.cms-localization-publication-http.v1",
+  "payload_sha256": "…",
+  "publication": { "schema": "blun.cms-localization-publication.v2" },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "publisher-2026-09",
+    "signature": "…"
+  }
+}
+```
+
+The complete publication object remains nested in `publication`. The adapter
+also sends the immutable `delivery_id` as `Idempotency-Key` and repeats the
+delivery ID and payload hash in reserved binding headers. The CMS must verify
+the publication signature and hash before its atomic source-revision write.
+
+HTTP success alone is insufficient. Status 200 must contain a strictly parsed,
+UTF-8 JSON envelope with the exact acknowledgement above and a CMS signature
+over its canonical bytes:
+
+```json
+{
+  "schema": "blun.cms-localization-publication-http-ack.v1",
+  "acknowledgement": {
+    "schema": "blun.cms-localization-publication-ack.v1",
+    "delivery_id": "blun-cms-delivery-…",
+    "payload_sha256": "…",
+    "status": "accepted"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "cms-2026-09",
+    "signature": "…"
+  }
+}
+```
+
+The acknowledgement verifier is independent from the publication signer.
+Redirects and other 3xx responses are terminal. HTTP 408, 425, 429 and 5xx
+responses, network failures and malformed response transport are retryable
+under the existing bounded outbox policy; other non-200 statuses, wrong
+bindings and invalid signatures are terminal. No response body, credential or
+exception detail enters the durable status record.
 
 Wrong or malformed acknowledgements retry with bounded exponential backoff;
 explicit permanent rejections become terminal. Crashed leases are recovered,

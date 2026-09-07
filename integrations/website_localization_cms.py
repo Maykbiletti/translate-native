@@ -116,6 +116,30 @@ class CMSPublishFailed(RuntimeError):
         self.detail = detail
 
 
+def _declared_publish_failure(error: Exception) -> CMSPublishFailed | None:
+    """Normalize an adapter failure without depending on module class identity."""
+
+    if isinstance(error, CMSPublishFailed):
+        return error
+    try:
+        declared = error.cms_publish_failure is True
+        code = error.code
+        retryable = error.retryable
+    except Exception:
+        return None
+    if (
+        not declared
+        or not isinstance(code, str)
+        or ERROR_CODE.fullmatch(code) is None
+        or not isinstance(retryable, bool)
+    ):
+        return None
+    full_code = "publisher." + code
+    if ERROR_CODE.fullmatch(full_code) is None:
+        full_code = "publisher.failure"
+    return CMSPublishFailed(full_code, retryable=retryable)
+
+
 @dataclass(frozen=True)
 class IngestedChange:
     event_id: str
@@ -983,11 +1007,10 @@ class WebsiteLocalizationCMSBridge:
             }
             if not isinstance(acknowledgement, Mapping) or dict(acknowledgement) != expected:
                 raise CMSPublishFailed("publisher.ack_invalid", retryable=True)
-        except CMSPublishFailed as error:
-            status = self._finish(claim, now=_timestamp(clock(), "cms.time.invalid"), error=error)
-            return DeliveryOutcome(status.status, status.delivery_id, status.attempts, error.code)
-        except Exception:
-            error = CMSPublishFailed("publisher.unavailable", retryable=True)
+        except Exception as original_error:
+            error = _declared_publish_failure(original_error)
+            if error is None:
+                error = CMSPublishFailed("publisher.unavailable", retryable=True)
             status = self._finish(claim, now=_timestamp(clock(), "cms.time.invalid"), error=error)
             return DeliveryOutcome(status.status, status.delivery_id, status.attempts, error.code)
         status = self._finish(claim, now=_timestamp(clock(), "cms.time.invalid"), error=None)

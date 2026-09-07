@@ -27,6 +27,10 @@ CMS = load(
     "blun_test_website_localization_cms",
     ROOT / "integrations" / "website_localization_cms.py",
 )
+HTTP = load(
+    "blun_test_website_localization_cms_http_integration",
+    ROOT / "integrations" / "website_localization_cms_http.py",
+)
 PLANNER = CMS._PLANNER
 RELEASE = CMS._RELEASE
 QUEUE = CMS._QUEUE
@@ -399,6 +403,89 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             "SELECT last_error_detail_hash FROM cms_publication_deliveries"
         ).fetchone()
         self.assertNotIn("customer", row[0])
+
+    def test_external_http_adapter_failure_preserves_declared_retry_policy(self):
+        class ExternalFailure(RuntimeError):
+            cms_publish_failure = True
+            code = "http_status"
+            retryable = False
+
+        self.ingest()
+        self.release_all()
+        request = self.prepare()
+        outcome = self.bridge.run_delivery(
+            Publisher(error=ExternalFailure("private response body")),
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(260),
+        )
+        self.assertEqual(
+            (outcome.status, outcome.error_code),
+            ("failed", "publisher.http_status"),
+        )
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertIsNone(status.last_error_detail_hash)
+
+    def test_signed_http_adapter_completes_the_real_outbox_delivery(self):
+        class Transport:
+            def __init__(self, result):
+                self.result = result
+                self.calls = []
+
+            def post(self, url, headers, body, *, timeout):
+                self.calls.append((url, dict(headers), body, timeout))
+                return self.result
+
+        self.ingest()
+        self.release_all()
+        request = self.prepare()
+        acknowledgement = {
+            "schema": CMS.ACK_SCHEMA,
+            "delivery_id": request.delivery_id,
+            "payload_sha256": request.payload_sha256,
+            "status": "accepted",
+        }
+        acknowledgement_bytes = HTTP._canonical_json(
+            acknowledgement,
+            code="acknowledgement_invalid",
+            maximum=HTTP.MAX_RESPONSE_BYTES,
+        )
+        acknowledgement_authority = CMSAuthority(b"ack-key")
+        signature = acknowledgement_authority.sign(acknowledgement_bytes)
+        body = json.dumps({
+            "schema": HTTP.RESPONSE_SCHEMA,
+            "acknowledgement": acknowledgement,
+            "signature": {
+                "algorithm": signature.algorithm,
+                "key_id": signature.key_id,
+                "signature": signature.signature,
+            },
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        transport = Transport(HTTP.HTTPResult(
+            200,
+            (("Content-Type", "application/json"),),
+            body,
+        ))
+        publisher = HTTP.HTTPPublisherAdapter(
+            "https://cms.example.test/localization/publications",
+            lambda: {"Authorization": "Bearer deployment-secret"},
+            acknowledgement_authority,
+            transport=transport,
+        )
+        outcome = self.bridge.run_delivery(
+            publisher,
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(260),
+        )
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(len(transport.calls), 1)
+        envelope = json.loads(transport.calls[0][2].decode("utf-8"))
+        self.assertEqual(envelope["publication"], request.payload)
+        self.assertEqual(
+            transport.calls[0][1]["Idempotency-Key"],
+            request.delivery_id,
+        )
 
     def test_expired_delivery_lease_is_recovered_and_stale_claim_cannot_finish(self):
         self.ingest()
