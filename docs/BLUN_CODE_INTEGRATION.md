@@ -19,7 +19,7 @@ BLUN Code owns the task kind, exact language, complete translation source, conte
 
 1. The installer writes the named MCP entry to `~/.blun/mcp.json`, creates the service token, and starts the isolated guard service.
 2. BLUN Code imports that named entry once into its encrypted MCP store without replacing existing MCP servers.
-3. The host creates a structured route. Ordinary chat is `response`; a translation requires `languageGuardTaskKind: translation`, `languageGuardSourceText`, and `languageGuardLanguage`.
+3. The host creates a structured route. Ordinary chat without a source defaults to `response`; a translation supplies `languageGuardSourceText` and `languageGuardLanguage`. Explicit `languageGuardTaskKind: translation` remains supported. A source with no explicit task kind selects translation; a source combined with explicit `response` blocks as contradictory metadata.
 4. BLUN Code adds a mandatory instruction to the model turn and suppresses candidate text events.
 5. The agent applies `translate-native` for translations, calls the correct release tool, and returns the strict envelope.
 6. BLUN Code asks the isolated service to verify the exact text, purpose, source, language, content policy, and receipt.
@@ -47,3 +47,30 @@ Free-form prompt inspection is not an authority boundary. No regex or model clas
 - A remote signer additionally separates the host machine, but must use authenticated transport, replay limits, bounded requests, and the same content-free audit policy.
 
 The automatic repository updater refreshes the skill, MCP server, service, and portable adapters. BLUN Code itself follows its own signed application update channel; updating one repository does not silently rewrite the other.
+
+## BLUN adapter compatibility evidence
+
+Claude `Stop`/`SubagentStop` payloads are not the BLUN adapter contract. BLUN
+hosts use the `meta` fields above and return an `answer`/`reply` release envelope;
+they must not invent Claude `stop_hook_active` or `agent_id` fields to satisfy
+a different client's hook. Agent identity is supplied separately by the host.
+
+Premortem: filtering the source based on an explicit task label could discard
+translation evidence before the shared router sees it. Coercing malformed
+metadata to strings could also turn invalid input into an apparently valid
+request. The adapter now passes task and source unchanged into that router.
+The regression first reproduced the downgrade, then verified its rejection,
+source-based inference, exact source/locale forwarding and invalid-type rejection
+for desktop and Telegram. Existing response and explicit-translation contracts
+remain supported.
+
+Run `node tests/blun_code_language_guard_test.js` for these adapter probes.
+They use a simulated verification service, not a live King process or real
+Fredrik session. Passing them does not establish compatibility with a particular
+installed King build. Before deploying that build, capture its actual host
+metadata and event/result shapes without credentials, replay them in an isolated
+test, and verify normal responses, translation source/locale binding, cancelled
+turns, streaming and service outages. Keep model text buffered and confirm that
+no desktop/Telegram sender receives rejected text. Record the King and guard
+revisions with the result; do not install or restart a live agent as part of
+these repository tests.

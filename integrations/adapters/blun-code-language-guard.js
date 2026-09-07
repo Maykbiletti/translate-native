@@ -398,18 +398,15 @@ function languageFromMeta(meta, config) {
 function createBlunLanguageGuard({ store, getConfig, environment = process.env }) {
   function context({ messages, meta = {}, channel = "desktop" }) {
     const prompt = String(messages?.[messages.length - 1]?.content || "");
-    const taskKind = String(meta.languageGuardTaskKind || "response").trim().toLowerCase();
-    const sourceText = taskKind === "translation"
-      ? String(meta.languageGuardSourceText || "")
-      : "";
     const languageResolution = resolveLanguage(meta, getConfig?.() || {});
     const language = languageResolution.language;
     const route = routeHostContext({
-      task_kind: taskKind,
-      operation: taskKind === "translation" ? "translation" : "chat",
-      source_text: sourceText,
-      target_language: taskKind === "translation" ? language : undefined,
-      response_language: taskKind === "response" ? language : undefined,
+      // Keep host evidence and types intact. The shared router infers a
+      // translation from source text and rejects an explicit downgrade.
+      task_kind: meta.languageGuardTaskKind,
+      source_text: meta.languageGuardSourceText,
+      target_language: language,
+      response_language: language,
       content_type: meta.languageGuardContentType || "prose",
     });
     const connection = resolveGuardConnection({ store, environment });

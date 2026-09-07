@@ -385,6 +385,41 @@ server.listen(0, "127.0.0.1", async () => {
       messages: [{ role: "user", content: "Translate this." }],
       meta: { languageGuardTaskKind: "translation", languageGuardLanguage: "sv-SE" },
     }), /complete source_text/);
+
+    // BLUN's host metadata must reach the router unchanged. These are adapter
+    // contract probes, not captured inputs from a running King installation.
+    for (const channel of ["desktop", "telegram"]) {
+      assert.throws(() => guard.context({
+        messages: [], channel,
+        meta: {
+          languageGuardTaskKind: "response",
+          languageGuardSourceText: "Save up to €480 a year.",
+          languageGuardLanguage: "fi-FI",
+        },
+      }), error => error.code === "mode_confusion");
+      const inferred = guard.context({
+        messages: [], channel,
+        meta: { languageGuardSourceText: "Save up to €480 a year.", languageGuardLanguage: "fi-FI" },
+      });
+      assert.equal(inferred.route.taskKind, "translation");
+      assert.equal(inferred.route.sourceText, "Save up to €480 a year.");
+      assert.match(guard.mandatoryInstruction(inferred), /release_translation/);
+      const translated = await guard.releaseResult({
+        answer: JSON.stringify({ target_text: "Test candidate", release_token: "valid" }),
+      }, inferred);
+      assert.equal(translated.languageGuard.taskKind, "translation");
+      assert.equal(records.at(-1).source_text, "Save up to €480 a year.");
+      assert.equal(records.at(-1).language, "fi-FI");
+      assert.equal(records.at(-1).task_kind, "translation");
+    }
+    for (const invalid of [42, false, [], {}]) {
+      assert.throws(() => guard.context({ messages: [], meta: {
+        languageGuardTaskKind: "translation", languageGuardSourceText: invalid,
+      } }), error => error.code === "invalid_host_context");
+      assert.throws(() => guard.context({ messages: [], meta: {
+        languageGuardTaskKind: invalid,
+      } }), error => error.code === "invalid_host_context");
+    }
   } finally {
     server.close();
     fs.rmSync(temporary, { recursive: true, force: true });
