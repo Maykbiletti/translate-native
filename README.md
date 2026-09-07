@@ -884,6 +884,18 @@ translate-native/
 
 The MCP configuration example, persistent CLI rules, automated tests, and GitHub Actions workflow live at repository level.
 
+### Commercial review in a skill-only installation
+
+Pricing/offer evidence can be checked offline using the bundled
+[`check_commercial_review.py`](translate-native/scripts/check_commercial_review.py),
+without installing `integrations/`. See the
+[commercial workflow and invocation contract](translate-native/references/commercial-localization.md#skill-only-evidence-check).
+The website worker imports the same implementation through its existing module
+path. No service is started or configured by this helper, and an `EVIDENCE_VALID`
+result is **not** semantic approval or a signed release. The ordinary MCP guard
+does not automatically become a commercial-review endpoint. Existing local
+guard patches must be preserved and reconciled separately.
+
 Machine-readable failure cases live in [`evals/regressions.jsonl`](evals/regressions.jsonl). They cover Swedish translationese and model selection, German umlauts, Spanish punctuation and accents, Czech and Catalan orthography, Vietnamese tone marks, Chinese and Arabic native scripts, and Ukrainian language identity. They are regression examples, never a language allowlist.
 
 ## Test
