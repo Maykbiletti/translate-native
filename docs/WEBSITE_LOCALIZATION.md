@@ -351,6 +351,53 @@ both leases and approval expiries are rechecked immediately before delivery.
 Regression tests cover replay, collision, partial readiness, tampering, exact
 acknowledgements, bounded retries, opaque failures, and crash recovery.
 
+## Commercial price and offer profile
+
+Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
+offers, subscriptions and their contextual CTAs/conditions. This adds the
+versioned `translate-native.commercial.v1` profile to the job payload, job ID
+and plan ID; the existing seven types retain their previous payloads and IDs.
+It is available for every planner locale, including `mt-MT` and `fi-FI`.
+The public skill's [commercial guide](../translate-native/references/commercial-localization.md)
+applies to all languages, with no hardcoded project prices, brands or products.
+
+The three provider calls stay ordered: transcreation, source-hidden native
+editing, source-aware fidelity. Commercial fidelity additionally returns
+`commercial_review` with the profile schema, `coverage` (`complete` or
+`uncertain`), and `checks` for `amount_currency`, `discount_basis`, `qualifiers`,
+`tax_status`, `billing_interval`, `commitment`, `renewal`, `cancellation`,
+`conditions`, and `offer_assignment`. Every check has `status` (`equivalent`,
+`not_present`, `changed`, `uncertain`) and `items`; each item has `offer`,
+`source_span`, `target_span`, and `explanation`. Spans are zero-based Unicode
+code-point offsets with an exclusive end. The exact response contract and
+dimension guidance are supplied in each fidelity request.
+
+Equivalent checks require evidence; absent dimensions require empty items.
+An all-absent report, uncertain coverage, changed terms, missing dimensions,
+invalid spans or a normal PASS without the commercial report block the worker.
+`review.commercial.independent_review_required` is a content-free terminal
+queue reason for operator routing to an independent adapter/native reviewer,
+not an automatic retry or permission to publish. A new reviewed attempt needs
+an appropriately versioned host policy. The old known-good translation remains.
+Do not classify legal text as commercial to bypass the legal human-review gate.
+
+The full commercial response hash stays in the normal quality-pass receipt;
+job IDs bind the profile version through queue, signed memory and publication.
+As before, the host must verify an independent quality receipt before signing.
+Schema validation does not prove that a model's semantic findings are true or
+complete. The receipt verifier must validate evidence held by the trusted host;
+the worker retains hashes, not reviewer prose. No new provider is hardwired.
+
+Premortem: counting digits could reject native number words yet accept swapped
+tariff prices. The profile instead requires per-offer semantic comparison,
+allows equivalent locale forms, and blocks unresolved evidence. Keeping source
+evidence out of the native pass prevents source-shaped copy from receiving an
+artificial advantage. Version-bound job IDs prevent old policy/cache reuse.
+Tests exercise the contract across all 24 locale routes, ten defect dimensions,
+native digit/number-word representations, multiple offers, source blindness,
+queue terminal failures and the actual worker-to-signed-publication path.
+Scripted adapters test enforcement, not real native quality or DeepL superiority.
+
 ## Read-only health and readiness monitor
 
 `integrations/website_localization_health.py` gives operators one

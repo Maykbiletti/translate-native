@@ -165,7 +165,12 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
         for content_type in PLANNER.CONTENT_TYPES:
             with self.subTest(content_type=content_type):
                 provider = self.successful_provider()
-                WORKER.run_localization_job(job(content_type=content_type), assets(), provider)
+                if content_type == "commercial":
+                    # An ordinary PASS lacks the mandatory commercial evidence.
+                    with self.assertRaises(WORKER.LocalizationWorkerBlocked):
+                        WORKER.run_localization_job(job(content_type=content_type), assets(), provider)
+                else:
+                    WORKER.run_localization_job(job(content_type=content_type), assets(), provider)
                 self.assertEqual(
                     provider.requests[0].input["content_guidance"],
                     WORKER._CONTENT_GUIDANCE[content_type],

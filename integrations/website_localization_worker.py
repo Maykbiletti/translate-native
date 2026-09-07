@@ -49,6 +49,10 @@ _GUARD = _load_module(
     "blun_website_localization_worker_guard",
     _ROOT / "translate-native" / "scripts" / "translation_guard.py",
 )
+_COMMERCIAL = _load_module(
+    "blun_website_commercial_profile",
+    _ROOT / "integrations" / "commercial_localization_profile.py",
+)
 
 
 class LocalizationWorkerBlocked(RuntimeError):
@@ -134,6 +138,7 @@ _CONTENT_GUIDANCE = {
     "documentation": "Prioritize precise, idiomatic technical explanation and stable terminology over source word order.",
     "seo": "Write natural search-facing copy without keyword stuffing. Preserve metadata structure and factual scope.",
     "legal": "Translate conservatively without cultural invention, changed obligation, or stronger legal certainty.",
+    "commercial": _COMMERCIAL.CREATION_GUIDANCE,
 }
 
 
@@ -447,6 +452,9 @@ def run_localization_job(
     assets = _validated_assets(job, assets)
     locale = job["target"]["locale"]
     base = _base_context(job, assets)
+    commercial = job["content_type"] == "commercial"
+    if commercial:
+        base["commercial_profile"] = job["commercial_profile"]
     full_glossary = [asdict(term) for term in assets.glossary]
     target_terms = [
         {"target": term.target}
@@ -475,7 +483,10 @@ def run_localization_job(
     })
     progress("transcreation")
 
-    native_request = _request(job, "target_native", _TARGET_REVIEW_SYSTEM, {
+    native_system = _TARGET_REVIEW_SYSTEM
+    if commercial:
+        native_system += "\n" + _COMMERCIAL.NATIVE_GUIDANCE
+    native_request = _request(job, "target_native", native_system, {
         **base,
         "candidate": candidate,
         "target_terms": target_terms,
@@ -504,7 +515,12 @@ def run_localization_job(
     })
     progress("target_native")
 
-    fidelity_request = _request(job, "source_fidelity", _FIDELITY_REVIEW_SYSTEM, {
+    fidelity_system = _FIDELITY_REVIEW_SYSTEM
+    commercial_contract = {}
+    if commercial:
+        fidelity_system += "\n" + _COMMERCIAL.FIDELITY_GUIDANCE
+        commercial_contract["commercial_review"] = _COMMERCIAL.review_contract(job["commercial_profile"])
+    fidelity_request = _request(job, "source_fidelity", fidelity_system, {
         **base,
         "source": job["source"],
         "candidate": candidate,
@@ -516,9 +532,21 @@ def run_localization_job(
             "status": "PASS or FAIL",
             "blocking_defects": [],
             "major_defects": [],
+            **commercial_contract,
         },
     })
     fidelity_response, request_hash, response_hash = _invoke(provider, fidelity_request)
+    if commercial:
+        # Hash above binds the complete evidence, even though the ordinary
+        # review parser below consumes only the original compatible fields.
+        fidelity_response = dict(fidelity_response)
+        commercial_review = fidelity_response.pop("commercial_review", None)
+        try:
+            _COMMERCIAL.validate_review(
+                commercial_review, job["source"]["text"], candidate, job["commercial_profile"],
+            )
+        except _COMMERCIAL.CommercialReviewBlocked as error:
+            raise LocalizationWorkerBlocked(error.code, retryable=False) from None
     findings = _review(fidelity_response, "source_fidelity", locale)
     if findings:
         raise LocalizationWorkerBlocked(

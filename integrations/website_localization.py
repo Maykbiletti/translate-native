@@ -38,8 +38,10 @@ CONTENT_TYPES = frozenset({
     "documentation",
     "seo",
     "legal",
+    "commercial",
 })
 QUALITY_PASSES = ("target_native", "source_fidelity")
+COMMERCIAL_PROFILE = "translate-native.commercial.v1"
 
 
 class LocalizationPlanBlocked(ValueError):
@@ -131,6 +133,7 @@ class LocalizationJob:
             "software_version": self.software_version,
             "quality_passes": list(QUALITY_PASSES),
             "release_required": True,
+            **({"commercial_profile": COMMERCIAL_PROFILE} if self.content_type == "commercial" else {}),
         }
 
 
@@ -284,6 +287,8 @@ def plan_website_localization(
         "software_version": software_version,
         "quality_passes": QUALITY_PASSES,
     }
+    if content_type == "commercial":
+        common["commercial_profile"] = COMMERCIAL_PROFILE
     jobs = tuple(
         LocalizationJob(
             job_id="blun-l10n-" + _digest({**common, "target_locale": profile.locale}),
