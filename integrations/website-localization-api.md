@@ -66,6 +66,44 @@ client timeout. Reusing an `event_id` with different canonical content returns
 `409 Conflict`. A valid response contains identifiers and counts only, never
 customer content or signatures.
 
+## Read per-locale progress
+
+Use a signed short-lived JSON request rather than an unauthenticated URL:
+
+```http
+POST /v1/localization/status HTTP/1.1
+Content-Type: application/json; charset=utf-8
+Content-Length: <exact UTF-8 byte count>
+X-Localization-Signature-Algorithm: <configured algorithm>
+X-Localization-Key-Id: <configured key identifier>
+X-Localization-Signature: <signature>
+```
+
+```json
+{"event_id":"cms-event-184","request_id":"status-7","requested_at":1788775200,"schema":"blun.cms-localization-status-request.v1"}
+```
+
+Sign this request with the same canonical-JSON rules. `requested_at` must be
+within five minutes of the API clock. Use a new unpredictable `request_id` for
+each call; the server echoes it so clients can bind the response to their
+request. The operation is read-only, so an exact replay inside the validity
+window cannot mutate work.
+
+A successful response reports counts plus one entry per required locale. Each
+entry includes job/locale identity, state, attempts, retry or lease timing, a
+stable error code, an optional hash of private error detail, and an optional
+result hash. `lease_expired: true` makes a crashed worker visible without
+silently changing queue state. No source, target, model output, signature or
+raw provider error is returned.
+
+Status is not readiness: `succeeded` means the worker stored an integrity-valid
+result, not that its quality receipt or signed approval is valid. The existing
+release store remains authoritative for publication. Before reporting status,
+the bridge revalidates the stored signed event, every plan/job/locale identity,
+the queue count, and every stored successful result. Missing events return
+`404`; inconsistent or tampered queue state returns `503` rather than a partial
+or optimistic response.
+
 ## Failure contract
 
 Failures use this content-free form and `Cache-Control: no-store`:
@@ -74,7 +112,7 @@ Failures use this content-free form and `Cache-Control: no-store`:
 {"error":"cms.event.signature_rejected","schema":"blun.website-localization-api.v1","status":"BLOCK"}
 ```
 
-`401` denotes a missing or rejected signature, `409` an idempotency collision,
+`401` denotes a missing, rejected or expired signed request, `409` an idempotency collision,
 `413` an oversized body, `415` the wrong media type, and `503` unavailable or
 invalid queue state. Other invalid events return `400`; unexpected failures
 return only `api.internal` with `500`. Clients may retry transport failures and

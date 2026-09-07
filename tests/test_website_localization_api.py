@@ -100,6 +100,11 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         result = b"".join(self.api(environ, lambda status, headers: captured.update(status=status, headers=headers)))
         return captured["status"], dict(captured["headers"]), json.loads(result)
 
+    def status_request(self, event_id="event-1", *, request_id="status-1", requested_at=100, signature=None):
+        value = {"schema": API.STATUS_REQUEST_SCHEMA, "request_id": request_id,
+                 "event_id": event_id, "requested_at": requested_at}
+        return self.request(value, signature=signature, PATH_INFO=API.STATUS_PATH)
+
     def test_signed_change_enqueues_one_job_per_locale_and_replay_is_idempotent(self):
         first = self.request()
         second = self.request()
@@ -177,6 +182,79 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         status, _, payload = self.request(value)
         self.assertEqual((status, payload["error"]), ("400 Bad Request", "cms.localization.invalid"))
         self.assertNotIn("private-customer-text", json.dumps(payload))
+
+    def test_signed_status_reports_each_locale_without_customer_text(self):
+        self.request()
+        status, headers, payload = self.status_request()
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(payload["status"], "PROGRESS")
+        self.assertEqual(payload["counts"]["pending"], 2)
+        self.assertEqual([item["target_locale"] for item in payload["locales"]], ["fi-FI", "mt-MT"])
+        self.assertTrue(all(item["status"] == "pending" for item in payload["locales"]))
+        self.assertNotIn("source_text", json.dumps(payload))
+        self.assertNotIn("Save up", json.dumps(payload))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+
+    def test_status_exposes_hashed_failure_reason_and_expired_lease(self):
+        self.request()
+        claim = self.queue.claim("worker", now=101, lease_seconds=5)
+        self.queue.fail(claim, "provider.timeout", error_detail="private provider response", now=102)
+        claim = self.queue.claim("worker", now=103, lease_seconds=5)
+        self.api.clock = lambda: 110
+        status, _, payload = self.status_request(request_id="status-2", requested_at=110)
+        self.assertEqual(status, "200 OK")
+        by_locale = {item["target_locale"]: item for item in payload["locales"]}
+        retry = by_locale[claim.target_locale]
+        self.assertTrue(retry["lease_expired"])
+        other = next(item for item in payload["locales"] if item["target_locale"] != claim.target_locale)
+        self.assertEqual(other["last_error_code"], "provider.timeout")
+        self.assertIsNotNone(other["last_error_detail_hash"])
+        self.assertNotIn("private provider response", json.dumps(payload))
+
+    def test_status_requires_fresh_valid_signature_and_exact_schema(self):
+        self.request()
+        status, _, payload = self.status_request(requested_at=1000)
+        self.assertEqual((status, payload["error"]), ("401 Unauthorized", "cms.status.request_expired"))
+        value = {"schema": API.STATUS_REQUEST_SCHEMA, "request_id": "status-1",
+                 "event_id": "event-1", "requested_at": 100}
+        forged = self.authority.sign(value)
+        forged = CMS.CMSMessageSignature(forged.algorithm, forged.key_id, "0" * 64)
+        status, _, payload = self.status_request(signature=forged)
+        self.assertEqual((status, payload["error"]), ("401 Unauthorized", "cms.status.signature_rejected"))
+        value["extra"] = True
+        status, _, payload = self.request(value, PATH_INFO=API.STATUS_PATH)
+        self.assertEqual((status, payload["error"]), ("400 Bad Request", "cms.status.request_invalid"))
+
+    def test_unknown_or_tampered_status_never_looks_ready(self):
+        status, _, payload = self.status_request(event_id="unknown")
+        self.assertEqual((status, payload["error"]), ("404 Not Found", "cms.event.not_enqueued"))
+        self.request()
+        self.queue.connection.execute(
+            "UPDATE localization_jobs SET result_sha256 = ? WHERE target_locale = ?",
+            ("0" * 64, "fi-FI"),
+        )
+        # Pending rows have no result; tamper a durable identity instead.
+        self.queue.connection.execute(
+            "UPDATE localization_plan_jobs SET plan_id = ? WHERE target_locale = ?",
+            ("blun-l10n-plan-tampered", "fi-FI"),
+        )
+        status, _, payload = self.status_request(request_id="status-tampered")
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertEqual(payload["error"], "cms.queue.identity_lost")
+
+    def test_corrupted_successful_result_blocks_complete_status_response(self):
+        status, _, _ = self.request()
+        self.assertEqual(status, "202 Accepted")
+        claim = self.queue.claim("worker", now=101, lease_seconds=10)
+        self.queue.complete(claim, {"job_id": claim.job_id}, now=102)
+        self.queue.connection.execute(
+            "UPDATE localization_jobs SET result_sha256 = ? WHERE job_id = ?",
+            ("0" * 64, claim.job_id),
+        )
+        status, _, payload = self.status_request(request_id="status-corrupt")
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertEqual(payload["error"], "cms.queue.integrity_failed")
+        self.assertNotIn(claim.job_id, json.dumps(payload))
 
 
 if __name__ == "__main__":

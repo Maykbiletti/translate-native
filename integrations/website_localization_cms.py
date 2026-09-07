@@ -160,6 +160,31 @@ class DeliveryOutcome:
     error_code: str | None = None
 
 
+@dataclass(frozen=True)
+class LocaleProgress:
+    job_id: str
+    target_locale: str
+    status: str
+    attempts: int
+    max_attempts: int
+    next_attempt_at: float
+    lease_expires_at: float | None
+    lease_expired: bool
+    last_error_code: str | None
+    last_error_detail_hash: str | None
+    result_sha256: str | None
+
+
+@dataclass(frozen=True)
+class ChangeProgress:
+    event_id: str
+    plan_id: str
+    website_version: str
+    job_count: int
+    counts: dict[str, int]
+    locales: tuple[LocaleProgress, ...]
+
+
 def _canonical_json(value: Any) -> str:
     try:
         encoded = json.dumps(
@@ -417,6 +442,56 @@ class WebsiteLocalizationCMSBridge:
         if plan.plan_id != row["plan_id"]:
             raise CMSBridgeBlocked("cms.event.plan_mismatch")
         return event, plan
+
+    def change_progress(
+        self,
+        event_id: Any,
+        event_verifier: CMSMessageAuthority,
+        *,
+        now: float | int,
+    ) -> ChangeProgress:
+        """Return content-free per-locale progress after rechecking stored identities."""
+        now = _timestamp(now, "cms.time.invalid")
+        event, plan = self._load_event(event_id, event_verifier)
+        locales = []
+        try:
+            for job in plan.jobs:
+                status = self.queue.status(job.job_id)
+                if status.target_locale != job.target.locale or plan.plan_id not in status.plan_ids:
+                    raise CMSBridgeBlocked("cms.queue.identity_lost")
+                if status.status == "succeeded":
+                    # Do not report a corrupted result as successful.
+                    self.queue.result(job.job_id)
+                locales.append(LocaleProgress(
+                    job_id=status.job_id,
+                    target_locale=status.target_locale,
+                    status=status.status,
+                    attempts=status.attempts,
+                    max_attempts=status.max_attempts,
+                    next_attempt_at=status.next_attempt_at,
+                    lease_expires_at=status.lease_expires_at,
+                    lease_expired=(
+                        status.status == "leased"
+                        and status.lease_expires_at is not None
+                        and status.lease_expires_at <= now
+                    ),
+                    last_error_code=status.last_error_code,
+                    last_error_detail_hash=status.last_error_detail_hash,
+                    result_sha256=status.result_sha256,
+                ))
+            counts = self.queue.plan_counts(plan.plan_id)
+        except _QUEUE.LocalizationQueueBlocked:
+            raise CMSBridgeBlocked("cms.queue.integrity_failed") from None
+        if sum(counts.values()) != len(plan.jobs) or len(locales) != len(plan.jobs):
+            raise CMSBridgeBlocked("cms.queue.identity_lost")
+        return ChangeProgress(
+            event_id=event["event_id"],
+            plan_id=plan.plan_id,
+            website_version=event["website_version"],
+            job_count=len(plan.jobs),
+            counts=counts,
+            locales=tuple(sorted(locales, key=lambda item: item.target_locale)),
+        )
 
     def prepare_delivery(
         self,

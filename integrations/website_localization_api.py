@@ -17,11 +17,18 @@ from website_localization_cms import (
     CMSBridgeBlocked,
     CMSMessageSignature,
     WebsiteLocalizationCMSBridge,
+    _canonical_json,
+    _timestamp,
+    _token,
+    _verify,
 )
 
 
 API_SCHEMA = "blun.website-localization-api.v1"
 CHANGE_PATH = "/v1/localization/changes"
+STATUS_PATH = "/v1/localization/status"
+STATUS_REQUEST_SCHEMA = "blun.cms-localization-status-request.v1"
+MAX_STATUS_CLOCK_SKEW = 300.0
 
 
 class WebsiteLocalizationAPI:
@@ -91,7 +98,8 @@ class WebsiteLocalizationAPI:
     def __call__(self, environ, start_response):
         if not isinstance(environ, dict):
             return self._blocked("500 Internal Server Error", "api.environment.invalid", start_response)
-        if environ.get("PATH_INFO") != CHANGE_PATH:
+        path = environ.get("PATH_INFO")
+        if path not in {CHANGE_PATH, STATUS_PATH}:
             return self._blocked("404 Not Found", "api.path.not_found", start_response)
         if environ.get("REQUEST_METHOD") != "POST":
             return self._blocked("405 Method Not Allowed", "api.method.not_allowed", start_response)
@@ -122,7 +130,7 @@ class WebsiteLocalizationAPI:
             text = raw.decode("utf-8")
             if text.startswith("\ufeff"):
                 raise ValueError("BOM rejected")
-            event = json.loads(text, object_pairs_hook=self._pairs, parse_constant=self._constant)
+            request = json.loads(text, object_pairs_hook=self._pairs, parse_constant=self._constant)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             return self._blocked("400 Bad Request", "api.json.invalid", start_response)
         signature = CMSMessageSignature(
@@ -131,16 +139,27 @@ class WebsiteLocalizationAPI:
             environ.get("HTTP_X_LOCALIZATION_SIGNATURE"),
         )
         try:
+            now = self.clock()
+            if path == STATUS_PATH:
+                return self._status(request, signature, now, start_response)
             ingested = self.bridge.ingest_change(
-                event, signature, self.event_verifier,
-                max_attempts=self.max_attempts, now=self.clock(),
+                request, signature, self.event_verifier,
+                max_attempts=self.max_attempts, now=now,
             )
         except CMSBridgeBlocked as error:
-            if error.code in {"cms.signature.invalid", "cms.event.signature_rejected"}:
+            if error.code in {
+                "cms.signature.invalid", "cms.event.signature_rejected",
+                "cms.status.signature_rejected", "cms.status.request_expired",
+            }:
                 status = "401 Unauthorized"
             elif error.code == "cms.event.idempotency_collision":
                 status = "409 Conflict"
-            elif error.code in {"cms.queue.rejected", "cms.transaction.external", "cms.schema.altered"}:
+            elif error.code == "cms.event.not_enqueued":
+                status = "404 Not Found"
+            elif error.code in {
+                "cms.queue.rejected", "cms.transaction.external", "cms.schema.altered",
+                "cms.queue.integrity_failed", "cms.queue.identity_lost",
+            }:
                 status = "503 Service Unavailable"
             else:
                 status = "400 Bad Request"
@@ -149,3 +168,30 @@ class WebsiteLocalizationAPI:
             return self._blocked("500 Internal Server Error", "api.internal", start_response)
         payload = {"schema": API_SCHEMA, **asdict(ingested)}
         return self._json("202 Accepted" if ingested.inserted_jobs else "200 OK", payload, start_response)
+
+    def _status(self, request, signature, now, start_response):
+        expected = {"schema", "request_id", "event_id", "requested_at"}
+        if not isinstance(request, dict) or set(request) != expected:
+            raise CMSBridgeBlocked("cms.status.request_invalid")
+        if request.get("schema") != STATUS_REQUEST_SCHEMA:
+            raise CMSBridgeBlocked("cms.status.request_invalid")
+        request_id = _token(request.get("request_id"), "cms.status.request_invalid")
+        event_id = _token(request.get("event_id"), "cms.status.request_invalid")
+        requested_at = _timestamp(request.get("requested_at"), "cms.status.request_invalid")
+        now = _timestamp(now, "cms.time.invalid")
+        _verify(
+            self.event_verifier,
+            _canonical_json(request).encode("utf-8"),
+            signature,
+            "cms.status.signature_rejected",
+        )
+        if abs(now - requested_at) > MAX_STATUS_CLOCK_SKEW:
+            raise CMSBridgeBlocked("cms.status.request_expired")
+        progress = self.bridge.change_progress(event_id, self.event_verifier, now=now)
+        payload = {
+            "schema": API_SCHEMA,
+            "status": "PROGRESS",
+            "request_id": request_id,
+            **asdict(progress),
+        }
+        return self._json("200 OK", payload, start_response)
