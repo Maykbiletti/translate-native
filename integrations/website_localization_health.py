@@ -182,7 +182,7 @@ class LocalizationHealthMonitor:
         supervisor: Any | None = None,
         supervisor_stale_after_seconds: float | int = 30,
     ):
-        if not isinstance(bridge, _CMS.WebsiteLocalizationCMSBridge):
+        if not self._supports_bridge(bridge):
             raise LocalizationHealthBlocked("bridge must be WebsiteLocalizationCMSBridge")
         if evidence_state is not None and not isinstance(
             getattr(evidence_state, "connection", None), sqlite3.Connection,
@@ -203,6 +203,25 @@ class LocalizationHealthMonitor:
         self.evidence_state = evidence_state
         self.supervisor = supervisor
         self.supervisor_stale_after_seconds = float(supervisor_stale_after_seconds)
+
+    @staticmethod
+    def _supports_bridge(bridge: Any) -> bool:
+        queue = getattr(bridge, "queue", None)
+        release_store = getattr(bridge, "release_store", None)
+        return (
+            isinstance(getattr(bridge, "connection", None), sqlite3.Connection)
+            and isinstance(getattr(queue, "connection", None), sqlite3.Connection)
+            and isinstance(getattr(release_store, "connection", None), sqlite3.Connection)
+            and all(callable(getattr(bridge, name, None)) for name in (
+                "_verify_schema", "_load_event", "delivery_status",
+            ))
+            and all(callable(getattr(queue, name, None)) for name in (
+                "_verify_schema", "plan_counts", "result", "status",
+            ))
+            and all(callable(getattr(release_store, name, None)) for name in (
+                "lookup", "readiness", "validated_result",
+            ))
+        )
 
     @staticmethod
     def _quick_check(connection: sqlite3.Connection) -> bool:

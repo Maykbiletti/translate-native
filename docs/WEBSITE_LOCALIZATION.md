@@ -661,6 +661,53 @@ fixed exception codes, and an overdue-heartbeat check close those paths. Tests u
 to prove exclusion and crash recovery, then cover backoff caps, graceful stop,
 state tampering, malformed results, invalid clocks, and prose redaction.
 
+## Provider-neutral runtime composition
+
+`integrations/website_localization_runtime.py` is the composition root for a
+host that wants to operate the complete service rather than assemble each
+adapter manually. It creates one canonical queue, signed release store, CMS
+bridge, durable quality-evidence store, service tick, supervisor, and health
+monitor. `run_once`, `run_forever`, and `health` all address those same object
+instances and durable records. This avoids Python class-identity mismatches
+between independently loadable adapter files while retaining their public
+structural contracts.
+
+The host supplies five distinct `sqlite3.Connection` objects: queue, release,
+CMS, evidence, and supervisor. They may point to host-chosen durable files but
+must not be the same connection because the stores have independent schemas,
+transactions, and migration rules. The runtime neither opens nor closes those
+connections. It also never reads a configuration file, environment variable,
+credential, signing key, or network endpoint.
+
+The `dependencies` mapping must contain exactly the configured provider and
+asset resolvers, evidence provider, quality verifier, inbound event verifier,
+approval and publication authorities, CMS publisher, three worker IDs, and an
+evidence revision. Optional values are limited to the documented lease, retry,
+attempt, approval-expiry, human-review, and result-cache settings accepted by
+the service tick. Unknown and missing keys, invalid capabilities, identifiers,
+retry ranges, duplicate connections, and already-active host transactions
+block before any store schema is created. The mapping is copied and frozen;
+runtime status and `repr` never include its objects or values.
+
+Supervisor policy is supplied as an exact plain mapping rather than a Python
+class instance, so loading the public supervisor and runtime files under
+different module names cannot break configuration. The runtime constructs its
+own canonical policy after validating all six positive, finite timing values.
+Its health method always reuses the event, approval, and publication verifiers
+that were validated during composition; a caller can add only the optional
+provider health probe and check time.
+
+Premortem: independently loaded modules could reject the same bridge, one
+SQLite handle could mix incompatible state machines, a missing publisher could
+be discovered only after a job is claimed, mutable configuration could swap a
+signer during operation, or diagnostic formatting could reveal a secret.
+Canonical construction, structural health contracts, pre-mutation validation,
+five distinct connections, a frozen dependency copy, and a fixed content-free
+representation close those paths. An end-to-end test sends one signed event
+through Finnish translation, evidence, approval, publication, supervisor, and
+health using the single composed runtime; separate tests prove invalid
+capabilities and connections cause no schema writes.
+
 ## Read-only health and readiness monitor
 
 `integrations/website_localization_health.py` gives operators one
