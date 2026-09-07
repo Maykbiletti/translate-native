@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass
@@ -21,6 +22,12 @@ from typing import Any, Mapping, Protocol
 
 SCHEMA = "blun.website-localization-health.v1"
 PROVIDER_HEALTH_SCHEMA = "blun.localization-provider-health.v1"
+SUPERVISOR_SCHEMA = "blun.website-localization-supervisor.v1"
+SUPERVISOR_PHASES = {"delivery", "release", "translation", "idle", "supervisor"}
+SUPERVISOR_STATUSES = {
+    "idle", "succeeded", "retry_wait", "failed", "blocked", "approved",
+    "delivery_ready", "delivered",
+}
 QUEUE_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
 DELIVERY_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
 EVIDENCE_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
@@ -168,17 +175,34 @@ def _component(name: str, status: str, reasons: set[str], counts: dict[str, int]
 class LocalizationHealthMonitor:
     """Inspect a configured localization bridge without mutating its state."""
 
-    def __init__(self, bridge: Any, evidence_state: Any | None = None):
+    def __init__(
+        self,
+        bridge: Any,
+        evidence_state: Any | None = None,
+        supervisor: Any | None = None,
+        supervisor_stale_after_seconds: float | int = 30,
+    ):
         if not isinstance(bridge, _CMS.WebsiteLocalizationCMSBridge):
             raise LocalizationHealthBlocked("bridge must be WebsiteLocalizationCMSBridge")
         if evidence_state is not None and not isinstance(
             getattr(evidence_state, "connection", None), sqlite3.Connection,
         ):
             raise LocalizationHealthBlocked("evidence state must use SQLite")
+        if supervisor is not None and not callable(getattr(supervisor, "status", None)):
+            raise LocalizationHealthBlocked("supervisor must expose read-only status")
+        if (
+            isinstance(supervisor_stale_after_seconds, bool)
+            or not isinstance(supervisor_stale_after_seconds, (int, float))
+            or not math.isfinite(float(supervisor_stale_after_seconds))
+            or float(supervisor_stale_after_seconds) <= 0
+        ):
+            raise LocalizationHealthBlocked("supervisor stale threshold is invalid")
         self.bridge = bridge
         self.queue = bridge.queue
         self.release_store = bridge.release_store
         self.evidence_state = evidence_state
+        self.supervisor = supervisor
+        self.supervisor_stale_after_seconds = float(supervisor_stale_after_seconds)
 
     @staticmethod
     def _quick_check(connection: sqlite3.Connection) -> bool:
@@ -736,6 +760,81 @@ class LocalizationHealthMonitor:
             ))
         return tuple(statuses), reasons
 
+    def _check_supervisor(self, now: float) -> ComponentHealth | None:
+        if self.supervisor is None:
+            return None
+        counts = {"revision": 0, "consecutive_blocked": 0, "lease_active": 0}
+        reasons: set[str] = set()
+        status = "blocked"
+        try:
+            value = self.supervisor.status(now=now)
+            payload_method = getattr(value, "as_payload", None)
+            payload = payload_method() if callable(payload_method) else value
+            expected = {
+                "schema", "status", "revision", "lease_active",
+                "lease_expires_at", "next_tick_at", "consecutive_blocked",
+                "last_started_at", "last_finished_at", "last_phase",
+                "last_status", "last_error_code",
+            }
+            if not isinstance(payload, Mapping) or set(payload) != expected:
+                raise ValueError
+            if payload["schema"] != SUPERVISOR_SCHEMA or payload["status"] not in {
+                "ready", "waiting", "leased", "recoverable",
+            }:
+                raise ValueError
+            if not isinstance(payload["lease_active"], bool):
+                raise ValueError
+            revision = payload["revision"]
+            blocked = payload["consecutive_blocked"]
+            if any(
+                isinstance(item, bool) or not isinstance(item, int) or item < 0
+                for item in (revision, blocked)
+            ):
+                raise ValueError
+            _timestamp(payload["next_tick_at"])
+            for name in ("lease_expires_at", "last_started_at", "last_finished_at"):
+                if payload[name] is not None:
+                    _timestamp(payload[name])
+            error_code = payload["last_error_code"]
+            if error_code is not None and (
+                not isinstance(error_code, str) or _QUEUE.ERROR_CODE.fullmatch(error_code) is None
+            ):
+                raise ValueError
+            last_phase = payload["last_phase"]
+            last_status = payload["last_status"]
+            if (last_phase is None) != (last_status is None):
+                raise ValueError
+            if last_phase is not None and (
+                last_phase not in SUPERVISOR_PHASES
+                or last_status not in SUPERVISOR_STATUSES
+            ):
+                raise ValueError
+            blocked_status = last_status in {"blocked", "failed", "retry_wait"}
+            if blocked_status != (error_code is not None):
+                raise ValueError
+            if (blocked > 0) != blocked_status:
+                raise ValueError
+            counts = {
+                "revision": revision,
+                "consecutive_blocked": blocked,
+                "lease_active": int(payload["lease_active"]),
+            }
+            if payload["status"] == "recoverable":
+                reasons.add("supervisor.lease_expired")
+            if (
+                payload["status"] == "ready"
+                and now - float(payload["next_tick_at"])
+                > self.supervisor_stale_after_seconds
+            ):
+                reasons.add("supervisor.heartbeat_stale")
+            if blocked_status:
+                reasons.add("supervisor.last_error." + error_code)
+            status = "degraded" if reasons else "healthy"
+        except Exception:
+            reasons = {"supervisor.state_invalid"}
+            status = "blocked"
+        return _component("supervisor", status, reasons, counts)
+
     def check(
         self,
         *,
@@ -781,6 +880,7 @@ class LocalizationHealthMonitor:
                 storage_reasons.add("monitor.state_unreadable")
 
         providers, provider_reasons = self._providers(provider_bindings, provider_probe)
+        supervisor = self._check_supervisor(now)
         blocking_workflow = {
             "queue.state_invalid",
             "evidence.state_invalid",
@@ -845,9 +945,18 @@ class LocalizationHealthMonitor:
                 },
             ),
         )
-        if storage_reasons or provider_reasons or workflow_reasons & blocking_workflow:
+        if supervisor is not None:
+            components = components + (supervisor,)
+        if (
+            storage_reasons
+            or provider_reasons
+            or workflow_reasons & blocking_workflow
+            or (supervisor is not None and supervisor.status == "blocked")
+        ):
             status = "blocked"
-        elif workflow_reasons:
+        elif workflow_reasons or (
+            supervisor is not None and supervisor.status == "degraded"
+        ):
             status = "degraded"
         else:
             status = "healthy"

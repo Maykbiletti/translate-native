@@ -613,6 +613,54 @@ provider, evidence, and publisher calls across translation, approval, and
 delivery ticks; they also cover delivery priority, provider/evidence/publisher
 failure, event tampering, and an idle completed service.
 
+## Durable service supervisor
+
+`integrations/website_localization_supervisor.py` turns the host-configured
+service tick into a long-running, restartable process without taking ownership
+of databases, credentials, provider selection, signing keys, or signal
+handling. The host supplies a dedicated SQLite connection, the configured tick
+callable, a stable worker ID, and—when running continuously—a stop predicate.
+The supervisor invokes exactly one service tick at a time and checks for a stop
+only between those atomic units.
+
+The supervisor uses one transactional, expiring lease. A second process sees a
+live lease and performs no work; after a crash, another process may claim only
+after the exact expiry time. Lease completion is bound to both worker ID and a
+fresh random token, so an old process cannot overwrite a recovered process's
+schedule or heartbeat. The service tick's own narrower queue, evidence, and
+delivery leases remain the final protection for any external operation that
+outlives the supervisor lease.
+
+Successful active work receives a short configurable delay, an idle result a
+longer delay, and `blocked`, `failed`, or `retry_wait` results bounded
+exponential backoff. Continuous operation caps sleeps by a separate stop-poll
+interval, allowing prompt graceful shutdown without interrupting a tick.
+Durable status reports the next tick, live or recoverable lease state,
+consecutive blocked count, last start/finish time, phase, status, and stable
+error code. It never returns the lease owner or token, customer content,
+provider output, exception text, receipts, signatures, or secrets.
+When attached to `LocalizationHealthMonitor`, a configurable staleness window
+also marks a long-overdue ready tick as `supervisor.heartbeat_stale`; this
+prevents an exited process from appearing healthy merely because no lease is
+currently held.
+
+Hosts should keep the supervisor connection on durable local storage, use a
+lease longer than the maximum expected tick duration, install their normal
+process manager's stop signal into the predicate, and treat
+`supervisor.tick.unhandled`, altered state, or an expired lease as degraded
+health requiring operator attention. The library deliberately does not open a
+socket, daemonize itself, modify an OS scheduler, invent a model, or publish a
+partial localization.
+
+Premortem: duplicate supervisors could call providers concurrently, a crash
+could retain ownership forever, a failing adapter could create a hot loop, a
+recovered old process could overwrite newer state, or an exception could copy
+customer prose into operations data. Transactional token-bound expiring
+leases, bounded delays, stale-completion rejection, structural tick validation,
+fixed exception codes, and an overdue-heartbeat check close those paths. Tests use two SQLite connections
+to prove exclusion and crash recovery, then cover backoff caps, graceful stop,
+state tampering, malformed results, invalid clocks, and prose redaction.
+
 ## Read-only health and readiness monitor
 
 `integrations/website_localization_health.py` gives operators one

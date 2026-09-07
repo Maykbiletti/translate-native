@@ -108,6 +108,41 @@ class Publisher:
         }
 
 
+class SupervisorProbe:
+    def __init__(
+        self,
+        *,
+        status="waiting",
+        last_status="succeeded",
+        error_code=None,
+        next_tick_offset=1,
+    ):
+        self.current_status = status
+        self.last_status = last_status
+        self.error_code = error_code
+        self.next_tick_offset = next_tick_offset
+        self.calls = []
+
+    def status(self, *, now):
+        self.calls.append(now)
+        return {
+            "schema": HEALTH.SUPERVISOR_SCHEMA,
+            "status": self.current_status,
+            "revision": 4,
+            "lease_active": self.current_status == "leased",
+            "lease_expires_at": now + 10 if self.current_status == "leased" else (
+                now - 1 if self.current_status == "recoverable" else None
+            ),
+            "next_tick_at": now + self.next_tick_offset,
+            "consecutive_blocked": int(self.error_code is not None),
+            "last_started_at": now - 2,
+            "last_finished_at": now - 1,
+            "last_phase": "translation",
+            "last_status": self.last_status,
+            "last_error_code": self.error_code,
+        }
+
+
 def event():
     return {
         "schema": CMS.CHANGE_SCHEMA,
@@ -292,6 +327,72 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         self.assertEqual(
             dict(self.component(report, "evidence").counts),
             {status: 0 for status in HEALTH.EVIDENCE_STATUSES},
+        )
+
+    def test_supervisor_liveness_is_part_of_read_only_health(self):
+        probe = SupervisorProbe(status="leased")
+        self.monitor = HEALTH.LocalizationHealthMonitor(
+            self.bridge, self.evidence_state, probe,
+        )
+
+        report = self.report(now=250)
+
+        self.assertEqual(report.status, "healthy")
+        component = self.component(report, "supervisor")
+        self.assertEqual(component.status, "healthy")
+        self.assertEqual(dict(component.counts)["lease_active"], 1)
+        self.assertEqual(probe.calls, [250.0])
+
+    def test_expired_or_blocked_supervisor_degrades_without_prose(self):
+        probe = SupervisorProbe(
+            status="recoverable",
+            last_status="blocked",
+            error_code="supervisor.tick.unhandled",
+        )
+        self.monitor = HEALTH.LocalizationHealthMonitor(
+            self.bridge, self.evidence_state, probe,
+        )
+
+        report = self.report(now=250)
+
+        self.assertEqual(report.status, "degraded")
+        reasons = self.component(report, "supervisor").reasons
+        self.assertEqual(reasons, (
+            "supervisor.last_error.supervisor.tick.unhandled",
+            "supervisor.lease_expired",
+        ))
+
+    def test_overdue_supervisor_heartbeat_is_degraded(self):
+        probe = SupervisorProbe(status="ready", next_tick_offset=-31)
+        self.monitor = HEALTH.LocalizationHealthMonitor(
+            self.bridge, self.evidence_state, probe,
+            supervisor_stale_after_seconds=30,
+        )
+
+        report = self.report(now=250)
+
+        self.assertEqual(report.status, "degraded")
+        self.assertEqual(
+            self.component(report, "supervisor").reasons,
+            ("supervisor.heartbeat_stale",),
+        )
+
+    def test_malformed_supervisor_status_blocks_health(self):
+        probe = SupervisorProbe()
+        probe.status = lambda **values: {
+            "schema": HEALTH.SUPERVISOR_SCHEMA,
+            "status": "healthy, customer text",
+        }
+        self.monitor = HEALTH.LocalizationHealthMonitor(
+            self.bridge, self.evidence_state, probe,
+        )
+
+        report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        self.assertEqual(
+            self.component(report, "supervisor").reasons,
+            ("supervisor.state_invalid",),
         )
 
     def test_monitor_without_evidence_store_remains_backward_compatible(self):
