@@ -736,6 +736,7 @@ def run_next_release(
     approval_ttl_seconds: float | int = 2_592_000,
     delivery_max_attempts: int = 5,
     human_review_verifier: Any | None = None,
+    operation_guard: Callable[[float], Any] | None = None,
     clock: Callable[[], float] = time.time,
 ) -> ReleaseCoordinatorOutcome:
     """Approve at most one completed locale and prepare only a complete bundle."""
@@ -744,6 +745,8 @@ def run_next_release(
     evidence_revision = _token(evidence_revision, "coordinator.evidence_revision.invalid")
     if not isinstance(evidence_state, QualityEvidenceStateStore):
         raise LocalizationReleaseCoordinatorBlocked("evidence.state.invalid")
+    if operation_guard is not None and not callable(operation_guard):
+        raise LocalizationReleaseCoordinatorBlocked("evidence.operation_guard.invalid")
     fixed_now = now is not None
     now = _timestamp(clock() if now is None else now)
 
@@ -830,6 +833,13 @@ def run_next_release(
             job_id=selected.job_id,
             target_locale=request.target_locale,
         )
+    if operation_guard is not None:
+        try:
+            operation_guard(float(evidence_lease_seconds))
+        except Exception:
+            raise LocalizationReleaseCoordinatorBlocked(
+                "evidence.operation_guard.failed",
+            ) from None
     try:
         quality_receipt, human_receipt = _obtain_evidence(evidence_provider, request)
     except LocalizationReleaseCoordinatorBlocked as error:

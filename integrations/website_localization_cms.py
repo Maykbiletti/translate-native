@@ -980,7 +980,10 @@ class WebsiteLocalizationCMSBridge:
         worker_id: Any,
         clock: Callable[[], float] = time.time,
         lease_seconds: float | int = 300,
+        operation_guard: Callable[[float], Any] | None = None,
     ) -> DeliveryOutcome:
+        if operation_guard is not None and not callable(operation_guard):
+            raise CMSBridgeBlocked("cms.delivery.operation_guard_invalid")
         claim = self.claim_delivery(
             worker_id, publication_authority, now=clock(), lease_seconds=lease_seconds,
         )
@@ -994,6 +997,13 @@ class WebsiteLocalizationCMSBridge:
                     "failed", claim.request.delivery_id, claim.attempt, error.code,
                 )
             raise
+        if operation_guard is not None:
+            try:
+                operation_guard(float(lease_seconds))
+            except Exception:
+                raise CMSBridgeBlocked(
+                    "cms.delivery.operation_guard_failed",
+                ) from None
         publish = getattr(publisher, "publish", None)
         try:
             if not callable(publish):

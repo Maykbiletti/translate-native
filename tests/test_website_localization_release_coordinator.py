@@ -310,6 +310,24 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertTrue(payload["request_id"].startswith("blun-l10n-evidence-"))
         self.assertNotIn("target_locales", json.dumps(payload))
 
+    def test_outer_operation_guard_blocks_before_evidence_provider_call(self):
+        self.complete_all()
+        provider = EvidenceProvider()
+
+        def blocked_guard(_):
+            raise RuntimeError("lost outer lease")
+
+        with self.assertRaisesRegex(
+            COORDINATOR.LocalizationReleaseCoordinatorBlocked,
+            "evidence.operation_guard.failed",
+        ):
+            self.run_release(provider, operation_guard=blocked_guard)
+
+        self.assertEqual(provider.requests, [])
+        states = self.evidence_state.statuses(self.event["event_id"])
+        self.assertEqual(len(states), 1)
+        self.assertEqual(states[0].status, "leased")
+
     def test_active_evidence_lease_prevents_a_second_provider_call(self):
         self.complete_all()
         request = self.evidence_request()

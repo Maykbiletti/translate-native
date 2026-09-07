@@ -679,6 +679,21 @@ transactions, and migration rules. The runtime neither opens nor closes those
 connections. It also never reads a configuration file, environment variable,
 credential, signing key, or network endpoint.
 
+The supervisor lease must be strictly longer than every effective translation,
+quality-evidence, and CMS-delivery lease. The runtime checks this hierarchy
+before any component creates or migrates a schema. Its default supervisor lease
+is 360 seconds for the three 300-second operation defaults. Custom values remain
+valid only when the supervisor continues to outlive the longest operation
+lease. Immediately before cache or adapter resolution, each model phase,
+quality-evidence acquisition, and CMS publication, the child path renews the
+exact token-bound outer lease and fails before the external call if that lease
+was lost. An expired outer lease cannot finish a tick even when no replacement
+has claimed it. Together these checks prevent a second service instance from
+taking the outer lease while the first instance still owns a legitimate inner
+operation lease. Each external adapter must additionally impose a transport
+deadline shorter than its operation lease; deterministic request and delivery
+identifiers still cover an uncertain remote acceptance at that deadline.
+
 The `dependencies` mapping must contain exactly the configured provider and
 asset resolvers, evidence provider, quality verifier, inbound event verifier,
 approval and publication authorities, CMS publisher, three worker IDs, and an
@@ -702,7 +717,8 @@ SQLite handle could mix incompatible state machines, a missing publisher could
 be discovered only after a job is claimed, mutable configuration could swap a
 signer during operation, or diagnostic formatting could reveal a secret.
 Canonical construction, structural health contracts, pre-mutation validation,
-five distinct connections, a frozen dependency copy, and a fixed content-free
+five distinct connections, a strict outer-before-inner lease hierarchy, a
+frozen dependency copy, and a fixed content-free
 representation close those paths. An end-to-end test sends one signed event
 through Finnish translation, evidence, approval, publication, supervisor, and
 health using the single composed runtime; separate tests prove invalid

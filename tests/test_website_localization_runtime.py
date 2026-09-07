@@ -189,7 +189,7 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             "dependencies": self.dependencies,
             "supervisor_worker_id": "runtime-worker",
             "supervisor_policy": {
-                "lease_seconds": 10,
+                "lease_seconds": 301,
                 "active_delay_seconds": 1,
                 "idle_delay_seconds": 5,
                 "blocked_base_seconds": 2,
@@ -258,6 +258,42 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             "healthy",
         )
 
+    def test_runtime_renews_outer_lease_for_each_child_operation_kind(self):
+        self.dependencies.update({
+            "translation_lease_seconds": 101,
+            "evidence_lease_seconds": 102,
+            "delivery_lease_seconds": 103,
+        })
+        policy = {
+            "lease_seconds": 104,
+            "active_delay_seconds": 1,
+            "idle_delay_seconds": 5,
+            "blocked_base_seconds": 2,
+            "blocked_max_seconds": 20,
+            "stop_poll_seconds": 1,
+        }
+        runtime = self.runtime(supervisor_policy=policy)
+        event = self.event()
+        signature = self.event_authority.sign(
+            CMS._canonical_json(event).encode("utf-8"),
+        )
+        runtime.bridge.ingest_change(
+            event, signature, self.event_authority, now=self.clock(),
+        )
+        guarded_leases = []
+        original_guard = runtime.supervisor.renew_active_lease
+
+        def observing_guard(seconds):
+            guarded_leases.append(seconds)
+            return original_guard(seconds)
+
+        runtime.supervisor.renew_active_lease = observing_guard
+        for now in (100, 101, 102):
+            self.clock.value = now
+            self.assertEqual(runtime.run_once(now=now).status, "ran")
+
+        self.assertTrue({101.0, 102.0, 103.0}.issubset(guarded_leases))
+
     def test_preflight_rejects_duplicate_connection_without_schema_writes(self):
         duplicate = self.connections[0]
         before = tuple(connection.total_changes for connection in self.connections)
@@ -294,6 +330,56 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
 
         after = tuple(connection.total_changes for connection in self.connections)
         self.assertEqual(before, after)
+
+    def test_preflight_requires_supervisor_lease_to_outlive_every_operation(self):
+        original_connections = self.connections
+        try:
+            for name in (
+                "translation_lease_seconds",
+                "evidence_lease_seconds",
+                "delivery_lease_seconds",
+            ):
+                with self.subTest(name=name):
+                    connections = [sqlite3.connect(":memory:") for _ in range(5)]
+                    self.connections = connections
+                    self.dependencies[name] = 301
+                    try:
+                        before = tuple(
+                            connection.total_changes for connection in connections
+                        )
+
+                        with self.assertRaisesRegex(
+                            RUNTIME.LocalizationRuntimeBlocked,
+                            "runtime.lease_hierarchy.invalid",
+                        ):
+                            self.runtime()
+
+                        after = tuple(
+                            connection.total_changes for connection in connections
+                        )
+                        self.assertEqual(before, after)
+                        self.assertTrue(all(
+                            connection.execute(
+                                "SELECT name FROM sqlite_master WHERE type = 'table'"
+                            ).fetchone() is None
+                            for connection in connections
+                        ))
+                    finally:
+                        self.dependencies.pop(name, None)
+                        for connection in connections:
+                            connection.close()
+        finally:
+            self.connections = original_connections
+
+    def test_default_operation_leases_fit_valid_supervisor_boundary(self):
+        runtime = self.runtime()
+
+        self.assertEqual(runtime.supervisor.policy.lease_seconds, 301.0)
+
+    def test_runtime_default_supervisor_policy_outlives_default_operations(self):
+        runtime = self.runtime(supervisor_policy=None)
+
+        self.assertEqual(runtime.supervisor.policy.lease_seconds, 360.0)
 
     def test_dependencies_are_copied_and_runtime_repr_is_secret_free(self):
         runtime = self.runtime()

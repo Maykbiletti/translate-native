@@ -34,6 +34,11 @@ OPTIONAL_TICK_KEYS = frozenset({
     "delivery_lease_seconds", "delivery_max_attempts",
     "human_review_verifier", "result_cache",
 })
+OPERATION_LEASE_DEFAULTS = {
+    "translation_lease_seconds": 300.0,
+    "evidence_lease_seconds": 300.0,
+    "delivery_lease_seconds": 300.0,
+}
 
 
 def _load_module(name: str, path: Path):
@@ -180,7 +185,7 @@ def _validate_connections(connections: tuple[Any, ...]) -> None:
 
 def _supervisor_policy(value: Any):
     if value is None:
-        return _SUPERVISOR.SupervisorPolicy()
+        return _SUPERVISOR.SupervisorPolicy(lease_seconds=360.0)
     if not isinstance(value, Mapping):
         raise LocalizationRuntimeBlocked("runtime.supervisor_policy.invalid")
     expected = {
@@ -193,6 +198,18 @@ def _supervisor_policy(value: Any):
         return _SUPERVISOR.SupervisorPolicy(**dict(value)).validated()
     except Exception:
         raise LocalizationRuntimeBlocked("runtime.supervisor_policy.invalid") from None
+
+
+def _validate_lease_hierarchy(
+    dependencies: Mapping[str, Any],
+    supervisor_policy: Any,
+) -> None:
+    longest_operation_lease = max(
+        float(dependencies.get(name, default))
+        for name, default in OPERATION_LEASE_DEFAULTS.items()
+    )
+    if float(supervisor_policy.lease_seconds) <= longest_operation_lease:
+        raise LocalizationRuntimeBlocked("runtime.lease_hierarchy.invalid")
 
 
 class WebsiteLocalizationRuntime:
@@ -227,6 +244,7 @@ class WebsiteLocalizationRuntime:
         if token_factory is not None and not callable(token_factory):
             raise LocalizationRuntimeBlocked("runtime.token_factory.invalid")
         supervisor_policy = _supervisor_policy(supervisor_policy)
+        _validate_lease_hierarchy(validated, supervisor_policy)
         _number(
             supervisor_stale_after_seconds,
             "runtime.supervisor_stale_after_seconds.invalid",
@@ -250,6 +268,7 @@ class WebsiteLocalizationRuntime:
                 self.bridge,
                 self.evidence_state,
                 clock=self._clock,
+                operation_guard=self.supervisor.renew_active_lease,
                 **self._dependencies,
             )
 

@@ -355,6 +355,32 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             clock=Clock(261),
         ).status, "idle")
 
+    def test_outer_operation_guard_blocks_before_cms_publisher_call(self):
+        event = change_event()
+        self.ingest(event)
+        self.release_all(event)
+        request = self.prepare(event)
+        publisher = Publisher()
+
+        def blocked_guard(_):
+            raise RuntimeError("lost outer lease")
+
+        with self.assertRaisesRegex(
+            CMS.CMSBridgeBlocked,
+            "cms.delivery.operation_guard_failed",
+        ):
+            self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="publisher-worker",
+                clock=lambda: 300,
+                lease_seconds=20,
+                operation_guard=blocked_guard,
+            )
+
+        self.assertEqual(publisher.requests, [])
+        self.assertEqual(self.bridge.delivery_status(request.delivery_id).status, "leased")
+
     def test_invalid_ack_retries_with_bound_and_opaque_error(self):
         self.ingest()
         self.release_all()

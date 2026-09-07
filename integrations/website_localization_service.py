@@ -138,6 +138,7 @@ def run_service_tick(
     delivery_max_attempts: int = 5,
     human_review_verifier: Any | None = None,
     result_cache: Any | None = None,
+    operation_guard: Callable[[float], Any] | None = None,
 ) -> ServiceTickOutcome:
     """Advance the durable pipeline by at most one externally active step.
 
@@ -151,6 +152,8 @@ def run_service_tick(
         raise TypeError("evidence_state must be QualityEvidenceStateStore")
     if not callable(clock):
         raise TypeError("clock must be callable")
+    if operation_guard is not None and not callable(operation_guard):
+        raise TypeError("operation_guard must be callable")
 
     try:
         delivery = bridge.run_delivery(
@@ -159,6 +162,7 @@ def run_service_tick(
             worker_id=delivery_worker_id,
             clock=clock,
             lease_seconds=delivery_lease_seconds,
+            operation_guard=operation_guard,
         )
     except Exception as error:
         return _runtime_error("delivery", error)
@@ -214,6 +218,7 @@ def run_service_tick(
                 approval_ttl_seconds=approval_ttl_seconds,
                 delivery_max_attempts=delivery_max_attempts,
                 human_review_verifier=human_review_verifier,
+                operation_guard=operation_guard,
                 clock=clock,
             )
         except Exception as error:
@@ -246,6 +251,7 @@ def run_service_tick(
             retry_max_seconds=translation_retry_max_seconds,
             result_cache=result_cache,
             eligible_plan_ids=tuple(plan_id for _, plan_id in events),
+            operation_guard=operation_guard,
         )
     except Exception as error:
         return _runtime_error("translation", error)

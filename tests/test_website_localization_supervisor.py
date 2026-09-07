@@ -143,6 +143,54 @@ class LocalizationSupervisorTests(unittest.TestCase):
             self.supervisor._finish("lease-a", tick(), 112.0)
         connection.close()
 
+    def test_tick_renews_outer_lease_immediately_before_child_work(self):
+        observed = []
+        connection, other = self.second()
+
+        def guarded_tick():
+            self.clock.value = 109.0
+            expires = self.supervisor.renew_active_lease(9)
+            self.clock.value = 111.0
+            observed.append((expires, other.run_once()))
+            self.clock.value = 112.0
+            return tick()
+
+        self.supervisor.tick = guarded_tick
+        outcome = self.supervisor.run_once(now=100.0)
+
+        self.assertEqual(outcome.status, "ran")
+        self.assertEqual(observed[0][0], 119.0)
+        self.assertEqual(observed[0][1].status, "leased")
+        self.assertEqual(observed[0][1].next_tick_at, 119.0)
+        connection.close()
+
+    def test_expired_outer_lease_cannot_finish_without_takeover(self):
+        token, skipped = self.supervisor._claim(100.0)
+        self.assertIsNone(skipped)
+
+        with self.assertRaisesRegex(
+            SUPERVISOR.LocalizationSupervisorBlocked, "supervisor.lease_lost"
+        ):
+            self.supervisor._finish(token, tick(), 110.0)
+
+    def test_outer_lease_renewal_blocks_concurrently_tampered_state(self):
+        def tampered_tick():
+            self.connection.execute("""
+                UPDATE localization_service_supervisor
+                SET last_status = 'customer prose'
+            """)
+            self.connection.commit()
+            self.supervisor.renew_active_lease(9)
+            return tick()
+
+        self.supervisor.tick = tampered_tick
+
+        with self.assertRaisesRegex(
+            SUPERVISOR.LocalizationSupervisorBlocked,
+            "supervisor.state.invalid",
+        ):
+            self.supervisor.run_once()
+
     def test_blocked_ticks_use_bounded_exponential_backoff(self):
         self.supervisor.tick = lambda: tick(
             phase="delivery", status="blocked", error_code="cms.unavailable",
@@ -226,6 +274,11 @@ class LocalizationSupervisorTests(unittest.TestCase):
             SUPERVISOR.LocalizationSupervisorBlocked, "supervisor.clock.invalid"
         ):
             self.supervisor.run_once(now=float("nan"))
+        with self.assertRaisesRegex(
+            SUPERVISOR.LocalizationSupervisorBlocked,
+            "supervisor.lease_guard.inactive",
+        ):
+            self.supervisor.renew_active_lease(5)
 
 
 if __name__ == "__main__":

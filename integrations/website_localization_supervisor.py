@@ -194,6 +194,7 @@ class LocalizationServiceSupervisor:
             raise LocalizationSupervisorBlocked("supervisor.policy.invalid")
         self.clock = clock
         self.token_factory = token_factory or (lambda: secrets.token_hex(32))
+        self._active_token: str | None = None
         self._create_schema()
         self._verify_schema()
 
@@ -361,7 +362,12 @@ class LocalizationServiceSupervisor:
             if row is None:
                 raise LocalizationSupervisorBlocked("supervisor.state.invalid")
             status = self._status_from_row(row, now)
-            if row["lease_owner"] != self.worker_id or row["lease_token"] != token:
+            if (
+                row["lease_owner"] != self.worker_id
+                or row["lease_token"] != token
+                or row["lease_expires_at"] is None
+                or _timestamp(row["lease_expires_at"]) <= now
+            ):
                 raise LocalizationSupervisorBlocked("supervisor.lease_lost")
             failures = status.consecutive_blocked + 1 if blocked else 0
             if blocked:
@@ -390,6 +396,50 @@ class LocalizationServiceSupervisor:
                 raise LocalizationSupervisorBlocked("supervisor.lease_lost")
         return next_tick_at
 
+    def renew_active_lease(self, minimum_child_seconds: float | int) -> float:
+        """Renew the current outer lease immediately before child work."""
+        if (
+            isinstance(minimum_child_seconds, bool)
+            or not isinstance(minimum_child_seconds, (int, float))
+        ):
+            raise LocalizationSupervisorBlocked("supervisor.lease_guard.invalid")
+        minimum_child_seconds = float(minimum_child_seconds)
+        if (
+            not math.isfinite(minimum_child_seconds)
+            or minimum_child_seconds <= 0
+            or minimum_child_seconds >= self.policy.lease_seconds
+        ):
+            raise LocalizationSupervisorBlocked("supervisor.lease_guard.invalid")
+        token = self._active_token
+        if token is None:
+            raise LocalizationSupervisorBlocked("supervisor.lease_guard.inactive")
+        now = _timestamp(self.clock())
+        expires = now + self.policy.lease_seconds
+        with _transaction(self.connection):
+            row = self.connection.execute(
+                "SELECT * FROM localization_service_supervisor WHERE singleton = 1"
+            ).fetchone()
+            if row is None:
+                raise LocalizationSupervisorBlocked("supervisor.state.invalid")
+            status = self._status_from_row(row, now)
+            if (
+                not status.lease_active
+                or row["lease_owner"] != self.worker_id
+                or row["lease_token"] != token
+            ):
+                raise LocalizationSupervisorBlocked("supervisor.lease_lost")
+            updated = self.connection.execute("""
+                UPDATE localization_service_supervisor
+                SET revision = revision + 1, lease_expires_at = ?, updated_at = ?
+                WHERE singleton = 1 AND lease_owner = ? AND lease_token = ?
+                  AND lease_expires_at > ? AND revision = ?
+            """, (
+                expires, now, self.worker_id, token, now, status.revision,
+            ))
+            if updated.rowcount != 1:
+                raise LocalizationSupervisorBlocked("supervisor.lease_lost")
+        return expires
+
     def run_once(self, *, now: float | int | None = None) -> SupervisorRunOutcome:
         started = _timestamp(self.clock() if now is None else now)
         try:
@@ -402,21 +452,25 @@ class LocalizationServiceSupervisor:
             return skipped
         assert token is not None
         try:
+            self._active_token = token
             try:
-                tick = _tick_payload(self.tick())
-            except Exception:
-                tick = {
-                    "schema": TICK_SCHEMA,
-                    "phase": "supervisor",
-                    "status": "blocked",
-                    "event_id": None,
-                    "plan_id": None,
-                    "job_id": None,
-                    "target_locale": None,
-                    "delivery_id": None,
-                    "attempt": None,
-                    "error_code": "supervisor.tick.unhandled",
-                }
+                try:
+                    tick = _tick_payload(self.tick())
+                except Exception:
+                    tick = {
+                        "schema": TICK_SCHEMA,
+                        "phase": "supervisor",
+                        "status": "blocked",
+                        "event_id": None,
+                        "plan_id": None,
+                        "job_id": None,
+                        "target_locale": None,
+                        "delivery_id": None,
+                        "attempt": None,
+                        "error_code": "supervisor.tick.unhandled",
+                    }
+            finally:
+                self._active_token = None
             finished = _timestamp(self.clock())
             if finished < started:
                 raise LocalizationSupervisorBlocked("supervisor.clock.invalid")
