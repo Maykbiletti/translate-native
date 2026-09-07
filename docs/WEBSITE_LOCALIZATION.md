@@ -358,14 +358,15 @@ and a publisher implementing `publish(CMSPublicationRequest)`. The bridge does
 not read keys, open sockets, choose credentials, or update live CMS state by
 itself.
 
-An inbound `blun.cms-content-change.v1` event has exactly these fields:
+An inbound `blun.cms-content-change.v2` event has exactly these fields:
 
 ```json
 {
-  "schema": "blun.cms-content-change.v1",
+  "schema": "blun.cms-content-change.v2",
   "event_id": "cms-event-184",
   "site_id": "blun-marketing",
   "website_version": "website-2026-08-29.1",
+  "source_sequence": 184,
   "localization": {
     "source_id": "homepage.hero",
     "source_revision": "cms-184",
@@ -390,9 +391,33 @@ two transactions, replaying the exact event resumes queue insertion safely.
 The same `event_id` with different canonical bytes is an idempotency collision
 and cannot add work.
 
+For each `(site_id, source_id)`, the CMS supplies a positive, monotonic
+`source_sequence` inside the signed event. Once a newer event has reached
+`enqueued`, every older, not-yet-
+published generation of that source is marked superseded. Exact replay keeps
+its signed sequence and therefore cannot displace a newer event; a delayed,
+out-of-order webhook with a lower sequence is superseded immediately. Reusing
+one sequence for a different event is an idempotency collision. A
+superseded event cannot create a release; any pending, retrying, or leased
+outbox entry becomes terminal with the content-free `event_superseded` reason.
+The service passes only current plan IDs into the queue claim, so a locale job
+referenced exclusively by superseded plans is never sent to a model. A
+content-identical job still remains eligible when any current plan references
+it.
+
+New events must use the v2 contract. During the transactional database-v1
+migration, already stored v1 events receive deterministic legacy generations;
+afterward only an exact, signed replay of such a stored event is accepted so a
+crash between persistence and queue insertion can still resume. A new v1 event
+is rejected rather than entering an ordering domain without a signed sequence.
+Independent sites and source IDs remain independent, and an already accepted
+publication remains immutable history. Schema-v1 databases migrate these
+generations and supersessions transactionally before normal operation resumes.
+
 After every required locale has a valid signed approval, `prepare_delivery`
-creates one `blun.cms-localization-publication.v1` payload for the complete
-locale set. It includes the site and website version, source identity and hash,
+creates one `blun.cms-localization-publication.v2` payload for the complete
+locale set. It includes the site and website version, source identity, signed
+source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, and expiry.
 Its deterministic `delivery_id` is an idempotency key over those immutable
 bytes. The host-owned publication authority signs and immediately verifies the
@@ -419,14 +444,26 @@ adapter must make the stable `delivery_id` idempotent: acceptance followed by a
 crash may send the exact same signed payload again. A failed new website
 version never deletes or overwrites an older successful delivery.
 
+There is an unavoidable boundary after a publisher begins an external request:
+local code cannot retract bytes already received by a CMS. The receiving CMS
+must therefore compare `(site_id, source_id, source_sequence, source_revision,
+source_sha256)` atomically with its current source revision and reject a stale
+payload even if its signature is otherwise valid. It must acknowledge
+`accepted` only after
+that conditional write succeeds. This complements the local generation gate
+and closes the lease-to-network race without requiring a vendor-specific API.
+
 Premortem: an attacker could reuse an event ID with changed content, a partial
 locale set could reach the CMS, an acknowledgement could name another payload,
-or a worker could wake after its lease or approval expired. Canonical inbound
+an older event could finish after a newer source revision, or a worker could
+wake after its lease or approval expired. Canonical inbound
 signatures and collision checks block changed events; the release gate creates
-only complete bundles; exact signed payload hashes bind acknowledgements; and
-both leases and approval expiries are rechecked immediately before delivery.
-Regression tests cover replay, collision, partial readiness, tampering, exact
-acknowledgements, bounded retries, opaque failures, and crash recovery.
+only complete bundles; monotonic source generations and the receiver-side
+revision comparison block stale publication; exact signed payload hashes bind
+acknowledgements; and both leases and approval expiries are rechecked
+immediately before delivery. Regression tests cover replay, collision,
+supersession, migration, partial readiness, tampering, exact acknowledgements,
+bounded retries, opaque failures, and crash recovery.
 
 ## Commercial price and offer profile
 

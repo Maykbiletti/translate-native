@@ -143,6 +143,7 @@ def run_next_localization_job(
     retry_base_seconds: float | int = 5,
     retry_max_seconds: float | int = 3600,
     result_cache: ResultCache | None = None,
+    eligible_plan_ids: tuple[str, ...] | None = None,
 ) -> RunOutcome | None:
     """Claim and execute at most one locale, then transition it atomically.
 
@@ -166,11 +167,13 @@ def run_next_localization_job(
     if retry_base_seconds > retry_max_seconds:
         raise ValueError("retry_base_seconds cannot exceed retry_max_seconds")
 
-    claim = queue.claim(
-        worker_id,
-        now=_now(clock),
-        lease_seconds=lease_seconds,
-    )
+    claim_arguments = {
+        "now": _now(clock),
+        "lease_seconds": lease_seconds,
+    }
+    if eligible_plan_ids is not None:
+        claim_arguments["eligible_plan_ids"] = eligible_plan_ids
+    claim = queue.claim(worker_id, **claim_arguments)
     if claim is None:
         return None
 

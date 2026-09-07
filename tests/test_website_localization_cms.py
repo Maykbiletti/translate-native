@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib.util
+import json
 import sqlite3
 import sys
 import unittest
@@ -121,6 +122,7 @@ def change_event(**overrides):
         "event_id": "cms-event-184",
         "site_id": "blun-marketing",
         "website_version": "website-2026-08-29.1",
+        "source_sequence": 184,
         "localization": localization,
     }
     for key, value in overrides.items():
@@ -196,11 +198,12 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
 
     def ingest(self, event=None, **values):
         event = event or change_event()
+        now = values.pop("now", 100)
         return self.bridge.ingest_change(
             event,
             self.signed_event(event),
             self.event_authority,
-            now=100,
+            now=now,
             **values,
         )
 
@@ -267,6 +270,26 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.ingest(changed)
         self.assertEqual(caught.exception.code, "cms.event.idempotency_collision")
         self.assertEqual(self.queue_connection.execute("SELECT COUNT(*) FROM localization_jobs").fetchone()[0], 2)
+
+    def test_new_events_require_signed_positive_source_sequence(self):
+        for value in (None, 0, True, 1.5):
+            current = change_event()
+            if value is None:
+                current.pop("source_sequence")
+            else:
+                current["source_sequence"] = value
+            with self.assertRaises(CMS.CMSBridgeBlocked):
+                self.ingest(current)
+        legacy = change_event(event_id="legacy-new-event")
+        legacy["schema"] = "blun.cms-content-change.v1"
+        legacy.pop("source_sequence")
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.ingest(legacy)
+        self.assertEqual(caught.exception.code, "cms.event.legacy_replay_only")
+        self.assertEqual(
+            self.cms_connection.execute("SELECT COUNT(*) FROM cms_change_events").fetchone()[0],
+            0,
+        )
 
     def test_partial_approvals_never_create_a_delivery(self):
         self.ingest()
@@ -426,6 +449,221 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "cms.delivery.approval_expired")
         self.assertEqual(publisher.requests, [])
+
+    def test_new_revision_supersedes_old_event_and_pending_delivery(self):
+        old = change_event()
+        self.ingest(old)
+        self.release_all(old)
+        request = self.prepare(old)
+        new = change_event(
+            event_id="cms-event-185",
+            website_version="website-2026-08-29.2",
+            source_revision="cms-185",
+            source_text="Launch your next product with BLUN.",
+            source_sequence=185,
+        )
+
+        self.ingest(new, now=300)
+
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge._load_event(old["event_id"], self.event_authority)
+        self.assertEqual(caught.exception.code, "cms.event.superseded")
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual((status.status, status.last_error_code), ("failed", "event_superseded"))
+        publisher = Publisher()
+        self.assertEqual(self.bridge.run_delivery(
+            publisher,
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(301),
+        ).status, "idle")
+        self.assertEqual(publisher.requests, [])
+
+    def test_exact_replay_of_old_event_cannot_supersede_new_generation(self):
+        old = change_event()
+        new = change_event(
+            event_id="cms-event-185",
+            website_version="website-2026-08-29.2",
+            source_revision="cms-185",
+            source_text="Launch your next product with BLUN.",
+            source_sequence=185,
+        )
+        self.ingest(old, now=100)
+        self.ingest(new, now=200)
+
+        self.ingest(old, now=300)
+
+        rows = self.cms_connection.execute("""
+            SELECT event_id, superseded_by_event_id FROM cms_event_supersessions
+            ORDER BY event_id
+        """).fetchall()
+        self.assertEqual([tuple(row) for row in rows], [(old["event_id"], new["event_id"])])
+        self.bridge._load_event(new["event_id"], self.event_authority)
+
+    def test_delayed_lower_sequence_is_superseded_and_sequence_reuse_blocks(self):
+        current = change_event()
+        self.ingest(current, now=100)
+        delayed = change_event(
+            event_id="cms-event-delayed",
+            website_version="website-2026-08-28.9",
+            source_sequence=183,
+            source_revision="cms-183",
+            source_text="An older source delivered late.",
+        )
+
+        outcome = self.ingest(delayed, now=200)
+
+        self.assertEqual(outcome.status, "superseded")
+        relation = self.cms_connection.execute("""
+            SELECT superseded_by_event_id FROM cms_event_supersessions
+            WHERE event_id = ?
+        """, (delayed["event_id"],)).fetchone()
+        self.assertEqual(relation[0], current["event_id"])
+        self.bridge._load_event(current["event_id"], self.event_authority)
+        collision = change_event(
+            event_id="cms-event-sequence-collision",
+            website_version="website-2026-08-29.9",
+            source_revision="cms-collision",
+            source_text="Different content at a reused sequence.",
+        )
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.ingest(collision, now=300)
+        self.assertEqual(caught.exception.code, "cms.event.sequence_collision")
+
+    def test_different_site_or_source_is_not_superseded(self):
+        first = change_event()
+        other_source = change_event(
+            event_id="cms-event-footer",
+            website_version="website-2026-08-29.2",
+            source_id="homepage.footer",
+            source_revision="footer-1",
+        )
+        other_site = change_event(
+            event_id="cms-event-other-site",
+            site_id="customer-help",
+            website_version="website-2026-08-29.3",
+            source_revision="cms-186",
+        )
+        self.ingest(first, now=100)
+        self.ingest(other_source, now=200)
+        self.ingest(other_site, now=300)
+
+        self.assertEqual(
+            self.cms_connection.execute(
+                "SELECT COUNT(*) FROM cms_event_supersessions"
+            ).fetchone()[0],
+            0,
+        )
+        for current in (first, other_source, other_site):
+            self.bridge._load_event(current["event_id"], self.event_authority)
+
+    def test_successful_delivery_remains_history_after_new_revision(self):
+        old = change_event()
+        self.ingest(old)
+        self.release_all(old)
+        request = self.prepare(old)
+        self.bridge.run_delivery(
+            Publisher(), self.publication_authority,
+            worker_id="cms-worker", clock=Clock(260),
+        )
+        new = change_event(
+            event_id="cms-event-185",
+            website_version="website-2026-08-29.2",
+            source_revision="cms-185",
+            source_text="Launch your next product with BLUN.",
+            source_sequence=185,
+        )
+
+        self.ingest(new, now=300)
+
+        self.assertEqual(self.bridge.delivery_status(request.delivery_id).status, "succeeded")
+        self.assertIsNone(self.cms_connection.execute(
+            "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
+            (old["event_id"],),
+        ).fetchone())
+
+    def test_v1_database_migrates_existing_events_with_generation(self):
+        current = change_event()
+        self.ingest(current)
+        legacy = json.loads(CMS._canonical_json(current))
+        legacy["schema"] = "blun.cms-content-change.v1"
+        legacy.pop("source_sequence")
+        legacy_json = CMS._canonical_json(legacy)
+        legacy_signature = self.event_authority.sign(legacy_json.encode("utf-8"))
+        self.cms_connection.execute("""
+            UPDATE cms_change_events
+            SET event_sha256 = ?, event_json = ?, signature_algorithm = ?,
+                key_id = ?, signature = ?
+            WHERE event_id = ?
+        """, (
+            CMS._hash(legacy_json), legacy_json, legacy_signature.algorithm,
+            legacy_signature.key_id, legacy_signature.signature, current["event_id"],
+        ))
+        self.cms_connection.execute("DROP TABLE cms_event_supersessions")
+        self.cms_connection.execute("DROP TABLE cms_event_topics")
+        self.cms_connection.execute("PRAGMA user_version = 1")
+        self.cms_connection.commit()
+
+        migrated = CMS.WebsiteLocalizationCMSBridge(
+            self.cms_connection, self.queue, self.release_store,
+        )
+
+        row = self.cms_connection.execute(
+            "SELECT site_id, source_id, generation FROM cms_event_topics"
+        ).fetchone()
+        self.assertEqual(tuple(row), ("blun-marketing", "homepage.hero", 1))
+        self.assertEqual(
+            self.cms_connection.execute("PRAGMA user_version").fetchone()[0],
+            CMS.SCHEMA_VERSION,
+        )
+        migrated._load_event(current["event_id"], self.event_authority)
+        replay = migrated.ingest_change(
+            legacy,
+            legacy_signature,
+            self.event_authority,
+            now=200,
+        )
+        self.assertEqual(replay.status, "enqueued")
+
+    def test_v1_migration_reconstructs_supersession_and_blocks_old_outbox(self):
+        old = change_event()
+        self.ingest(old, now=100)
+        self.release_all(old)
+        request = self.prepare(old)
+        new = change_event(
+            event_id="cms-event-185",
+            website_version="website-2026-08-29.2",
+            source_revision="cms-185",
+            source_text="Launch your next product with BLUN.",
+            source_sequence=185,
+        )
+        self.ingest(new, now=300)
+        self.cms_connection.execute("DELETE FROM cms_event_supersessions")
+        self.cms_connection.execute("""
+            UPDATE cms_publication_deliveries
+            SET status = 'pending', last_error_code = NULL, updated_at = 250
+        """)
+        self.cms_connection.execute("DROP TABLE cms_event_supersessions")
+        self.cms_connection.execute("DROP TABLE cms_event_topics")
+        self.cms_connection.execute("PRAGMA user_version = 1")
+        self.cms_connection.commit()
+
+        migrated = CMS.WebsiteLocalizationCMSBridge(
+            self.cms_connection, self.queue, self.release_store,
+        )
+
+        relation = self.cms_connection.execute("""
+            SELECT event_id, superseded_by_event_id FROM cms_event_supersessions
+        """).fetchone()
+        self.assertEqual(tuple(relation), (old["event_id"], new["event_id"]))
+        status = migrated.delivery_status(request.delivery_id)
+        self.assertEqual((status.status, status.last_error_code), ("failed", "event_superseded"))
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            migrated.prepare_delivery(
+                old["event_id"], self.event_authority, self.approval_authority,
+                self.publication_authority, now=350,
+            )
+        self.assertEqual(caught.exception.code, "cms.event.superseded")
 
 
 if __name__ == "__main__":

@@ -114,6 +114,7 @@ def event():
         "event_id": "cms-event-184",
         "site_id": "blun-marketing",
         "website_version": "website-2026-08-29.1",
+        "source_sequence": 184,
         "localization": {
             "source_id": "homepage.hero",
             "source_revision": "cms-184",
@@ -199,8 +200,7 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         self.release_connection.close()
         self.queue_connection.close()
 
-    def ingest(self):
-        current = event()
+    def ingest_event(self, current, *, now=100):
         signature = self.event_authority.sign(
             CMS._canonical_json(current).encode("utf-8")
         )
@@ -208,9 +208,12 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             current,
             signature,
             self.event_authority,
-            now=100,
+            now=now,
         )
         return PLANNER.plan_from_mapping(current["localization"])
+
+    def ingest(self):
+        return self.ingest_event(event())
 
     def complete_jobs(self, plan):
         translations = {
@@ -675,6 +678,66 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         self.assertIn(
             "release.approval_invalid",
             self.component(release_report, "release").reasons,
+        )
+
+    def test_superseded_revision_is_visible_without_degrading_health(self):
+        old = event()
+        self.ingest_event(old, now=100)
+        newer = event()
+        newer["event_id"] = "cms-event-185"
+        newer["website_version"] = "website-2026-08-29.2"
+        newer["source_sequence"] = 185
+        newer["localization"]["source_revision"] = "cms-185"
+        newer["localization"]["source_text"] = "Launch your next product with BLUN."
+
+        self.ingest_event(newer, now=200)
+        report = self.report(now=250)
+
+        statuses = {item.event_id: item.status for item in report.website_versions}
+        self.assertEqual(statuses[old["event_id"]], "superseded")
+        self.assertEqual(statuses[newer["event_id"]], "processing")
+        self.assertEqual(report.status, "healthy")
+        self.assertEqual(len(self.probe.calls), 1)
+
+    def test_tampered_source_generation_blocks_health(self):
+        self.ingest()
+        self.cms_connection.execute("""
+            UPDATE cms_event_topics SET source_id = 'homepage.footer'
+        """)
+        self.cms_connection.commit()
+
+        report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        self.assertIn(
+            "cms.supersession.invalid",
+            self.component(report, "cms").reasons,
+        )
+
+    def test_deleted_supersession_is_recomputed_and_blocks_health(self):
+        old = event()
+        self.ingest_event(old, now=100)
+        newer = event()
+        newer["event_id"] = "cms-event-185"
+        newer["website_version"] = "website-2026-08-29.2"
+        newer["source_sequence"] = 185
+        newer["localization"]["source_revision"] = "cms-185"
+        newer["localization"]["source_text"] = "Launch your next product with BLUN."
+        self.ingest_event(newer, now=200)
+        self.cms_connection.execute("DELETE FROM cms_event_supersessions")
+        self.cms_connection.commit()
+
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge.prepare_delivery(
+                old["event_id"], self.event_authority, self.approval_authority,
+                self.publication_authority, now=250,
+            )
+        self.assertEqual(caught.exception.code, "cms.event.superseded")
+        report = self.report()
+        self.assertEqual(report.status, "blocked")
+        self.assertIn(
+            "cms.supersession.invalid",
+            self.component(report, "cms").reasons,
         )
 
 

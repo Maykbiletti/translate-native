@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
 
-SCHEMA_VERSION = 1
-CHANGE_SCHEMA = "blun.cms-content-change.v1"
-PUBLICATION_SCHEMA = "blun.cms-localization-publication.v1"
+SCHEMA_VERSION = 2
+CHANGE_SCHEMA = "blun.cms-content-change.v2"
+PUBLICATION_SCHEMA = "blun.cms-localization-publication.v2"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_ATTEMPTS = 20
@@ -43,6 +43,12 @@ _DELIVERY_COLUMNS = (
     "max_attempts", "next_attempt_at", "lease_owner", "lease_token",
     "lease_expires_at", "last_error_code", "last_error_detail_hash",
     "created_at", "updated_at",
+)
+_EVENT_TOPIC_COLUMNS = (
+    "event_id", "site_id", "source_id", "generation", "created_at",
+)
+_SUPERSESSION_COLUMNS = (
+    "event_id", "superseded_by_event_id", "created_at",
 )
 
 
@@ -204,6 +210,12 @@ def _timestamp(value: Any, code: str) -> float:
     return value
 
 
+def _positive_integer(value: Any, code: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value < 2**63:
+        raise CMSBridgeBlocked(code)
+    return value
+
+
 def _duration(value: Any, code: str, *, maximum: float = MAX_LEASE_SECONDS) -> float:
     value = _timestamp(value, code)
     if value <= 0 or value > maximum:
@@ -265,11 +277,40 @@ class WebsiteLocalizationCMSBridge:
         self.queue = queue
         self.release_store = release_store
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, SCHEMA_VERSION}:
+        if version not in {0, 1, SCHEMA_VERSION}:
             raise CMSBridgeBlocked("cms.schema.unsupported")
         if version == 0:
             self._create_schema()
+        elif version == 1:
+            self._migrate_v1()
         self._verify_schema()
+
+    def _create_revision_schema(self) -> None:
+        self.connection.execute("""
+            CREATE TABLE cms_event_topics (
+                event_id TEXT PRIMARY KEY,
+                site_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation > 0),
+                created_at REAL NOT NULL,
+                FOREIGN KEY (event_id) REFERENCES cms_change_events (event_id),
+                UNIQUE (site_id, source_id, generation)
+            )
+        """)
+        self.connection.execute("""
+            CREATE INDEX cms_event_topic_order
+            ON cms_event_topics (site_id, source_id, generation, event_id)
+        """)
+        self.connection.execute("""
+            CREATE TABLE cms_event_supersessions (
+                event_id TEXT PRIMARY KEY,
+                superseded_by_event_id TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                CHECK (event_id <> superseded_by_event_id),
+                FOREIGN KEY (event_id) REFERENCES cms_change_events (event_id),
+                FOREIGN KEY (superseded_by_event_id) REFERENCES cms_change_events (event_id)
+            )
+        """)
 
     def _create_schema(self) -> None:
         with _transaction(self.connection):
@@ -319,7 +360,100 @@ class WebsiteLocalizationCMSBridge:
                 CREATE INDEX cms_publication_ready
                 ON cms_publication_deliveries (status, next_attempt_at, created_at, delivery_id)
             """)
+            self._create_revision_schema()
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_v1(self) -> None:
+        try:
+            with _transaction(self.connection):
+                event_columns = tuple(
+                    row["name"]
+                    for row in self.connection.execute("PRAGMA table_info(cms_change_events)")
+                )
+                delivery_columns = tuple(
+                    row["name"]
+                    for row in self.connection.execute(
+                        "PRAGMA table_info(cms_publication_deliveries)"
+                    )
+                )
+                if event_columns != _EVENT_COLUMNS or delivery_columns != _DELIVERY_COLUMNS:
+                    raise CMSBridgeBlocked("cms.schema.altered")
+                self._create_revision_schema()
+                generations: dict[tuple[str, str], int] = {}
+                last_created_at: dict[tuple[str, str], float] = {}
+                rows = self.connection.execute(
+                    "SELECT * FROM cms_change_events ORDER BY created_at, event_id"
+                ).fetchall()
+                for row in rows:
+                    if _hash(row["event_json"]) != row["event_sha256"]:
+                        raise CMSBridgeBlocked("cms.migration.event_invalid")
+                    try:
+                        event = json.loads(row["event_json"])
+                    except json.JSONDecodeError:
+                        raise CMSBridgeBlocked("cms.migration.event_invalid") from None
+                    if _canonical_json(event) != row["event_json"]:
+                        raise CMSBridgeBlocked("cms.migration.event_invalid")
+                    event, plan = self._validated_event(event, allow_legacy=True)
+                    if plan.plan_id != row["plan_id"]:
+                        raise CMSBridgeBlocked("cms.migration.event_invalid")
+                    topic = (event["site_id"], event["localization"]["source_id"])
+                    if event.get("schema") == CHANGE_SCHEMA:
+                        generation = event["source_sequence"]
+                    else:
+                        if last_created_at.get(topic) == float(row["created_at"]):
+                            raise CMSBridgeBlocked("cms.migration.order_ambiguous")
+                        generation = generations.get(topic, 0) + 1
+                    generations[topic] = max(generations.get(topic, 0), generation)
+                    last_created_at[topic] = float(row["created_at"])
+                    self.connection.execute(
+                        "INSERT INTO cms_event_topics VALUES (?, ?, ?, ?, ?)",
+                        (row["event_id"], *topic, generation, row["created_at"]),
+                    )
+                self.connection.execute("""
+                    INSERT INTO cms_event_supersessions
+                    SELECT older.event_id, newest.event_id, newest.created_at
+                    FROM cms_event_topics AS older
+                    JOIN cms_change_events AS older_event
+                        ON older_event.event_id = older.event_id
+                    JOIN cms_event_topics AS newest
+                        ON newest.site_id = older.site_id
+                       AND newest.source_id = older.source_id
+                    JOIN cms_change_events AS newest_event
+                        ON newest_event.event_id = newest.event_id
+                    LEFT JOIN cms_publication_deliveries AS delivery
+                        ON delivery.event_id = older.event_id
+                       AND delivery.status = 'succeeded'
+                    WHERE older_event.status = 'enqueued'
+                      AND newest_event.status = 'enqueued'
+                      AND newest.generation = (
+                          SELECT MAX(candidate.generation)
+                          FROM cms_event_topics AS candidate
+                          JOIN cms_change_events AS candidate_event
+                              ON candidate_event.event_id = candidate.event_id
+                          WHERE candidate.site_id = older.site_id
+                            AND candidate.source_id = older.source_id
+                            AND candidate_event.status = 'enqueued'
+                      )
+                      AND older.generation < newest.generation
+                      AND delivery.event_id IS NULL
+                """)
+                self.connection.execute("""
+                    UPDATE cms_publication_deliveries
+                    SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+                        lease_expires_at = NULL, last_error_code = 'event_superseded',
+                        last_error_detail_hash = NULL, updated_at = (
+                            SELECT created_at FROM cms_event_supersessions
+                            WHERE cms_event_supersessions.event_id =
+                                  cms_publication_deliveries.event_id
+                        )
+                    WHERE event_id IN (SELECT event_id FROM cms_event_supersessions)
+                      AND status <> 'succeeded'
+                """)
+                self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        except CMSBridgeBlocked:
+            raise
+        except Exception:
+            raise CMSBridgeBlocked("cms.migration.failed") from None
 
     def _verify_schema(self) -> None:
         event_columns = tuple(
@@ -329,18 +463,50 @@ class WebsiteLocalizationCMSBridge:
             row["name"]
             for row in self.connection.execute("PRAGMA table_info(cms_publication_deliveries)")
         )
-        if event_columns != _EVENT_COLUMNS or delivery_columns != _DELIVERY_COLUMNS:
+        topic_columns = tuple(
+            row["name"] for row in self.connection.execute("PRAGMA table_info(cms_event_topics)")
+        )
+        supersession_columns = tuple(
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(cms_event_supersessions)")
+        )
+        version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+        if (
+            version != SCHEMA_VERSION
+            or event_columns != _EVENT_COLUMNS
+            or delivery_columns != _DELIVERY_COLUMNS
+            or topic_columns != _EVENT_TOPIC_COLUMNS
+            or supersession_columns != _SUPERSESSION_COLUMNS
+        ):
             raise CMSBridgeBlocked("cms.schema.altered")
 
-    def _validated_event(self, event: Any) -> tuple[dict[str, Any], Any]:
+    def _validated_event(
+        self,
+        event: Any,
+        *,
+        allow_legacy: bool = False,
+    ) -> tuple[dict[str, Any], Any]:
         if not isinstance(event, dict):
             raise CMSBridgeBlocked("cms.event.invalid")
-        expected = {"schema", "event_id", "site_id", "website_version", "localization"}
-        if set(event) != expected or event.get("schema") != CHANGE_SCHEMA:
+        if not isinstance(allow_legacy, bool):
+            raise CMSBridgeBlocked("cms.event.legacy_mode_invalid")
+        expected = {
+            "schema", "event_id", "site_id", "website_version",
+            "source_sequence", "localization",
+        }
+        legacy = event.get("schema") == "blun.cms-content-change.v1"
+        if legacy:
+            expected.remove("source_sequence")
+        if (
+            set(event) != expected
+            or (event.get("schema") != CHANGE_SCHEMA and not (allow_legacy and legacy))
+        ):
             raise CMSBridgeBlocked("cms.event.invalid")
         _token(event.get("event_id"), "cms.event_id.invalid")
         _token(event.get("site_id"), "cms.site_id.invalid")
         _token(event.get("website_version"), "cms.website_version.invalid")
+        if not legacy:
+            _positive_integer(event.get("source_sequence"), "cms.source_sequence.invalid")
         localization = event.get("localization")
         try:
             plan = _PLANNER.plan_from_mapping(localization)
@@ -357,13 +523,15 @@ class WebsiteLocalizationCMSBridge:
         max_attempts: int = 3,
         now: float | int,
     ) -> IngestedChange:
-        event, plan = self._validated_event(event)
+        event, plan = self._validated_event(event, allow_legacy=True)
         signature = _signature(signature)
         now = _timestamp(now, "cms.time.invalid")
         event_json = _canonical_json(event)
         event_hash = _hash(event_json)
         _verify(verifier, event_json.encode("utf-8"), signature, "cms.event.signature_rejected")
         event_id = event["event_id"]
+        site_id = event["site_id"]
+        source_id = event["localization"]["source_id"]
 
         with _transaction(self.connection):
             row = self.connection.execute(
@@ -371,14 +539,34 @@ class WebsiteLocalizationCMSBridge:
                 (event_id,),
             ).fetchone()
             if row is None:
+                if event.get("schema") != CHANGE_SCHEMA:
+                    raise CMSBridgeBlocked("cms.event.legacy_replay_only")
+                generation = event["source_sequence"]
+                collision = self.connection.execute("""
+                    SELECT 1 FROM cms_event_topics
+                    WHERE site_id = ? AND source_id = ? AND generation = ?
+                """, (site_id, source_id, generation)).fetchone()
+                if collision is not None:
+                    raise CMSBridgeBlocked("cms.event.sequence_collision")
                 self.connection.execute("""
                     INSERT INTO cms_change_events VALUES (?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)
                 """, (
                     event_id, event_hash, event_json, signature.algorithm, signature.key_id,
                     signature.signature, plan.plan_id, now, now,
                 ))
+                self.connection.execute(
+                    "INSERT INTO cms_event_topics VALUES (?, ?, ?, ?, ?)",
+                    (event_id, site_id, source_id, generation, now),
+                )
             elif row["event_sha256"] != event_hash or row["plan_id"] != plan.plan_id:
                 raise CMSBridgeBlocked("cms.event.idempotency_collision")
+            else:
+                topic = self.connection.execute(
+                    "SELECT site_id, source_id FROM cms_event_topics WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if topic is None or (topic["site_id"], topic["source_id"]) != (site_id, source_id):
+                    raise CMSBridgeBlocked("cms.event.topic_invalid")
 
         try:
             inserted = self.queue.enqueue_plan(plan, max_attempts=max_attempts, now=now)
@@ -391,16 +579,80 @@ class WebsiteLocalizationCMSBridge:
             """, (now, event_id, event_hash, plan.plan_id))
             if updated.rowcount != 1:
                 raise CMSBridgeBlocked("cms.event.identity_lost")
-        return IngestedChange(event_id, plan.plan_id, len(plan.jobs), inserted, "enqueued")
+            newest = self.connection.execute("""
+                SELECT topic.event_id, topic.generation
+                FROM cms_event_topics AS topic
+                JOIN cms_change_events AS event ON event.event_id = topic.event_id
+                WHERE topic.site_id = ? AND topic.source_id = ?
+                  AND event.status = 'enqueued'
+                ORDER BY topic.generation DESC LIMIT 1
+            """, (site_id, source_id)).fetchone()
+            if newest is None:
+                raise CMSBridgeBlocked("cms.event.topic_invalid")
+            older = self.connection.execute("""
+                SELECT older.event_id
+                FROM cms_event_topics AS older
+                JOIN cms_change_events AS events ON events.event_id = older.event_id
+                LEFT JOIN cms_publication_deliveries AS delivery
+                    ON delivery.event_id = older.event_id AND delivery.status = 'succeeded'
+                WHERE older.site_id = ? AND older.source_id = ?
+                  AND older.generation < ? AND events.status = 'enqueued'
+                  AND delivery.event_id IS NULL
+                ORDER BY older.generation, older.event_id
+            """, (site_id, source_id, newest["generation"])).fetchall()
+            for prior in older:
+                self.connection.execute("""
+                    INSERT OR IGNORE INTO cms_event_supersessions
+                    VALUES (?, ?, ?)
+                """, (prior["event_id"], newest["event_id"], now))
+            self.connection.execute("""
+                UPDATE cms_publication_deliveries
+                SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, last_error_code = 'event_superseded',
+                    last_error_detail_hash = NULL, updated_at = ?
+                WHERE event_id IN (
+                    SELECT supersession.event_id FROM cms_event_supersessions AS supersession
+                    JOIN cms_event_topics AS topic ON topic.event_id = supersession.event_id
+                    WHERE topic.site_id = ? AND topic.source_id = ?
+                ) AND status <> 'succeeded'
+            """, (now, site_id, source_id))
+            superseded = self.connection.execute(
+                "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
+                (event_id,),
+            ).fetchone() is not None
+        return IngestedChange(
+            event_id, plan.plan_id, len(plan.jobs), inserted,
+            "superseded" if superseded else "enqueued",
+        )
 
-    def _load_event(self, event_id: Any, verifier: CMSMessageAuthority) -> tuple[dict[str, Any], Any]:
+    def _load_event(
+        self,
+        event_id: Any,
+        verifier: CMSMessageAuthority,
+        *,
+        allow_superseded: bool = False,
+        allow_accepted: bool = False,
+    ) -> tuple[dict[str, Any], Any]:
         event_id = _token(event_id, "cms.event_id.invalid")
+        if not isinstance(allow_superseded, bool):
+            raise CMSBridgeBlocked("cms.event.supersession_mode_invalid")
+        if not isinstance(allow_accepted, bool):
+            raise CMSBridgeBlocked("cms.event.status_mode_invalid")
         row = self.connection.execute(
             "SELECT * FROM cms_change_events WHERE event_id = ?",
             (event_id,),
         ).fetchone()
-        if row is None or row["status"] != "enqueued":
+        if row is None or (
+            row["status"] != "enqueued"
+            and not (allow_accepted and row["status"] == "accepted")
+        ):
             raise CMSBridgeBlocked("cms.event.not_enqueued")
+        supersession = self.connection.execute(
+            "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if supersession is not None and not allow_superseded:
+            raise CMSBridgeBlocked("cms.event.superseded")
         if _hash(row["event_json"]) != row["event_sha256"]:
             raise CMSBridgeBlocked("cms.event.tampered")
         try:
@@ -413,10 +665,48 @@ class WebsiteLocalizationCMSBridge:
             row["signature_algorithm"], row["key_id"], row["signature"],
         ))
         _verify(verifier, row["event_json"].encode("utf-8"), signature, "cms.event.signature_rejected")
-        event, plan = self._validated_event(event)
+        event, plan = self._validated_event(event, allow_legacy=True)
         if plan.plan_id != row["plan_id"]:
             raise CMSBridgeBlocked("cms.event.plan_mismatch")
+        topic = self.connection.execute("""
+            SELECT site_id, source_id, generation FROM cms_event_topics
+            WHERE event_id = ?
+        """, (event_id,)).fetchone()
+        if topic is None or (
+            topic["site_id"], topic["source_id"]
+        ) != (event["site_id"], event["localization"]["source_id"]):
+            raise CMSBridgeBlocked("cms.event.topic_invalid")
+        newer = self.connection.execute("""
+            SELECT 1
+            FROM cms_event_topics AS candidate
+            JOIN cms_change_events AS candidate_event
+                ON candidate_event.event_id = candidate.event_id
+            WHERE candidate.site_id = ? AND candidate.source_id = ?
+              AND candidate.generation > ? AND candidate_event.status = 'enqueued'
+            LIMIT 1
+        """, (topic["site_id"], topic["source_id"], topic["generation"])).fetchone()
+        if newer is not None and not allow_superseded:
+            raise CMSBridgeBlocked("cms.event.superseded")
         return event, plan
+
+    def _event_is_current(self, event_id: str) -> bool:
+        row = self.connection.execute("""
+            SELECT topic.site_id, topic.source_id, topic.generation
+            FROM cms_event_topics AS topic
+            JOIN cms_change_events AS event ON event.event_id = topic.event_id
+            WHERE topic.event_id = ? AND event.status = 'enqueued'
+              AND topic.event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
+        """, (event_id,)).fetchone()
+        if row is None:
+            return False
+        return self.connection.execute("""
+            SELECT 1
+            FROM cms_event_topics AS newer
+            JOIN cms_change_events AS event ON event.event_id = newer.event_id
+            WHERE newer.site_id = ? AND newer.source_id = ?
+              AND newer.generation > ? AND event.status = 'enqueued'
+            LIMIT 1
+        """, (row["site_id"], row["source_id"], row["generation"])).fetchone() is None
 
     def prepare_delivery(
         self,
@@ -444,6 +734,15 @@ class WebsiteLocalizationCMSBridge:
         actual = tuple(item.target_locale for item in bundle)
         if actual != required:
             raise CMSBridgeBlocked("cms.bundle.incomplete")
+        source_sequence = event.get("source_sequence")
+        if source_sequence is None:
+            topic = self.connection.execute(
+                "SELECT generation FROM cms_event_topics WHERE event_id = ?",
+                (event["event_id"],),
+            ).fetchone()
+            if topic is None:
+                raise CMSBridgeBlocked("cms.event.topic_invalid")
+            source_sequence = topic["generation"]
         unsigned = {
             "schema": PUBLICATION_SCHEMA,
             "event_id": event["event_id"],
@@ -452,6 +751,7 @@ class WebsiteLocalizationCMSBridge:
             "plan_id": plan.plan_id,
             "source_id": event["localization"]["source_id"],
             "source_revision": event["localization"]["source_revision"],
+            "source_sequence": source_sequence,
             "source_sha256": plan.source_hash,
             "localizations": [
                 {
@@ -567,6 +867,19 @@ class WebsiteLocalizationCMSBridge:
                 SELECT * FROM cms_publication_deliveries
                 WHERE status IN ('pending', 'retry_wait') AND next_attempt_at <= ?
                   AND attempts < max_attempts
+                  AND event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM cms_event_topics AS current
+                      JOIN cms_event_topics AS newer
+                        ON newer.site_id = current.site_id
+                       AND newer.source_id = current.source_id
+                       AND newer.generation > current.generation
+                      JOIN cms_change_events AS newer_event
+                        ON newer_event.event_id = newer.event_id
+                      WHERE current.event_id = cms_publication_deliveries.event_id
+                        AND newer_event.status = 'enqueued'
+                  )
                 ORDER BY created_at, delivery_id LIMIT 1
             """, (now,)).fetchone()
             if row is None:
@@ -595,7 +908,11 @@ class WebsiteLocalizationCMSBridge:
             "SELECT * FROM cms_publication_deliveries WHERE delivery_id = ?",
             (claim.request.delivery_id,),
         ).fetchone()
-        if row is None or row["status"] != "leased":
+        if row is None:
+            raise CMSBridgeBlocked("cms.delivery.lease_lost")
+        if not self._event_is_current(row["event_id"]):
+            raise CMSBridgeBlocked("cms.delivery.event_superseded")
+        if row["status"] != "leased":
             raise CMSBridgeBlocked("cms.delivery.lease_lost")
         if row["lease_owner"] != claim.lease_owner or row["lease_token"] != claim.lease_token:
             raise CMSBridgeBlocked("cms.delivery.lease_lost")
@@ -645,6 +962,14 @@ class WebsiteLocalizationCMSBridge:
         )
         if claim is None:
             return DeliveryOutcome("idle")
+        try:
+            self._live_delivery(claim, _timestamp(clock(), "cms.time.invalid"))
+        except CMSBridgeBlocked as error:
+            if error.code == "cms.delivery.event_superseded":
+                return DeliveryOutcome(
+                    "failed", claim.request.delivery_id, claim.attempt, error.code,
+                )
+            raise
         publish = getattr(publisher, "publish", None)
         try:
             if not callable(publish):

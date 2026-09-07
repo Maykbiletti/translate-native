@@ -122,6 +122,27 @@ class WebsiteLocalizationQueueTests(unittest.TestCase):
         self.assertEqual(self.queue.plan_counts(single.plan_id)["pending"], 1)
         self.assertEqual(self.queue.plan_counts(combined.plan_id)["pending"], 2)
 
+    def test_claim_filter_skips_ineligible_jobs_but_keeps_shared_work(self) -> None:
+        single = plan(("de-AT",))
+        combined = plan(("de-AT", "sv-SE"))
+        self.queue.enqueue_plan(single, now=90)
+        self.queue.enqueue_plan(combined, now=100)
+
+        shared = self.queue.claim(
+            "worker-a", now=100, lease_seconds=10,
+            eligible_plan_ids=(combined.plan_id,),
+        )
+        self.assertEqual(shared.job_id, single.jobs[0].job_id)
+        self.assertIsNone(self.queue.claim(
+            "worker-b", now=100, lease_seconds=10,
+            eligible_plan_ids=("unrelated-plan",),
+        ))
+        with self.assertRaises(QUEUE.LocalizationQueueBlocked):
+            self.queue.claim(
+                "worker-b", now=100, lease_seconds=10,
+                eligible_plan_ids=[combined.plan_id],
+            )
+
     def test_claims_are_exclusive_attempt_bound_and_ordered(self) -> None:
         current = plan(("sv-SE", "de-AT"))
         self.queue.enqueue_plan(current, now=100)

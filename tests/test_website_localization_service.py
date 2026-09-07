@@ -179,7 +179,7 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
         self.evidence = EvidenceProvider()
         self.publisher = Publisher()
         self.clock = Clock()
-        self.ingest("event-1", "site-version-1")
+        self.ingest("event-1", "site-version-1", source_sequence=1)
 
     def tearDown(self):
         self.evidence_connection.close()
@@ -187,14 +187,15 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
         self.release_connection.close()
         self.queue_connection.close()
 
-    def event(self, event_id, version):
+    def event(self, event_id, version, *, source_id="homepage.hero", source_sequence=1):
         return {
             "schema": CMS.CHANGE_SCHEMA,
             "event_id": event_id,
             "site_id": "public-site",
             "website_version": version,
+            "source_sequence": source_sequence,
             "localization": {
-                "source_id": "homepage.hero",
+                "source_id": source_id,
                 "source_revision": version,
                 "source_text": "Build your business with BLUN.",
                 "source_locale": "en-IE",
@@ -209,8 +210,10 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
             },
         }
 
-    def ingest(self, event_id, version):
-        event = self.event(event_id, version)
+    def ingest(self, event_id, version, *, source_id="homepage.hero", source_sequence=1):
+        event = self.event(
+            event_id, version, source_id=source_id, source_sequence=source_sequence,
+        )
         signature = self.event_authority.sign(
             CMS._canonical_json(event).encode("utf-8"),
         )
@@ -276,7 +279,7 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
     def test_due_delivery_has_priority_over_a_new_translation(self):
         self.tick()
         self.tick()
-        self.ingest("event-2", "site-version-2")
+        self.ingest("event-2", "site-version-2", source_id="homepage.footer")
 
         delivered = self.tick()
 
@@ -287,6 +290,49 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
                 "SELECT plan_id FROM cms_change_events WHERE event_id = 'event-2'"
             ).fetchone()[0]
         )["pending"], 1)
+
+    def test_new_source_revision_blocks_older_delivery_and_releases_new_event(self):
+        self.tick()
+        self.tick()
+        self.ingest("event-2", "site-version-2", source_sequence=2)
+
+        translated = self.tick()
+
+        self.assertEqual((translated.phase, translated.status), ("translation", "succeeded"))
+        self.assertEqual(self.publisher.requests, [])
+        old_delivery = self.cms_connection.execute("""
+            SELECT status, last_error_code FROM cms_publication_deliveries
+            WHERE event_id = 'event-1'
+        """).fetchone()
+        self.assertEqual(tuple(old_delivery), ("failed", "event_superseded"))
+        released = self.tick()
+        self.assertEqual((released.phase, released.status), ("release", "delivery_ready"))
+        self.assertEqual(released.event_id, "event-2")
+
+    def test_worker_never_calls_provider_for_superseded_pending_plan(self):
+        old_plan_id = self.cms_connection.execute(
+            "SELECT plan_id FROM cms_change_events WHERE event_id = 'event-1'"
+        ).fetchone()[0]
+        self.ingest("event-2", "site-version-2", source_sequence=2)
+
+        outcome = self.tick()
+
+        new_plan_id = self.cms_connection.execute(
+            "SELECT plan_id FROM cms_change_events WHERE event_id = 'event-2'"
+        ).fetchone()[0]
+        self.assertEqual((outcome.phase, outcome.status), ("translation", "succeeded"))
+        self.assertIn(new_plan_id, self.queue.status(outcome.job_id).plan_ids)
+        self.assertNotIn(old_plan_id, self.queue.status(outcome.job_id).plan_ids)
+        old_status = self.queue_connection.execute("""
+            SELECT jobs.status
+            FROM localization_jobs AS jobs
+            JOIN localization_plan_jobs AS mapping ON mapping.job_id = jobs.job_id
+            WHERE mapping.plan_id = ?
+        """, (old_plan_id,)).fetchone()[0]
+        self.assertEqual(old_status, "pending")
+        self.assertEqual(self.provider.calls, [
+            "transcreation", "target_native", "source_fidelity",
+        ])
 
     def test_provider_failure_is_one_content_free_transition(self):
         self.provider = LocalizationProvider(fail_once=True)

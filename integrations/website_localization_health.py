@@ -285,9 +285,15 @@ class LocalizationHealthMonitor:
         for row in rows:
             try:
                 state = _COORDINATOR.QualityEvidenceStateStore._status_from_row(row)
+                superseded = self.bridge.connection.execute(
+                    "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
+                    (state.event_id,),
+                ).fetchone() is not None
                 if state.event_id not in event_cache:
                     event_cache[state.event_id] = self.bridge._load_event(
-                        state.event_id, event_verifier,
+                        state.event_id,
+                        event_verifier,
+                        allow_superseded=superseded,
                     )
                 event, plan = event_cache[state.event_id]
                 if plan.plan_id != state.plan_id:
@@ -317,13 +323,15 @@ class LocalizationHealthMonitor:
                 if state.status == "succeeded" and approval is None:
                     raise ValueError
                 if state.status != "succeeded" and approval is not None:
-                    reasons.add("evidence.approval_unreconciled")
-                if state.status == "leased" and state.lease_expires_at <= now:
-                    reasons.add("evidence.lease_expired")
-                if state.status in {"retry_wait", "failed"}:
-                    reasons.add("evidence.error." + state.last_error_code)
-                if state.status == "failed":
-                    reasons.add("evidence.review_failed")
+                    if not superseded:
+                        reasons.add("evidence.approval_unreconciled")
+                if not superseded:
+                    if state.status == "leased" and state.lease_expires_at <= now:
+                        reasons.add("evidence.lease_expired")
+                    if state.status in {"retry_wait", "failed"}:
+                        reasons.add("evidence.error." + state.last_error_code)
+                    if state.status == "failed":
+                        reasons.add("evidence.review_failed")
             except Exception:
                 reasons.add("evidence.state_invalid")
         return counts, reasons
@@ -413,6 +421,7 @@ class LocalizationHealthMonitor:
             "cms_publication_deliveries",
             DELIVERY_STATUSES,
         )
+        counts["superseded"] = 0
         reasons: set[str] = set()
         verify = getattr(authority, "verify", None)
         rows = self.bridge.connection.execute(
@@ -420,6 +429,14 @@ class LocalizationHealthMonitor:
         ).fetchall()
         for row in rows:
             try:
+                superseded = self.bridge.connection.execute(
+                    "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
+                    (row["event_id"],),
+                ).fetchone() is not None
+                if superseded and (
+                    row["status"] != "failed" or row["last_error_code"] != "event_superseded"
+                ):
+                    raise ValueError
                 if _hash(row["payload_json"]) != row["payload_sha256"]:
                     raise ValueError
                 payload = json.loads(row["payload_json"])
@@ -427,7 +444,8 @@ class LocalizationHealthMonitor:
                     raise ValueError
                 if not isinstance(payload, dict) or set(payload) != {
                     "schema", "delivery_id", "event_id", "site_id", "website_version",
-                    "plan_id", "source_id", "source_revision", "source_sha256",
+                    "plan_id", "source_id", "source_revision", "source_sequence",
+                    "source_sha256",
                     "localizations",
                 }:
                     raise ValueError
@@ -480,12 +498,130 @@ class LocalizationHealthMonitor:
                     code = row["last_error_code"]
                     if not isinstance(code, str) or _CMS.ERROR_CODE.fullmatch(code) is None:
                         raise ValueError
-                    reasons.add("cms.delivery.error." + code)
+                    if superseded and code == "event_superseded":
+                        counts["failed"] -= 1
+                        counts["superseded"] += 1
+                    else:
+                        reasons.add("cms.delivery.error." + code)
             except Exception:
                 reasons.add("cms.delivery.invalid")
         if counts["failed"]:
             reasons.add("cms.delivery.failed")
         return counts, reasons
+
+    def _check_supersessions(self, event_verifier: Any) -> set[str]:
+        reasons: set[str] = set()
+        topic_order: dict[tuple[str, str], list[tuple[int, float]]] = {}
+        topic_rows = self.bridge.connection.execute("""
+            SELECT event.event_id, event.created_at AS event_created_at,
+                   topic.site_id, topic.source_id, topic.generation,
+                   topic.created_at AS topic_created_at
+            FROM cms_change_events AS event
+            LEFT JOIN cms_event_topics AS topic ON topic.event_id = event.event_id
+            ORDER BY event.event_id
+        """).fetchall()
+        for row in topic_rows:
+            try:
+                event, _ = self.bridge._load_event(
+                    row["event_id"],
+                    event_verifier,
+                    allow_superseded=True,
+                    allow_accepted=True,
+                )
+                if (
+                    row["site_id"] != event["site_id"]
+                    or row["source_id"] != event["localization"]["source_id"]
+                    or isinstance(row["generation"], bool)
+                    or not isinstance(row["generation"], int)
+                    or row["generation"] <= 0
+                    or row["topic_created_at"] != row["event_created_at"]
+                    or (
+                        "source_sequence" in event
+                        and row["generation"] != event["source_sequence"]
+                    )
+                ):
+                    raise ValueError
+                if "source_sequence" not in event:
+                    topic_order.setdefault(
+                        (row["site_id"], row["source_id"]), [],
+                    ).append((int(row["generation"]), float(row["topic_created_at"])))
+            except Exception:
+                reasons.add("cms.supersession.invalid")
+        for values in topic_order.values():
+            ordered = sorted(values)
+            if [generation for generation, _ in ordered] != list(
+                range(1, len(ordered) + 1)
+            ) or [created_at for _, created_at in ordered] != sorted(
+                created_at for _, created_at in ordered
+            ):
+                reasons.add("cms.supersession.invalid")
+        orphan_topics = self.bridge.connection.execute("""
+            SELECT COUNT(*)
+            FROM cms_event_topics AS topic
+            LEFT JOIN cms_change_events AS event ON event.event_id = topic.event_id
+            WHERE event.event_id IS NULL
+        """).fetchone()[0]
+        missing_supersessions = self.bridge.connection.execute("""
+            SELECT COUNT(*)
+            FROM cms_event_topics AS older
+            JOIN cms_change_events AS older_event ON older_event.event_id = older.event_id
+            LEFT JOIN cms_publication_deliveries AS delivery
+                ON delivery.event_id = older.event_id AND delivery.status = 'succeeded'
+            WHERE older_event.status = 'enqueued' AND delivery.event_id IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM cms_event_topics AS newer
+                  JOIN cms_change_events AS newer_event
+                    ON newer_event.event_id = newer.event_id
+                  WHERE newer.site_id = older.site_id
+                    AND newer.source_id = older.source_id
+                    AND newer.generation > older.generation
+                    AND newer_event.status = 'enqueued'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM cms_event_supersessions AS supersession
+                  WHERE supersession.event_id = older.event_id
+              )
+        """).fetchone()[0]
+        if orphan_topics or missing_supersessions:
+            reasons.add("cms.supersession.invalid")
+        rows = self.bridge.connection.execute("""
+            SELECT supersession.event_id, supersession.superseded_by_event_id,
+                   older.site_id AS older_site_id, older.source_id AS older_source_id,
+                   older.generation AS older_generation,
+                   newer.site_id AS newer_site_id, newer.source_id AS newer_source_id,
+                   newer.generation AS newer_generation,
+                   delivery.status AS delivery_status
+            FROM cms_event_supersessions AS supersession
+            LEFT JOIN cms_event_topics AS older ON older.event_id = supersession.event_id
+            LEFT JOIN cms_event_topics AS newer
+                ON newer.event_id = supersession.superseded_by_event_id
+            LEFT JOIN cms_publication_deliveries AS delivery
+                ON delivery.event_id = supersession.event_id
+            ORDER BY supersession.event_id
+        """).fetchall()
+        for row in rows:
+            try:
+                if (
+                    row["older_site_id"] is None
+                    or row["newer_site_id"] is None
+                    or row["older_site_id"] != row["newer_site_id"]
+                    or row["older_source_id"] != row["newer_source_id"]
+                    or int(row["older_generation"]) >= int(row["newer_generation"])
+                    or row["delivery_status"] == "succeeded"
+                ):
+                    raise ValueError
+                self.bridge._load_event(
+                    row["event_id"], event_verifier, allow_superseded=True,
+                )
+                self.bridge._load_event(
+                    row["superseded_by_event_id"],
+                    event_verifier,
+                    allow_superseded=True,
+                )
+            except Exception:
+                reasons.add("cms.supersession.invalid")
+        return reasons
 
     def _versions(
         self,
@@ -504,13 +640,20 @@ class LocalizationHealthMonitor:
                 reasons.add("cms.event.awaiting_queue_resume")
                 continue
             try:
-                event, plan = self.bridge._load_event(row["event_id"], event_verifier)
+                superseded = self.bridge.connection.execute(
+                    "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
+                    (row["event_id"],),
+                ).fetchone() is not None
+                event, plan = self.bridge._load_event(
+                    row["event_id"], event_verifier, allow_superseded=superseded,
+                )
                 localization = event["localization"]
-                providers.add((
-                    localization["provider_id"],
-                    localization["model_id"],
-                    localization["model_version"],
-                ))
+                if not superseded:
+                    providers.add((
+                        localization["provider_id"],
+                        localization["model_id"],
+                        localization["model_version"],
+                    ))
                 queue_counts = self.queue.plan_counts(plan.plan_id)
                 readiness = self.release_store.readiness(
                     plan, approval_authority, now=now,
@@ -523,7 +666,9 @@ class LocalizationHealthMonitor:
                 (event["event_id"],),
             ).fetchone()
             delivery_status = delivery["status"] if delivery is not None else None
-            if delivery_status == "succeeded":
+            if superseded:
+                status = "superseded"
+            elif delivery_status == "succeeded":
                 status = "published"
             elif delivery_status == "failed":
                 status = "publication_failed"
@@ -622,6 +767,7 @@ class LocalizationHealthMonitor:
                 delivery_counts, delivery_reasons = self._check_deliveries(
                     publication_authority, now,
                 )
+                supersession_reasons = self._check_supersessions(event_verifier)
                 versions, event_reasons, provider_bindings = self._versions(
                     event_verifier, approval_authority, now,
                 )
@@ -629,6 +775,7 @@ class LocalizationHealthMonitor:
                 workflow_reasons.update(evidence_reasons)
                 workflow_reasons.update(approval_reasons)
                 workflow_reasons.update(delivery_reasons)
+                workflow_reasons.update(supersession_reasons)
                 workflow_reasons.update(event_reasons)
             except Exception:
                 storage_reasons.add("monitor.state_unreadable")
@@ -640,6 +787,7 @@ class LocalizationHealthMonitor:
             "release.approval_invalid",
             "cms.delivery.invalid",
             "cms.event.invalid",
+            "cms.supersession.invalid",
         }
         queue_reasons = {reason for reason in workflow_reasons if reason.startswith("queue.")}
         evidence_reasons = {

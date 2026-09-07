@@ -141,6 +141,7 @@ def change_event(*, targets=("de-AT", "sv-SE"), content_type="headline"):
         "event_id": "cms-event-release-1",
         "site_id": "public-website",
         "website_version": "website-2026-09-07.1",
+        "source_sequence": 184,
         "localization": {
             "source_id": "homepage.hero",
             "source_revision": "cms-184",

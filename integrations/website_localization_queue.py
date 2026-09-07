@@ -338,10 +338,17 @@ class LocalizationQueue:
         *,
         now: float | int | None = None,
         lease_seconds: float | int = 300,
+        eligible_plan_ids: tuple[str, ...] | None = None,
     ) -> ClaimedJob | None:
         worker_id = _field("worker_id", worker_id, limit=128)
         now = _timestamp("now", now)
         lease_seconds = _duration("lease_seconds", lease_seconds)
+        if eligible_plan_ids is not None:
+            if not isinstance(eligible_plan_ids, tuple):
+                raise LocalizationQueueBlocked("eligible_plan_ids must be an immutable tuple")
+            eligible_plan_ids = tuple(sorted({
+                _field("eligible_plan_id", value) for value in eligible_plan_ids
+            }))
         blocked_error: str | None = None
         claimed: ClaimedJob | None = None
         with _transaction(self.connection):
@@ -361,13 +368,30 @@ class LocalizationQueue:
                 WHERE status = 'leased' AND lease_expires_at <= ?
                   AND attempts < max_attempts
             """, (now, now, now))
-            row = self.connection.execute("""
-                SELECT * FROM localization_jobs
-                WHERE status IN ('pending', 'retry_wait')
-                  AND next_attempt_at <= ? AND attempts < max_attempts
-                ORDER BY created_at, target_locale, job_id
-                LIMIT 1
-            """, (now,)).fetchone()
+            if eligible_plan_ids is not None and not eligible_plan_ids:
+                row = None
+            elif eligible_plan_ids is None:
+                row = self.connection.execute("""
+                    SELECT * FROM localization_jobs
+                    WHERE status IN ('pending', 'retry_wait')
+                      AND next_attempt_at <= ? AND attempts < max_attempts
+                    ORDER BY created_at, target_locale, job_id
+                    LIMIT 1
+                """, (now,)).fetchone()
+            else:
+                placeholders = ",".join("?" for _ in eligible_plan_ids)
+                row = self.connection.execute(f"""
+                    SELECT jobs.* FROM localization_jobs AS jobs
+                    WHERE jobs.status IN ('pending', 'retry_wait')
+                      AND jobs.next_attempt_at <= ? AND jobs.attempts < jobs.max_attempts
+                      AND EXISTS (
+                          SELECT 1 FROM localization_plan_jobs AS mapping
+                          WHERE mapping.job_id = jobs.job_id
+                            AND mapping.plan_id IN ({placeholders})
+                      )
+                    ORDER BY jobs.created_at, jobs.target_locale, jobs.job_id
+                    LIMIT 1
+                """, (now, *eligible_plan_ids)).fetchone()
             if row is not None:
                 payload_hash = _hash_text(row["payload_json"])
                 if payload_hash != row["payload_sha256"]:

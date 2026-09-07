@@ -98,6 +98,7 @@ def _event_rows(bridge: Any) -> tuple[Any, ...]:
                   SELECT event_id FROM cms_publication_deliveries
                   WHERE status = 'succeeded'
               )
+              AND event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
             ORDER BY created_at, event_id
         """).fetchall())
         return tuple(
@@ -244,6 +245,7 @@ def run_service_tick(
             retry_base_seconds=translation_retry_base_seconds,
             retry_max_seconds=translation_retry_max_seconds,
             result_cache=result_cache,
+            eligible_plan_ids=tuple(plan_id for _, plan_id in events),
         )
     except Exception as error:
         return _runtime_error("translation", error)
