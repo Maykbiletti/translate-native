@@ -196,6 +196,7 @@ def completed_result(job, candidate):
             "status": "PASS",
             "guard": "translate-native-structure-and-token-gate",
         },
+        "review_confidence": {"target_native": "high", "source_fidelity": "high"},
         "human_review_required": False,
         "release_required": True,
     }

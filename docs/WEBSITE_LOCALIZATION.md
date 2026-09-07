@@ -122,19 +122,25 @@ glossary and policy versions must exactly match the versions already bound to
 the job; stale assets block before any provider call. The policy version owns
 the audience, tone profile, prompt rules, and review standard. Provider
 responses must use the exact phase, locale, and schema, contain no extra
-fields, and use NFC text. A wrong locale, malformed response, failed review,
-provider exception, or changed job binding blocks without producing a queue
-result.
+fields, and use NFC text. Each review must also report `confidence` as exactly
+`high` or `low`. Missing or unknown confidence is malformed and blocks; `high`
+does not replace either substantive review, while `low` adds a mandatory
+qualified-human-review requirement to the result. A wrong locale, malformed
+response, failed review, provider exception, or changed job binding blocks
+without producing a queue result.
 
 After both LLM reviews pass, the bundled local translation guard independently
 checks Unicode NFC, HTML/JSON/XML structure, placeholders, links, code,
 protected tokens, untranslated segments, and major omissions. Worker results
 bind source and target hashes, locales, content type, glossary and policy
 versions, provider/model identity, software version, and hashes of all three
-requests and responses. They retain no reviewer prose and still set
+requests and responses. The explicit per-phase confidence decision is carried
+in the result and remains bound through quality evidence and the signed
+approval. Results retain no reviewer prose and still set
 `release_required: true`; queue success therefore remains neither a signed
 release nor publication permission. Legal content additionally sets
-`human_review_required: true`.
+`human_review_required: true`; low confidence in either review sets the same
+fail-closed requirement for every content type.
 
 Premortem: a provider could answer in the wrong locale, merge creation and
 review, leak the source into the native-only judgment, return convincing but
@@ -251,8 +257,10 @@ deterministic test double.
 Every approval binds the exact source and target hashes, source and target
 locales, content type, glossary and policy versions, provider/model identity,
 worker schema, software version, queue-result hash, quality-receipt hash,
-approval lifetime, and signing-key identity. Legal content additionally needs
-a separately verified human-review receipt. Raw receipts are never stored.
+the explicit two-phase review confidence, approval lifetime, and signing-key
+identity. Legal content and any result with
+low native or fidelity confidence additionally need a separately verified
+human-review receipt. Raw receipts are never stored.
 Approvals for one deterministic job may be reused across different plan
 compositions, but a changed source, policy, glossary, provider, model, or
 software version produces a different job and therefore a cache miss. An
@@ -317,12 +325,14 @@ The adapter must return exactly this shape:
 
 The response is rejected if the request object was mutated, a binding differs,
 the receipt is empty or malformed, or the trusted quality verifier rejects it.
-Legal content requires a non-null human receipt and a separate human-review
-verifier. A receipt is evidence for the existing two ordered reviews—first
-source-blind native quality, then source-aware fidelity—not permission to
-collapse them into one score. Low confidence or a major defect must remain
-blocked and be routed through a new evidence revision to an independent model
-adapter or qualified native reviewer.
+The evidence request binds the explicit native and fidelity confidence values.
+Legal content and every result escalated by low review confidence require a
+non-null human receipt and a separate human-review verifier. Without both, the
+locale remains blocked. A receipt is evidence for the existing two ordered
+reviews—first source-blind native quality, then source-aware fidelity—not
+permission to collapse them into one score. A major defect still blocks the
+worker result entirely; it cannot be outweighed or converted into a confidence
+decision.
 
 Exact retries are safe: approved locales are reused, the outbox has a stable
 delivery identity, and a crash after signing an approval but before recording

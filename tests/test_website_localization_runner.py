@@ -68,12 +68,13 @@ def candidate(locale, text):
     }
 
 
-def review(locale, phase, status="PASS", findings=None):
+def review(locale, phase, status="PASS", findings=None, confidence="high"):
     return {
         "schema": WORKER.REVIEW_SCHEMA,
         "phase": phase,
         "locale": locale,
         "status": status,
+        "confidence": confidence,
         "blocking_defects": [] if findings is None else findings,
         "major_defects": [],
     }

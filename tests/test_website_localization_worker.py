@@ -72,13 +72,20 @@ def candidate(text="Bygg ditt företag med BLUN.", locale="sv-SE"):
     }
 
 
-def review(phase, status="PASS", locale="sv-SE", findings=None):
+def review(
+    phase,
+    status="PASS",
+    locale="sv-SE",
+    findings=None,
+    confidence="high",
+):
     findings = [] if findings is None else findings
     return {
         "schema": WORKER.REVIEW_SCHEMA,
         "phase": phase,
         "locale": locale,
         "status": status,
+        "confidence": confidence,
         "blocking_defects": findings,
         "major_defects": [],
     }
@@ -314,9 +321,51 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
         result = WORKER.run_localization_job(job("By continuing, you accept the terms.", "legal"), assets(), provider)
         self.assertTrue(result["human_review_required"])
 
+    def test_low_review_confidence_routes_any_content_to_human_review(self):
+        for low_phase in ("target_native", "source_fidelity"):
+            with self.subTest(phase=low_phase):
+                provider = ScriptedProvider([
+                    candidate(),
+                    review(
+                        "target_native",
+                        confidence=(
+                            "low" if low_phase == "target_native" else "high"
+                        ),
+                    ),
+                    review(
+                        "source_fidelity",
+                        confidence=(
+                            "low" if low_phase == "source_fidelity" else "high"
+                        ),
+                    ),
+                ])
+                result = WORKER.run_localization_job(job(), assets(), provider)
+                self.assertTrue(result["human_review_required"])
+                self.assertEqual(result["review_confidence"][low_phase], "low")
+
+    def test_missing_or_unknown_review_confidence_blocks(self):
+        missing = review("target_native")
+        missing.pop("confidence")
+        for response in (
+            missing,
+            review("target_native", confidence="unknown"),
+        ):
+            with self.subTest(response=response):
+                provider = ScriptedProvider([candidate(), response])
+                with self.assertRaises(WORKER.LocalizationWorkerBlocked) as caught:
+                    WORKER.run_localization_job(job(), assets(), provider)
+                self.assertEqual(
+                    caught.exception.code,
+                    "provider.response.invalid",
+                )
+
     def test_pass_result_retains_no_reviewer_prose(self):
         provider = self.successful_provider()
         result = WORKER.run_localization_job(job(), assets(), provider)
+        self.assertEqual(result["review_confidence"], {
+            "target_native": "high",
+            "source_fidelity": "high",
+        })
         serialized = json.dumps(result, ensure_ascii=False)
         self.assertNotIn("reason", serialized)
         self.assertNotIn("excerpt", serialized)

@@ -70,6 +70,7 @@ class Provider:
             "phase": request.phase,
             "locale": request.input["target"]["locale"],
             "status": "PASS",
+            "confidence": "high",
             "blocking_defects": [],
             "major_defects": [],
         }

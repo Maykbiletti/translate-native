@@ -53,8 +53,12 @@ def make_plan(targets=("de-AT", "sv-SE"), **overrides):
     return PLANNER.plan_website_localization(**values)
 
 
-def completed_result(job, candidate):
+def completed_result(job, candidate, *, review_confidence=None):
     payload = job.as_payload()
+    review_confidence = review_confidence or {
+        "target_native": "high",
+        "source_fidelity": "high",
+    }
     target_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
     phases = []
     for index, phase in enumerate(WORKER.PHASES):
@@ -83,7 +87,10 @@ def completed_result(job, candidate):
             "status": "PASS",
             "guard": "translate-native-structure-and-token-gate",
         },
-        "human_review_required": payload["content_type"] == "legal",
+        "review_confidence": review_confidence,
+        "human_review_required": (
+            payload["content_type"] == "legal" or "low" in review_confidence.values()
+        ),
         "release_required": True,
     }
 
@@ -135,7 +142,7 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.release_connection.close()
         self.queue_connection.close()
 
-    def complete(self, plan, translations=None):
+    def complete(self, plan, translations=None, *, review_confidence=None):
         translations = translations or {
             "de-AT": "Baue dein Unternehmen mit BLUN auf.",
             "sv-SE": "Bygg ditt företag med BLUN.",
@@ -144,7 +151,11 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         completed = {}
         for index, job in enumerate(sorted(plan.jobs, key=lambda item: item.as_payload()["target"]["locale"])):
             claim = self.queue.claim("worker", now=100 + index, lease_seconds=30)
-            result = completed_result(job, translations[claim.target_locale])
+            result = completed_result(
+                job,
+                translations[claim.target_locale],
+                review_confidence=review_confidence,
+            )
             self.queue.complete(claim, result, now=101 + index)
             completed[job.job_id] = result
         return completed
@@ -297,6 +308,37 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             human_review_verifier=human,
         )
         self.assertEqual(approved.target_locale, "sv-SE")
+
+    def test_low_confidence_result_requires_separate_human_review_receipt(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan, review_confidence={
+            "target_native": "low",
+            "source_fidelity": "high",
+        })
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.approve(plan, plan.jobs[0])
+        self.assertEqual(caught.exception.code, "human.receipt.required")
+
+        human = ExactReceiptVerifier("qualified-native-review")
+        approved = self.approve(
+            plan,
+            plan.jobs[0],
+            human_review_receipt="qualified-native-review",
+            human_review_verifier=human,
+        )
+        self.assertEqual(approved.target_locale, "sv-SE")
+
+    def test_low_confidence_cannot_drop_human_review_requirement(self):
+        plan = make_plan(("sv-SE",))
+        job = plan.jobs[0]
+        result = completed_result(job, "Bygg ditt företag med BLUN.", review_confidence={
+            "target_native": "high",
+            "source_fidelity": "low",
+        })
+        result["human_review_required"] = False
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            RELEASE._validate_result(job.as_payload(), result)
+        self.assertEqual(caught.exception.code, "result.human_review.invalid")
 
     def test_tampered_result_payload_or_signature_blocks_lookup(self):
         plan = make_plan(("sv-SE",))

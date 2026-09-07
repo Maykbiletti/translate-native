@@ -185,6 +185,7 @@ def completed_result(job, target_text):
             for phase in WORKER.PHASES
         ],
         "integrity": {"status": "PASS", "guard": "translate-native-structure-and-token-gate"},
+        "review_confidence": {"target_native": "high", "source_fidelity": "high"},
         "human_review_required": payload["content_type"] == "legal",
         "release_required": True,
     }

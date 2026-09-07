@@ -213,7 +213,8 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "schema", "worker_schema", "job_id", "source_sha256", "target_sha256",
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
-        "quality_passes", "integrity", "human_review_required", "release_required",
+        "quality_passes", "integrity", "review_confidence",
+        "human_review_required", "release_required",
     }
     if set(result) != expected:
         raise LocalizationReleaseBlocked("result.invalid")
@@ -253,7 +254,18 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         raise LocalizationReleaseBlocked("result.integrity.invalid")
     if result.get("release_required") is not True:
         raise LocalizationReleaseBlocked("result.release.invalid")
-    if result.get("human_review_required") is not (job["content_type"] == "legal"):
+    review_confidence = result.get("review_confidence")
+    if (
+        not isinstance(review_confidence, dict)
+        or set(review_confidence) != {"target_native", "source_fidelity"}
+        or any(value not in {"high", "low"} for value in review_confidence.values())
+    ):
+        raise LocalizationReleaseBlocked("result.review_confidence.invalid")
+    human_review_required = result.get("human_review_required")
+    expected_human_review = (
+        job["content_type"] == "legal" or "low" in review_confidence.values()
+    )
+    if not isinstance(human_review_required, bool) or human_review_required is not expected_human_review:
         raise LocalizationReleaseBlocked("result.human_review.invalid")
     return result
 
@@ -379,6 +391,7 @@ class LocalizationReleaseStore:
             "provider": result["provider"],
             "software_version": result["software_version"],
             "worker_schema": result["worker_schema"],
+            "review_confidence": result["review_confidence"],
             "result_sha256": result_hash,
             "quality_receipt_sha256": _hash_text(quality_receipt),
             "human_review_receipt_sha256": human_hash,
@@ -467,6 +480,7 @@ class LocalizationReleaseStore:
             "schema", "job_id", "source_sha256", "target_sha256", "source_locale",
             "target_locale", "content_type", "glossary_version", "policy_version",
             "provider", "software_version", "worker_schema", "result_sha256",
+            "review_confidence",
             "quality_receipt_sha256", "human_review_receipt_sha256", "approval_id",
             "approved_at", "expires_at",
         }
@@ -485,6 +499,7 @@ class LocalizationReleaseStore:
             "provider": result["provider"],
             "software_version": result["software_version"],
             "worker_schema": result["worker_schema"],
+            "review_confidence": result["review_confidence"],
             "result_sha256": row["result_sha256"],
             "approved_at": row["approved_at"],
             "expires_at": row["expires_at"],

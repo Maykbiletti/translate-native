@@ -102,6 +102,7 @@ class QualityEvidenceRequest:
     software_version: str
     source_text: str
     target_text: str
+    review_confidence: dict[str, str]
     human_review_required: bool
 
     def as_payload(self) -> dict[str, Any]:
@@ -633,6 +634,7 @@ def _request(
         "policy_version": result["policy_version"],
         "provider": json.loads(_canonical_json(result["provider"])),
         "software_version": result["software_version"],
+        "review_confidence": json.loads(_canonical_json(result["review_confidence"])),
         "human_review_required": result["human_review_required"],
     }
     request_id = "blun-l10n-evidence-" + _hash(_canonical_json(binding))

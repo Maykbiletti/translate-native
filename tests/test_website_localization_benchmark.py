@@ -110,6 +110,7 @@ def candidate_result(payload, text=None):
         "candidate": text,
         "quality_passes": [phase(name) for name in ("transcreation", "target_native", "source_fidelity")],
         "integrity": {"status": "PASS", "guard": "translate-native-structure-and-token-gate"},
+        "review_confidence": {"target_native": "high", "source_fidelity": "high"},
         "human_review_required": False,
         "release_required": True,
     }

@@ -207,7 +207,8 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "schema", "worker_schema", "job_id", "source_sha256", "target_sha256",
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
-        "quality_passes", "integrity", "human_review_required", "release_required",
+        "quality_passes", "integrity", "review_confidence",
+        "human_review_required", "release_required",
     }
     if not isinstance(result, dict) or set(result) != expected_keys:
         raise BenchmarkBlocked("benchmark.candidate.invalid")
@@ -231,6 +232,16 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "guard": "translate-native-structure-and-token-gate",
     }:
         raise BenchmarkBlocked("benchmark.candidate.invalid")
+    review_confidence = result["review_confidence"]
+    if (
+        not isinstance(review_confidence, dict)
+        or set(review_confidence) != {"target_native", "source_fidelity"}
+        or any(value not in {"high", "low"} for value in review_confidence.values())
+    ):
+        raise BenchmarkBlocked("benchmark.candidate.invalid")
+    expected_human_review = (
+        job["content_type"] == "legal" or "low" in review_confidence.values()
+    )
     bindings = (
         result["schema"] == _WORKER.RESULT_SCHEMA,
         result["worker_schema"] == _WORKER.WORKER_SCHEMA,
@@ -244,7 +255,8 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         result["policy_version"] == job["policy_version"],
         result["provider"] == job["provider"],
         result["software_version"] == job["software_version"],
-        result["human_review_required"] is (job["content_type"] == "legal"),
+        isinstance(result["human_review_required"], bool),
+        result["human_review_required"] is expected_human_review,
         result["release_required"] is True,
     )
     if not all(bindings):
