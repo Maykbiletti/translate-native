@@ -197,6 +197,44 @@ verification errors stop the attempt before any other resolver runs. Tests
 cover exact offline recovery, policy invalidation, expiry, and database
 tampering across separate queue and translation-memory connections.
 
+## Blind quality benchmark against an external baseline
+
+`integrations/website_localization_benchmark.py` provides the evidence gate for
+quality claims such as “better than DeepL.” The module does not call DeepL or
+any other baseline service. A host may supply a fixed comparison artifact that
+was obtained through the provider's official API or another lawful route. The
+artifact binds the baseline identity and version, exact source hash, target
+locale, content type, target hash, and complete target text. Credentials,
+transport code, and undocumented scraping do not belong in this repository.
+
+Each case compares one fully validated worker result with one bound baseline
+artifact. A host-held blinding key assigns them reproducibly to anonymous `A`
+and `B` positions. Neither reviewer request contains candidate-provider or
+baseline identity. The first review receives only the two targets, the exact
+locale profile, audience, tone, target terminology, and content type. The
+second review receives the complete source and glossary for a separate
+fidelity judgment. Both must prefer the same variant; a preferred variant with
+any blocking or major defect is an invalid review. The local structure guard
+independently checks both variants. Raw texts and reviewer prose are absent
+from stored case results; only hashes, counts, blinded commitments, and
+unblinded preferences remain.
+
+`summarize_benchmark` applies a one-sided exact sign test and minimum case,
+decisive-rate, and win-rate thresholds separately to every required locale.
+One candidate blocking/major/integrity defect blocks that locale. Missing,
+small, tied, mixed-version, or duplicate samples block the superiority claim,
+and a strong result in one language can never average away a weak result in
+another. Maltesisch (`mt-MT`) and Finnisch (`fi-FI`) are the initial mandatory
+lanes; the same versioned contract extends to all 24 EU language profiles.
+
+Premortem: reviewers could learn which output came from which system, a large
+language could hide a weak low-resource language, or an old baseline could be
+quietly reused. Keyed A/B assignment and origin-free review payloads reduce
+identity bias; per-locale hard gates prevent averaging; exact baseline,
+reviewer, benchmark, source, locale, and content bindings reject stale or
+mixed evidence. The harness permits a claim only from measured blind evidence,
+never from a model grading its own prose.
+
 ## Signed translation memory and website readiness
 
 `integrations/website_localization_release.py` turns a completed queue result
