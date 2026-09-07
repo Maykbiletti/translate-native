@@ -150,8 +150,9 @@ def run_next_localization_job(
     make the website version publishable. Failures retain stable codes and
     optional hashes only; provider prose and candidate text never enter status.
     """
-    if not isinstance(queue, _QUEUE.LocalizationQueue):
-        raise TypeError("queue must be LocalizationQueue")
+    required_queue_methods = ("claim", "renew", "complete", "retry", "fail")
+    if any(not callable(getattr(queue, name, None)) for name in required_queue_methods):
+        raise TypeError("queue must provide the LocalizationQueue transition contract")
     if not callable(provider_resolver) or not callable(assets_resolver):
         raise TypeError("provider and asset resolvers must be callable")
     cache_resolve = None if result_cache is None else getattr(result_cache, "resolve", None)

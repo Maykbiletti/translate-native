@@ -475,6 +475,47 @@ native digit/number-word representations, multiple offers, source blindness,
 queue terminal failures and the actual worker-to-signed-publication path.
 Scripted adapters test enforcement, not real native quality or DeepL superiority.
 
+## One-transition service loop
+
+`integrations/website_localization_service.py` composes the queue runner,
+quality-evidence coordinator, signed release store, and CMS outbox into one
+host-callable tick. It opens no database, socket, credential, or model by
+itself. The host injects the provider and asset resolvers, evidence adapter,
+receipt verifiers, signing authorities, publisher, worker identities, clock,
+and durable stores.
+
+Each tick performs at most one externally active pipeline step. A due signed
+CMS delivery has first priority; otherwise the service advances at most one
+completed locale through independent evidence and signed approval; otherwise
+it claims and processes at most one translation job. Active leases and backoff
+windows remain untouched. An existing delivery that is not yet due and an
+evidence request waiting for retry do not prevent unrelated queued work from
+advancing. Successful delivery removes that event from future scheduling.
+
+The return schema `blun.website-localization-service-tick.v1` contains only the
+phase, status, stable event/plan/job/delivery IDs, target locale, attempt, and
+stable error code. It never contains source or target text, reviewer prose,
+receipts, signatures, provider exceptions, or transport details. A blocked
+signature, database, queue, evidence, or publication transition cannot fall
+through to a weaker phase in the same tick.
+
+The runner accepts the narrow `LocalizationQueue` transition contract rather
+than a process-local Python class identity. This matters because the public
+files are independently loadable adapters: a queue created by the CMS bridge
+can now be passed to the runner without copying state or opening a second
+database. The host remains trusted and the queue itself still validates every
+payload, lease, hash, and transition transactionally.
+
+Premortem: a scheduler could publish before all locales are signed, call a
+translation provider after an evidence failure, starve a ready outbox behind a
+large queue, leak prose in operational status, or duplicate work after a
+restart. Delivery-first ordering, one active transition per tick, immediate
+fail-closed return, content-free outcomes, and reuse of the existing durable
+leases and idempotency keys address those failures. End-to-end tests count the
+provider, evidence, and publisher calls across translation, approval, and
+delivery ticks; they also cover delivery priority, provider/evidence/publisher
+failure, event tampering, and an idle completed service.
+
 ## Read-only health and readiness monitor
 
 `integrations/website_localization_health.py` gives operators one
