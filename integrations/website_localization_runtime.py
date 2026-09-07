@@ -115,6 +115,8 @@ def _validate_dependencies(values: Mapping[str, Any]) -> MappingProxyType:
     keys = set(copied)
     if keys - REQUIRED_TICK_KEYS - OPTIONAL_TICK_KEYS or REQUIRED_TICK_KEYS - keys:
         raise LocalizationRuntimeBlocked("runtime.dependencies.invalid")
+    if "result_cache" in copied:
+        raise LocalizationRuntimeBlocked("runtime.result_cache.external_forbidden")
     if not callable(copied["provider_resolver"]):
         raise LocalizationRuntimeBlocked("runtime.provider_resolver.invalid")
     if not callable(copied["assets_resolver"]):
@@ -138,9 +140,6 @@ def _validate_dependencies(values: Mapping[str, Any]) -> MappingProxyType:
     human = copied.get("human_review_verifier")
     if human is not None:
         _capability(human, "verify", "runtime.human_review_verifier.invalid")
-    cache = copied.get("result_cache")
-    if cache is not None:
-        _capability(cache, "resolve", "runtime.result_cache.invalid")
     bounds = {
         "translation_lease_seconds": (86_400.0, False),
         "translation_retry_base_seconds": (86_400.0, True),
@@ -250,12 +249,18 @@ class WebsiteLocalizationRuntime:
             "runtime.supervisor_stale_after_seconds.invalid",
         )
 
-        self._dependencies = validated
         self._clock = clock
         self.queue = _QUEUE.LocalizationQueue(queue_connection)
         self.release_store = _RELEASE.LocalizationReleaseStore(
             release_connection, self.queue,
         )
+        runtime_dependencies = dict(validated)
+        runtime_dependencies["result_cache"] = (
+            self.release_store.verified_result_cache(
+                validated["approval_authority"],
+            )
+        )
+        self._dependencies = MappingProxyType(runtime_dependencies)
         self.bridge = _CMS.WebsiteLocalizationCMSBridge(
             cms_connection, self.queue, self.release_store,
         )

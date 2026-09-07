@@ -202,6 +202,33 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         values.update(overrides)
         return RUNTIME.WebsiteLocalizationRuntime(**values)
 
+    def ingest(self, runtime, event=None):
+        event = self.event() if event is None else event
+        signature = self.event_authority.sign(
+            CMS._canonical_json(event).encode("utf-8"),
+        )
+        runtime.bridge.ingest_change(
+            event, signature, self.event_authority, now=self.clock(),
+        )
+
+    def seed_approval_then_replace_operational_stores(self):
+        runtime = self.runtime()
+        self.ingest(runtime)
+        for now in (100, 101):
+            self.clock.value = now
+            self.assertEqual(runtime.run_once(now=now).status, "ran")
+
+        old = self.connections
+        self.connections = [
+            sqlite3.connect(":memory:"),
+            old[1],
+            sqlite3.connect(":memory:"),
+            sqlite3.connect(":memory:"),
+            sqlite3.connect(":memory:"),
+        ]
+        for index in (0, 2, 3, 4):
+            old[index].close()
+
     @staticmethod
     def event():
         return {
@@ -228,13 +255,7 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
 
     def test_one_runtime_reaches_cms_and_reports_same_state_healthy(self):
         runtime = self.runtime()
-        event = self.event()
-        signature = self.event_authority.sign(
-            CMS._canonical_json(event).encode("utf-8"),
-        )
-        runtime.bridge.ingest_change(
-            event, signature, self.event_authority, now=self.clock(),
-        )
+        self.ingest(runtime)
 
         phases = []
         for now in (100, 101, 102):
@@ -257,6 +278,52 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
                  if item.component == "supervisor").status,
             "healthy",
         )
+
+    def test_runtime_restores_only_its_signed_local_translation_memory(self):
+        self.seed_approval_then_replace_operational_stores()
+        calls = []
+        self.dependencies["assets_resolver"] = lambda payload: calls.append("assets")
+        self.dependencies["provider_resolver"] = lambda payload: calls.append("provider")
+        runtime = self.runtime()
+        self.ingest(runtime)
+
+        self.clock.value = 102
+        outcome = runtime.run_once(now=102)
+
+        self.assertEqual(outcome.tick["phase"], "release")
+        self.assertEqual(outcome.tick["status"], "delivery_ready")
+        self.assertEqual(calls, [])
+        self.assertIs(runtime._dependencies["result_cache"].store, runtime.release_store)
+        self.assertIs(
+            runtime._dependencies["result_cache"].authority,
+            self.approval_authority,
+        )
+        self.clock.value = 103
+        delivered = runtime.run_once(now=103)
+        self.assertEqual(delivered.tick["phase"], "delivery")
+        self.assertEqual(delivered.tick["status"], "succeeded")
+        self.assertEqual(calls, [])
+        self.assertEqual(len(self.publisher.requests), 1)
+
+    def test_tampered_runtime_fallback_blocks_before_external_resolvers(self):
+        self.seed_approval_then_replace_operational_stores()
+        self.connections[1].execute(
+            "UPDATE localization_approvals SET result_json = '{}'",
+        )
+        self.connections[1].commit()
+        calls = []
+        self.dependencies["assets_resolver"] = lambda payload: calls.append("assets")
+        self.dependencies["provider_resolver"] = lambda payload: calls.append("provider")
+        runtime = self.runtime()
+        self.ingest(runtime)
+
+        self.clock.value = 102
+        outcome = runtime.run_once(now=102)
+
+        self.assertEqual(outcome.tick["phase"], "translation")
+        self.assertEqual(outcome.tick["status"], "retry_wait")
+        self.assertEqual(outcome.tick["error_code"], "runner.cache.unexpected")
+        self.assertEqual(calls, [])
 
     def test_runtime_renews_outer_lease_for_each_child_operation_kind(self):
         self.dependencies.update({
@@ -312,6 +379,21 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RUNTIME.LocalizationRuntimeBlocked, "runtime.publisher.invalid"
+        ):
+            self.runtime()
+
+        after = tuple(connection.total_changes for connection in self.connections)
+        self.assertEqual(before, after)
+
+    def test_preflight_rejects_external_result_cache_without_schema_writes(self):
+        self.dependencies["result_cache"] = type(
+            "ExternalCache", (), {"resolve": lambda *args, **kwargs: None},
+        )()
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.result_cache.external_forbidden",
         ):
             self.runtime()
 

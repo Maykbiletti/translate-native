@@ -172,9 +172,11 @@ exhaustion, opaque errors, and partial provider failure.
 
 ### Signed local fallback
 
-The runner's optional `result_cache` is deliberately consulted before asset or
-provider resolution. Production hosts should pass only
-`LocalizationReleaseStore.verified_result_cache(authority)`. That adapter
+The low-level runner's optional `result_cache` is deliberately consulted before
+asset or provider resolution. The complete production runtime does not accept a
+host-supplied cache: it always constructs
+`LocalizationReleaseStore.verified_result_cache(authority)` from its own local
+signed release store and the already validated approval authority. That adapter
 loads the exact deterministic job from the local translation memory, rechecks
 the stored result hash, approval payload hash, complete job binding, approval
 ID, signing-key identity, signature, and expiry, and returns the already
@@ -698,8 +700,10 @@ The `dependencies` mapping must contain exactly the configured provider and
 asset resolvers, evidence provider, quality verifier, inbound event verifier,
 approval and publication authorities, CMS publisher, three worker IDs, and an
 evidence revision. Optional values are limited to the documented lease, retry,
-attempt, approval-expiry, human-review, and result-cache settings accepted by
-the service tick. Unknown and missing keys, invalid capabilities, identifiers,
+attempt, approval-expiry, and human-review settings accepted by the service
+tick. A host-supplied result cache is rejected before schema creation; the
+runtime inserts only its own signed local translation-memory adapter. Unknown
+and missing keys, invalid capabilities, identifiers,
 retry ranges, duplicate connections, and already-active host transactions
 block before any store schema is created. The mapping is copied and frozen;
 runtime status and `repr` never include its objects or values.
