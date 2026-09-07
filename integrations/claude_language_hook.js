@@ -41,6 +41,15 @@ const ENCLOSED_LATIN_LETTER_RANGES = [
   [0x1F150, 0x1F169],
   [0x1F170, 0x1F189]
 ];
+const MORSE_LETTER_CODES = new Set([
+  ".-", "-...", "-.-.", "-..", ".", "..-.", "--.", "....", "..", ".---",
+  "-.-", ".-..", "--", "-.", "---", ".--.", "--.-", ".-.", "...", "-", "..-",
+  "...-", ".--", "-..-", "-.--", "--.."
+]);
+const ROMAN_NUMERAL_VALUES = new Map([
+  ["I", 1], ["V", 5], ["X", 10], ["L", 50], ["C", 100], ["D", 500], ["M", 1000]
+]);
+const ROMAN_SUBTRACTIVE_PAIRS = new Set(["IV", "IX", "XL", "XC", "CD", "CM"]);
 let currentHookInput = null;
 
 function canonicalText(value) {
@@ -66,9 +75,46 @@ function readBoundedUtf8Descriptor(descriptor, maximumBytes, label) {
   return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size));
 }
 
+function isRomanNumber(value) {
+  let previousToken = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < value.length;) {
+    const current = ROMAN_NUMERAL_VALUES.get(value[index]);
+    const next = ROMAN_NUMERAL_VALUES.get(value[index + 1]);
+    let token = current;
+    if (next > current) {
+      if (!ROMAN_SUBTRACTIVE_PAIRS.has(value.slice(index, index + 2))) return false;
+      token = next - current;
+      index += 2;
+    } else {
+      index += 1;
+    }
+    if (token > previousToken) return false;
+    previousToken = token;
+  }
+  return true;
+}
+
 function containsLanguageCharacters(value) {
   const text = String(value || "");
   if (/\p{L}/u.test(text)) return true;
+  const normalizedMorse = text
+    .replace(/[\u00B7\u2022]/gu, ".")
+    .replace(/[\u2010-\u2015\u2212]/gu, "-");
+  if (/(?:^|[^.\-])\.\.\.---\.\.\.(?=$|[^.\-])/.test(normalizedMorse)) return true;
+  const morseRun = /(?:^|[^.\-])((?:[.\-]{1,4}[\t\n\r /]+){2,}[.\-]{1,4})(?=$|[^.\-])/g;
+  for (const match of normalizedMorse.matchAll(morseRun)) {
+    const tokens = match[1].trim().split(/[\s/]+/u).filter(Boolean);
+    if (tokens.length < 3 || !tokens.every((token) => MORSE_LETTER_CODES.has(token))) continue;
+    if (tokens.some((token) => token.includes(".")) && tokens.some((token) => token.includes("-"))) {
+      return true;
+    }
+  }
+  for (const match of text.matchAll(/[\u2160-\u217F]+/gu)) {
+    const romanText = match[0].normalize("NFKC").toUpperCase();
+    if ([...match[0]].length >= 2 && romanText.length >= 3 && !isRomanNumber(romanText)) {
+      return true;
+    }
+  }
   let enclosedEmojiLetters = 0;
   let brailleCells = 0;
   let signWritingSymbols = 0;
@@ -541,14 +587,20 @@ function stateDirectory() {
   return path.join(runtimeConfig().runtime, "claude-hooks");
 }
 
-function hookIdentity(input, requireExplicitAgent = false) {
+function hookIdentity(input, agentPolicy = "optional") {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Claude hook input has no valid identity");
   }
+  if (!["optional", "required", "forbidden"].includes(agentPolicy)) {
+    throw new Error("Claude hook identity has no valid agent policy");
+  }
   const session = input.session_id;
   const hasAgent = Object.prototype.hasOwnProperty.call(input, "agent_id");
-  if (requireExplicitAgent && !hasAgent) {
+  if (agentPolicy === "required" && !hasAgent) {
     throw new Error("Claude hook input has no explicit agent_id");
+  }
+  if (agentPolicy === "forbidden" && hasAgent) {
+    throw new Error("Claude hook input has an unexpected agent_id");
   }
   const agent = hasAgent ? input.agent_id : "main";
   if (typeof session !== "string" || session.length === 0) {
@@ -1153,6 +1205,13 @@ function blockedStop(input, reason) {
   };
 }
 
+function malformedStopState() {
+  return {
+    continue: false,
+    stopReason: "BLUN Language Guard stopped a response after receiving invalid Claude stop state. Repair or reconnect the hook, then retry the response."
+  };
+}
+
 function startupMessage(eventName, healthy) {
   const subject = eventName === "SubagentStart" ? "This subagent" : "This Claude session";
   const policyInstruction = hostPolicyInstruction();
@@ -1377,13 +1436,17 @@ async function stop(input, expectedEvent) {
     emit(blockedStop(input, `The BLUN hook route expected ${expectedEvent} input and cannot trust this mismatched event. Fail closed and retry through the configured Claude hook.`));
     return;
   }
+  if (typeof input.stop_hook_active !== "boolean") {
+    emit(malformedStopState());
+    return;
+  }
   if (!input || typeof input.last_assistant_message !== "string") {
     emit(blockedStop(input, "The BLUN hook received no valid last_assistant_message and cannot verify the actual final response. Fail closed and retry after Claude supplies the documented Stop output field."));
     return;
   }
   let hook;
   try {
-    hook = hookIdentity(input, expectedEvent === "SubagentStop");
+    hook = hookIdentity(input, expectedEvent === "SubagentStop" ? "required" : "forbidden");
   } catch (_) {
     emit(blockedStop(input, "The BLUN hook received no valid explicit Claude identity for this stop event. Fail closed and retry after Claude supplies the documented identity fields."));
     return;

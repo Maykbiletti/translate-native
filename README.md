@@ -147,6 +147,26 @@ The same module exposes `guarded_send` and `guarded_send_async` for API, Telegra
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 
+### Version 6.42.18: Roman-symbol text bypass
+
+Version 6.42.18 protects readable text written with Unicode Roman numeral symbols at Claude's complete `Stop` and `SubagentStop` boundary. Contiguous multi-symbol runs are compatibility-normalized and require an exact signed delivery grant when they cannot be parsed as a non-increasing additive/subtractive Roman number. Literal, lowercase, compound-symbol, and numeric HTML forms such as `ⅭⅠⅤⅠⅭ` now block, while genuine numeric output such as `Ⅻ`, `ⅯⅯⅩⅩⅥ`, additive forms, and isolated symbols remain compatible.
+
+### Version 6.42.17: formatted and compact Morse boundaries
+
+Version 6.42.17 closes the remaining formatting gaps in Claude's complete `Stop` and `SubagentStop` response check. Valid separated Morse runs now remain protected when parentheses, punctuation, or emoji immediately follow the final code, and the exact bounded compact SOS prosign `...---...` is protected in literal, HTML-encoded, and standard typographic form. Short decoration, incomplete compact signals, and longer unbounded dot-dash runs remain compatible.
+
+### Version 6.42.16: Morse output bypass
+
+Version 6.42.16 classifies readable Morse output as natural language at Claude's complete `Stop` and `SubagentStop` boundary. Literal ASCII, standard typographic dots and dashes, numeric HTML references, and emoji-prefixed runs now require an exact signed delivery grant when they contain at least three separated valid Morse letter codes using both signal types. Isolated marks, ellipses, and one- or two-token decorative separators remain compatible to avoid punctuation false positives.
+
+### Version 6.42.15: exact Stop continuation state
+
+Version 6.42.15 requires Anthropic's documented `stop_hook_active` field to be an exact boolean on both `Stop` and `SubagentStop`. Missing, string, numeric, array, object, and null values now terminate processing with `continue: false` before any protected grant state is read. The generic stop reason exposes no response text, and regression tests prove that malformed main and child inputs cannot consume the independently valid one-time grant that a subsequent schema-correct stop still uses.
+
+### Version 6.42.14: symmetric Stop identity isolation
+
+Version 6.42.14 rejects `agent_id` on the dedicated main-thread `Stop` route, matching Anthropic's event schema where the field is added specifically for `SubagentStop`. Together with the existing child-route requirement, neither stop boundary can address the other's grant namespace: a forged main stop carrying a child ID blocks before protected state is read, and the exact child retains its independently consumable one-time grant.
+
 ### Version 6.42.13: isolated SubagentStop identity
 
 Version 6.42.13 routes Claude's `SubagentStop` event through a dedicated hook mode and requires its documented `agent_id` explicitly. The trusted route and the reported hook event must match before any protected state is read, so a malformed child stop cannot omit its identity, claim the main-thread route, or consume the parent's one-time grant. Ordinary `Stop` inputs retain the documented absent-`agent_id` fallback to `main` for compatibility.
@@ -688,7 +708,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.42.13 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.42.18 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

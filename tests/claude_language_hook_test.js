@@ -39,9 +39,14 @@ async function main() {
     agent: "main"
   });
   assert.throws(
-    () => hookIdentity({ session_id: "session" }, true),
+    () => hookIdentity({ session_id: "session" }, "required"),
     /explicit agent_id/,
     "SubagentStop identity resolution must never fall back to the main agent"
+  );
+  assert.throws(
+    () => hookIdentity({ session_id: "session", agent_id: "child" }, "forbidden"),
+    /unexpected agent_id/,
+    "main-thread Stop identity resolution must never address a subagent"
   );
   for (const malformedIdentity of [
     {},
@@ -146,6 +151,39 @@ async function main() {
   }
   for (const signWritingSymbol of ["𝠀", "&#120832;", "&#x1D801;", "𝪇𝪈"]) {
     assert(!hasNaturalLanguage(signWritingSymbol), `${signWritingSymbol} must remain non-language output`);
+  }
+  for (const morseText of [
+    ".... . .-.. .-.. ---",
+    "... --- ...",
+    "···· · ·−·· ·−·· −−−",
+    "&#46;&#46;&#46; &#45;&#45;&#45; &#46;&#46;&#46;",
+    "✅ ... --- ...",
+    "(... --- ...)",
+    "... --- ...!",
+    "... --- ...✅",
+    "...---...",
+    "(···−−−···)",
+    "(&#46;&#46;&#46;&#45;&#45;&#45;&#46;&#46;&#46;)"
+  ]) {
+    assert(hasNaturalLanguage(morseText), `${morseText} must require verification`);
+  }
+  for (const morseDecoration of [
+    ".", "...", "---", ". -", "--- ---", "... ...", "...---", "---...", "...---...---..."
+  ]) {
+    assert(!hasNaturalLanguage(morseDecoration), `${morseDecoration} must remain non-language output`);
+  }
+  for (const romanText of [
+    "ⅭⅠⅤⅠⅭ",
+    "ⅬⅠⅤⅠⅮ",
+    "ⅽⅰⅴⅰⅽ",
+    "ⅭⅣⅠⅭ",
+    "&#8557;&#8544;&#8548;&#8544;&#8557;",
+    "&#x216D;&#x2160;&#x2164;&#x2160;&#x216D;"
+  ]) {
+    assert(hasNaturalLanguage(romanText), `${romanText} must require verification`);
+  }
+  for (const romanNumber of ["Ⅰ", "Ⅻ", "ⅯⅯⅩⅩⅥ", "ⅠⅡⅢ", "ⅯⅯⅯⅯ", "ⅤⅠⅤ"]) {
+    assert(!hasNaturalLanguage(romanNumber), `${romanNumber} must remain a numeric output`);
   }
   assert(
     hasNaturalLanguage("\u{1DA84}"),
@@ -2083,6 +2121,66 @@ async function main() {
     reason: "subagent parent isolation regression complete"
   }, environment)).stdout, "");
 
+  const stopStateSession = { ...common, session_id: "strict-stop-continuation-state" };
+  const stopStateStarted = await runHook("session-start", stopStateSession, environment);
+  assert.strictEqual(stopStateStarted.code, 0, stopStateStarted.stderr);
+  const stopStateMainTool = {
+    ...tool,
+    ...stopStateSession,
+    tool_use_id: "tool-strict-stop-state-main"
+  };
+  const stopStateChildTool = {
+    ...tool,
+    ...stopStateSession,
+    agent_id: "strict-stop-state-child",
+    tool_use_id: "tool-strict-stop-state-child"
+  };
+  assert.strictEqual((await runHook("post-tool", stopStateMainTool, environment)).stdout, "");
+  assert.strictEqual((await runHook("post-tool", stopStateChildTool, environment)).stdout, "");
+  for (const invalidStopState of [undefined, null, 0, 1, "false", "true", {}, []]) {
+    const malformedStateInput = {
+      ...stopStateSession,
+      hook_event_name: "Stop",
+      last_assistant_message: clean
+    };
+    if (invalidStopState !== undefined) malformedStateInput.stop_hook_active = invalidStopState;
+    const malformedStateStop = await runHook("stop", malformedStateInput, environment);
+    const malformedStateHardStop = JSON.parse(malformedStateStop.stdout);
+    assert.strictEqual(malformedStateHardStop.continue, false);
+    assert.strictEqual(malformedStateHardStop.decision, undefined);
+    assert.match(malformedStateHardStop.stopReason, /invalid Claude stop state/);
+    assert(!malformedStateHardStop.stopReason.includes(clean), "invalid-state stop reason must not expose candidate text");
+  }
+  const malformedChildStateStop = await runHook("subagent-stop", {
+    ...stopStateSession,
+    agent_id: "strict-stop-state-child",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: clean,
+    stop_hook_active: "true"
+  }, environment);
+  const malformedChildStateHardStop = JSON.parse(malformedChildStateStop.stdout);
+  assert.strictEqual(malformedChildStateHardStop.continue, false);
+  assert.strictEqual(malformedChildStateHardStop.decision, undefined);
+  assert.match(malformedChildStateHardStop.stopReason, /invalid Claude stop state/);
+  assert.strictEqual((await runHook("stop", {
+    ...stopStateSession,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment)).stdout, "", "malformed stop state must not consume the main grant");
+  assert.strictEqual((await runHook("subagent-stop", {
+    ...stopStateSession,
+    agent_id: "strict-stop-state-child",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment)).stdout, "", "malformed stop state must not consume the child grant");
+  assert.strictEqual((await runHook("session-end", {
+    ...stopStateSession,
+    hook_event_name: "SessionEnd",
+    reason: "strict stop continuation state regression complete"
+  }, environment)).stdout, "");
+
   for (const invalidMessage of [undefined, null, { text: clean }]) {
     const malformedInput = {
       ...common,
@@ -2144,6 +2242,15 @@ async function main() {
     tool_use_id: "tool-agent-identity-collision"
   };
   assert.strictEqual((await runHook("post-tool", collisionAgentTool, environment)).stdout, "");
+  const forgedMainAgentCollision = await runHook("stop", {
+    ...common,
+    agent_id: "[object Object]",
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(forgedMainAgentCollision.stdout).decision, "block");
+  assert.match(JSON.parse(forgedMainAgentCollision.stdout).reason, /explicit Claude identity/);
   const malformedAgentCollision = await runHook("subagent-stop", {
     ...common,
     agent_id: {},
@@ -2289,6 +2396,73 @@ async function main() {
     stop_hook_active: false
   }, environment);
   assert.strictEqual(singleBrailleCellStop.stdout, "");
+
+  const morseAlphabeticStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: ".... . .-.. .-.. ---",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(morseAlphabeticStop.stdout).decision, "block");
+
+  const encodedMorseSubagentStop = await runHook("subagent-stop", {
+    ...common,
+    agent_id: "child-morse-alphabetic",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#46;&#46;&#46; &#45;&#45;&#45; &#46;&#46;&#46;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(encodedMorseSubagentStop.stdout).decision, "block");
+
+  const wrappedMorseStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "(... --- ...)✅",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(wrappedMorseStop.stdout).decision, "block");
+
+  const compactMorseSubagentStop = await runHook("subagent-stop", {
+    ...common,
+    agent_id: "child-compact-morse",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "(&#46;&#46;&#46;&#45;&#45;&#45;&#46;&#46;&#46;)!",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(compactMorseSubagentStop.stdout).decision, "block");
+
+  const morseDecorationStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "--- ---",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(morseDecorationStop.stdout, "");
+
+  const disguisedRomanStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "\u216D\u2160\u2164\u2160\u216D",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(disguisedRomanStop.stdout).decision, "block");
+
+  const encodedDisguisedRomanSubagentStop = await runHook("subagent-stop", {
+    ...common,
+    agent_id: "child-disguised-roman",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "&#x216D;&#x2160;&#x2164;&#x2160;&#x216D;",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(JSON.parse(encodedDisguisedRomanSubagentStop.stdout).decision, "block");
+
+  const romanNumberStop = await runHook("stop", {
+    ...common,
+    hook_event_name: "Stop",
+    last_assistant_message: "\u216F\u216F\u2169\u2169\u2165",
+    stop_hook_active: false
+  }, environment);
+  assert.strictEqual(romanNumberStop.stdout, "");
 
   const signWritingStop = await runHook("stop", {
     ...common,
