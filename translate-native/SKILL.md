@@ -56,6 +56,12 @@ Read [references/native-translation-standard.md](references/native-translation-s
 
 ## Reconstruct the meaning
 
+For prices, offers, discounts, trials, subscriptions or commercial conditions in
+any language, read [references/commercial-localization.md](references/commercial-localization.md).
+Preserve each condition's association with its offer, not just the numbers.
+Keep project-specific protected names and slogans configurable; this public
+skill defines no universal brand, product or price list.
+
 Read the entire source before drafting. Build an internal meaning map containing:
 
 - facts, claims, relationships, and chronology;
