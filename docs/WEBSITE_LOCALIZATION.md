@@ -142,6 +142,23 @@ unstructured prose, or pass a candidate with a broken placeholder. Exact
 phase and locale schemas, separate inputs, ordered calls, version matching,
 response hashes, and the final local integrity gate make each case fail closed.
 
+### Secure HTTP provider adapter
+
+`integrations/website_localization_http_provider.py` is the bundled transport
+for connecting a host-owned model gateway to the worker contract. It sends one
+request for one locale and one phase, binds every response to the deterministic
+request ID and canonical request hash, obtains credentials from a host callback,
+rejects redirects, and leaves all bounded retries to the durable queue. The
+adapter is vendor-neutral and can sit in front of a user's own LLM or any
+provider-specific proxy without placing credentials or vendor logic in jobs.
+
+The complete public envelope, authentication, idempotency, response, and
+failure contract is documented in
+[`WEBSITE_LOCALIZATION_HTTP_PROVIDER.md`](WEBSITE_LOCALIZATION_HTTP_PROVIDER.md).
+The transport proves neither native quality nor superiority over an external
+baseline; those decisions remain with the two independent review stages and
+the blinded benchmark.
+
 ## Queue-to-worker execution
 
 `integrations/website_localization_runner.py` is the narrow bridge between the
