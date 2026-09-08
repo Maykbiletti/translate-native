@@ -578,6 +578,13 @@ Health never signs or stores a report. A fully completed campaign without its
 first report is degraded with `benchmark.campaign.report_missing` until an
 explicit `summarize` call creates it; altered or unverifiable report bytes block
 with `benchmark.campaign.report_invalid` and are never regenerated in place.
+The production benchmark runtime performs that explicit finalization directly
+after the last successful case. If the process stopped between committing that
+case and creating the report, the next otherwise idle benchmark tick detects
+the exact complete matrix and closes the gap without resolving another case.
+Both paths guard the signing boundary before and after report construction, so
+loss of the outer supervisor lease prevents persistence and a later tick can
+retry safely. A stored report suppresses all automatic re-signing.
 Expired leases and overdue actionable work degrade health; any terminal work
 failure, altered row, invalid attestation, or invalid final report blocks it.
 Live backoff and recent incomplete work remain healthy and never imply that the

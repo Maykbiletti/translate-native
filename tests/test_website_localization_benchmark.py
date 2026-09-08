@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1952,6 +1953,63 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(len(reviewer.requests), 1)
         self.assertNotIn("private reviewer failure", json.dumps(runtime.status()))
 
+    def test_benchmark_runtime_finalizes_after_last_case_and_after_crash_gap(self):
+        for completed_case in (False, True):
+            with self.subTest(completed_case=completed_case):
+                runtime, _, _, _, _ = self._benchmark_runtime_fixture()
+                outcome = (
+                    CAMPAIGN.BenchmarkCampaignOutcome(
+                        work_id="benchmark-work-" + "a" * 64,
+                        target_locale="mt-MT",
+                        suite_case_key="homepage-headline",
+                        status="succeeded",
+                        attempt=1,
+                        max_attempts=3,
+                        next_attempt_at=100,
+                        error_code=None,
+                        error_detail_hash=None,
+                        result_sha256="b" * 64,
+                    )
+                    if completed_case else None
+                )
+                guard_calls = []
+                with (
+                    mock.patch.object(
+                        BENCHMARK_RUNTIME._CAMPAIGN,
+                        "run_next_benchmark_case",
+                        return_value=outcome,
+                    ),
+                    mock.patch.object(
+                        runtime.campaign_store,
+                        "report_finalization_required",
+                        return_value=True,
+                    ) as required,
+                    mock.patch.object(
+                        runtime.campaign_store,
+                        "summarize",
+                        return_value={"status": "BLOCK"},
+                    ) as summarize,
+                ):
+                    observed = runtime.run_once(
+                        operation_guard=guard_calls.append,
+                        lease_seconds=240,
+                    )
+
+                self.assertIs(observed, outcome)
+                required.assert_called_once_with(
+                    runtime.policy, runtime.campaign_id,
+                )
+                summarize.assert_called_once()
+                arguments = summarize.call_args
+                self.assertEqual(arguments.args[:3], (
+                    runtime.policy,
+                    runtime.campaign_id,
+                    runtime.evidence_authority,
+                ))
+                self.assertEqual(arguments.kwargs["now"], 100)
+                arguments.kwargs["operation_guard"]()
+                self.assertEqual(guard_calls, [240.0])
+
     def test_cross_loaded_deepl_adapter_store_and_inputs_complete_campaign_case(self):
         benchmark_policy = campaign_policy()
         authority = CampaignAuthority()
@@ -2265,20 +2323,51 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertFalse(pending_report.report_ready)
             self.assertEqual(authority.sign_calls, sign_calls)
             self.assertEqual(connection.total_changes, before)
+            self.assertTrue(store.report_finalization_required(
+                benchmark_policy, campaign_id,
+            ))
+
+            lost_guard_calls = []
+
+            def lose_guard_after_signing():
+                lost_guard_calls.append(len(lost_guard_calls) + 1)
+                if len(lost_guard_calls) == 2:
+                    raise RuntimeError("outer lease lost")
+
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.summarize(
+                    benchmark_policy,
+                    campaign_id,
+                    authority,
+                    now=101,
+                    operation_guard=lose_guard_after_signing,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.operation_guard_failed",
+            )
+            self.assertEqual(lost_guard_calls, [1, 2])
+            self.assertEqual(authority.sign_calls, sign_calls + 1)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM benchmark_campaign_reports"
+            ).fetchone()[0], 0)
 
             report = store.summarize(
-                benchmark_policy, campaign_id, authority, now=101,
+                benchmark_policy, campaign_id, authority, now=102,
             )
-            self.assertEqual(authority.sign_calls, sign_calls + 1)
+            self.assertEqual(authority.sign_calls, sign_calls + 2)
             first_report_json = connection.execute("""
                 SELECT report_json FROM benchmark_campaign_reports
                 WHERE campaign_id = ?
             """, (campaign_id,)).fetchone()[0]
+            self.assertFalse(store.report_finalization_required(
+                benchmark_policy, campaign_id,
+            ))
             repeated = store.summarize(
-                benchmark_policy, campaign_id, authority, now=102,
+                benchmark_policy, campaign_id, authority, now=103,
             )
             self.assertEqual(repeated, report)
-            self.assertEqual(authority.sign_calls, sign_calls + 1)
+            self.assertEqual(authority.sign_calls, sign_calls + 2)
             self.assertEqual(
                 connection.execute("""
                     SELECT report_json FROM benchmark_campaign_reports
@@ -2290,11 +2379,11 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertEqual(report["status"], "BLOCK")
             self.assertFalse(report["superiority_claim_allowed"])
             health = store.health(
-                benchmark_policy, campaign_id, authority, now=102,
+                benchmark_policy, campaign_id, authority, now=103,
             )
             self.assertEqual(health.status, "healthy")
             self.assertTrue(health.report_ready)
-            self.assertEqual(authority.sign_calls, sign_calls + 1)
+            self.assertEqual(authority.sign_calls, sign_calls + 2)
             self.assertEqual(
                 report["claim_block_reasons"],
                 ["eu_target_locale_coverage_incomplete"],
@@ -2305,8 +2394,11 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 WHERE campaign_id = ?
             """, ("0" * 64, campaign_id))
             connection.commit()
+            self.assertFalse(store.report_finalization_required(
+                benchmark_policy, campaign_id,
+            ))
             blocked = store.health(
-                benchmark_policy, campaign_id, authority, now=103,
+                benchmark_policy, campaign_id, authority, now=104,
             )
             self.assertEqual(blocked.status, "blocked")
             self.assertEqual(
@@ -2316,13 +2408,13 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertFalse(blocked.report_ready)
             with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
                 store.summarize(
-                    benchmark_policy, campaign_id, authority, now=103,
+                    benchmark_policy, campaign_id, authority, now=104,
                 )
             self.assertEqual(
                 caught.exception.code,
                 "benchmark.campaign.report_invalid",
             )
-            self.assertEqual(authority.sign_calls, sign_calls + 1)
+            self.assertEqual(authority.sign_calls, sign_calls + 2)
 
 
 if __name__ == "__main__":

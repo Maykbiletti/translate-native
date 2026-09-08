@@ -450,7 +450,7 @@ class WebsiteLocalizationBenchmarkRuntime:
             operation_guard=review_guard,
             clock=self.clock,
         )
-        return _CAMPAIGN.run_next_benchmark_case(
+        outcome = _CAMPAIGN.run_next_benchmark_case(
             self.campaign_store,
             self.policy,
             self.campaign_id,
@@ -466,6 +466,24 @@ class WebsiteLocalizationBenchmarkRuntime:
             retry_base_seconds=retry_base_seconds,
             retry_max_seconds=retry_max_seconds,
         )
+        if (
+            outcome is None or outcome.status == "succeeded"
+        ) and self.campaign_store.report_finalization_required(
+            self.policy, self.campaign_id,
+        ):
+            report_guard = (
+                None
+                if operation_guard is None
+                else lambda: operation_guard(lease_seconds)
+            )
+            self.campaign_store.summarize(
+                self.policy,
+                self.campaign_id,
+                self.evidence_authority,
+                now=self.clock(),
+                operation_guard=report_guard,
+            )
+        return outcome
 
     def status(self):
         return self.campaign_store.status(self.policy, self.campaign_id)
@@ -479,10 +497,22 @@ class WebsiteLocalizationBenchmarkRuntime:
             stale_after_seconds=stale_after_seconds,
         )
 
-    def summarize(self):
+    def summarize(
+        self, *, operation_guard: Callable[[float], Any] | None = None,
+        lease_seconds: Any = 300,
+    ):
+        if operation_guard is not None and not callable(operation_guard):
+            raise TypeError("operation_guard must be callable")
+        lease_seconds = _CAMPAIGN._duration(lease_seconds)
+        report_guard = (
+            None
+            if operation_guard is None
+            else lambda: operation_guard(lease_seconds)
+        )
         return self.campaign_store.summarize(
             self.policy,
             self.campaign_id,
             self.evidence_authority,
             now=self.clock(),
+            operation_guard=report_guard,
         )

@@ -726,6 +726,24 @@ class BenchmarkCampaignStore:
             result_sha256s.append(row["result_sha256"])
         return results, tuple(result_sha256s)
 
+    def report_finalization_required(self, policy: Any, campaign_id: str) -> bool:
+        """Return whether exact complete work still lacks its immutable report."""
+        policy = _BENCHMARK._validate_policy(policy)
+        with _transaction(self.connection):
+            self._verify_binding_locked(policy, campaign_id)
+            incomplete = self.connection.execute("""
+                SELECT 1 FROM benchmark_campaign_work
+                WHERE campaign_id = ? AND status != 'succeeded' LIMIT 1
+            """, (campaign_id,)).fetchone()
+            if incomplete is not None:
+                return False
+            self._complete_results_locked(policy, campaign_id)
+            report = self.connection.execute("""
+                SELECT 1 FROM benchmark_campaign_reports
+                WHERE campaign_id = ?
+            """, (campaign_id,)).fetchone()
+            return report is None
+
     def _verified_report_row(
         self,
         row: Any,
@@ -971,9 +989,23 @@ class BenchmarkCampaignStore:
         authority: Any,
         *,
         now: Any = None,
+        operation_guard: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
         policy = _BENCHMARK._validate_policy(policy)
         now = _timestamp(now)
+        if operation_guard is not None and not callable(operation_guard):
+            raise TypeError("operation_guard must be callable")
+
+        def guard() -> None:
+            if operation_guard is None:
+                return
+            try:
+                operation_guard()
+            except Exception:
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.operation_guard_failed",
+                ) from None
+
         with _transaction(self.connection):
             results, result_sha256s = self._complete_results_locked(
                 policy, campaign_id,
@@ -983,10 +1015,12 @@ class BenchmarkCampaignStore:
                 WHERE campaign_id = ?
             """, (campaign_id,)).fetchone()
         if stored is not None:
+            guard()
             return self._verified_report_row(
                 stored, policy, campaign_id, results, result_sha256s,
                 authority, now=now,
             )
+        guard()
         report = _BENCHMARK.summarize_benchmark(
             policy, results, evidence_authority=authority,
         )
@@ -997,6 +1031,7 @@ class BenchmarkCampaignStore:
         if len(report_json.encode("utf-8")) > MAX_RESULT_BYTES:
             raise BenchmarkCampaignBlocked("benchmark.campaign.report_invalid")
         results_sha256 = _results_sha256(result_sha256s)
+        guard()
         with _transaction(self.connection):
             current_results, current_sha256s = self._complete_results_locked(
                 policy, campaign_id,
