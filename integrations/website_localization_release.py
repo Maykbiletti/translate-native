@@ -99,6 +99,11 @@ class IndependentModelReviewVerifier(Protocol):
         receipt: str,
         provider: dict[str, str],
         primary_provider: dict[str, str],
+        content_type: str,
+        policy_version: str,
+        review_confidence: dict[str, str],
+        quality_profile: dict[str, str],
+        commercial_profile: str | None,
     ) -> bool: ...
 
 
@@ -440,8 +445,13 @@ class LocalizationReleaseStore:
                         target_text=result["candidate"],
                         target_locale=job["target"]["locale"],
                         receipt=model_receipt,
-                        provider=provider,
-                        primary_provider=result["provider"],
+                        provider=json.loads(_canonical_json(provider)),
+                        primary_provider=json.loads(_canonical_json(result["provider"])),
+                        content_type=result["content_type"],
+                        policy_version=result["policy_version"],
+                        review_confidence=json.loads(_canonical_json(result["review_confidence"])),
+                        quality_profile=json.loads(_canonical_json(result["quality_profile"])),
+                        commercial_profile=job.get("commercial_profile"),
                     ) is True
                 except Exception:
                     model_ok = False

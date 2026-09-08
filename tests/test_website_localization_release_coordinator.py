@@ -347,8 +347,39 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             "version": self.plan.jobs[0].target.quality_profile_version,
             "sha256": self.plan.jobs[0].target.quality_profile_sha256,
         })
+        self.assertIsNone(payload["commercial_profile"])
         self.assertTrue(payload["request_id"].startswith("blun-l10n-evidence-"))
         self.assertNotIn("target_locales", json.dumps(payload))
+
+        commercial_event = change_event(targets=("sv-SE",), content_type="commercial")
+        commercial_plan = PLANNER.plan_from_mapping(commercial_event["localization"])
+        commercial_job = commercial_plan.jobs[0]
+        commercial_result = completed_result(
+            commercial_job,
+            "Spara upp till 480 € per år. Alla priser är exklusive moms.",
+            review_confidence={"target_native": "high", "source_fidelity": "low"},
+        )
+        commercial_result_hash = hashlib.sha256(
+            json.dumps(
+                commercial_result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        commercial_request = COORDINATOR._request(
+            commercial_event,
+            commercial_plan,
+            commercial_job,
+            commercial_result,
+            commercial_result_hash,
+            "commercial-evidence-1",
+        )
+        self.assertEqual(
+            commercial_request.as_payload()["commercial_profile"],
+            PLANNER.COMMERCIAL_PROFILE,
+        )
 
     def test_outer_operation_guard_blocks_before_evidence_provider_call(self):
         self.complete_all()

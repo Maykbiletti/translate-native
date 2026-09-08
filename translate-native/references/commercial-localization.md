@@ -70,9 +70,12 @@ The planner binds `translate-native.commercial.v1` into the job and plan IDs.
 The worker uses the existing three ordered passes; the source-fidelity response
 additionally requires `commercial_review`. It contains all ten named dimensions,
 coverage and per-offer evidence with exact source/target character spans.
-Missing/malformed checks, changed terms, uncertainty or an all-absent report
-produce no result or approval. Uncertainty is terminal for that attempt and
-requires host routing; the worker does not secretly call an alternative provider.
+Missing/malformed checks and changed terms produce no result or approval.
+Uncertainty or an all-absent report preserves the candidate only as a
+low-confidence fidelity result. It remains unpublishable until the host verifies
+exactly one qualified native/domain review or an independent second-provider
+model receipt bound to the commercial profile and policy. The worker does not
+secretly call an alternative provider.
 
 The validator checks evidence shape and offsets, **not semantic truth**. A model
 can misinterpret text or omit a fact while claiming completeness. The host's

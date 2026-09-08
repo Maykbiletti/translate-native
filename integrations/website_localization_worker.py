@@ -563,6 +563,7 @@ def run_localization_job(
         },
     })
     fidelity_response, request_hash, response_hash = _invoke(provider, fidelity_request)
+    commercial_escalation_required = False
     if commercial:
         # Hash above binds the complete evidence, even though the ordinary
         # review parser below consumes only the original compatible fields.
@@ -573,7 +574,9 @@ def run_localization_job(
                 commercial_review, job["source"]["text"], candidate, job["commercial_profile"],
             )
         except _COMMERCIAL.CommercialReviewBlocked as error:
-            raise LocalizationWorkerBlocked(error.code, retryable=False) from None
+            if error.code != "review.commercial.independent_review_required":
+                raise LocalizationWorkerBlocked(error.code, retryable=False) from None
+            commercial_escalation_required = True
     findings, fidelity_confidence = _review(
         fidelity_response,
         "source_fidelity",
@@ -585,6 +588,11 @@ def run_localization_job(
             retryable=True,
             finding_hashes=findings,
         )
+    if commercial_escalation_required:
+        # Preserve a syntactically valid candidate for targeted review without
+        # allowing the primary provider's unresolved commercial interpretation
+        # to satisfy the release gate on its own.
+        fidelity_confidence = "low"
     phases.append({
         "phase": "source_fidelity",
         "request_sha256": request_hash,

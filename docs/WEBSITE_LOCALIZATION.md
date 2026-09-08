@@ -306,9 +306,10 @@ Every approval binds the exact source and target hashes, source and target
 locales, content type, glossary and policy versions, provider/model identity,
 worker schema, software version, queue-result hash, quality-receipt hash,
 the explicit two-phase review confidence, approval lifetime, and signing-key
-identity. Legal content and any result with
-low native or fidelity confidence additionally need a separately verified
-human-review receipt. Raw receipts are never stored.
+identity. Legal content additionally needs a separately verified qualified-human
+receipt. For non-legal content, low native or fidelity confidence requires
+exactly one separately verified qualified-human receipt or an independent
+second-provider model receipt. Raw receipts are never stored.
 Approvals for one deterministic job may be reused across different plan
 compositions, but a changed source, policy, glossary, provider, model, or
 software version produces a different job and therefore a cache miss. An
@@ -627,12 +628,14 @@ code-point offsets with an exclusive end. The exact response contract and
 dimension guidance are supplied in each fidelity request.
 
 Equivalent checks require evidence; absent dimensions require empty items.
-An all-absent report, uncertain coverage, changed terms, missing dimensions,
-invalid spans or a normal PASS without the commercial report block the worker.
-`review.commercial.independent_review_required` is a content-free terminal
-queue reason for operator routing to an independent adapter/native reviewer,
-not an automatic retry or permission to publish. A new reviewed attempt needs
-an appropriately versioned host policy. The old known-good translation remains.
+Changed terms, missing dimensions, invalid spans or a normal PASS without the
+commercial report block the worker without a publishable result. Uncertain
+coverage, an uncertain dimension or an all-absent report instead preserve the
+candidate as a low-confidence fidelity result. That result is fail-closed and
+requires exactly one independently verified second-provider or qualified-human
+review before signing; it is neither an automatic retry nor permission to
+publish. The evidence request and independent verifier both receive the bound
+commercial profile and policy context. The old known-good translation remains.
 Do not classify legal text as commercial to bypass the legal human-review gate.
 
 The full commercial response hash stays in the normal quality-pass receipt;
@@ -643,9 +646,11 @@ complete. The receipt verifier must validate evidence held by the trusted host;
 the worker retains hashes, not reviewer prose. No new provider is hardwired.
 
 Premortem: counting digits could reject native number words yet accept swapped
-tariff prices. The profile instead requires per-offer semantic comparison,
-allows equivalent locale forms, and blocks unresolved evidence. Keeping source
-evidence out of the native pass prevents source-shaped copy from receiving an
+tariff prices, while treating uncertainty as an ordinary PASS could bypass the
+release gate. The profile instead requires per-offer semantic comparison,
+allows equivalent locale forms, and converts unresolved evidence into a bound
+low-confidence review route. Keeping source evidence out of the native pass
+prevents source-shaped copy from receiving an
 artificial advantage. Version-bound job IDs prevent old policy/cache reuse.
 Tests exercise the contract across all 24 locale routes, ten defect dimensions,
 native digit/number-word representations, multiple offers, source blindness,

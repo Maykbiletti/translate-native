@@ -92,28 +92,46 @@ class CommercialLocalizationTests(unittest.TestCase):
             WORKER._validated_job(after)
         self.assertNotIn("commercial_profile", job(SOURCE, "marketing"))
 
-    def test_each_dimension_blocks_known_changes_or_uncertainty(self):
+    def test_each_dimension_blocks_known_changes_and_routes_uncertainty(self):
         for dimension in PROFILE.DIMENSIONS:
-            for verdict in ("changed", "uncertain"):
-                with self.subTest(dimension=dimension, verdict=verdict):
-                    report = evidence()
-                    report["checks"][dimension] = {"status": verdict, "items": []}
-                    with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
-                        self.run_worker(report)
-                    expected = "changed" if verdict == "changed" else "independent_review_required"
-                    self.assertEqual(error.exception.code, "review.commercial." + expected)
-                    self.assertFalse(error.exception.retryable)
+            report = evidence()
+            report["checks"][dimension] = {"status": "changed", "items": []}
+            with self.subTest(dimension=dimension, verdict="changed"):
+                with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
+                    self.run_worker(report)
+                self.assertEqual(error.exception.code, "review.commercial.changed")
+                self.assertFalse(error.exception.retryable)
 
-    def test_missing_coverage_dimension_or_evidence_never_passes(self):
+            report = evidence()
+            report["checks"][dimension] = {"status": "uncertain", "items": []}
+            with self.subTest(dimension=dimension, verdict="uncertain"):
+                result, _ = self.run_worker(report)
+                self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
+                self.assertTrue(result["independent_review_required"])
+
+    def test_malformed_evidence_blocks_while_unresolved_coverage_routes_to_review(self):
         mutations = []
         report = evidence(); del report["checks"]["renewal"]; mutations.append(report)
         report = evidence(); report["checks"]["tax_status"]["items"] = []; mutations.append(report)
-        report = evidence(); report["coverage"] = "uncertain"; mutations.append(report)
         report = evidence(); report["schema"] = "old"; mutations.append(report)
-        report = evidence(); report["checks"] = {n: {"status": "not_present", "items": []} for n in PROFILE.DIMENSIONS}; mutations.append(report)
         for report in mutations:
             with self.subTest(report=report), self.assertRaises(WORKER.LocalizationWorkerBlocked):
                 self.run_worker(report)
+        for report in (
+            {**evidence(), "coverage": "uncertain"},
+            {
+                "schema": SCHEMA,
+                "coverage": "complete",
+                "checks": {
+                    name: {"status": "not_present", "items": []}
+                    for name in PROFILE.DIMENSIONS
+                },
+            },
+        ):
+            with self.subTest(report=report):
+                result, _ = self.run_worker(report)
+                self.assertTrue(result["independent_review_required"])
+                self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
 
     def test_invalid_offsets_types_and_duplicate_evidence_block(self):
         for offsets in ([True, 2], [-1, 3], [0, 99999], [2, 2], [2, 1], "0:3", [0, 1.5]):
@@ -134,8 +152,9 @@ class CommercialLocalizationTests(unittest.TestCase):
             self.run_worker(report)
         report = evidence()
         report["checks"]["offer_assignment"] = {"status": "not_present", "items": []}
-        with self.assertRaises(WORKER.LocalizationWorkerBlocked):
-            self.run_worker(report)
+        result, _ = self.run_worker(report)
+        self.assertTrue(result["independent_review_required"])
+        self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
 
     def test_no_numeric_regex_rejects_semantically_reviewed_native_forms(self):
         # Contract-level fixtures, not claims of independent native approval.
@@ -201,11 +220,11 @@ class CommercialLocalizationTests(unittest.TestCase):
             self.assertFalse(store.readiness(changed, authority, now=302).ready)
             self.assertEqual(store.cached_result(plan.jobs[0].as_payload(), authority, now=302), cached)
 
-    def test_uncertainty_is_terminal_in_queue_without_result(self):
+    def test_uncertainty_survives_queue_but_requires_bound_independent_review(self):
         plan = make_plan(targets=("sv-SE",), source_text=SOURCE, content_type="commercial")
         report = evidence()
         report["checks"]["tax_status"] = {"status": "uncertain", "items": []}
-        with sqlite3.connect(":memory:") as connection:
+        with sqlite3.connect(":memory:") as connection, sqlite3.connect(":memory:") as release_db:
             queue = RUNNER._QUEUE.LocalizationQueue(connection)
             queue.enqueue_plan(plan, now=100)
             outcome = RUNNER.run_next_localization_job(
@@ -215,10 +234,41 @@ class CommercialLocalizationTests(unittest.TestCase):
                     audience="Swedish customers", tone_profile="Clear and natural",
                 ), clock=Clock(),
             )
-            self.assertEqual(outcome.status, "failed")
-            self.assertEqual(outcome.error_code, "review.commercial.independent_review_required")
-            self.assertIsNone(outcome.result_sha256)
+            self.assertEqual(outcome.status, "succeeded")
+            self.assertIsNotNone(outcome.result_sha256)
             self.assertIsNone(queue.claim("another-worker", now=1000))
+            release_queue = RELEASE._QUEUE.LocalizationQueue(connection)
+            store = RELEASE.LocalizationReleaseStore(release_db, release_queue)
+            authority = HmacAuthority()
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as blocked:
+                store.approve(
+                    plan, plan.jobs[0].job_id, "quality-receipt",
+                    ExactReceiptVerifier(), authority, now=300,
+                )
+            self.assertEqual(blocked.exception.code, "human.receipt.required")
+            verifier = ExactReceiptVerifier("commercial-independent-receipt")
+            review = {
+                "schema": RELEASE.INDEPENDENT_MODEL_REVIEW_SCHEMA,
+                "provider": {
+                    "id": "independent-commercial-reviewer",
+                    "model_id": "offer-fidelity-review",
+                    "model_version": "2026-09-08",
+                },
+                "receipt": "commercial-independent-receipt",
+            }
+            store.approve(
+                plan, plan.jobs[0].job_id, "quality-receipt",
+                ExactReceiptVerifier(), authority, now=301,
+                independent_model_review=review,
+                independent_model_review_verifier=verifier,
+            )
+            self.assertTrue(store.readiness(plan, authority, now=302).ready)
+            self.assertEqual(verifier.calls[0]["content_type"], "commercial")
+            self.assertEqual(verifier.calls[0]["commercial_profile"], SCHEMA)
+            self.assertEqual(verifier.calls[0]["policy_version"], "native-web-1")
+            self.assertEqual(
+                verifier.calls[0]["review_confidence"]["source_fidelity"], "low",
+            )
 
     def test_many_offer_evidence_items_survive_without_price_bag_matching(self):
         source = "\n".join(f"Offer {i}: €{i + 10} a month, billed annually." for i in range(100))

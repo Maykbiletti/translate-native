@@ -374,6 +374,14 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             "model_id": "king",
             "model_version": "2026-08-29",
         })
+        self.assertEqual(verifier.calls[0]["content_type"], "headline")
+        self.assertEqual(verifier.calls[0]["policy_version"], "native-web-1")
+        self.assertEqual(verifier.calls[0]["review_confidence"], {
+            "target_native": "low",
+            "source_fidelity": "high",
+        })
+        self.assertEqual(verifier.calls[0]["quality_profile"]["locale"], "sv-SE")
+        self.assertIsNone(verifier.calls[0]["commercial_profile"])
         self.store.lookup(plan, plan.jobs[0].job_id, self.authority, now=201)
 
     def test_same_provider_is_not_an_independent_model_adapter(self):
