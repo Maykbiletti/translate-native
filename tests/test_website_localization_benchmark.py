@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import sqlite3
 import sys
 import unittest
 from pathlib import Path
@@ -27,6 +28,7 @@ PLANNER = load("blun_test_benchmark_planner", ROOT / "integrations" / "website_l
 WORKER = load("blun_test_benchmark_worker", ROOT / "integrations" / "website_localization_worker.py")
 BENCHMARK = load("blun_test_website_localization_benchmark", ROOT / "integrations" / "website_localization_benchmark.py")
 SUITE = load("blun_test_website_localization_benchmark_suite", ROOT / "integrations" / "website_localization_benchmark_suite.py")
+CAMPAIGN = load("blun_test_website_localization_benchmark_campaign", ROOT / "integrations" / "website_localization_benchmark_campaign.py")
 SUITE_MANIFEST = SUITE.manifest()
 
 
@@ -281,6 +283,38 @@ class HmacNativeReferenceVerifier:
         return hmac.compare_digest(self.receipt(request), receipt)
 
 
+class CampaignAuthority(HmacBenchmarkAuthority):
+    def sign(self, payload):
+        digest = hmac.new(self.key, payload, hashlib.sha256).digest()
+        return CAMPAIGN._BENCHMARK.BenchmarkSignature(
+            algorithm=self.algorithm,
+            key_id=self.key_id,
+            signature=base64.b64encode(digest).decode("ascii"),
+        )
+
+
+class CampaignNativeReferenceVerifier(HmacNativeReferenceVerifier):
+    def receipt(self, request):
+        payload = CAMPAIGN._BENCHMARK._canonical_json(request).encode("utf-8")
+        return base64.b64encode(
+            hmac.new(self.key, payload, hashlib.sha256).digest()
+        ).decode("ascii")
+
+
+class CampaignCandidateReviewer:
+    def __init__(self):
+        self.requests = []
+
+    def review(self, request):
+        self.requests.append(request)
+        marker = fixture_copy(request.target_locale)["candidate"]
+        preferred = next(
+            item["label"] for item in request.input["variants"]
+            if marker in item["text"]
+        )
+        return review_response(request, preferred)
+
+
 def native_reference(
     payload, benchmark_policy, verifier, authority, text=None,
     *, reviewer_id="qualified-native-reviewer-17",
@@ -298,6 +332,57 @@ def native_reference(
         qualification_receipt=verifier.receipt(request),
         native_reference_verifier=verifier,
         evidence_authority=authority,
+    )
+
+
+def campaign_policy(**overrides):
+    return CAMPAIGN._BENCHMARK.BenchmarkPolicy(
+        **{**CAMPAIGN.asdict(policy()), **overrides},
+    )
+
+
+def campaign_inputs(payload, benchmark_policy, verifier, authority):
+    benchmark = CAMPAIGN._BENCHMARK
+    candidate = candidate_result(payload)
+    baseline_text = _target_fixture(payload, "baseline")
+    evidence_id = "fixture-" + payload["job_id"]
+    baseline_artifact = benchmark.create_baseline_artifact(
+        payload,
+        baseline_text,
+        benchmark_policy,
+        {
+            "schema": benchmark.BASELINE_PROVENANCE_SCHEMA,
+            "method": "lawful_fixture",
+            "evidence_id": evidence_id,
+            "evidence_sha256": hashlib.sha256(
+                (evidence_id + payload["source"]["sha256"] + baseline_text).encode()
+            ).hexdigest(),
+        },
+        evidence_authority=authority,
+    )
+    reference_text = _target_fixture(payload, "reference")
+    request = benchmark.native_reference_verification_request(
+        payload,
+        reference_text,
+        benchmark_policy,
+        reviewer_id="qualified-native-reviewer-17",
+        reviewer_version="credential-2026-08-30",
+    )
+    native_artifact = benchmark.create_native_reference_artifact(
+        payload,
+        reference_text,
+        benchmark_policy,
+        reviewer_id="qualified-native-reviewer-17",
+        reviewer_version="credential-2026-08-30",
+        qualification_receipt=verifier.receipt(request),
+        native_reference_verifier=verifier,
+        evidence_authority=authority,
+    )
+    return CAMPAIGN.BenchmarkCaseInputs(
+        candidate_result=candidate,
+        baseline_artifact=baseline_artifact,
+        assets=assets(payload["target"]["locale"]),
+        native_reference_artifact=native_artifact,
     )
 
 
@@ -1240,6 +1325,201 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 policy(), report, [], evidence_authority=self.authority,
             )
         self.assertEqual(caught.exception.code, "benchmark.report.binding_mismatch")
+
+    def test_progress_callback_runs_before_each_external_review(self):
+        payload = job()
+        phases = []
+        reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
+        self.run_benchmark(
+            payload, candidate_result(payload), baseline(payload), assets(),
+            policy(), reviewer, blinding_key=self.key,
+            progress_callback=phases.append,
+        )
+        self.assertEqual(phases, ["target_native", "source_fidelity"])
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, candidate_result(payload), baseline(payload), assets(),
+                policy(), reviewer, blinding_key=self.key,
+                progress_callback="not-callable",
+            )
+        self.assertEqual(caught.exception.code, "benchmark.progress.invalid")
+
+    def test_campaign_plans_exact_complete_eu_matrix_and_replays_idempotently(self):
+        benchmark_policy = campaign_policy(
+            required_locales=CAMPAIGN._BENCHMARK.EU_BENCHMARK_TARGET_LOCALES,
+        )
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+            self.assertEqual(store.create(benchmark_policy, now=101), campaign_id)
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.create(benchmark_policy, max_attempts=4, now=102)
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.attempts_mismatch",
+            )
+            status = store.status(benchmark_policy, campaign_id)
+            self.assertEqual(status["work_count"], 23 * len(SUITE.SOURCE_CASES))
+            self.assertEqual(status["counts"]["pending"], 345)
+            self.assertFalse(status["complete"])
+            rows = connection.execute("""
+                SELECT target_locale, suite_case_key
+                FROM benchmark_campaign_work
+            """).fetchall()
+            self.assertEqual(len(set(map(tuple, rows))), 345)
+            self.assertNotIn("en-IE", {row["target_locale"] for row in rows})
+
+    def test_campaign_policy_change_creates_new_identity_and_tampering_blocks(self):
+        first = campaign_policy()
+        second = campaign_policy(candidate_model_version="2026-09-08")
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            first_id = store.create(first, now=100)
+            second_id = store.create(second, now=101)
+            self.assertNotEqual(first_id, second_id)
+            connection.execute("""
+                UPDATE benchmark_campaign_work SET suite_case_key = 'exchanged-case'
+                WHERE work_id = (
+                    SELECT work_id FROM benchmark_campaign_work
+                    WHERE campaign_id = ? LIMIT 1
+                )
+            """, (first_id,))
+            connection.commit()
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.status(first, first_id)
+            self.assertEqual(caught.exception.code, "benchmark.campaign.state_invalid")
+
+    def test_campaign_recovers_expired_lease_and_rejects_stale_completion(self):
+        benchmark_policy = campaign_policy()
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+            stale = store.claim(
+                benchmark_policy, campaign_id, "worker-a",
+                now=100, lease_seconds=5,
+            )
+            recovered = store.claim(
+                benchmark_policy, campaign_id, "worker-b",
+                now=106, lease_seconds=5,
+            )
+            self.assertEqual(recovered.work_id, stale.work_id)
+            self.assertEqual(recovered.attempt, 2)
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.transition_failure(
+                    benchmark_policy, stale, "reviewer.timeout",
+                    retryable=True, now=106,
+                )
+            self.assertEqual(caught.exception.code, "benchmark.campaign.lease_lost")
+
+    def test_campaign_dependency_failure_is_bounded_and_content_free(self):
+        benchmark_policy = campaign_policy()
+        secret = "private provider response with customer text"
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(
+                benchmark_policy, max_attempts=1, now=100,
+            )
+
+            def unavailable(_):
+                raise CAMPAIGN.BenchmarkCampaignDependencyFailed(
+                    "provider_unavailable", retryable=True,
+                )
+
+            outcome = CAMPAIGN.run_next_benchmark_case(
+                store, benchmark_policy, campaign_id, "worker", unavailable,
+                CampaignCandidateReviewer(), blinding_key=self.key,
+                native_reference_verifier=CampaignNativeReferenceVerifier(),
+                evidence_authority=CampaignAuthority(), clock=lambda: 100,
+            )
+            self.assertEqual(outcome.status, "failed")
+            self.assertEqual(
+                outcome.error_code,
+                "benchmark.campaign.dependency.provider_unavailable",
+            )
+            serialized = json.dumps(store.status(benchmark_policy, campaign_id))
+            self.assertNotIn(secret, serialized)
+            self.assertEqual(
+                store.status(benchmark_policy, campaign_id)["counts"]["failed"],
+                1,
+            )
+            next_claim = store.claim(
+                benchmark_policy, campaign_id, "other", now=1000,
+            )
+            self.assertIsNotNone(next_claim)
+            self.assertNotEqual(next_claim.work_id, outcome.work_id)
+
+    def test_campaign_runs_one_case_per_tick_and_blocks_incomplete_report(self):
+        benchmark_policy = campaign_policy()
+        authority = CampaignAuthority()
+        verifier = CampaignNativeReferenceVerifier()
+        reviewer = CampaignCandidateReviewer()
+        guard_calls = []
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+            outcome = CAMPAIGN.run_next_benchmark_case(
+                store, benchmark_policy, campaign_id, "worker",
+                lambda payload: campaign_inputs(
+                    payload, benchmark_policy, verifier, authority,
+                ),
+                reviewer,
+                blinding_key=self.key,
+                native_reference_verifier=verifier,
+                evidence_authority=authority,
+                operation_guard=guard_calls.append,
+                clock=lambda: 100,
+            )
+            self.assertEqual(outcome.status, "succeeded")
+            self.assertRegex(outcome.result_sha256, r"^[0-9a-f]{64}$")
+            status = store.status(benchmark_policy, campaign_id)
+            self.assertEqual(status["counts"]["succeeded"], 1)
+            self.assertEqual(status["counts"]["pending"], 29)
+            self.assertEqual(len(reviewer.requests), 2)
+            self.assertGreaterEqual(len(guard_calls), 4)
+            stored = connection.execute("""
+                SELECT result_json FROM benchmark_campaign_work
+                WHERE status = 'succeeded'
+            """).fetchone()[0]
+            self.assertNotIn(fixture_copy(outcome.target_locale)["candidate"], stored)
+            self.assertNotIn(fixture_copy(outcome.target_locale)["baseline"], stored)
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.summarize(benchmark_policy, campaign_id, authority)
+            self.assertEqual(caught.exception.code, "benchmark.campaign.incomplete")
+
+    def test_complete_early_campaign_produces_attested_partial_scope_report(self):
+        benchmark_policy = campaign_policy()
+        authority = CampaignAuthority()
+        verifier = CampaignNativeReferenceVerifier()
+        reviewer = CampaignCandidateReviewer()
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+            outcomes = []
+            while True:
+                outcome = CAMPAIGN.run_next_benchmark_case(
+                    store, benchmark_policy, campaign_id, "worker",
+                    lambda payload: campaign_inputs(
+                        payload, benchmark_policy, verifier, authority,
+                    ),
+                    reviewer,
+                    blinding_key=self.key,
+                    native_reference_verifier=verifier,
+                    evidence_authority=authority,
+                    clock=lambda: 100,
+                )
+                if outcome is None:
+                    break
+                outcomes.append(outcome)
+            self.assertEqual(len(outcomes), 30)
+            self.assertTrue(store.status(benchmark_policy, campaign_id)["complete"])
+            report = store.summarize(benchmark_policy, campaign_id, authority)
+            self.assertEqual(report["configured_lanes_status"], "PASS")
+            self.assertEqual(report["status"], "BLOCK")
+            self.assertFalse(report["superiority_claim_allowed"])
+            self.assertEqual(
+                report["claim_block_reasons"],
+                ["eu_target_locale_coverage_incomplete"],
+            )
 
 
 if __name__ == "__main__":

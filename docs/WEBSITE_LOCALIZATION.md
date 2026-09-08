@@ -302,6 +302,43 @@ contains no target, candidate, baseline, or supposed reference translation.
 Actual targets must still come from the attached candidate and lawfully
 acquired baseline so unreviewed prose cannot silently become a gold standard.
 
+### Durable benchmark campaigns
+
+`integrations/website_localization_benchmark_campaign.py` turns the bound suite
+and benchmark policy into a durable execution matrix. With the current
+English-source suite and complete EU target scope, one campaign contains
+exactly 345 work items: 15 source cases multiplied by 23 target locales. Work
+IDs bind the complete policy hash, suite hash, locale, and case key. Creating
+the same campaign again is idempotent; changing any candidate, reviewer,
+reference, baseline, threshold, locale, or suite field creates a different
+campaign identity instead of inheriting old evidence.
+
+The host supplies a dedicated trusted `sqlite3.Connection`, a
+`BenchmarkInputResolver`, the blind reviewer, native-reference verifier,
+evidence authority, and blinding key. The resolver receives one canonical
+localization job and returns `BenchmarkCaseInputs`: the already validated
+candidate result, an attested baseline from an allowed acquisition route,
+locale-bound assets, and an attested qualified-native reference. The campaign
+store never fetches an API, chooses a provider, reads credentials, or invents a
+missing artifact.
+
+`run_next_benchmark_case` claims and processes at most one exact
+case/locale pair. Random token-bound leases are renewed before dependency
+resolution and before each of the two reviewer calls. An abandoned lease can
+be recovered after expiry; stale workers cannot finish it. Retryable adapter
+or attestation failures use bounded exponential backoff and a configured
+attempt ceiling. Terminal binding, parser, suite, policy, and evidence failures
+remain failed while unrelated work continues.
+
+Operational status contains only deterministic work identity, counts, stable
+error codes, timestamps, and hashes. The database retains only the attested
+text-free case result after success—not source, candidate, baseline, reference,
+credentials, or reviewer prose. `summarize` remains fail-closed until every
+expected item succeeded, then passes the exact verified result set to the
+existing separately attested statistical report. A failed, omitted, duplicated,
+exchanged, or policy-stale work item therefore cannot disappear behind a
+partial aggregate.
+
 Early locale lanes may be run and reported independently, but passing them no
 longer authorizes an EU-wide superiority statement. The attested report exposes
 `configured_lanes_status` separately from `superiority_claim_allowed` and

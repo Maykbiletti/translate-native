@@ -977,8 +977,11 @@ def run_blind_benchmark_case(
     native_reference_artifact: Any,
     native_reference_verifier: NativeReferenceVerifier,
     evidence_authority: BenchmarkEvidenceAuthority,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     """Run one locale case through source-blind and source-aware A/B review."""
+    if progress_callback is not None and not callable(progress_callback):
+        raise BenchmarkBlocked("benchmark.progress.invalid")
     policy = _validate_policy(policy)
     try:
         job = _WORKER._validated_job(job_payload)
@@ -1020,6 +1023,8 @@ def run_blind_benchmark_case(
     }
     preferences: list[str] = []
     for phase in PHASES:
+        if progress_callback is not None:
+            progress_callback(phase)
         request = _review_request(
             phase=phase, case_id=case_id, blind_id=blind_id, job=job,
             benchmark_case=benchmark_case, assets=assets,
