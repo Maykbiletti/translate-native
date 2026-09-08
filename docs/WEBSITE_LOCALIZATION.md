@@ -241,11 +241,24 @@ tampering across separate queue and translation-memory connections.
 
 `integrations/website_localization_benchmark.py` provides the evidence gate for
 quality claims such as “better than DeepL.” The module does not call DeepL or
-any other baseline service. A host may supply a fixed comparison artifact that
-was obtained through the provider's official API or another lawful route. The
-artifact binds the baseline identity and version, exact source hash, target
-locale, content type, target hash, and complete target text. Credentials,
-transport code, and undocumented scraping do not belong in this repository.
+any other baseline service. A host may create a comparison artifact only from
+the provider's official API or a lawfully supplied fixed fixture. It calls
+`create_baseline_artifact` with the exact target and a provenance record whose
+method is `official_api` or `lawful_fixture`, plus a stable evidence identifier
+and SHA-256 digest of the host-retained acquisition record. Undocumented
+endpoints and scraping are deliberately not valid provenance methods.
+
+The artifact binds the baseline identity and version, exact source hash,
+target locale, content type, target hash, complete target text, and provenance.
+The same host-owned `BenchmarkEvidenceAuthority` attests those canonical bytes
+and immediately verifies its own result. The harness rejects unsigned,
+foreign-key, changed, or malformed baseline evidence before either reviewer is
+called. The case result retains only target, provenance, and complete artifact
+hashes; the final report includes a digest over the exact baseline-evidence set.
+Neither provenance nor baseline identity enters a reviewer request. A signature
+proves integrity and host approval, not that a false provenance statement is
+legally true, so the host must preserve the API receipt or fixture licence for
+audit. Credentials and transport code do not belong in benchmark artifacts.
 
 Every benchmark policy must bind the exact version and SHA-256 digest of the
 output-free source manifest in
@@ -307,8 +320,9 @@ versioned contract extends to every eligible EU language profile, excluding
 the source language as required by the localization planner.
 
 Premortem: reviewers could learn which output came from which system, a large
-language could hide a weak low-resource language, or an old baseline could be
-quietly reused. Keyed A/B assignment and origin-free review payloads reduce
+language could hide a weak low-resource language, an arbitrary output could be
+labelled as an official baseline, or an old baseline could be quietly reused.
+Attested lawful provenance, keyed A/B assignment, and origin-free review payloads reduce
 identity bias; per-locale hard gates prevent averaging; exact baseline,
 reviewer, benchmark, suite, suite case, source, locale, and content bindings
 plus exact candidate and quality-profile bindings reject stale, substituted,

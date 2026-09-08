@@ -23,14 +23,16 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v4"
-BASELINE_SCHEMA = "blun.website-localization-baseline.v1"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v5"
+BASELINE_SCHEMA = "blun.website-localization-baseline.v2"
+BASELINE_PROVENANCE_SCHEMA = "blun.website-localization-baseline-provenance.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v4"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v4"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v5"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v5"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
+BASELINE_PROVENANCE_METHODS = frozenset(("official_api", "lawful_fixture"))
 MAX_TEXT_BYTES = 2_000_000
 EARLY_REQUIRED_LOCALES = frozenset(("mt-MT", "fi-FI"))
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
@@ -385,6 +387,62 @@ def _attest(
     return signed
 
 
+def _baseline_provenance(value: Any) -> dict[str, str]:
+    expected = {"schema", "method", "evidence_id", "evidence_sha256"}
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise BenchmarkBlocked("benchmark.baseline.provenance_invalid")
+    provenance = dict(value)
+    if (
+        provenance["schema"] != BASELINE_PROVENANCE_SCHEMA
+        or not isinstance(provenance["method"], str)
+        or provenance["method"] not in BASELINE_PROVENANCE_METHODS
+        or not isinstance(provenance["evidence_id"], str)
+        or IDENTIFIER.fullmatch(provenance["evidence_id"]) is None
+    ):
+        raise BenchmarkBlocked("benchmark.baseline.provenance_invalid")
+    _sha256(
+        provenance["evidence_sha256"],
+        "benchmark.baseline.provenance_invalid",
+    )
+    return json.loads(_canonical_json(provenance))
+
+
+def create_baseline_artifact(
+    job_payload: Any,
+    target_text: Any,
+    policy: BenchmarkPolicy,
+    provenance: Mapping[str, Any],
+    *,
+    evidence_authority: BenchmarkEvidenceAuthority,
+) -> dict[str, Any]:
+    """Create verified evidence from an official API or lawful fixed fixture."""
+    policy = _validate_policy(policy)
+    try:
+        job = _WORKER._validated_job(job_payload)
+    except _WORKER.LocalizationWorkerBlocked as error:
+        raise BenchmarkBlocked("benchmark.job_or_assets.invalid") from error
+    _validate_candidate_job_binding(job, policy)
+    if job["target"]["locale"] not in policy.required_locales:
+        raise BenchmarkBlocked("benchmark.locale.not_required")
+    try:
+        _SUITE.case_for_job(job)
+    except ValueError as error:
+        raise BenchmarkBlocked("benchmark.suite.case_mismatch") from error
+    target = _target_text(target_text)
+    artifact = {
+        "schema": BASELINE_SCHEMA,
+        "baseline_id": policy.baseline_id,
+        "baseline_version": policy.baseline_version,
+        "source_sha256": job["source"]["sha256"],
+        "target_locale": job["target"]["locale"],
+        "content_type": job["content_type"],
+        "target_text": target,
+        "target_sha256": _hash_text(target),
+        "provenance": _baseline_provenance(provenance),
+    }
+    return _attest(artifact, policy, evidence_authority)
+
+
 def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     expected_keys = {
         "schema", "worker_schema", "job_id", "source_sha256", "target_sha256",
@@ -459,22 +517,29 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
 
 def _validate_baseline(
     job: dict[str, Any], artifact: Any, policy: BenchmarkPolicy,
+    authority: BenchmarkEvidenceAuthority,
 ) -> dict[str, Any]:
     expected = {
         "schema", "baseline_id", "baseline_version", "source_sha256",
         "target_locale", "content_type", "target_text", "target_sha256",
+        "provenance", "attestation",
     }
     if not isinstance(artifact, dict) or set(artifact) != expected:
         raise BenchmarkBlocked("benchmark.baseline.invalid")
-    target = _target_text(artifact["target_text"])
+    baseline = dict(artifact)
+    attestation = baseline.pop("attestation")
+    _verify_attestation(baseline, attestation, policy, authority)
+    target = _target_text(baseline["target_text"])
+    provenance = _baseline_provenance(baseline["provenance"])
     bindings = (
-        artifact["schema"] == BASELINE_SCHEMA,
-        artifact["baseline_id"] == policy.baseline_id,
-        artifact["baseline_version"] == policy.baseline_version,
-        artifact["source_sha256"] == job["source"]["sha256"],
-        artifact["target_locale"] == job["target"]["locale"],
-        artifact["content_type"] == job["content_type"],
-        artifact["target_sha256"] == _hash_text(target),
+        baseline["schema"] == BASELINE_SCHEMA,
+        baseline["baseline_id"] == policy.baseline_id,
+        baseline["baseline_version"] == policy.baseline_version,
+        baseline["source_sha256"] == job["source"]["sha256"],
+        baseline["target_locale"] == job["target"]["locale"],
+        baseline["content_type"] == job["content_type"],
+        baseline["target_sha256"] == _hash_text(target),
+        provenance == baseline["provenance"],
     )
     if not all(bindings):
         raise BenchmarkBlocked("benchmark.baseline.binding_mismatch")
@@ -513,7 +578,8 @@ def _validated_assets(job: dict[str, Any], assets: Any):
 
 def _blinding(
     job: dict[str, Any], candidate_hash: str, baseline_hash: str,
-    benchmark_case: dict[str, Any], policy: BenchmarkPolicy, key: Any,
+    baseline_evidence_hash: str, benchmark_case: dict[str, Any],
+    policy: BenchmarkPolicy, key: Any,
 ) -> tuple[str, dict[str, str], str]:
     if not isinstance(key, bytes) or len(key) < 32:
         raise BenchmarkBlocked("benchmark.blinding_key.invalid")
@@ -527,6 +593,7 @@ def _blinding(
         "candidate": _candidate_binding(policy),
         "candidate_sha256": candidate_hash,
         "baseline_sha256": baseline_hash,
+        "baseline_evidence_sha256": baseline_evidence_hash,
         "baseline_id": policy.baseline_id,
         "baseline_version": policy.baseline_version,
         "reviewer_id": policy.reviewer_id,
@@ -696,12 +763,14 @@ def run_blind_benchmark_case(
     except ValueError as error:
         raise BenchmarkBlocked("benchmark.suite.case_mismatch") from error
     candidate_result = _validate_worker_result(job, candidate_result)
-    baseline = _validate_baseline(job, baseline_artifact, policy)
+    baseline = _validate_baseline(
+        job, baseline_artifact, policy, evidence_authority,
+    )
     candidate_text = candidate_result["candidate"]
     baseline_text = baseline["target_text"]
     case_id, origins, blind_id = _blinding(
         job, candidate_result["target_sha256"], baseline["target_sha256"],
-        benchmark_case, policy, blinding_key,
+        _hash_json(baseline), benchmark_case, policy, blinding_key,
     )
     texts = {"candidate": candidate_text, "baseline": baseline_text}
     variants = {label: texts[origin] for label, origin in origins.items()}
@@ -766,6 +835,9 @@ def run_blind_benchmark_case(
             "id": policy.baseline_id,
             "version": policy.baseline_version,
             "target_sha256": baseline["target_sha256"],
+            "provenance_method": baseline["provenance"]["method"],
+            "provenance_sha256": _hash_json(baseline["provenance"]),
+            "evidence_sha256": _hash_json(baseline),
         },
         "reviewer": {"id": policy.reviewer_id, "version": policy.reviewer_version},
         "blind_commitment_sha256": _hash_text(blind_id),
@@ -855,11 +927,18 @@ def _validated_case_result(
     _sha256(result["candidate_sha256"])
     _sha256(result["blind_commitment_sha256"])
     baseline = result["baseline"]
-    if not isinstance(baseline, dict) or set(baseline) != {"id", "version", "target_sha256"}:
+    if not isinstance(baseline, dict) or set(baseline) != {
+        "id", "version", "target_sha256", "provenance_method",
+        "provenance_sha256", "evidence_sha256",
+    }:
         raise BenchmarkBlocked("benchmark.results.invalid")
     if baseline["id"] != policy.baseline_id or baseline["version"] != policy.baseline_version:
         raise BenchmarkBlocked("benchmark.results.version_mismatch")
+    if baseline["provenance_method"] not in BASELINE_PROVENANCE_METHODS:
+        raise BenchmarkBlocked("benchmark.results.invalid")
     _sha256(baseline["target_sha256"])
+    _sha256(baseline["provenance_sha256"])
+    _sha256(baseline["evidence_sha256"])
     reviewer = result["reviewer"]
     if not isinstance(reviewer, dict) or set(reviewer) != {"id", "version"}:
         raise BenchmarkBlocked("benchmark.results.invalid")
@@ -933,6 +1012,7 @@ def _unsigned_benchmark_report(
     grouped: dict[str, list[dict[str, Any]]] = {locale: [] for locale in policy.required_locales}
     seen: set[tuple[str, str]] = set()
     evidence_hashes: list[str] = []
+    baseline_evidence_hashes: list[str] = []
     for raw in case_results:
         if not isinstance(raw, Mapping):
             raise BenchmarkBlocked("benchmark.results.invalid")
@@ -944,6 +1024,7 @@ def _unsigned_benchmark_report(
         seen.add(suite_key)
         grouped[result["target_locale"]].append(result)
         evidence_hashes.append(_hash_json(signed_result))
+        baseline_evidence_hashes.append(result["baseline"]["evidence_sha256"])
     locale_reports: list[dict[str, Any]] = []
     for locale in policy.required_locales:
         cases = grouped[locale]
@@ -1001,9 +1082,17 @@ def _unsigned_benchmark_report(
         "quality_profiles": [
             _quality_profile_binding(locale) for locale in policy.required_locales
         ],
-        "baseline": {"id": policy.baseline_id, "version": policy.baseline_version},
+        "baseline": {
+            "id": policy.baseline_id,
+            "version": policy.baseline_version,
+            "provenance_methods": sorted({
+                item["baseline"]["provenance_method"]
+                for cases in grouped.values() for item in cases
+            }),
+        },
         "reviewer": {"id": policy.reviewer_id, "version": policy.reviewer_version},
         "case_evidence_sha256": _hash_json(sorted(evidence_hashes)),
+        "baseline_evidence_sha256": _hash_json(sorted(baseline_evidence_hashes)),
         "required_locales": list(policy.required_locales),
         "status": "PASS" if claim_allowed else "BLOCK",
         "superiority_claim_allowed": claim_allowed,

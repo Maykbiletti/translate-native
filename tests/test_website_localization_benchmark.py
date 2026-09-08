@@ -140,18 +140,24 @@ def candidate_result(payload, text=None):
     }
 
 
-def baseline(payload, text=None):
+def baseline(
+    payload, text=None, *, method="lawful_fixture", evidence_id=None,
+    authority=None,
+):
     text = _target_fixture(payload, "baseline") if text is None else text
-    return {
-        "schema": BENCHMARK.BASELINE_SCHEMA,
-        "baseline_id": "deepl-official-api",
-        "baseline_version": "fixture-2026-08-30",
-        "source_sha256": payload["source"]["sha256"],
-        "target_locale": payload["target"]["locale"],
-        "content_type": payload["content_type"],
-        "target_text": text,
-        "target_sha256": hashlib.sha256(text.encode()).hexdigest(),
+    evidence_id = evidence_id or "fixture-" + payload["job_id"]
+    provenance = {
+        "schema": BENCHMARK.BASELINE_PROVENANCE_SCHEMA,
+        "method": method,
+        "evidence_id": evidence_id,
+        "evidence_sha256": hashlib.sha256(
+            (evidence_id + payload["source"]["sha256"] + text).encode()
+        ).hexdigest(),
     }
+    return BENCHMARK.create_baseline_artifact(
+        payload, text, policy(), provenance,
+        evidence_authority=authority or HmacBenchmarkAuthority(),
+    )
 
 
 def _target_fixture(payload, variant):
@@ -279,6 +285,9 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertNotIn("deepl", (native + fidelity).lower())
         self.assertNotIn("benchmark-test-key", native + fidelity)
         self.assertNotIn("hmac-sha256-test", native + fidelity)
+        self.assertNotIn("lawful_fixture", native + fidelity)
+        self.assertNotIn("official_api", native + fidelity)
+        self.assertNotIn("evidence_id", native + fidelity)
         self.assertNotIn('"origin"', native + fidelity)
         self.assertNotIn('"case_key"', native)
         self.assertNotIn('"adversarial_tags"', native)
@@ -347,8 +356,60 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                         payload, candidate_result(payload), changed, assets(), policy(), reviewer,
                         blinding_key=self.key,
                     )
-                self.assertEqual(caught.exception.code, "benchmark.baseline.binding_mismatch")
+                self.assertEqual(caught.exception.code, "benchmark.attestation.payload_mismatch")
                 self.assertEqual(reviewer.requests, [])
+
+    def test_baseline_requires_attested_lawful_provenance_before_review(self):
+        payload = job()
+        for method in ("official_api", "lawful_fixture"):
+            with self.subTest(method=method):
+                artifact = baseline(payload, method=method, authority=self.authority)
+                reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
+                outcome = self.run_benchmark(
+                    payload, candidate_result(payload), artifact, assets(),
+                    policy(), reviewer, blinding_key=self.key,
+                )
+                self.assertEqual(outcome["winner"], "candidate")
+                self.assertRegex(
+                    outcome["baseline"]["provenance_sha256"], r"^[0-9a-f]{64}$",
+                )
+                self.assertRegex(
+                    outcome["baseline"]["evidence_sha256"], r"^[0-9a-f]{64}$",
+                )
+
+        artifact = baseline(payload, authority=self.authority)
+        cases = []
+        unsigned = copy.deepcopy(artifact)
+        unsigned.pop("attestation")
+        cases.append((unsigned, "benchmark.baseline.invalid"))
+        changed = copy.deepcopy(artifact)
+        changed["provenance"]["method"] = "scraped"
+        cases.append((changed, "benchmark.attestation.payload_mismatch"))
+        changed = copy.deepcopy(artifact)
+        changed["provenance"]["evidence_sha256"] = "0" * 64
+        cases.append((changed, "benchmark.attestation.payload_mismatch"))
+        changed = copy.deepcopy(artifact)
+        changed["attestation"]["signature"] = "0" * 64
+        cases.append((changed, "benchmark.attestation.rejected"))
+        for changed, code in cases:
+            with self.subTest(code=code):
+                reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
+                with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+                    self.run_benchmark(
+                        payload, candidate_result(payload), changed, assets(),
+                        policy(), reviewer, blinding_key=self.key,
+                    )
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(reviewer.requests, [])
+
+        for method in ("scraped", "undocumented_endpoint", ""):
+            with self.subTest(method=method):
+                with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+                    baseline(payload, method=method, authority=self.authority)
+                self.assertEqual(
+                    caught.exception.code,
+                    "benchmark.baseline.provenance_invalid",
+                )
 
     def test_wrong_candidate_binding_blocks_before_review(self):
         payload = job()
@@ -509,6 +570,12 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             "policy_version": "native-web-2",
             "worker_schema": WORKER.WORKER_SCHEMA,
         })
+        self.assertEqual(report["baseline"], {
+            "id": "deepl-official-api",
+            "version": "fixture-2026-08-30",
+            "provenance_methods": ["lawful_fixture"],
+        })
+        self.assertRegex(report["baseline_evidence_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             report["quality_profiles"],
             [
@@ -661,8 +728,17 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "benchmark.attestation.rejected")
 
         class RejectingAuthority(HmacBenchmarkAuthority):
+            reject_new_signature = False
+
+            def sign(self, payload):
+                signature = super().sign(payload)
+                self.reject_new_signature = True
+                return signature
+
             def verify(self, payload, signature):
-                return False
+                if self.reject_new_signature:
+                    return False
+                return super().verify(payload, signature)
 
         payload = job()
         reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
