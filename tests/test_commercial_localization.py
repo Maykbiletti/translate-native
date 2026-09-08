@@ -17,15 +17,23 @@ SOURCE = "Save up to €480 a year. All prices exclude VAT."
 TARGET = "Spara upp till 480 € per år. Alla priser är exklusive moms."
 
 
+def evidence_item(source, target, *, offer="offer-1", relation="matched"):
+    return {
+        "offer": offer,
+        "relation": relation,
+        "source_span": None if relation == "target_only" else [0, len(source)],
+        "target_span": None if relation == "source_only" else [0, len(target)],
+        "explanation": "Scripted protocol fixture; not independent linguistic evidence.",
+    }
+
+
 def evidence(source=SOURCE, target=TARGET):
     checks = {name: {"status": "not_present", "items": []} for name in PROFILE.DIMENSIONS}
     for name in ("amount_currency", "discount_basis", "qualifiers", "tax_status", "offer_assignment"):
-        checks[name] = {"status": "equivalent", "items": [{
-            "offer": "offer-1",
-            "source_span": [0, len(source)],
-            "target_span": [0, len(target)],
-            "explanation": "Scripted protocol fixture; not independent linguistic evidence.",
-        }]}
+        checks[name] = {
+            "status": "equivalent",
+            "items": [evidence_item(source, target)],
+        }
     return {"schema": SCHEMA, "coverage": "complete", "checks": checks}
 
 
@@ -84,7 +92,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v2"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v3"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -95,7 +103,10 @@ class CommercialLocalizationTests(unittest.TestCase):
     def test_each_dimension_blocks_known_changes_and_routes_uncertainty(self):
         for dimension in PROFILE.DIMENSIONS:
             report = evidence()
-            report["checks"][dimension] = {"status": "changed", "items": []}
+            report["checks"][dimension] = {
+                "status": "changed",
+                "items": [evidence_item(SOURCE, TARGET)],
+            }
             with self.subTest(dimension=dimension, verdict="changed"):
                 with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
                     self.run_worker(report)
@@ -103,7 +114,10 @@ class CommercialLocalizationTests(unittest.TestCase):
                 self.assertFalse(error.exception.retryable)
 
             report = evidence()
-            report["checks"][dimension] = {"status": "uncertain", "items": []}
+            report["checks"][dimension] = {
+                "status": "uncertain",
+                "items": [evidence_item(SOURCE, TARGET)],
+            }
             with self.subTest(dimension=dimension, verdict="uncertain"):
                 result, _ = self.run_worker(report)
                 self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
@@ -145,6 +159,80 @@ class CommercialLocalizationTests(unittest.TestCase):
         with self.assertRaises(WORKER.LocalizationWorkerBlocked):
             self.run_worker(report)
 
+    def test_directional_evidence_represents_omissions_and_additions(self):
+        source = "Standard costs €29 monthly. Cancel with 30 days' notice."
+        target = "Standard kostar 29 € per månad. Priority kostar 99 € per månad."
+
+        addition = evidence(source, target)
+        added_start = target.index("Priority")
+        addition["checks"]["amount_currency"] = {
+            "status": "changed",
+            "items": [{
+                "offer": "offer-1",
+                "relation": "target_only",
+                "source_span": None,
+                "target_span": [added_start, len(target)],
+                "explanation": "The target adds a price absent from the source.",
+            }],
+        }
+        with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
+            PROFILE.validate_review(addition, source, target, SCHEMA)
+        self.assertEqual(error.exception.code, "review.commercial.changed")
+
+        omission = evidence(source, target)
+        omitted_start = source.index("Cancel")
+        omission["checks"]["cancellation"] = {
+            "status": "uncertain",
+            "items": [{
+                "offer": "offer-1",
+                "relation": "source_only",
+                "source_span": [omitted_start, len(source)],
+                "target_span": None,
+                "explanation": "The source condition has no identified target counterpart.",
+            }],
+        }
+        with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
+            PROFILE.validate_review(omission, source, target, SCHEMA)
+        self.assertEqual(
+            error.exception.code, "review.commercial.independent_review_required",
+        )
+
+    def test_directional_evidence_rejects_impossible_span_combinations(self):
+        malformed_items = (
+            {**evidence_item(SOURCE, TARGET), "relation": "unknown"},
+            {**evidence_item(SOURCE, TARGET), "source_span": None},
+            {**evidence_item(SOURCE, TARGET, relation="source_only"), "target_span": [0, 1]},
+            {**evidence_item(SOURCE, TARGET, relation="target_only"), "source_span": [0, 1]},
+        )
+        for item in malformed_items:
+            report = evidence()
+            report["checks"]["amount_currency"] = {
+                "status": "changed", "items": [item],
+            }
+            with self.subTest(item=item), self.assertRaises(
+                PROFILE.CommercialReviewBlocked,
+            ) as error:
+                PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+            self.assertEqual(error.exception.code, "review.commercial.invalid")
+
+        for status in ("changed", "uncertain"):
+            report = evidence()
+            report["checks"]["amount_currency"] = {"status": status, "items": []}
+            with self.subTest(status=status), self.assertRaises(
+                PROFILE.CommercialReviewBlocked,
+            ) as error:
+                PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+            self.assertEqual(error.exception.code, "review.commercial.invalid")
+
+        report = evidence()
+        report["checks"]["amount_currency"] = {
+            "status": "equivalent",
+            "items": [evidence_item(SOURCE, TARGET, relation="source_only")],
+        }
+        with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
+            PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+        self.assertEqual(error.exception.code, "review.commercial.invalid")
+
     def test_conditions_require_reviewed_offer_association(self):
         report = evidence()
         report["checks"]["amount_currency"]["items"][0]["offer"] = "unreviewed-offer"
@@ -172,7 +260,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             ("1,234", "1.234", "amount_currency"),
         ):
             report = evidence(source, target)
-            report["checks"][dimension] = {"status": "uncertain", "items": []}
+            report["checks"][dimension]["status"] = "uncertain"
             with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
                 PROFILE.validate_review(report, source, target, SCHEMA)
             self.assertEqual(error.exception.code, "review.commercial.independent_review_required")
@@ -223,7 +311,7 @@ class CommercialLocalizationTests(unittest.TestCase):
     def test_uncertainty_survives_queue_but_requires_bound_independent_review(self):
         plan = make_plan(targets=("sv-SE",), source_text=SOURCE, content_type="commercial")
         report = evidence()
-        report["checks"]["tax_status"] = {"status": "uncertain", "items": []}
+        report["checks"]["tax_status"]["status"] = "uncertain"
         with sqlite3.connect(":memory:") as connection, sqlite3.connect(":memory:") as release_db:
             queue = RUNNER._QUEUE.LocalizationQueue(connection)
             queue.enqueue_plan(plan, now=100)
@@ -278,7 +366,8 @@ class CommercialLocalizationTests(unittest.TestCase):
         source_offset = target_offset = 0
         for i, (src, tgt) in enumerate(zip(source.splitlines(), target.splitlines())):
             items.append({
-                "offer": f"offer-{i}", "source_span": [source_offset, source_offset + len(src)],
+                "offer": f"offer-{i}", "relation": "matched",
+                "source_span": [source_offset, source_offset + len(src)],
                 "target_span": [target_offset, target_offset + len(tgt)],
                 "explanation": "Scripted monthly display / annual charge association.",
             })

@@ -36,11 +36,13 @@ currency and interval expressions, unambiguous offer layout and readable conditi
 of number words, ASCII instead of native digits, or source-locale punctuation. Do not infer missing commercial facts."""
 
 FIDELITY_GUIDANCE = """For each commercial dimension inspect the COMPLETE source and candidate, including
-all offers, headings, footnotes, links and conditions. Record every applicable proposition as an item with exact
-source and target character spans (zero-based Python Unicode code-point offsets, end exclusive), a stable offer
-label and a semantic explanation. Repeated amounts must stay attached to their own offer; number multisets do not
-prove fidelity. Check for target-only additions as well as source omissions. 'not_present' is valid only if a dimension
-is absent from BOTH texts. 'equivalent' requires nonempty items covering every applicable proposition.
+all offers, headings, footnotes, links and conditions. Record every applicable proposition as an item with a stable
+offer label, semantic explanation and relation: 'matched', 'source_only' for an omission, or 'target_only' for an
+addition. Give exact zero-based Python Unicode code-point spans with an exclusive end; the absent side of a one-sided
+item MUST be null. Repeated amounts must stay attached to their own offer; number multisets do not prove fidelity.
+'not_present' is valid only if a dimension is absent from BOTH texts. 'equivalent' requires nonempty matched items
+covering every applicable proposition. A dimension-level 'changed' or 'uncertain' verdict requires at least one
+specific item; use coverage='uncertain' for unresolved overall completeness without inventing a span.
 Use 'changed' for a known defect and 'uncertain' for unresolved interpretation, coverage or insufficient language/domain
 evidence. Use coverage='uncertain' unless every proposition and offer association was checked. Never resolve numeric
 ambiguity by guessing. Number words, written percentages, native digits and locale separators may be equivalent;
@@ -63,6 +65,7 @@ def review_contract(schema: str) -> dict[str, Any]:
                 "status": "equivalent, not_present, changed or uncertain",
                 "items": [{
                     "offer": "stable offer label",
+                    "relation": "matched, source_only, or target_only",
                     "source_span": [0, 1],
                     "target_span": [0, 1],
                     "explanation": description,
@@ -105,18 +108,41 @@ def validate_review(value: Any, source: str, target: str, schema: str) -> None:
             invalid()
         if not isinstance(items, list) or len(items) > 1000:
             invalid()
-        if (status == "not_present" and items) or (status == "equivalent" and not items):
+        if (
+            (status == "not_present" and items)
+            or (status in ("equivalent", "changed", "uncertain") and not items)
+        ):
             invalid()
         seen = set()
         for item in items:
-            if not isinstance(item, dict) or set(item) != {"offer", "source_span", "target_span", "explanation"}:
+            if not isinstance(item, dict) or set(item) != {
+                "offer", "relation", "source_span", "target_span", "explanation",
+            }:
                 invalid()
             for field in ("offer", "explanation"):
                 if not isinstance(item[field], str) or not item[field].strip() or len(item[field]) > 2000:
                     invalid()
-            span(item["source_span"], source)
-            span(item["target_span"], target)
-            identity = (item["offer"], tuple(item["source_span"]), tuple(item["target_span"]))
+            relation = item["relation"]
+            if relation == "matched":
+                span(item["source_span"], source)
+                span(item["target_span"], target)
+            elif relation == "source_only":
+                span(item["source_span"], source)
+                if item["target_span"] is not None:
+                    invalid()
+            elif relation == "target_only":
+                if item["source_span"] is not None:
+                    invalid()
+                span(item["target_span"], target)
+            else:
+                invalid()
+            if status == "equivalent" and relation != "matched":
+                invalid()
+            identity = (
+                item["offer"], relation,
+                tuple(item["source_span"]) if item["source_span"] is not None else None,
+                tuple(item["target_span"]) if item["target_span"] is not None else None,
+            )
             if identity in seen:
                 invalid()
             seen.add(identity)

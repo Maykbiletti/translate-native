@@ -1,4 +1,4 @@
-# Commercial localization — profile v1
+# Commercial localization — profile v2
 
 Use for pricing pages, offer cards, checkout copy, subscription CTAs, discounts,
 trials and associated conditions in **any language or script**. The skill is
@@ -66,12 +66,16 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v1` into the job and plan IDs.
+The planner binds `translate-native.commercial.v2` into the job and plan IDs.
 The worker uses the existing three ordered passes; the source-fidelity response
 additionally requires `commercial_review`. It contains all ten named dimensions,
-coverage and per-offer evidence with exact source/target character spans.
-Missing/malformed checks and changed terms produce no result or approval.
-Uncertainty or an all-absent report preserves the candidate only as a
+coverage and per-offer evidence. Each item declares `matched`, `source_only`, or
+`target_only` and supplies exact source/target character spans; the absent side
+of a one-sided item is `null`. Equivalent evidence must be matched. A specific
+changed or uncertain verdict needs a concrete item, while globally uncertain
+coverage may remain span-free rather than fabricate a location.
+Missing/malformed checks, impossible relation/span combinations and changed
+terms produce no result or approval. Uncertainty or an all-absent report preserves the candidate only as a
 low-confidence fidelity result. It remains unpublishable until the host verifies
 exactly one qualified native/domain review or an independent second-provider
 model receipt bound to the commercial profile and policy. The worker does not

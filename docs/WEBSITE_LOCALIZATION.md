@@ -704,7 +704,7 @@ bounded retries, opaque failures, and crash recovery.
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v1` profile to the job payload, job ID
+versioned `translate-native.commercial.v2` profile to the job payload, job ID
 and plan ID; the existing seven types retain their previous payloads and IDs.
 It is available for every planner locale, including `mt-MT` and `fi-FI`.
 The public skill's [commercial guide](../translate-native/references/commercial-localization.md)
@@ -717,15 +717,21 @@ editing, source-aware fidelity. Commercial fidelity additionally returns
 `tax_status`, `billing_interval`, `commitment`, `renewal`, `cancellation`,
 `conditions`, and `offer_assignment`. Every check has `status` (`equivalent`,
 `not_present`, `changed`, `uncertain`) and `items`; each item has `offer`,
-`source_span`, `target_span`, and `explanation`. Spans are zero-based Unicode
-code-point offsets with an exclusive end. The exact response contract and
+`relation` (`matched`, `source_only`, or `target_only`), `source_span`,
+`target_span`, and `explanation`. Spans are zero-based Unicode code-point
+offsets with an exclusive end. A one-sided item uses `null` only for the side
+that is absent, so an omitted condition and an invented target claim can be
+represented without fabricating a counterpart. The exact response contract and
 dimension guidance are supplied in each fidelity request.
 
-Equivalent checks require evidence; absent dimensions require empty items.
-Changed terms, missing dimensions, invalid spans or a normal PASS without the
-commercial report block the worker without a publishable result. Uncertain
-coverage, an uncertain dimension or an all-absent report instead preserve the
-candidate as a low-confidence fidelity result. That result is fail-closed and
+Equivalent checks require matched evidence; absent dimensions require empty
+items. A dimension-level changed or uncertain verdict requires at least one
+specific evidence item, while globally uncertain coverage may remain span-free
+instead of inventing a location. Changed terms, missing dimensions, invalid
+relations/spans or a normal PASS without the commercial report block the worker
+without a publishable result. Uncertain coverage, an uncertain dimension or an
+all-absent report instead preserve the candidate as a low-confidence fidelity
+result. That result is fail-closed and
 requires exactly one independently verified second-provider or qualified-human
 review before signing; it is neither an automatic retry nor permission to
 publish. The evidence request and independent verifier both receive the bound
