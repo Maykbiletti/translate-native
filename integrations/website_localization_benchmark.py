@@ -23,16 +23,18 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v3"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v4"
 BASELINE_SCHEMA = "blun.website-localization-baseline.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v3"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v3"
+ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v4"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v4"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
 MAX_TEXT_BYTES = 2_000_000
 EARLY_REQUIRED_LOCALES = frozenset(("mt-MT", "fi-FI"))
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
+SIGNATURE_TOKEN = re.compile(r"^[A-Za-z0-9._~+/=:-]{1,16384}$")
 
 
 def _load_module(name: str, path: Path):
@@ -81,6 +83,18 @@ class BenchmarkReviewerFailed(RuntimeError):
 
 
 @dataclass(frozen=True)
+class BenchmarkSignature:
+    algorithm: str
+    key_id: str
+    signature: str
+
+
+class BenchmarkEvidenceAuthority(Protocol):
+    def sign(self, payload: bytes) -> BenchmarkSignature: ...
+    def verify(self, payload: bytes, signature: BenchmarkSignature) -> bool: ...
+
+
+@dataclass(frozen=True)
 class BenchmarkPolicy:
     benchmark_version: str
     suite_version: str
@@ -92,6 +106,8 @@ class BenchmarkPolicy:
     candidate_worker_schema: str
     candidate_glossary_version: str
     candidate_policy_version: str
+    attestation_algorithm: str
+    attestation_key_id: str
     baseline_id: str
     baseline_version: str
     reviewer_id: str
@@ -189,6 +205,8 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
         policy.candidate_worker_schema,
         policy.candidate_glossary_version,
         policy.candidate_policy_version,
+        policy.attestation_algorithm,
+        policy.attestation_key_id,
         policy.baseline_id,
         policy.baseline_version,
         policy.reviewer_id,
@@ -269,6 +287,102 @@ def _validate_candidate_job_binding(
         or job["policy_version"] != expected["policy_version"]
     ):
         raise BenchmarkBlocked("benchmark.candidate.policy_mismatch")
+
+
+def _benchmark_signature(value: Any) -> BenchmarkSignature:
+    if not isinstance(value, BenchmarkSignature):
+        raise BenchmarkBlocked("benchmark.attestation.invalid")
+    if (
+        not isinstance(value.algorithm, str)
+        or IDENTIFIER.fullmatch(value.algorithm) is None
+        or not isinstance(value.key_id, str)
+        or IDENTIFIER.fullmatch(value.key_id) is None
+        or not isinstance(value.signature, str)
+        or SIGNATURE_TOKEN.fullmatch(value.signature) is None
+    ):
+        raise BenchmarkBlocked("benchmark.attestation.invalid")
+    return value
+
+
+def _attestation_payload(
+    payload: dict[str, Any],
+    policy: BenchmarkPolicy,
+    authority: BenchmarkEvidenceAuthority,
+) -> dict[str, str]:
+    sign = getattr(authority, "sign", None)
+    verify = getattr(authority, "verify", None)
+    if not callable(sign) or not callable(verify):
+        raise BenchmarkBlocked("benchmark.attestation.authority_invalid")
+    encoded = _canonical_json(payload).encode("utf-8")
+    try:
+        signature = _benchmark_signature(sign(encoded))
+    except BenchmarkBlocked:
+        raise
+    except Exception:
+        raise BenchmarkBlocked("benchmark.attestation.sign_failed") from None
+    if (
+        signature.algorithm != policy.attestation_algorithm
+        or signature.key_id != policy.attestation_key_id
+    ):
+        raise BenchmarkBlocked("benchmark.attestation.binding_mismatch")
+    try:
+        accepted = verify(encoded, signature) is True
+    except Exception:
+        raise BenchmarkBlocked("benchmark.attestation.verify_failed") from None
+    if not accepted:
+        raise BenchmarkBlocked("benchmark.attestation.rejected")
+    return {
+        "schema": ATTESTATION_SCHEMA,
+        "algorithm": signature.algorithm,
+        "key_id": signature.key_id,
+        "payload_sha256": hashlib.sha256(encoded).hexdigest(),
+        "signature": signature.signature,
+    }
+
+
+def _verify_attestation(
+    payload: dict[str, Any],
+    attestation: Any,
+    policy: BenchmarkPolicy,
+    authority: BenchmarkEvidenceAuthority,
+) -> None:
+    if not isinstance(attestation, dict) or set(attestation) != {
+        "schema", "algorithm", "key_id", "payload_sha256", "signature",
+    }:
+        raise BenchmarkBlocked("benchmark.attestation.invalid")
+    signature = _benchmark_signature(BenchmarkSignature(
+        algorithm=attestation.get("algorithm"),
+        key_id=attestation.get("key_id"),
+        signature=attestation.get("signature"),
+    ))
+    if (
+        attestation.get("schema") != ATTESTATION_SCHEMA
+        or signature.algorithm != policy.attestation_algorithm
+        or signature.key_id != policy.attestation_key_id
+    ):
+        raise BenchmarkBlocked("benchmark.attestation.binding_mismatch")
+    encoded = _canonical_json(payload).encode("utf-8")
+    if attestation.get("payload_sha256") != hashlib.sha256(encoded).hexdigest():
+        raise BenchmarkBlocked("benchmark.attestation.payload_mismatch")
+    verify = getattr(authority, "verify", None)
+    if not callable(verify):
+        raise BenchmarkBlocked("benchmark.attestation.authority_invalid")
+    try:
+        accepted = verify(encoded, signature) is True
+    except Exception:
+        raise BenchmarkBlocked("benchmark.attestation.verify_failed") from None
+    if not accepted:
+        raise BenchmarkBlocked("benchmark.attestation.rejected")
+
+
+def _attest(
+    payload: dict[str, Any],
+    policy: BenchmarkPolicy,
+    authority: BenchmarkEvidenceAuthority,
+) -> dict[str, Any]:
+    signed = json.loads(_canonical_json(payload))
+    signed["attestation"] = _attestation_payload(signed, policy, authority)
+    return signed
 
 
 def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
@@ -565,6 +679,7 @@ def run_blind_benchmark_case(
     reviewer: BenchmarkReviewer,
     *,
     blinding_key: bytes,
+    evidence_authority: BenchmarkEvidenceAuthority,
 ) -> dict[str, Any]:
     """Run one locale case through source-blind and source-aware A/B review."""
     policy = _validate_policy(policy)
@@ -628,7 +743,7 @@ def run_blind_benchmark_case(
     elif candidate_text != baseline_text and preferences == ["baseline", "baseline"]:
         if not integrity["baseline"] and not any(defect_counts["baseline"].values()):
             winner = "baseline"
-    return {
+    result = {
         "schema": CASE_RESULT_SCHEMA,
         "benchmark_version": policy.benchmark_version,
         "suite": {
@@ -662,6 +777,7 @@ def run_blind_benchmark_case(
         "defect_counts": defect_counts,
         "winner": winner,
     }
+    return _attest(result, policy, evidence_authority)
 
 
 def _one_sided_sign_p(candidate_wins: int, decisive: int) -> float:
@@ -671,8 +787,14 @@ def _one_sided_sign_p(candidate_wins: int, decisive: int) -> float:
     return numerator / (2 ** decisive)
 
 
-def _validated_case_result(raw: Mapping[str, Any], policy: BenchmarkPolicy) -> dict[str, Any]:
+def _validated_case_result(
+    raw: Mapping[str, Any],
+    policy: BenchmarkPolicy,
+    authority: BenchmarkEvidenceAuthority,
+) -> dict[str, Any]:
     result = dict(raw)
+    attestation = result.pop("attestation", None)
+    _verify_attestation(result, attestation, policy, authority)
     required = {
         "schema", "benchmark_version", "suite", "case_id", "job_id", "target_locale",
         "content_type", "source_sha256", "domain", "long_form", "adversarial_tags",
@@ -800,25 +922,28 @@ def _validated_case_result(raw: Mapping[str, Any], policy: BenchmarkPolicy) -> d
     return json.loads(_canonical_json(result))
 
 
-def summarize_benchmark(
+def _unsigned_benchmark_report(
     policy: BenchmarkPolicy,
     case_results: Sequence[Mapping[str, Any]],
+    evidence_authority: BenchmarkEvidenceAuthority,
 ) -> dict[str, Any]:
-    """Permit a superiority claim only when every required locale passes."""
     policy = _validate_policy(policy)
     if isinstance(case_results, (str, bytes)) or not isinstance(case_results, Sequence):
         raise BenchmarkBlocked("benchmark.results.invalid")
     grouped: dict[str, list[dict[str, Any]]] = {locale: [] for locale in policy.required_locales}
     seen: set[tuple[str, str]] = set()
+    evidence_hashes: list[str] = []
     for raw in case_results:
         if not isinstance(raw, Mapping):
             raise BenchmarkBlocked("benchmark.results.invalid")
-        result = _validated_case_result(raw, policy)
+        signed_result = dict(raw)
+        result = _validated_case_result(signed_result, policy, evidence_authority)
         suite_key = (result["target_locale"], result["suite"]["case_key"])
         if suite_key in seen or result["target_locale"] not in grouped:
             raise BenchmarkBlocked("benchmark.results.invalid")
         seen.add(suite_key)
         grouped[result["target_locale"]].append(result)
+        evidence_hashes.append(_hash_json(signed_result))
     locale_reports: list[dict[str, Any]] = []
     for locale in policy.required_locales:
         cases = grouped[locale]
@@ -878,8 +1003,41 @@ def summarize_benchmark(
         ],
         "baseline": {"id": policy.baseline_id, "version": policy.baseline_version},
         "reviewer": {"id": policy.reviewer_id, "version": policy.reviewer_version},
+        "case_evidence_sha256": _hash_json(sorted(evidence_hashes)),
         "required_locales": list(policy.required_locales),
         "status": "PASS" if claim_allowed else "BLOCK",
         "superiority_claim_allowed": claim_allowed,
         "locales": locale_reports,
     }
+
+
+def summarize_benchmark(
+    policy: BenchmarkPolicy,
+    case_results: Sequence[Mapping[str, Any]],
+    *,
+    evidence_authority: BenchmarkEvidenceAuthority,
+) -> dict[str, Any]:
+    """Return an attested claim only when every required locale passes."""
+    policy = _validate_policy(policy)
+    report = _unsigned_benchmark_report(policy, case_results, evidence_authority)
+    return _attest(report, policy, evidence_authority)
+
+
+def verify_benchmark_report(
+    policy: BenchmarkPolicy,
+    report: Mapping[str, Any],
+    case_results: Sequence[Mapping[str, Any]],
+    *,
+    evidence_authority: BenchmarkEvidenceAuthority,
+) -> dict[str, Any]:
+    """Verify a report signature and its exact set of case attestations."""
+    policy = _validate_policy(policy)
+    if not isinstance(report, Mapping):
+        raise BenchmarkBlocked("benchmark.report.invalid")
+    unsigned = dict(report)
+    attestation = unsigned.pop("attestation", None)
+    _verify_attestation(unsigned, attestation, policy, evidence_authority)
+    expected = _unsigned_benchmark_report(policy, case_results, evidence_authority)
+    if _canonical_json(unsigned) != _canonical_json(expected):
+        raise BenchmarkBlocked("benchmark.report.binding_mismatch")
+    return json.loads(_canonical_json(report))

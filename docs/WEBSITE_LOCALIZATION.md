@@ -280,6 +280,20 @@ result from another model, policy, source case, or locale cannot be relabelled.
 The final report records the same candidate binding and all required locale
 profile bindings. These fields never enter either blinded reviewer request.
 
+Benchmark results are durable evidence only when a host-owned
+`BenchmarkEvidenceAuthority` attests them. The harness passes canonical UTF-8
+bytes to that provider-neutral interface and never reads a signing key. The
+policy fixes the expected algorithm and key identifier. After both blind
+reviews, the harness signs and immediately verifies the complete text-free
+case result; missing, rejected, foreign-key, or payload-mismatched attestations
+block before aggregation. `summarize_benchmark` verifies every case first,
+binds the report to the digest of the exact signed case set, and attests the
+complete report. Consumers can call `verify_benchmark_report` with that exact
+case evidence before accepting even a `PASS` claim. Production hosts should
+back the authority with an isolated signer or hardware-backed key and restrict
+it to this benchmark contract; the test-only HMAC authority is not production
+key management.
+
 `summarize_benchmark` applies a one-sided exact sign test and minimum case,
 decisive-rate, and win-rate thresholds separately to every required locale.
 One candidate blocking/major/integrity defect blocks that locale. Missing,
@@ -298,7 +312,7 @@ quietly reused. Keyed A/B assignment and origin-free review payloads reduce
 identity bias; per-locale hard gates prevent averaging; exact baseline,
 reviewer, benchmark, suite, suite case, source, locale, and content bindings
 plus exact candidate and quality-profile bindings reject stale, substituted,
-homogeneous, relabelled, or mixed evidence. The harness permits
+homogeneous, relabelled, unsigned, forged, or mixed evidence. The harness permits
 a claim only from complete measured blind evidence, never from a model grading
 its own prose.
 

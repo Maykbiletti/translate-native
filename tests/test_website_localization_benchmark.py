@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
+import hmac
 import importlib.util
 import json
 import sys
@@ -54,6 +56,8 @@ def policy(**overrides):
         "candidate_worker_schema": WORKER.WORKER_SCHEMA,
         "candidate_glossary_version": "blun-glossary-3",
         "candidate_policy_version": "native-web-2",
+        "attestation_algorithm": "hmac-sha256-test",
+        "attestation_key_id": "benchmark-test-key-1",
         "baseline_id": "deepl-official-api",
         "baseline_version": "fixture-2026-08-30",
         "reviewer_id": "independent-native-panel",
@@ -207,14 +211,53 @@ class PreferenceReviewer:
         return review_response(request, label, self.defects)
 
 
+class HmacBenchmarkAuthority:
+    def __init__(
+        self, key=b"isolated-benchmark-attestation-key-material",
+        *, algorithm="hmac-sha256-test", key_id="benchmark-test-key-1",
+    ):
+        self.key = key
+        self.algorithm = algorithm
+        self.key_id = key_id
+
+    def sign(self, payload):
+        digest = hmac.new(self.key, payload, hashlib.sha256).digest()
+        return BENCHMARK.BenchmarkSignature(
+            algorithm=self.algorithm,
+            key_id=self.key_id,
+            signature=base64.b64encode(digest).decode("ascii"),
+        )
+
+    def verify(self, payload, signature):
+        digest = hmac.new(self.key, payload, hashlib.sha256).digest()
+        expected = base64.b64encode(digest).decode("ascii")
+        return (
+            signature.algorithm == self.algorithm
+            and signature.key_id == self.key_id
+            and hmac.compare_digest(signature.signature, expected)
+        )
+
+
 class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
     key = b"benchmark-host-secret-key-material-32"
+
+    def setUp(self):
+        self.authority = HmacBenchmarkAuthority()
+
+    def run_benchmark(self, *args, **kwargs):
+        kwargs["evidence_authority"] = self.authority
+        return BENCHMARK.run_blind_benchmark_case(*args, **kwargs)
+
+    def summarize(self, benchmark_policy, results):
+        return BENCHMARK.summarize_benchmark(
+            benchmark_policy, results, evidence_authority=self.authority,
+        )
 
     def run_case(self, locale="mt-MT", suffix="1", *, prefer="preferred", baseline_text=None):
         payload = job(locale, suffix)
         result = candidate_result(payload)
         reviewer = PreferenceReviewer(result["candidate"], prefer=prefer)
-        outcome = BENCHMARK.run_blind_benchmark_case(
+        outcome = self.run_benchmark(
             payload,
             result,
             baseline(payload, baseline_text),
@@ -234,6 +277,8 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertNotIn(source_text, native)
         self.assertNotIn("customer-llm", native + fidelity)
         self.assertNotIn("deepl", (native + fidelity).lower())
+        self.assertNotIn("benchmark-test-key", native + fidelity)
+        self.assertNotIn("hmac-sha256-test", native + fidelity)
         self.assertNotIn('"origin"', native + fidelity)
         self.assertNotIn('"case_key"', native)
         self.assertNotIn('"adversarial_tags"', native)
@@ -251,11 +296,11 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         result = candidate_result(payload)
         base = baseline(payload)
         first_reviewer = PreferenceReviewer(result["candidate"])
-        first = BENCHMARK.run_blind_benchmark_case(
+        first = self.run_benchmark(
             payload, result, base, assets(), policy(), first_reviewer, blinding_key=self.key,
         )
         second_reviewer = PreferenceReviewer(result["candidate"])
-        second = BENCHMARK.run_blind_benchmark_case(
+        second = self.run_benchmark(
             payload, result, base, assets(), policy(), second_reviewer, blinding_key=self.key,
         )
         self.assertEqual(first, second)
@@ -263,7 +308,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         commitments = {first["blind_commitment_sha256"]}
         for index in range(1, 8):
             reviewer = PreferenceReviewer(result["candidate"])
-            changed = BENCHMARK.run_blind_benchmark_case(
+            changed = self.run_benchmark(
                 payload, result, base, assets(), policy(), reviewer,
                 blinding_key=(f"different-key-{index:02d}".encode() * 3)[:32],
             )
@@ -298,7 +343,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 changed = {**base, field: value}
                 reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
                 with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-                    BENCHMARK.run_blind_benchmark_case(
+                    self.run_benchmark(
                         payload, candidate_result(payload), changed, assets(), policy(), reviewer,
                         blinding_key=self.key,
                     )
@@ -311,7 +356,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         result["target_sha256"] = "0" * 64
         reviewer = PreferenceReviewer(result["candidate"])
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.run_blind_benchmark_case(
+            self.run_benchmark(
                 payload, result, baseline(payload), assets(), policy(), reviewer,
                 blinding_key=self.key,
             )
@@ -334,7 +379,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             with self.subTest(field=field):
                 reviewer = PreferenceReviewer(result["candidate"])
                 with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-                    BENCHMARK.run_blind_benchmark_case(
+                    self.run_benchmark(
                         payload, result, baseline(payload), assets(),
                         policy(**{field: value}), reviewer, blinding_key=self.key,
                     )
@@ -350,7 +395,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         result["quality_profile"]["version"] = "stale-profile"
         reviewer = PreferenceReviewer(result["candidate"])
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.run_blind_benchmark_case(
+            self.run_benchmark(
                 payload, result, baseline(payload), assets(), policy(), reviewer,
                 blinding_key=self.key,
             )
@@ -363,7 +408,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         result["quality_passes"][1]["status"] = "FAIL"
         reviewer = PreferenceReviewer(result["candidate"])
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.run_blind_benchmark_case(
+            self.run_benchmark(
                 payload, result, baseline(payload), assets(), policy(), reviewer,
                 blinding_key=self.key,
             )
@@ -371,15 +416,15 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(reviewer.requests, [])
 
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.summarize_benchmark(policy(minimum_cases_per_locale="six"), [])
+            self.summarize(policy(minimum_cases_per_locale="six"), [])
         self.assertEqual(caught.exception.code, "benchmark.policy.invalid")
 
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.summarize_benchmark(policy(suite_sha256="0" * 64), [])
+            self.summarize(policy(suite_sha256="0" * 64), [])
         self.assertEqual(caught.exception.code, "benchmark.suite.version_mismatch")
 
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.summarize_benchmark(policy(required_locales=("mt-MT",)), [])
+            self.summarize(policy(required_locales=("mt-MT",)), [])
         self.assertEqual(caught.exception.code, "benchmark.policy.invalid")
 
     def test_preferred_variant_cannot_have_major_or_blocking_defect(self):
@@ -395,7 +440,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
 
         reviewer = DefectiveReviewer(result["candidate"])
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.run_blind_benchmark_case(
+            self.run_benchmark(
                 payload, result, baseline(payload), assets(), policy(), reviewer,
                 blinding_key=self.key,
             )
@@ -414,7 +459,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                     label = "B" if label == "A" else "A"
                 return review_response(request, label)
 
-        outcome = BENCHMARK.run_blind_benchmark_case(
+        outcome = self.run_benchmark(
             payload, result, baseline(payload), assets(), policy(), SplitReviewer(result["candidate"]),
             blinding_key=self.key,
         )
@@ -429,7 +474,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         result = candidate_result(payload, broken)
         base = baseline(payload)
         reviewer = PreferenceReviewer(broken)
-        outcome = BENCHMARK.run_blind_benchmark_case(
+        outcome = self.run_benchmark(
             payload, result, base, assets(), policy(), reviewer, blinding_key=self.key,
         )
         self.assertEqual(outcome["integrity"]["candidate"]["status"], "FAIL")
@@ -450,7 +495,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             for index in range(len(SUITE.SOURCE_CASES)):
                 outcome, _ = self.run_case(locale, f"{locale}-{index}")
                 results.append(outcome)
-        report = BENCHMARK.summarize_benchmark(policy(), results)
+        report = self.summarize(policy(), results)
         self.assertTrue(report["superiority_claim_allowed"])
         self.assertEqual(report["status"], "PASS")
         self.assertEqual(report["candidate"], {
@@ -495,7 +540,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         ).jobs[0].as_payload()
         reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.run_blind_benchmark_case(
+            self.run_benchmark(
                 payload, candidate_result(payload), baseline(payload), assets(), policy(), reviewer,
                 blinding_key=self.key,
             )
@@ -510,7 +555,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         for index in range(len(SUITE.SOURCE_CASES)):
             outcome, _ = self.run_case("fi-FI", f"fi-{index}", prefer="other")
             results.append(outcome)
-        report = BENCHMARK.summarize_benchmark(policy(), results)
+        report = self.summarize(policy(), results)
         self.assertFalse(report["superiority_claim_allowed"])
         by_locale = {item["locale"]: item for item in report["locales"]}
         self.assertEqual(by_locale["mt-MT"]["status"], "PASS")
@@ -522,7 +567,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             for index in range(len(SUITE.SOURCE_CASES) - 1):
                 outcome, _ = self.run_case(locale, f"small-{locale}-{index}")
                 results.append(outcome)
-        report = BENCHMARK.summarize_benchmark(policy(), results)
+        report = self.summarize(policy(), results)
         self.assertFalse(report["superiority_claim_allowed"])
 
         tied = []
@@ -530,22 +575,22 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             for index in range(len(SUITE.SOURCE_CASES)):
                 outcome, _ = self.run_case(locale, f"tie-{locale}-{index}", prefer="tie")
                 tied.append(outcome)
-        report = BENCHMARK.summarize_benchmark(policy(), tied)
+        report = self.summarize(policy(), tied)
         self.assertFalse(report["superiority_claim_allowed"])
 
     def test_duplicate_cases_and_mixed_versions_block(self):
         result, _ = self.run_case()
         with self.assertRaises(BENCHMARK.BenchmarkBlocked):
-            BENCHMARK.summarize_benchmark(policy(), [result, result])
+            self.summarize(policy(), [result, result])
         disguised_duplicate = copy.deepcopy(result)
         disguised_duplicate["case_id"] = "benchmark-case-" + "0" * 64
         with self.assertRaises(BENCHMARK.BenchmarkBlocked):
-            BENCHMARK.summarize_benchmark(policy(), [result, disguised_duplicate])
+            self.summarize(policy(), [result, disguised_duplicate])
         changed = copy.deepcopy(result)
         changed["benchmark_version"] = "other"
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.summarize_benchmark(policy(), [changed])
-        self.assertEqual(caught.exception.code, "benchmark.results.version_mismatch")
+            self.summarize(policy(), [changed])
+        self.assertEqual(caught.exception.code, "benchmark.attestation.payload_mismatch")
 
     def test_complete_suite_is_required_even_with_a_lower_case_threshold(self):
         results = []
@@ -553,7 +598,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             for index in range(len(SUITE.SOURCE_CASES) - 1):
                 outcome, _ = self.run_case(locale, f"partial-{locale}-{index}")
                 results.append(outcome)
-        report = BENCHMARK.summarize_benchmark(
+        report = self.summarize(
             policy(minimum_cases_per_locale=len(SUITE.SOURCE_CASES) - 1),
             results,
         )
@@ -565,8 +610,8 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         changed = copy.deepcopy(result)
         changed["winner"] = "baseline"
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.summarize_benchmark(policy(), [changed])
-        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+            self.summarize(policy(), [changed])
+        self.assertEqual(caught.exception.code, "benchmark.attestation.payload_mismatch")
 
         for field, value in (
             ("job_id", "blun-l10n-" + "0" * 64),
@@ -577,13 +622,82 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 changed = copy.deepcopy(result)
                 changed[field] = value
                 with self.assertRaises(BENCHMARK.BenchmarkBlocked):
-                    BENCHMARK.summarize_benchmark(policy(), [changed])
+                    self.summarize(policy(), [changed])
 
         changed = copy.deepcopy(result)
         changed["integrity"]["candidate"] = "PASS"
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
-            BENCHMARK.summarize_benchmark(policy(), [changed])
-        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+            self.summarize(policy(), [changed])
+        self.assertEqual(caught.exception.code, "benchmark.attestation.payload_mismatch")
+
+    def test_case_attestation_blocks_forgery_and_wrong_authority(self):
+        result, _ = self.run_case()
+        self.assertEqual(result["attestation"]["schema"], BENCHMARK.ATTESTATION_SCHEMA)
+        self.assertEqual(result["attestation"]["key_id"], "benchmark-test-key-1")
+
+        unsigned = copy.deepcopy(result)
+        unsigned.pop("attestation")
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(policy(), [unsigned])
+        self.assertEqual(caught.exception.code, "benchmark.attestation.invalid")
+
+        for field, value, code in (
+            ("signature", "0" * 64, "benchmark.attestation.rejected"),
+            ("key_id", "other-key", "benchmark.attestation.binding_mismatch"),
+            ("payload_sha256", "0" * 64, "benchmark.attestation.payload_mismatch"),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(result)
+                changed["attestation"][field] = value
+                with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+                    self.summarize(policy(), [changed])
+                self.assertEqual(caught.exception.code, code)
+
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.summarize_benchmark(
+                policy(), [result],
+                evidence_authority=HmacBenchmarkAuthority(key=b"wrong-key-material"),
+            )
+        self.assertEqual(caught.exception.code, "benchmark.attestation.rejected")
+
+        class RejectingAuthority(HmacBenchmarkAuthority):
+            def verify(self, payload, signature):
+                return False
+
+        payload = job()
+        reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.run_blind_benchmark_case(
+                payload, candidate_result(payload), baseline(payload), assets(),
+                policy(), reviewer, blinding_key=self.key,
+                evidence_authority=RejectingAuthority(),
+            )
+        self.assertEqual(caught.exception.code, "benchmark.attestation.rejected")
+        self.assertEqual(len(reviewer.requests), 2)
+
+    def test_report_attestation_binds_exact_case_evidence(self):
+        result, _ = self.run_case()
+        report = self.summarize(policy(), [result])
+        verified = BENCHMARK.verify_benchmark_report(
+            policy(), report, [result], evidence_authority=self.authority,
+        )
+        self.assertEqual(verified, report)
+        self.assertEqual(report["attestation"]["schema"], BENCHMARK.ATTESTATION_SCHEMA)
+        self.assertRegex(report["case_evidence_sha256"], r"^[0-9a-f]{64}$")
+
+        changed_report = copy.deepcopy(report)
+        changed_report["superiority_claim_allowed"] = True
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.verify_benchmark_report(
+                policy(), changed_report, [result], evidence_authority=self.authority,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.attestation.payload_mismatch")
+
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.verify_benchmark_report(
+                policy(), report, [], evidence_authority=self.authority,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.report.binding_mismatch")
 
 
 if __name__ == "__main__":
