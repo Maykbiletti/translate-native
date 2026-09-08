@@ -25,10 +25,13 @@ from typing import Any, Callable, Iterator, Mapping, Protocol
 
 
 SCHEMA_VERSION = 1
+HEALTH_SCHEMA = "blun.website-localization-benchmark-campaign-health.v1"
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
+MAX_STALE_SECONDS = 31_536_000.0
 MAX_RESULT_BYTES = 2_000_000
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
+HEALTH_REASON = re.compile(r"^[a-z][a-z0-9_.-]{0,255}$")
 STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
 CAMPAIGN_COLUMNS = (
     "campaign_id", "policy_sha256", "suite_sha256", "work_count",
@@ -119,6 +122,29 @@ class BenchmarkCampaignOutcome:
     error_code: str | None
     error_detail_hash: str | None
     result_sha256: str | None
+
+
+@dataclass(frozen=True)
+class BenchmarkCampaignHealth:
+    campaign_id: str
+    status: str
+    reasons: tuple[str, ...]
+    counts: tuple[tuple[str, int], ...]
+    work_count: int
+    report_ready: bool
+    last_progress_at: float | None
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": HEALTH_SCHEMA,
+            "campaign_id": self.campaign_id,
+            "status": self.status,
+            "reasons": list(self.reasons),
+            "counts": dict(self.counts),
+            "work_count": self.work_count,
+            "report_ready": self.report_ready,
+            "last_progress_at": self.last_progress_at,
+        }
 
 
 class BenchmarkInputResolver(Protocol):
@@ -583,6 +609,186 @@ class BenchmarkCampaignStore:
             "complete": counts["succeeded"] == len(_expected_work(policy)),
             "blocked": counts["failed"] > 0,
         }
+
+    def health(
+        self,
+        policy: Any,
+        campaign_id: str,
+        authority: Any,
+        *,
+        now: Any,
+        stale_after_seconds: Any = 3600,
+    ) -> BenchmarkCampaignHealth:
+        """Return a read-only, text-free health snapshot for one campaign."""
+        now = _timestamp(now)
+        stale_after_seconds = _timestamp(stale_after_seconds)
+        if not 0 < stale_after_seconds <= MAX_STALE_SECONDS:
+            raise BenchmarkCampaignBlocked("benchmark.campaign.stale_threshold_invalid")
+        counts = {name: 0 for name in STATUSES}
+        work_count = 0
+        last_progress_at: float | None = None
+        results: list[dict[str, Any]] = []
+        reasons: set[str] = set()
+        try:
+            policy = _BENCHMARK._validate_policy(policy)
+            if self.connection.in_transaction:
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.external_transaction",
+                )
+            self.connection.execute("BEGIN")
+            try:
+                self._verify_binding_locked(policy, campaign_id)
+                rows = self.connection.execute("""
+                    SELECT * FROM benchmark_campaign_work
+                    WHERE campaign_id = ?
+                    ORDER BY target_locale, suite_case_key
+                """, (campaign_id,)).fetchall()
+                work_count = len(rows)
+                due = False
+                live_lease = False
+                for row in rows:
+                    status = row["status"]
+                    if status not in counts:
+                        raise ValueError
+                    counts[status] += 1
+                    attempts = row["attempts"]
+                    maximum = row["max_attempts"]
+                    if (
+                        isinstance(attempts, bool)
+                        or isinstance(maximum, bool)
+                        or not isinstance(attempts, int)
+                        or not isinstance(maximum, int)
+                        or not 0 <= attempts <= maximum <= MAX_ATTEMPTS
+                    ):
+                        raise ValueError
+                    created_at = _timestamp(row["created_at"])
+                    updated_at = _timestamp(row["updated_at"])
+                    next_attempt_at = _timestamp(row["next_attempt_at"])
+                    if created_at > updated_at or updated_at > now:
+                        raise ValueError
+                    last_progress_at = max(
+                        updated_at,
+                        last_progress_at if last_progress_at is not None else updated_at,
+                    )
+                    lease_values = (
+                        row["lease_owner"], row["lease_token"],
+                        row["lease_expires_at"],
+                    )
+                    if status == "leased":
+                        _identifier(row["lease_owner"])
+                        _identifier(row["lease_token"])
+                        expires_at = _timestamp(row["lease_expires_at"])
+                        if attempts < 1:
+                            raise ValueError
+                        if expires_at <= now:
+                            reasons.add("benchmark.campaign.lease_expired")
+                            due = True
+                        else:
+                            live_lease = True
+                    elif any(value is not None for value in lease_values):
+                        raise ValueError
+                    if status == "pending":
+                        if attempts != 0 or row["last_error_code"] is not None:
+                            raise ValueError
+                        due = due or next_attempt_at <= now
+                    elif status in {"retry_wait", "failed"}:
+                        if attempts < 1:
+                            raise ValueError
+                        if status == "retry_wait":
+                            if attempts >= maximum:
+                                raise ValueError
+                            due = due or next_attempt_at <= now
+                    elif status == "succeeded" and row["last_error_code"] is not None:
+                        raise ValueError
+                    code = row["last_error_code"]
+                    if code is not None:
+                        if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
+                            raise ValueError
+                        reasons.add("benchmark.campaign.error." + code)
+                    elif status in {"retry_wait", "failed"}:
+                        raise ValueError
+                    detail_hash = row["last_error_detail_hash"]
+                    if detail_hash is not None and re.fullmatch(
+                        r"[0-9a-f]{64}", detail_hash,
+                    ) is None:
+                        raise ValueError
+                    if status in {"pending", "succeeded"} and detail_hash is not None:
+                        raise ValueError
+                    result_json = row["result_json"]
+                    result_sha256 = row["result_sha256"]
+                    if status == "succeeded":
+                        if (
+                            not isinstance(result_json, str)
+                            or result_sha256 != _hash_text(result_json)
+                            or attempts < 1
+                        ):
+                            raise ValueError
+                        result = json.loads(result_json)
+                        if _canonical_json(result) != result_json:
+                            raise ValueError
+                        validated = _BENCHMARK._validated_case_result(
+                            result, policy, authority,
+                        )
+                        if (
+                            validated["target_locale"] != row["target_locale"]
+                            or validated["suite"]["case_key"] != row["suite_case_key"]
+                        ):
+                            raise ValueError
+                        results.append(result)
+                    elif result_json is not None or result_sha256 is not None:
+                        raise ValueError
+                if work_count != len(_expected_work(policy)):
+                    raise ValueError
+            finally:
+                self.connection.rollback()
+        except Exception:
+            return BenchmarkCampaignHealth(
+                campaign_id=(
+                    campaign_id
+                    if isinstance(campaign_id, str) and re.fullmatch(
+                        r"benchmark-campaign-[0-9a-f]{64}", campaign_id,
+                    ) is not None
+                    else "invalid"
+                ),
+                status="blocked",
+                reasons=("benchmark.campaign.state_invalid",),
+                counts=tuple(sorted(counts.items())),
+                work_count=work_count,
+                report_ready=False,
+                last_progress_at=last_progress_at,
+            )
+
+        report_ready = counts["succeeded"] == work_count
+        if counts["failed"]:
+            reasons.add("benchmark.campaign.failed")
+        if (
+            not report_ready
+            and not counts["failed"]
+            and not live_lease
+            and due
+            and last_progress_at is not None
+            and now - last_progress_at > stale_after_seconds
+        ):
+            reasons.add("benchmark.campaign.stalled")
+        if report_ready:
+            try:
+                _BENCHMARK.summarize_benchmark(
+                    policy, results, evidence_authority=authority,
+                )
+            except Exception:
+                reasons.add("benchmark.campaign.report_invalid")
+                report_ready = False
+        blocking = counts["failed"] > 0 or "benchmark.campaign.report_invalid" in reasons
+        status = "blocked" if blocking else ("degraded" if reasons else "healthy")
+        return BenchmarkCampaignHealth(
+            campaign_id=campaign_id,
+            status=status,
+            reasons=tuple(sorted(reasons)),
+            counts=tuple(sorted(counts.items())),
+            work_count=work_count,
+            report_ready=report_ready,
+            last_progress_at=last_progress_at,
+        )
 
     def summarize(self, policy: Any, campaign_id: str, authority: Any) -> dict[str, Any]:
         policy = _BENCHMARK._validate_policy(policy)

@@ -181,6 +181,37 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             protected_terms=(),
         )
 
+    @staticmethod
+    def benchmark_policy():
+        campaign = RUNTIME._HEALTH._CAMPAIGN
+        benchmark = campaign._BENCHMARK
+        manifest = campaign._SUITE.manifest()
+        return benchmark.BenchmarkPolicy(
+            benchmark_version="native-vs-baseline-1",
+            suite_version=manifest["version"],
+            suite_sha256=manifest["sha256"],
+            candidate_provider_id="customer-llm",
+            candidate_model_id="king",
+            candidate_model_version="2026-09-08",
+            candidate_software_version="6.43.0-dev",
+            candidate_worker_schema=WORKER.WORKER_SCHEMA,
+            candidate_glossary_version="customer-glossary-1",
+            candidate_policy_version="native-web-2",
+            attestation_algorithm="hmac-sha256-test",
+            attestation_key_id="benchmark-key",
+            baseline_id="deepl-official-api",
+            baseline_version="fixture-2026-09-08",
+            reviewer_id="independent-native-panel",
+            reviewer_version="2026-09-08",
+            native_reference_revision="qualified-native-reference-1",
+            native_reference_verifier_id="qualified-review-registry",
+            native_reference_verifier_version="2026-09-08",
+            required_locales=("mt-MT", "fi-FI"),
+            required_content_types=("commercial",),
+            minimum_cases_per_locale=len(manifest["cases"]),
+            minimum_cases_per_content_type=8,
+        )
+
     def runtime(self, **overrides):
         values = {
             "queue_connection": self.connections[0],
@@ -374,6 +405,78 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
 
         after = tuple(connection.total_changes for connection in self.connections)
         self.assertEqual(before, after)
+
+    def test_runtime_integrates_bound_benchmark_campaign_health(self):
+        campaign = RUNTIME._HEALTH._CAMPAIGN
+        benchmark_connection = sqlite3.connect(":memory:")
+        self.connections.append(benchmark_connection)
+        benchmark_policy = self.benchmark_policy()
+        store = campaign.BenchmarkCampaignStore(benchmark_connection)
+        campaign_id = store.create(benchmark_policy, now=100)
+        authority = Authority(
+            campaign._BENCHMARK.BenchmarkSignature,
+            b"benchmark-key",
+            "benchmark-key",
+        )
+        self.clock.value = 105
+
+        runtime = self.runtime(
+            benchmark_connection=benchmark_connection,
+            benchmark_policy=benchmark_policy,
+            benchmark_campaign_id=campaign_id,
+            benchmark_evidence_authority=authority,
+            benchmark_stale_after_seconds=30,
+        )
+        report = runtime.health(now=105)
+
+        self.assertIs(runtime.benchmark_store.connection, benchmark_connection)
+        component = next(
+            item for item in report.components
+            if item.component == "benchmark_campaign"
+        )
+        self.assertEqual(component.status, "healthy")
+        self.assertEqual(dict(component.counts)["work_count"], 30)
+        self.assertEqual(dict(component.counts)["pending"], 30)
+
+    def test_runtime_rejects_partial_benchmark_before_schema_writes(self):
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.benchmark.incomplete",
+        ):
+            self.runtime(benchmark_policy=self.benchmark_policy())
+
+        after = tuple(connection.total_changes for connection in self.connections)
+        self.assertEqual(before, after)
+
+    def test_runtime_rejects_stale_benchmark_binding_before_schema_writes(self):
+        campaign = RUNTIME._HEALTH._CAMPAIGN
+        benchmark_connection = sqlite3.connect(":memory:")
+        self.connections.append(benchmark_connection)
+        authority = Authority(
+            campaign._BENCHMARK.BenchmarkSignature,
+            b"benchmark-key",
+            "benchmark-key",
+        )
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.benchmark.binding.invalid",
+        ):
+            self.runtime(
+                benchmark_connection=benchmark_connection,
+                benchmark_policy=self.benchmark_policy(),
+                benchmark_campaign_id="benchmark-campaign-" + "0" * 64,
+                benchmark_evidence_authority=authority,
+            )
+
+        after = tuple(connection.total_changes for connection in self.connections)
+        self.assertEqual(before, after)
+        self.assertIsNone(benchmark_connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'",
+        ).fetchone())
 
     def test_preflight_rejects_missing_capability_without_schema_writes(self):
         self.dependencies["publisher"] = object()

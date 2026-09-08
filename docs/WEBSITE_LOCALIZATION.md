@@ -339,6 +339,15 @@ existing separately attested statistical report. A failed, omitted, duplicated,
 exchanged, or policy-stale work item therefore cannot disappear behind a
 partial aggregate.
 
+`BenchmarkCampaignStore.health` verifies the complete campaign binding, every
+row invariant, successful result hash, and case attestation in a consistent
+read-only snapshot. It reports only status counts, stable reason codes, the
+latest progress timestamp, and whether a fully verified report can be produced.
+Expired leases and overdue actionable work degrade health; any terminal work
+failure, altered row, invalid attestation, or invalid final report blocks it.
+Live backoff and recent incomplete work remain healthy and never imply that the
+candidate won.
+
 Early locale lanes may be run and reported independently, but passing them no
 longer authorizes an EU-wide superiority statement. The attested report exposes
 `configured_lanes_status` separately from `superiority_claim_allowed` and
@@ -905,11 +914,30 @@ between independently loadable adapter files while retaining their public
 structural contracts.
 
 The host supplies five distinct `sqlite3.Connection` objects: queue, release,
-CMS, evidence, and supervisor. They may point to host-chosen durable files but
-must not be the same connection because the stores have independent schemas,
-transactions, and migration rules. The runtime neither opens nor closes those
-connections. It also never reads a configuration file, environment variable,
-credential, signing key, or network endpoint.
+CMS, evidence, and supervisor. An optional monitored benchmark campaign adds a
+sixth connection plus its exact policy, campaign ID, evidence verifier, and
+staleness threshold. The runtime rejects partial benchmark configuration and
+connection reuse before constructing any store. These connections may point to
+host-chosen durable files but must not be the same connection because the stores
+have independent schemas, transactions, and migration rules. The runtime
+neither opens nor closes those connections. It also never reads a configuration
+file, environment variable, credential, signing key, or network endpoint.
+
+When configured, the existing content-free health report gains a
+`benchmark_campaign` component. Its overall status becomes degraded for an
+expired lease or a stalled actionable campaign and blocked for failed or
+unverifiable work. The localization service supervisor does not execute
+benchmark cases: campaign workers retain separate leases and adapters, while
+operators obtain one fail-closed operational view of both publication and
+benchmark readiness.
+
+Premortem: a mirrored database could yield inconsistent status, a dead worker
+could leave a lease that looks active, terminal cases could hide behind overall
+progress, status could leak reviewer prose, or an incomplete campaign could be
+mistaken for a passed comparison. Distinct connection validation, snapshot
+verification, lease and staleness reasons, per-row attestation checks,
+code-and-count-only output, and a separate `report_ready` flag close those
+paths.
 
 The supervisor lease must be strictly longer than every effective translation,
 quality-evidence, and CMS-delivery lease. The runtime checks this hierarchy

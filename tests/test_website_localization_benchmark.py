@@ -1411,6 +1411,45 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.code, "benchmark.campaign.lease_lost")
 
+    def test_campaign_health_is_read_only_and_detects_expired_or_stalled_work(self):
+        benchmark_policy = campaign_policy()
+        authority = CampaignAuthority()
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+
+            recent = store.health(
+                benchmark_policy, campaign_id, authority,
+                now=105, stale_after_seconds=10,
+            )
+            self.assertEqual(recent.status, "healthy")
+            self.assertFalse(recent.report_ready)
+            self.assertEqual(dict(recent.counts)["pending"], 30)
+
+            stale = store.health(
+                benchmark_policy, campaign_id, authority,
+                now=111, stale_after_seconds=10,
+            )
+            self.assertEqual(stale.status, "degraded")
+            self.assertEqual(stale.reasons, ("benchmark.campaign.stalled",))
+
+            claim = store.claim(
+                benchmark_policy, campaign_id, "worker",
+                now=112, lease_seconds=5,
+            )
+            before = connection.total_changes
+            expired = store.health(
+                benchmark_policy, campaign_id, authority,
+                now=117, stale_after_seconds=10,
+            )
+            self.assertIn("benchmark.campaign.lease_expired", expired.reasons)
+            self.assertEqual(connection.total_changes, before)
+            row = connection.execute(
+                "SELECT status FROM benchmark_campaign_work WHERE work_id = ?",
+                (claim.work_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "leased")
+
     def test_campaign_dependency_failure_is_bounded_and_content_free(self):
         benchmark_policy = campaign_policy()
         secret = "private provider response with customer text"
@@ -1447,6 +1486,13 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             )
             self.assertIsNotNone(next_claim)
             self.assertNotEqual(next_claim.work_id, outcome.work_id)
+            health = store.health(
+                benchmark_policy, campaign_id, CampaignAuthority(),
+                now=1000,
+            )
+            self.assertEqual(health.status, "blocked")
+            self.assertIn("benchmark.campaign.failed", health.reasons)
+            self.assertNotIn(secret, json.dumps(health.as_payload()))
 
     def test_campaign_runs_one_case_per_tick_and_blocks_incomplete_report(self):
         benchmark_policy = campaign_policy()
@@ -1482,6 +1528,24 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             """).fetchone()[0]
             self.assertNotIn(fixture_copy(outcome.target_locale)["candidate"], stored)
             self.assertNotIn(fixture_copy(outcome.target_locale)["baseline"], stored)
+            health = store.health(
+                benchmark_policy, campaign_id, authority, now=100,
+            )
+            self.assertEqual(health.status, "healthy")
+            self.assertFalse(health.report_ready)
+            connection.execute("""
+                UPDATE benchmark_campaign_work SET result_json = '{}'
+                WHERE status = 'succeeded'
+            """)
+            connection.commit()
+            blocked_health = store.health(
+                benchmark_policy, campaign_id, authority, now=100,
+            )
+            self.assertEqual(blocked_health.status, "blocked")
+            self.assertEqual(
+                blocked_health.reasons,
+                ("benchmark.campaign.state_invalid",),
+            )
             with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
                 store.summarize(benchmark_policy, campaign_id, authority)
             self.assertEqual(caught.exception.code, "benchmark.campaign.incomplete")
@@ -1516,6 +1580,11 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertEqual(report["configured_lanes_status"], "PASS")
             self.assertEqual(report["status"], "BLOCK")
             self.assertFalse(report["superiority_claim_allowed"])
+            health = store.health(
+                benchmark_policy, campaign_id, authority, now=100,
+            )
+            self.assertEqual(health.status, "healthy")
+            self.assertTrue(health.report_ready)
             self.assertEqual(
                 report["claim_block_reasons"],
                 ["eu_target_locale_coverage_incomplete"],

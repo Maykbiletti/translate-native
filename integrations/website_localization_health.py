@@ -54,6 +54,10 @@ _COORDINATOR = _load_module(
     "blun_website_localization_health_coordinator",
     _ROOT / "integrations" / "website_localization_release_coordinator.py",
 )
+_CAMPAIGN = _load_module(
+    "blun_website_localization_health_benchmark_campaign",
+    _ROOT / "integrations" / "website_localization_benchmark_campaign.py",
+)
 
 
 class LocalizationHealthBlocked(RuntimeError):
@@ -181,6 +185,11 @@ class LocalizationHealthMonitor:
         evidence_state: Any | None = None,
         supervisor: Any | None = None,
         supervisor_stale_after_seconds: float | int = 30,
+        benchmark_store: Any | None = None,
+        benchmark_policy: Any | None = None,
+        benchmark_campaign_id: str | None = None,
+        benchmark_evidence_authority: Any | None = None,
+        benchmark_stale_after_seconds: float | int = 3600,
     ):
         if not self._supports_bridge(bridge):
             raise LocalizationHealthBlocked("bridge must be WebsiteLocalizationCMSBridge")
@@ -190,6 +199,24 @@ class LocalizationHealthMonitor:
             raise LocalizationHealthBlocked("evidence state must use SQLite")
         if supervisor is not None and not callable(getattr(supervisor, "status", None)):
             raise LocalizationHealthBlocked("supervisor must expose read-only status")
+        benchmark_values = (
+            benchmark_store, benchmark_policy, benchmark_campaign_id,
+            benchmark_evidence_authority,
+        )
+        if any(value is not None for value in benchmark_values) and any(
+            value is None for value in benchmark_values
+        ):
+            raise LocalizationHealthBlocked("benchmark configuration is incomplete")
+        if benchmark_store is not None and (
+            not isinstance(getattr(benchmark_store, "connection", None), sqlite3.Connection)
+            or not callable(getattr(benchmark_store, "health", None))
+            or not callable(getattr(benchmark_store, "_verify_schema", None))
+        ):
+            raise LocalizationHealthBlocked("benchmark store is invalid")
+        if benchmark_store is not None and not callable(
+            getattr(benchmark_evidence_authority, "verify", None),
+        ):
+            raise LocalizationHealthBlocked("benchmark authority is invalid")
         if (
             isinstance(supervisor_stale_after_seconds, bool)
             or not isinstance(supervisor_stale_after_seconds, (int, float))
@@ -197,12 +224,24 @@ class LocalizationHealthMonitor:
             or float(supervisor_stale_after_seconds) <= 0
         ):
             raise LocalizationHealthBlocked("supervisor stale threshold is invalid")
+        if (
+            isinstance(benchmark_stale_after_seconds, bool)
+            or not isinstance(benchmark_stale_after_seconds, (int, float))
+            or not math.isfinite(float(benchmark_stale_after_seconds))
+            or not 0 < float(benchmark_stale_after_seconds) <= _CAMPAIGN.MAX_STALE_SECONDS
+        ):
+            raise LocalizationHealthBlocked("benchmark stale threshold is invalid")
         self.bridge = bridge
         self.queue = bridge.queue
         self.release_store = bridge.release_store
         self.evidence_state = evidence_state
         self.supervisor = supervisor
         self.supervisor_stale_after_seconds = float(supervisor_stale_after_seconds)
+        self.benchmark_store = benchmark_store
+        self.benchmark_policy = benchmark_policy
+        self.benchmark_campaign_id = benchmark_campaign_id
+        self.benchmark_evidence_authority = benchmark_evidence_authority
+        self.benchmark_stale_after_seconds = float(benchmark_stale_after_seconds)
 
     @staticmethod
     def _supports_bridge(bridge: Any) -> bool:
@@ -261,6 +300,11 @@ class LocalizationHealthMonitor:
                     reasons.add("evidence.schema_invalid")
             except Exception:
                 reasons.add("evidence.schema_invalid")
+        if self.benchmark_store is not None:
+            try:
+                self.benchmark_store._verify_schema()
+            except Exception:
+                reasons.add("benchmark.campaign.schema_invalid")
         connections = [
             ("queue", self.queue.connection),
             ("release", self.release_store.connection),
@@ -268,6 +312,8 @@ class LocalizationHealthMonitor:
         ]
         if self.evidence_state is not None:
             connections.append(("evidence", self.evidence_state.connection))
+        if self.benchmark_store is not None:
+            connections.append(("benchmark", self.benchmark_store.connection))
         for name, connection in connections:
             try:
                 if not self._quick_check(connection):
@@ -854,6 +900,94 @@ class LocalizationHealthMonitor:
             status = "blocked"
         return _component("supervisor", status, reasons, counts)
 
+    def _check_benchmark(self, now: float) -> ComponentHealth | None:
+        if self.benchmark_store is None:
+            return None
+        counts = {status: 0 for status in _CAMPAIGN.STATUSES}
+        counts.update({"work_count": 0, "report_ready": 0})
+        try:
+            value = self.benchmark_store.health(
+                self.benchmark_policy,
+                self.benchmark_campaign_id,
+                self.benchmark_evidence_authority,
+                now=now,
+                stale_after_seconds=self.benchmark_stale_after_seconds,
+            )
+            payload_method = getattr(value, "as_payload", None)
+            payload = payload_method() if callable(payload_method) else value
+            expected = {
+                "schema", "campaign_id", "status", "reasons", "counts",
+                "work_count", "report_ready", "last_progress_at",
+            }
+            if (
+                not isinstance(payload, Mapping)
+                or set(payload) != expected
+                or payload["schema"] != _CAMPAIGN.HEALTH_SCHEMA
+                or payload["campaign_id"] != self.benchmark_campaign_id
+                or payload["status"] not in {"healthy", "degraded", "blocked"}
+                or not isinstance(payload["reasons"], list)
+                or payload["reasons"] != sorted(set(payload["reasons"]))
+                or not isinstance(payload["counts"], Mapping)
+                or set(payload["counts"]) != set(_CAMPAIGN.STATUSES)
+                or not isinstance(payload["report_ready"], bool)
+            ):
+                raise ValueError
+            work_count = payload["work_count"]
+            if (
+                isinstance(work_count, bool)
+                or not isinstance(work_count, int)
+                or work_count <= 0
+            ):
+                raise ValueError
+            for name, count in payload["counts"].items():
+                if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                    raise ValueError
+                counts[name] = count
+            if sum(counts[name] for name in _CAMPAIGN.STATUSES) != work_count:
+                raise ValueError
+            reasons = set(payload["reasons"])
+            if any(
+                not isinstance(reason, str)
+                or _CAMPAIGN.HEALTH_REASON.fullmatch(reason) is None
+                or not reason.startswith("benchmark.campaign.")
+                for reason in reasons
+            ):
+                raise ValueError
+            progress = payload["last_progress_at"]
+            if progress is None or _timestamp(progress) > now:
+                raise ValueError
+            blocking_reasons = {
+                "benchmark.campaign.failed",
+                "benchmark.campaign.report_invalid",
+                "benchmark.campaign.state_invalid",
+            }
+            expected_status = (
+                "blocked" if counts["failed"] or reasons & blocking_reasons
+                else "degraded" if reasons
+                else "healthy"
+            )
+            if payload["status"] != expected_status:
+                raise ValueError
+            if counts["failed"] and "benchmark.campaign.failed" not in reasons:
+                raise ValueError
+            if payload["report_ready"] != (
+                counts["succeeded"] == work_count
+                and "benchmark.campaign.report_invalid" not in reasons
+            ):
+                raise ValueError
+            counts["work_count"] = work_count
+            counts["report_ready"] = int(payload["report_ready"])
+            return _component(
+                "benchmark_campaign", payload["status"], reasons, counts,
+            )
+        except Exception:
+            return _component(
+                "benchmark_campaign",
+                "blocked",
+                {"benchmark.campaign.state_invalid"},
+                counts,
+            )
+
     def check(
         self,
         *,
@@ -900,6 +1034,7 @@ class LocalizationHealthMonitor:
 
         providers, provider_reasons = self._providers(provider_bindings, provider_probe)
         supervisor = self._check_supervisor(now)
+        benchmark = self._check_benchmark(now)
         blocking_workflow = {
             "queue.state_invalid",
             "evidence.state_invalid",
@@ -919,7 +1054,9 @@ class LocalizationHealthMonitor:
                 "storage",
                 "blocked" if storage_reasons else "healthy",
                 storage_reasons,
-                {"connections": 3 + int(self.evidence_state is not None)},
+                {"connections": 3 + int(self.evidence_state is not None) + int(
+                    self.benchmark_store is not None
+                )},
             ),
             _component(
                 "queue",
@@ -966,15 +1103,20 @@ class LocalizationHealthMonitor:
         )
         if supervisor is not None:
             components = components + (supervisor,)
+        if benchmark is not None:
+            components = components + (benchmark,)
         if (
             storage_reasons
             or provider_reasons
             or workflow_reasons & blocking_workflow
             or (supervisor is not None and supervisor.status == "blocked")
+            or (benchmark is not None and benchmark.status == "blocked")
         ):
             status = "blocked"
         elif workflow_reasons or (
             supervisor is not None and supervisor.status == "degraded"
+        ) or (
+            benchmark is not None and benchmark.status == "degraded"
         ):
             status = "degraded"
         else:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Provider-neutral composition root for the website-localization service.
 
-The host owns five distinct SQLite connections and every external capability.
+The host owns distinct SQLite connections and every external capability.
 This module validates those inputs before constructing the durable queue,
 release, CMS, evidence, supervisor, and read-only health components.
 """
@@ -177,7 +177,7 @@ def _validate_dependencies(values: Mapping[str, Any]) -> MappingProxyType:
 
 
 def _validate_connections(connections: tuple[Any, ...]) -> None:
-    if len(connections) != 5 or any(
+    if len(connections) not in {5, 6} or any(
         not isinstance(connection, sqlite3.Connection) for connection in connections
     ):
         raise LocalizationRuntimeBlocked("runtime.connections.invalid")
@@ -231,13 +231,51 @@ class WebsiteLocalizationRuntime:
         supervisor_worker_id: str,
         supervisor_policy: Any = None,
         supervisor_stale_after_seconds: float | int = 30,
+        benchmark_connection: sqlite3.Connection | None = None,
+        benchmark_policy: Any | None = None,
+        benchmark_campaign_id: str | None = None,
+        benchmark_evidence_authority: Any | None = None,
+        benchmark_stale_after_seconds: float | int = 3600,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
     ):
+        benchmark_values = (
+            benchmark_connection, benchmark_policy, benchmark_campaign_id,
+            benchmark_evidence_authority,
+        )
+        benchmark_enabled = any(value is not None for value in benchmark_values)
+        if benchmark_enabled and any(value is None for value in benchmark_values):
+            raise LocalizationRuntimeBlocked("runtime.benchmark.incomplete")
+        if benchmark_enabled:
+            if not isinstance(benchmark_campaign_id, str) or re.fullmatch(
+                r"benchmark-campaign-[0-9a-f]{64}", benchmark_campaign_id,
+            ) is None:
+                raise LocalizationRuntimeBlocked("runtime.benchmark.campaign_id.invalid")
+            _capability(
+                benchmark_evidence_authority,
+                "verify",
+                "runtime.benchmark.authority.invalid",
+            )
+            try:
+                benchmark_policy = (
+                    _HEALTH._CAMPAIGN._BENCHMARK._validate_policy(benchmark_policy)
+                )
+                expected_campaign_id = _HEALTH._CAMPAIGN._campaign_identity(
+                    benchmark_policy,
+                )[0]
+            except Exception:
+                raise LocalizationRuntimeBlocked("runtime.benchmark.policy.invalid") from None
+            if expected_campaign_id != benchmark_campaign_id:
+                raise LocalizationRuntimeBlocked("runtime.benchmark.binding.invalid")
+        _number(
+            benchmark_stale_after_seconds,
+            "runtime.benchmark.stale_after_seconds.invalid",
+            maximum=_HEALTH._CAMPAIGN.MAX_STALE_SECONDS,
+        )
         connections = (
             queue_connection, release_connection, cms_connection,
             evidence_connection, supervisor_connection,
-        )
+        ) + ((benchmark_connection,) if benchmark_enabled else ())
         _validate_connections(connections)
         validated = _validate_dependencies(dependencies)
         supervisor_worker_id = _identifier(
@@ -272,6 +310,10 @@ class WebsiteLocalizationRuntime:
         self.evidence_state = _COORDINATOR.QualityEvidenceStateStore(
             evidence_connection,
         )
+        self.benchmark_store = (
+            _HEALTH._CAMPAIGN.BenchmarkCampaignStore(benchmark_connection)
+            if benchmark_enabled else None
+        )
 
         def tick():
             return _SERVICE.run_service_tick(
@@ -295,6 +337,11 @@ class WebsiteLocalizationRuntime:
             self.evidence_state,
             self.supervisor,
             supervisor_stale_after_seconds=supervisor_stale_after_seconds,
+            benchmark_store=self.benchmark_store,
+            benchmark_policy=benchmark_policy,
+            benchmark_campaign_id=benchmark_campaign_id,
+            benchmark_evidence_authority=benchmark_evidence_authority,
+            benchmark_stale_after_seconds=benchmark_stale_after_seconds,
         )
 
     def __repr__(self) -> str:

@@ -402,6 +402,111 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             ("supervisor.state_invalid",),
         )
 
+    def test_benchmark_campaign_health_is_integrated_and_content_free(self):
+        campaign_id = "benchmark-campaign-" + "a" * 64
+        benchmark_connection = sqlite3.connect(":memory:")
+
+        class BenchmarkProbe:
+            connection = benchmark_connection
+
+            @staticmethod
+            def _verify_schema():
+                return None
+
+            @staticmethod
+            def health(policy, observed_id, authority, **values):
+                self.assertEqual(policy, "bound-policy")
+                self.assertEqual(observed_id, campaign_id)
+                self.assertIs(authority, self.approval_authority)
+                self.assertEqual(values, {"now": 250.0, "stale_after_seconds": 30.0})
+                return {
+                    "schema": HEALTH._CAMPAIGN.HEALTH_SCHEMA,
+                    "campaign_id": campaign_id,
+                    "status": "degraded",
+                    "reasons": ["benchmark.campaign.stalled"],
+                    "counts": {
+                        "pending": 29, "leased": 0, "retry_wait": 1,
+                        "succeeded": 0, "failed": 0,
+                    },
+                    "work_count": 30,
+                    "report_ready": False,
+                    "last_progress_at": 200.0,
+                }
+
+        try:
+            self.monitor = HEALTH.LocalizationHealthMonitor(
+                self.bridge,
+                self.evidence_state,
+                benchmark_store=BenchmarkProbe(),
+                benchmark_policy="bound-policy",
+                benchmark_campaign_id=campaign_id,
+                benchmark_evidence_authority=self.approval_authority,
+                benchmark_stale_after_seconds=30,
+            )
+            before = benchmark_connection.total_changes
+
+            report = self.report(now=250)
+
+            self.assertEqual(report.status, "degraded")
+            component = self.component(report, "benchmark_campaign")
+            self.assertEqual(component.status, "degraded")
+            self.assertEqual(component.reasons, ("benchmark.campaign.stalled",))
+            self.assertEqual(dict(component.counts)["work_count"], 30)
+            self.assertEqual(dict(component.counts)["report_ready"], 0)
+            self.assertEqual(benchmark_connection.total_changes, before)
+            self.assertEqual(
+                dict(self.component(report, "storage").counts)["connections"], 5,
+            )
+            self.assertNotIn("bound-policy", json.dumps(report.as_payload()))
+        finally:
+            benchmark_connection.close()
+
+    def test_malformed_benchmark_campaign_status_blocks_health(self):
+        campaign_id = "benchmark-campaign-" + "b" * 64
+        benchmark_connection = sqlite3.connect(":memory:")
+
+        class BenchmarkProbe:
+            connection = benchmark_connection
+
+            @staticmethod
+            def _verify_schema():
+                return None
+
+            @staticmethod
+            def health(*args, **kwargs):
+                return {"status": "healthy; private benchmark text"}
+
+        try:
+            self.monitor = HEALTH.LocalizationHealthMonitor(
+                self.bridge,
+                self.evidence_state,
+                benchmark_store=BenchmarkProbe(),
+                benchmark_policy="bound-policy",
+                benchmark_campaign_id=campaign_id,
+                benchmark_evidence_authority=self.approval_authority,
+            )
+
+            report = self.report()
+
+            self.assertEqual(report.status, "blocked")
+            self.assertEqual(
+                self.component(report, "benchmark_campaign").reasons,
+                ("benchmark.campaign.state_invalid",),
+            )
+            self.assertNotIn("private benchmark text", json.dumps(report.as_payload()))
+        finally:
+            benchmark_connection.close()
+
+    def test_incomplete_benchmark_configuration_is_rejected(self):
+        with self.assertRaisesRegex(
+            HEALTH.LocalizationHealthBlocked,
+            "benchmark configuration is incomplete",
+        ):
+            HEALTH.LocalizationHealthMonitor(
+                self.bridge,
+                benchmark_policy="policy-without-store",
+            )
+
     def test_monitor_without_evidence_store_remains_backward_compatible(self):
         monitor = HEALTH.LocalizationHealthMonitor(self.bridge)
 
