@@ -23,11 +23,11 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v2"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v3"
 BASELINE_SCHEMA = "blun.website-localization-baseline.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v2"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v2"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v3"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v3"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
 MAX_TEXT_BYTES = 2_000_000
@@ -85,6 +85,13 @@ class BenchmarkPolicy:
     benchmark_version: str
     suite_version: str
     suite_sha256: str
+    candidate_provider_id: str
+    candidate_model_id: str
+    candidate_model_version: str
+    candidate_software_version: str
+    candidate_worker_schema: str
+    candidate_glossary_version: str
+    candidate_policy_version: str
     baseline_id: str
     baseline_version: str
     reviewer_id: str
@@ -175,6 +182,13 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
     for value in (
         policy.benchmark_version,
         policy.suite_version,
+        policy.candidate_provider_id,
+        policy.candidate_model_id,
+        policy.candidate_model_version,
+        policy.candidate_software_version,
+        policy.candidate_worker_schema,
+        policy.candidate_glossary_version,
+        policy.candidate_policy_version,
         policy.baseline_id,
         policy.baseline_version,
         policy.reviewer_id,
@@ -187,6 +201,8 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
         or policy.suite_sha256 != suite["sha256"]
     ):
         raise BenchmarkBlocked("benchmark.suite.version_mismatch")
+    if policy.candidate_worker_schema != _WORKER.WORKER_SCHEMA:
+        raise BenchmarkBlocked("benchmark.candidate.policy_mismatch")
     if not isinstance(policy.required_locales, tuple) or not policy.required_locales:
         raise BenchmarkBlocked("benchmark.policy.invalid")
     try:
@@ -217,6 +233,42 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
         if value <= 0 or value > 1:
             raise BenchmarkBlocked("benchmark.policy.invalid")
     return policy
+
+
+def _candidate_binding(policy: BenchmarkPolicy) -> dict[str, Any]:
+    return {
+        "provider": {
+            "id": policy.candidate_provider_id,
+            "model_id": policy.candidate_model_id,
+            "model_version": policy.candidate_model_version,
+        },
+        "software_version": policy.candidate_software_version,
+        "glossary_version": policy.candidate_glossary_version,
+        "policy_version": policy.candidate_policy_version,
+        "worker_schema": policy.candidate_worker_schema,
+    }
+
+
+def _quality_profile_binding(locale: str) -> dict[str, str]:
+    profile = _PLANNER.quality_profile_for(locale)
+    return {
+        "locale": locale,
+        "version": profile["version"],
+        "sha256": profile["sha256"],
+    }
+
+
+def _validate_candidate_job_binding(
+    job: dict[str, Any], policy: BenchmarkPolicy,
+) -> None:
+    expected = _candidate_binding(policy)
+    if (
+        job["provider"] != expected["provider"]
+        or job["software_version"] != expected["software_version"]
+        or job["glossary_version"] != expected["glossary_version"]
+        or job["policy_version"] != expected["policy_version"]
+    ):
+        raise BenchmarkBlocked("benchmark.candidate.policy_mismatch")
 
 
 def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
@@ -358,6 +410,7 @@ def _blinding(
         "suite_sha256": policy.suite_sha256,
         "suite_case_key": benchmark_case["key"],
         "job_id": job["job_id"],
+        "candidate": _candidate_binding(policy),
         "candidate_sha256": candidate_hash,
         "baseline_sha256": baseline_hash,
         "baseline_id": policy.baseline_id,
@@ -519,6 +572,7 @@ def run_blind_benchmark_case(
         job = _WORKER._validated_job(job_payload)
     except _WORKER.LocalizationWorkerBlocked as error:
         raise BenchmarkBlocked("benchmark.job_or_assets.invalid") from error
+    _validate_candidate_job_binding(job, policy)
     assets = _validated_assets(job, assets)
     if job["target"]["locale"] not in policy.required_locales:
         raise BenchmarkBlocked("benchmark.locale.not_required")
@@ -590,7 +644,9 @@ def run_blind_benchmark_case(
         "domain": benchmark_case["domain"],
         "long_form": benchmark_case["long_form"],
         "adversarial_tags": benchmark_case["adversarial_tags"],
+        "candidate": _candidate_binding(policy),
         "candidate_sha256": candidate_result["target_sha256"],
+        "quality_profile": _quality_profile_binding(job["target"]["locale"]),
         "baseline": {
             "id": policy.baseline_id,
             "version": policy.baseline_version,
@@ -620,7 +676,7 @@ def _validated_case_result(raw: Mapping[str, Any], policy: BenchmarkPolicy) -> d
     required = {
         "schema", "benchmark_version", "suite", "case_id", "job_id", "target_locale",
         "content_type", "source_sha256", "domain", "long_form", "adversarial_tags",
-        "candidate_sha256", "baseline", "reviewer",
+        "candidate", "candidate_sha256", "quality_profile", "baseline", "reviewer",
         "blind_commitment_sha256", "passes", "integrity", "defect_counts", "winner",
     }
     if set(result) != required or result["schema"] != CASE_RESULT_SCHEMA:
@@ -641,10 +697,27 @@ def _validated_case_result(raw: Mapping[str, Any], policy: BenchmarkPolicy) -> d
     benchmark_case = manifest_cases.get(suite["case_key"])
     if benchmark_case is None:
         raise BenchmarkBlocked("benchmark.results.invalid")
+    try:
+        expected_job = _PLANNER.plan_website_localization(
+            source_id=benchmark_case["source_id"],
+            source_revision=benchmark_case["source_revision"],
+            source_text=benchmark_case["source_text"],
+            source_locale=benchmark_case["source_locale"],
+            content_type=benchmark_case["content_type"],
+            glossary_version=policy.candidate_glossary_version,
+            policy_version=policy.candidate_policy_version,
+            provider_id=policy.candidate_provider_id,
+            model_id=policy.candidate_model_id,
+            model_version=policy.candidate_model_version,
+            software_version=policy.candidate_software_version,
+            target_locales=[result["target_locale"]],
+        ).jobs[0].as_payload()
+    except (_PLANNER.LocalizationPlanBlocked, KeyError, TypeError, IndexError) as error:
+        raise BenchmarkBlocked("benchmark.results.invalid") from error
     if (
         not isinstance(result["case_id"], str)
         or not result["case_id"].startswith("benchmark-case-")
-        or not isinstance(result["job_id"], str)
+        or result["job_id"] != expected_job["job_id"]
         or result["content_type"] not in _PLANNER.CONTENT_TYPES
         or result["content_type"] != benchmark_case["content_type"]
         or result["source_sha256"] != benchmark_case["source_sha256"]
@@ -653,6 +726,10 @@ def _validated_case_result(raw: Mapping[str, Any], policy: BenchmarkPolicy) -> d
         or result["adversarial_tags"] != benchmark_case["adversarial_tags"]
     ):
         raise BenchmarkBlocked("benchmark.results.invalid")
+    if result["candidate"] != _candidate_binding(policy):
+        raise BenchmarkBlocked("benchmark.results.version_mismatch")
+    if result["quality_profile"] != _quality_profile_binding(result["target_locale"]):
+        raise BenchmarkBlocked("benchmark.results.version_mismatch")
     _sha256(result["candidate_sha256"])
     _sha256(result["blind_commitment_sha256"])
     baseline = result["baseline"]
@@ -795,6 +872,10 @@ def summarize_benchmark(
         "schema": REPORT_SCHEMA,
         "benchmark_version": policy.benchmark_version,
         "suite": {"version": policy.suite_version, "sha256": policy.suite_sha256},
+        "candidate": _candidate_binding(policy),
+        "quality_profiles": [
+            _quality_profile_binding(locale) for locale in policy.required_locales
+        ],
         "baseline": {"id": policy.baseline_id, "version": policy.baseline_version},
         "reviewer": {"id": policy.reviewer_id, "version": policy.reviewer_version},
         "required_locales": list(policy.required_locales),

@@ -47,6 +47,13 @@ def policy(**overrides):
         "benchmark_version": "native-vs-baseline-1",
         "suite_version": SUITE_MANIFEST["version"],
         "suite_sha256": SUITE_MANIFEST["sha256"],
+        "candidate_provider_id": "customer-llm",
+        "candidate_model_id": "king",
+        "candidate_model_version": "2026-08-30",
+        "candidate_software_version": "6.43.0-dev",
+        "candidate_worker_schema": WORKER.WORKER_SCHEMA,
+        "candidate_glossary_version": "blun-glossary-3",
+        "candidate_policy_version": "native-web-2",
         "baseline_id": "deepl-official-api",
         "baseline_version": "fixture-2026-08-30",
         "reviewer_id": "independent-native-panel",
@@ -311,6 +318,32 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "benchmark.candidate.binding_mismatch")
         self.assertEqual(reviewer.requests, [])
 
+    def test_candidate_policy_mismatch_blocks_before_review(self):
+        payload = job()
+        result = candidate_result(payload)
+        mismatches = {
+            "candidate_provider_id": "other-provider",
+            "candidate_model_id": "other-model",
+            "candidate_model_version": "other-version",
+            "candidate_software_version": "other-software",
+            "candidate_worker_schema": "other-worker-schema",
+            "candidate_glossary_version": "other-glossary",
+            "candidate_policy_version": "other-policy",
+        }
+        for field, value in mismatches.items():
+            with self.subTest(field=field):
+                reviewer = PreferenceReviewer(result["candidate"])
+                with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+                    BENCHMARK.run_blind_benchmark_case(
+                        payload, result, baseline(payload), assets(),
+                        policy(**{field: value}), reviewer, blinding_key=self.key,
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "benchmark.candidate.policy_mismatch",
+                )
+                self.assertEqual(reviewer.requests, [])
+
     def test_substituted_candidate_quality_profile_blocks_before_review(self):
         payload = job()
         result = candidate_result(payload)
@@ -420,6 +453,28 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         report = BENCHMARK.summarize_benchmark(policy(), results)
         self.assertTrue(report["superiority_claim_allowed"])
         self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["candidate"], {
+            "provider": {
+                "id": "customer-llm",
+                "model_id": "king",
+                "model_version": "2026-08-30",
+            },
+            "software_version": "6.43.0-dev",
+            "glossary_version": "blun-glossary-3",
+            "policy_version": "native-web-2",
+            "worker_schema": WORKER.WORKER_SCHEMA,
+        })
+        self.assertEqual(
+            report["quality_profiles"],
+            [
+                {
+                    "locale": locale,
+                    "version": PLANNER.quality_profile_for(locale)["version"],
+                    "sha256": PLANNER.quality_profile_for(locale)["sha256"],
+                }
+                for locale in ("mt-MT", "fi-FI")
+            ],
+        )
         for item in report["locales"]:
             self.assertEqual(item["candidate_wins"], len(SUITE.SOURCE_CASES))
             self.assertEqual(item["one_sided_sign_p"], 0.00390625)
@@ -512,6 +567,17 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
             BENCHMARK.summarize_benchmark(policy(), [changed])
         self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        for field, value in (
+            ("job_id", "blun-l10n-" + "0" * 64),
+            ("candidate", {**result["candidate"], "software_version": "stale"}),
+            ("quality_profile", {**result["quality_profile"], "version": "stale"}),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(result)
+                changed[field] = value
+                with self.assertRaises(BENCHMARK.BenchmarkBlocked):
+                    BENCHMARK.summarize_benchmark(policy(), [changed])
 
         changed = copy.deepcopy(result)
         changed["integrity"]["candidate"] = "PASS"

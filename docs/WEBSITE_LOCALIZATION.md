@@ -270,6 +270,16 @@ independently checks both variants. Raw texts and reviewer prose are absent
 from stored case results; only hashes, counts, blinded commitments, and
 unblinded preferences remain.
 
+The policy also names the exact candidate provider, model and model version,
+software version, glossary version, localization-policy version, and worker
+schema. The harness rejects a job that differs from any of these values before
+calling a reviewer. Stored case results repeat this candidate binding and the
+exact locale-quality-profile version and hash. During aggregation, the harness
+rebuilds the canonical suite job and requires its deterministic job ID, so a
+result from another model, policy, source case, or locale cannot be relabelled.
+The final report records the same candidate binding and all required locale
+profile bindings. These fields never enter either blinded reviewer request.
+
 `summarize_benchmark` applies a one-sided exact sign test and minimum case,
 decisive-rate, and win-rate thresholds separately to every required locale.
 One candidate blocking/major/integrity defect blocks that locale. Missing,
@@ -287,7 +297,8 @@ language could hide a weak low-resource language, or an old baseline could be
 quietly reused. Keyed A/B assignment and origin-free review payloads reduce
 identity bias; per-locale hard gates prevent averaging; exact baseline,
 reviewer, benchmark, suite, suite case, source, locale, and content bindings
-reject stale, substituted, homogeneous, or mixed evidence. The harness permits
+plus exact candidate and quality-profile bindings reject stale, substituted,
+homogeneous, relabelled, or mixed evidence. The harness permits
 a claim only from complete measured blind evidence, never from a model grading
 its own prose.
 
