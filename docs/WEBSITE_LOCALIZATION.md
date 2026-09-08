@@ -540,6 +540,15 @@ campaign status and final case results still expose only response hashes,
 preferences, defect counts and finding hashes—not reviewer reasons, excerpts,
 source text or either target.
 
+The review store also exposes a strictly read-only, content-free health view
+for one exact reviewer route and benchmark policy. It rechecks canonical rows,
+digests, phases, locale and blind-variant bindings, and every host attestation;
+historical policies are counted separately from the active scope. The caller
+may provide the exact request and response hashes required by completed cases.
+Missing, mismatched, altered, or unverifiable evidence blocks with stable
+reason codes. The health payload contains only counts and never invokes the
+reviewer or returns source, target, explanation, excerpt, or finding text.
+
 `run_next_benchmark_case` claims and processes at most one exact
 case/locale pair. Random token-bound leases are renewed before dependency
 resolution and before each of the two reviewer calls. An abandoned lease can
@@ -1160,10 +1169,17 @@ opens nor closes them. It also never reads a configuration file, environment
 variable, credential, signing key, or network endpoint.
 
 When configured, the existing content-free health report gains a
-`benchmark_campaign` component. Its overall status becomes degraded for an
-expired lease or a stalled actionable campaign and blocked for failed or
-unverifiable work. The localization service supervisor does not execute
-benchmark cases for monitor-only configurations. With `benchmark_execution`,
+`benchmark_campaign` component. Full `benchmark_execution` configuration also
+adds `benchmark_reviews`, bound to the same durable review store and reviewer
+route used by the executor. For every succeeded campaign case, the monitor
+requires exact stored request and response evidence for both ordered passes
+and reverifies each artifact. Missing, mismatched, tampered, or unverifiable
+review evidence blocks the whole health report even when the campaign result
+itself remains valid. Output is limited to stable reasons and aggregate counts.
+Its overall status becomes degraded for an expired lease or a stalled
+actionable campaign and blocked for failed or unverifiable work. The
+localization service supervisor does not execute benchmark cases for
+monitor-only configurations. With `benchmark_execution`,
 each supervised tick still runs the customer publication pipeline first. A
 delivery, release, evidence, or translation transition returns immediately and
 the benchmark executor is not called. Only an exact `idle` customer result may
@@ -1177,11 +1193,12 @@ error code use the existing content-free supervisor tick schema.
 Premortem: a mirrored database could yield inconsistent status, a dead worker
 could leave a lease that looks active, terminal cases could hide behind overall
 progress, status could leak reviewer prose, an incomplete campaign could be
-mistaken for a passed comparison, or background evaluation could delay a real
+mistaken for a passed comparison, stored reviews could disappear behind a
+still-valid case result, or background evaluation could delay a real
 publication. Ten-store validation, customer-first scheduling, strict lease
-hierarchy, snapshot verification, lease and staleness reasons, per-row
-attestation checks, code-and-count-only output, and a separate `report_ready`
-flag close those paths.
+hierarchy, snapshot verification, lease and staleness reasons, exact
+cross-store review matching, per-row attestation checks, code-and-count-only
+output, and a separate `report_ready` flag close those paths.
 
 The supervisor lease must be strictly longer than every effective translation,
 quality-evidence, and CMS-delivery lease. The runtime checks this hierarchy
@@ -1277,6 +1294,13 @@ actionable, while free-form details stay represented only by their stored
 hashes. The separate `evidence` component reports pending, leased, retrying,
 succeeded, and failed counts plus stable reasons such as
 `evidence.lease_expired` or `evidence.review_failed`.
+
+For a fully executing benchmark, the separate `benchmark_reviews` component
+is equally observational. It scopes review rows to the active policy and route,
+reverifies their immutable attestations, and compares them with the two pass
+hash pairs referenced by every succeeded case. Historical rows remain visible
+only as a count and cannot satisfy current requirements. Neither this check nor
+its error path calls an adapter or returns reviewer prose or content hashes.
 
 Premortem: a dashboard could report healthy after stored bytes were altered,
 mutate leases while merely observing them, or leak customer content through a

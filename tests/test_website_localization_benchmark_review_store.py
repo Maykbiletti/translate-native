@@ -322,6 +322,107 @@ class BenchmarkReviewEvidenceStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "review.store.attestation_unavailable")
         self.assertTrue(caught.exception.retryable)
 
+    def test_health_is_read_only_content_free_and_matches_required_passes(self):
+        secret = "private reviewer explanation"
+        reviewed = response(self.request, "tie")
+        reviewed["variants"]["A"]["major_defects"] = [{
+            "class": "translationese",
+            "excerpt": "private excerpt",
+            "reason": secret,
+        }]
+        self.store.save(
+            self.request,
+            self.policy,
+            "independent-review-panel",
+            reviewed,
+            evidence_authority=self.authority,
+            now=100,
+        )
+        expected = ({
+            "phase": self.request.phase,
+            "request_sha256": BENCHMARK._hash_json(self.request.as_payload()),
+            "response_sha256": BENCHMARK._hash_json(reviewed),
+        },)
+        before = self.connection.total_changes
+
+        health = self.store.health(
+            self.policy,
+            "independent-review-panel",
+            evidence_authority=self.authority,
+            expected_passes=expected,
+            now=101,
+        )
+
+        self.assertEqual(health.status, "healthy")
+        self.assertEqual(dict(health.counts), {
+            "historical": 0,
+            "matched": 1,
+            "required": 1,
+            "scoped": 1,
+            "source_fidelity": 0,
+            "target_native": 1,
+            "total": 1,
+        })
+        self.assertEqual(self.connection.total_changes, before)
+        serialized = json.dumps(health.as_payload())
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("private excerpt", serialized)
+
+    def test_health_blocks_missing_tampered_or_unverifiable_required_evidence(self):
+        reviewed = self.store.save(
+            self.request,
+            self.policy,
+            "independent-review-panel",
+            response(self.request),
+            evidence_authority=self.authority,
+            now=100,
+        )
+        expected = ({
+            "phase": self.request.phase,
+            "request_sha256": BENCHMARK._hash_json(self.request.as_payload()),
+            "response_sha256": BENCHMARK._hash_json(reviewed),
+        },)
+        missing = self.store.health(
+            self.policy,
+            "independent-review-panel",
+            evidence_authority=self.authority,
+            expected_passes=({
+                **expected[0],
+                "request_sha256": "f" * 64,
+            },),
+            now=101,
+        )
+        self.assertEqual(missing.status, "blocked")
+        self.assertEqual(missing.reasons, ("review.store.required_missing",))
+
+        unavailable = self.store.health(
+            self.policy,
+            "independent-review-panel",
+            evidence_authority=Authority(available=False),
+            expected_passes=expected,
+            now=101,
+        )
+        self.assertEqual(unavailable.status, "blocked")
+        self.assertEqual(
+            unavailable.reasons,
+            ("review.store.attestation_unavailable",),
+        )
+
+        self.connection.execute(
+            "UPDATE benchmark_review_evidence SET artifact_sha256 = ?",
+            ("0" * 64,),
+        )
+        self.connection.commit()
+        tampered = self.store.health(
+            self.policy,
+            "independent-review-panel",
+            evidence_authority=self.authority,
+            expected_passes=expected,
+            now=101,
+        )
+        self.assertEqual(tampered.status, "blocked")
+        self.assertEqual(tampered.reasons, ("review.store.state_invalid",))
+
 
 if __name__ == "__main__":
     unittest.main()

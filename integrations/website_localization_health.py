@@ -58,6 +58,10 @@ _CAMPAIGN = _load_module(
     "blun_website_localization_health_benchmark_campaign",
     _ROOT / "integrations" / "website_localization_benchmark_campaign.py",
 )
+_BENCHMARK_REVIEW = _load_module(
+    "blun_website_localization_health_benchmark_review",
+    _ROOT / "integrations" / "website_localization_benchmark_review_store.py",
+)
 
 
 class LocalizationHealthBlocked(RuntimeError):
@@ -190,6 +194,8 @@ class LocalizationHealthMonitor:
         benchmark_campaign_id: str | None = None,
         benchmark_evidence_authority: Any | None = None,
         benchmark_stale_after_seconds: float | int = 3600,
+        benchmark_review_store: Any | None = None,
+        benchmark_reviewer_route_id: str | None = None,
     ):
         if not self._supports_bridge(bridge):
             raise LocalizationHealthBlocked("bridge must be WebsiteLocalizationCMSBridge")
@@ -217,6 +223,26 @@ class LocalizationHealthMonitor:
             getattr(benchmark_evidence_authority, "verify", None),
         ):
             raise LocalizationHealthBlocked("benchmark authority is invalid")
+        review_values = (benchmark_review_store, benchmark_reviewer_route_id)
+        if any(value is not None for value in review_values) and any(
+            value is None for value in review_values
+        ):
+            raise LocalizationHealthBlocked("benchmark review configuration is incomplete")
+        if benchmark_review_store is not None and benchmark_store is None:
+            raise LocalizationHealthBlocked("benchmark review requires campaign configuration")
+        if benchmark_review_store is not None and (
+            not isinstance(
+                getattr(benchmark_review_store, "connection", None),
+                sqlite3.Connection,
+            )
+            or not callable(getattr(benchmark_review_store, "health", None))
+            or not callable(getattr(benchmark_review_store, "_verify_schema", None))
+            or not isinstance(benchmark_reviewer_route_id, str)
+            or _CAMPAIGN._BENCHMARK.IDENTIFIER.fullmatch(
+                benchmark_reviewer_route_id,
+            ) is None
+        ):
+            raise LocalizationHealthBlocked("benchmark review store is invalid")
         if (
             isinstance(supervisor_stale_after_seconds, bool)
             or not isinstance(supervisor_stale_after_seconds, (int, float))
@@ -242,6 +268,8 @@ class LocalizationHealthMonitor:
         self.benchmark_campaign_id = benchmark_campaign_id
         self.benchmark_evidence_authority = benchmark_evidence_authority
         self.benchmark_stale_after_seconds = float(benchmark_stale_after_seconds)
+        self.benchmark_review_store = benchmark_review_store
+        self.benchmark_reviewer_route_id = benchmark_reviewer_route_id
 
     @staticmethod
     def _supports_bridge(bridge: Any) -> bool:
@@ -305,6 +333,11 @@ class LocalizationHealthMonitor:
                 self.benchmark_store._verify_schema()
             except Exception:
                 reasons.add("benchmark.campaign.schema_invalid")
+        if self.benchmark_review_store is not None:
+            try:
+                self.benchmark_review_store._verify_schema()
+            except Exception:
+                reasons.add("review.store.schema_unsupported")
         connections = [
             ("queue", self.queue.connection),
             ("release", self.release_store.connection),
@@ -314,6 +347,8 @@ class LocalizationHealthMonitor:
             connections.append(("evidence", self.evidence_state.connection))
         if self.benchmark_store is not None:
             connections.append(("benchmark", self.benchmark_store.connection))
+        if self.benchmark_review_store is not None:
+            connections.append(("benchmark_review", self.benchmark_review_store.connection))
         for name, connection in connections:
             try:
                 if not self._quick_check(connection):
@@ -988,6 +1023,93 @@ class LocalizationHealthMonitor:
                 counts,
             )
 
+    def _check_benchmark_reviews(self, now: float) -> ComponentHealth | None:
+        if self.benchmark_review_store is None:
+            return None
+        counts = {
+            "total": 0,
+            "scoped": 0,
+            "historical": 0,
+            "target_native": 0,
+            "source_fidelity": 0,
+            "required": 0,
+            "matched": 0,
+        }
+        try:
+            rows = self.benchmark_store.connection.execute("""
+                SELECT result_json, result_sha256
+                FROM benchmark_campaign_work
+                WHERE campaign_id = ? AND status = 'succeeded'
+                ORDER BY target_locale, suite_case_key
+            """, (self.benchmark_campaign_id,)).fetchall()
+            expected_passes = []
+            for row in rows:
+                if (
+                    not isinstance(row["result_json"], str)
+                    or row["result_sha256"] != _hash(row["result_json"])
+                ):
+                    raise ValueError
+                result = json.loads(row["result_json"])
+                if _canonical_json(result) != row["result_json"]:
+                    raise ValueError
+                validated = _CAMPAIGN._BENCHMARK._validated_case_result(
+                    result,
+                    self.benchmark_policy,
+                    self.benchmark_evidence_authority,
+                )
+                expected_passes.extend({
+                    "phase": item["phase"],
+                    "request_sha256": item["request_sha256"],
+                    "response_sha256": item["response_sha256"],
+                } for item in validated["passes"])
+            value = self.benchmark_review_store.health(
+                self.benchmark_policy,
+                self.benchmark_reviewer_route_id,
+                evidence_authority=self.benchmark_evidence_authority,
+                expected_passes=tuple(expected_passes),
+                now=now,
+            )
+            payload_method = getattr(value, "as_payload", None)
+            payload = payload_method() if callable(payload_method) else value
+            expected = {"schema", "route_id", "status", "reasons", "counts"}
+            if (
+                not isinstance(payload, Mapping)
+                or set(payload) != expected
+                or payload["schema"] != _BENCHMARK_REVIEW.HEALTH_SCHEMA
+                or payload["route_id"] != self.benchmark_reviewer_route_id
+                or payload["status"] not in {"healthy", "blocked"}
+                or not isinstance(payload["reasons"], list)
+                or payload["reasons"] != sorted(set(payload["reasons"]))
+                or not isinstance(payload["counts"], Mapping)
+                or set(payload["counts"]) != set(counts)
+            ):
+                raise ValueError
+            for name, count in payload["counts"].items():
+                if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                    raise ValueError
+                counts[name] = count
+            reasons = set(payload["reasons"])
+            if any(
+                not isinstance(reason, str)
+                or _CAMPAIGN.HEALTH_REASON.fullmatch(reason) is None
+                or not reason.startswith("review.store.")
+                for reason in reasons
+            ):
+                raise ValueError
+            if counts["matched"] > counts["required"]:
+                raise ValueError
+            expected_status = "blocked" if reasons else "healthy"
+            if payload["status"] != expected_status:
+                raise ValueError
+            return _component("benchmark_reviews", expected_status, reasons, counts)
+        except Exception:
+            return _component(
+                "benchmark_reviews",
+                "blocked",
+                {"review.store.state_invalid"},
+                counts,
+            )
+
     def check(
         self,
         *,
@@ -1035,6 +1157,7 @@ class LocalizationHealthMonitor:
         providers, provider_reasons = self._providers(provider_bindings, provider_probe)
         supervisor = self._check_supervisor(now)
         benchmark = self._check_benchmark(now)
+        benchmark_reviews = self._check_benchmark_reviews(now)
         blocking_workflow = {
             "queue.state_invalid",
             "evidence.state_invalid",
@@ -1056,7 +1179,7 @@ class LocalizationHealthMonitor:
                 storage_reasons,
                 {"connections": 3 + int(self.evidence_state is not None) + int(
                     self.benchmark_store is not None
-                )},
+                ) + int(self.benchmark_review_store is not None)},
             ),
             _component(
                 "queue",
@@ -1105,12 +1228,18 @@ class LocalizationHealthMonitor:
             components = components + (supervisor,)
         if benchmark is not None:
             components = components + (benchmark,)
+        if benchmark_reviews is not None:
+            components = components + (benchmark_reviews,)
         if (
             storage_reasons
             or provider_reasons
             or workflow_reasons & blocking_workflow
             or (supervisor is not None and supervisor.status == "blocked")
             or (benchmark is not None and benchmark.status == "blocked")
+            or (
+                benchmark_reviews is not None
+                and benchmark_reviews.status == "blocked"
+            )
         ):
             status = "blocked"
         elif workflow_reasons or (

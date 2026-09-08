@@ -561,6 +561,14 @@ class WebsiteLocalizationRuntime:
             benchmark_campaign_id=benchmark_campaign_id,
             benchmark_evidence_authority=benchmark_evidence_authority,
             benchmark_stale_after_seconds=benchmark_stale_after_seconds,
+            benchmark_review_store=(
+                self.benchmark_runtime.review_store
+                if self.benchmark_runtime is not None else None
+            ),
+            benchmark_reviewer_route_id=(
+                self.benchmark_runtime.reviewer_route_id
+                if self.benchmark_runtime is not None else None
+            ),
         )
 
     def __repr__(self) -> str:

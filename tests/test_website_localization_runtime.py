@@ -530,6 +530,10 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         values = self.benchmark_configuration()
         fake = mock.Mock()
         fake.campaign_id = values["benchmark_campaign_id"]
+        fake.review_store = RUNTIME._HEALTH._BENCHMARK_REVIEW.BenchmarkReviewEvidenceStore(
+            values["benchmark_execution"]["review_connection"]
+        )
+        fake.reviewer_route_id = values["benchmark_execution"]["reviewer_route_id"]
         fake.run_once.side_effect = lambda **kwargs: (
             kwargs["operation_guard"](kwargs["lease_seconds"]),
             SimpleNamespace(
@@ -579,11 +583,23 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         status = runtime.benchmark_runtime.status()
         self.assertEqual(status["work_count"], 30)
         self.assertEqual(status["counts"]["pending"], 30)
+        report = runtime.health(now=100)
+        review_health = next(
+            component for component in report.components
+            if component.component == "benchmark_reviews"
+        )
+        self.assertEqual(review_health.status, "healthy")
+        self.assertEqual(dict(review_health.counts)["scoped"], 0)
+        self.assertEqual(dict(review_health.counts)["required"], 0)
 
     def test_runtime_prioritizes_all_customer_phases_over_benchmark(self):
         values = self.benchmark_configuration()
         fake = mock.Mock()
         fake.campaign_id = values["benchmark_campaign_id"]
+        fake.review_store = RUNTIME._HEALTH._BENCHMARK_REVIEW.BenchmarkReviewEvidenceStore(
+            values["benchmark_execution"]["review_connection"]
+        )
+        fake.reviewer_route_id = values["benchmark_execution"]["reviewer_route_id"]
         fake.run_once.return_value = SimpleNamespace(
             status="succeeded",
             work_id="benchmark-work-" + "b" * 64,

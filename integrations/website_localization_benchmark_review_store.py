@@ -18,13 +18,14 @@ import sqlite3
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 
 STORE_SCHEMA = "blun.website-localization-benchmark-review-store.v1"
 ARTIFACT_SCHEMA = "blun.website-localization-benchmark-review-evidence.v1"
+HEALTH_SCHEMA = "blun.website-localization-benchmark-review-health.v1"
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 REVIEW_ID = re.compile(r"^benchmark-review-[0-9a-f]{64}$")
@@ -64,6 +65,25 @@ class BenchmarkReviewEvidenceFailed(RuntimeError):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+
+
+@dataclass(frozen=True)
+class BenchmarkReviewEvidenceHealth:
+    """Content-free integrity summary for one active review route and policy."""
+
+    route_id: str
+    status: str
+    reasons: tuple[str, ...]
+    counts: tuple[tuple[str, int], ...]
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": HEALTH_SCHEMA,
+            "route_id": self.route_id,
+            "status": self.status,
+            "reasons": list(self.reasons),
+            "counts": dict(self.counts),
+        }
 
 
 def _pairs(items):
@@ -390,6 +410,9 @@ class BenchmarkReviewEvidenceStore:
                     UNIQUE(review_id, route_id, policy_sha256)
                 )
             """)
+        self._verify_schema()
+
+    def _verify_schema(self) -> None:
         columns = tuple(
             row[1] for row in self.connection.execute(
                 "PRAGMA table_info(benchmark_review_evidence)"
@@ -399,6 +422,138 @@ class BenchmarkReviewEvidenceStore:
             raise BenchmarkReviewEvidenceFailed(
                 "review.store.schema_unsupported", retryable=False,
             )
+
+    def health(
+        self,
+        policy: Any,
+        route_id: Any,
+        *,
+        evidence_authority: Any,
+        expected_passes: Any = (),
+        now: Any = None,
+    ) -> BenchmarkReviewEvidenceHealth:
+        """Verify stored evidence without returning review text or changing state."""
+        counts = {
+            "total": 0,
+            "scoped": 0,
+            "historical": 0,
+            "target_native": 0,
+            "source_fidelity": 0,
+            "required": 0,
+            "matched": 0,
+        }
+        reasons: set[str] = set()
+        safe_route = route_id if isinstance(route_id, str) else "invalid"
+        try:
+            safe_route = _identifier(route_id, "review.store.route_invalid")
+            validated_policy = _BENCHMARK._validate_policy(policy)
+            policy_sha256 = _hash_bytes(_json_bytes(
+                asdict(validated_policy), "review.store.policy_invalid",
+            ))
+            checked_at = _timestamp(now)
+            if self.connection.in_transaction:
+                raise BenchmarkReviewEvidenceFailed(
+                    "review.store.external_transaction", retryable=False,
+                )
+            if not isinstance(expected_passes, (tuple, list)):
+                raise ValueError
+            required: dict[str, tuple[str, str]] = {}
+            for item in expected_passes:
+                if not isinstance(item, Mapping) or set(item) != {
+                    "phase", "request_sha256", "response_sha256",
+                }:
+                    raise ValueError
+                phase = item["phase"]
+                request_sha256 = item["request_sha256"]
+                response_sha256 = item["response_sha256"]
+                if (
+                    phase not in _BENCHMARK.PHASES
+                    or re.fullmatch(r"[0-9a-f]{64}", request_sha256 or "") is None
+                    or re.fullmatch(r"[0-9a-f]{64}", response_sha256 or "") is None
+                    or request_sha256 in required
+                ):
+                    raise ValueError
+                required[request_sha256] = (phase, response_sha256)
+            counts["required"] = len(required)
+            observed: dict[str, tuple[str, str]] = {}
+            self._verify_schema()
+            rows = self.connection.execute(
+                "SELECT * FROM benchmark_review_evidence "
+                "ORDER BY route_id, policy_sha256, review_id"
+            ).fetchall()
+            counts["total"] = len(rows)
+            for row in rows:
+                if tuple(row.keys()) != STORE_COLUMNS:
+                    raise ValueError
+                scoped = (
+                    row["route_id"] == safe_route
+                    and row["policy_sha256"] == policy_sha256
+                )
+                if not scoped:
+                    counts["historical"] += 1
+                    continue
+                counts["scoped"] += 1
+                created_at = _timestamp(row["created_at"])
+                if created_at > checked_at:
+                    raise ValueError
+                identity = tuple(row[name] for name in STORE_COLUMNS[:5])
+                if (
+                    not isinstance(row["artifact_json"], str)
+                    or row["artifact_sha256"] != _hash_text(row["artifact_json"])
+                    or REVIEW_ID.fullmatch(row["review_id"] or "") is None
+                    or re.fullmatch(r"[0-9a-f]{64}", row["request_sha256"] or "") is None
+                ):
+                    raise ValueError
+                artifact = _parse_json(row["artifact_json"])
+                if _json_bytes(
+                    artifact, "review.store.artifact_invalid",
+                ).decode("utf-8") != row["artifact_json"]:
+                    raise ValueError
+                response = artifact.get("response") if isinstance(artifact, dict) else None
+                if not isinstance(response, dict):
+                    raise ValueError
+                phase = response.get("phase")
+                locale = response.get("target_locale")
+                blind_id = response.get("blind_id")
+                if (
+                    phase not in _BENCHMARK.PHASES
+                    or locale not in validated_policy.required_locales
+                    or re.fullmatch(r"blind-[0-9a-f]{64}", blind_id or "") is None
+                ):
+                    raise ValueError
+                request_stub = {
+                    "phase": phase,
+                    "target_locale": locale,
+                    "input": {"blind_id": blind_id},
+                }
+                verified = _validate_artifact(
+                    artifact, identity, request_stub, validated_policy,
+                    evidence_authority,
+                )
+                response_sha256 = verified["response_sha256"]
+                if row["request_sha256"] in observed:
+                    raise ValueError
+                observed[row["request_sha256"]] = (phase, response_sha256)
+                counts[phase] += 1
+            for request_sha256, expected in required.items():
+                actual = observed.get(request_sha256)
+                if actual is None:
+                    reasons.add("review.store.required_missing")
+                elif actual != expected:
+                    reasons.add("review.store.required_mismatch")
+                else:
+                    counts["matched"] += 1
+        except BenchmarkReviewEvidenceFailed as error:
+            reasons = {error.code}
+        except Exception:
+            reasons = {"review.store.state_invalid"}
+        status = "blocked" if reasons else "healthy"
+        return BenchmarkReviewEvidenceHealth(
+            route_id=safe_route,
+            status=status,
+            reasons=tuple(sorted(reasons)),
+            counts=tuple(sorted(counts.items())),
+        )
 
     def _row_for_identity(
         self, identity: tuple[str, str, str, str, str],
