@@ -37,13 +37,20 @@ class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
             sort_keys=True, separators=(",", ":"),
         ).encode()
         self.assertEqual(claimed_hash, hashlib.sha256(encoded).hexdigest())
-        self.assertEqual(len(manifest["cases"]), 8)
+        self.assertEqual(len(manifest["cases"]), 15)
         self.assertEqual(
             {case["content_type"] for case in manifest["cases"]},
             set(PLANNER.CONTENT_TYPES),
         )
         self.assertGreaterEqual(len({case["domain"] for case in manifest["cases"]}), 6)
-        self.assertEqual(sum(case["long_form"] for case in manifest["cases"]), 2)
+        self.assertGreaterEqual(sum(case["long_form"] for case in manifest["cases"]), 6)
+        commercial = [
+            case for case in manifest["cases"]
+            if case["content_type"] == "commercial"
+        ]
+        self.assertEqual(len(commercial), 8)
+        self.assertGreaterEqual(len({case["domain"] for case in commercial}), 8)
+        self.assertGreaterEqual(sum(case["long_form"] for case in commercial), 5)
         serialized = json.dumps(manifest, ensure_ascii=False).lower()
         for forbidden in ("target_text", "candidate_text", "baseline_text", "reference_translation"):
             self.assertNotIn(forbidden, serialized)
@@ -69,6 +76,16 @@ class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
         self.assertTrue(
             {"amount", "currency", "discount_basis", "tax", "billing_interval",
              "contract_term", "renewal", "cancellation"}.issubset(offer_tags)
+        )
+        commercial_tags = {
+            tag for case in cases if case["content_type"] == "commercial"
+            for tag in case["adversarial_tags"]
+        }
+        self.assertTrue(
+            {"qualifier", "deposit", "refund", "trial", "proration",
+             "tiered_price", "surcharge_basis", "offer_assignment"}.issubset(
+                commercial_tags
+            )
         )
 
     def test_every_case_binds_to_every_eligible_eu_locale_profile(self):

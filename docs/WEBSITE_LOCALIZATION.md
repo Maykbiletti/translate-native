@@ -291,14 +291,16 @@ contract fixtures only and make no native-quality claim.
 
 Every benchmark policy must bind the exact version and SHA-256 digest of the
 output-free source manifest in
-`integrations/website_localization_benchmark_suite.py`. Its eight cases cover
-all supported content types across distinct domains, include two connected
-long-form pages, and exercise HTML, JSON, placeholders, links, negation,
-modality, commercial offers, amounts, currencies, discount basis, tax,
-billing interval, contract term, renewal, and cancellation. The suite contains
-no target, candidate, baseline, or supposed reference translation. Actual
-targets must still come from the attached candidate and lawfully acquired
-baseline so unreviewed prose cannot silently become a gold standard.
+`integrations/website_localization_benchmark_suite.py`. Suite v2 contains
+fifteen cases: one for each non-commercial type and eight complete commercial
+cases across eight commercial domains. Seven cases are connected long-form
+pages, including six commercial pages. Together they exercise HTML, JSON,
+placeholders, links, negation, modality, amounts, currencies, discount and
+surcharge bases, tax, deposits, trials, billing versus commitment, renewal,
+cancellation, refunds, proration, tiered prices and offer assignment. The suite
+contains no target, candidate, baseline, or supposed reference translation.
+Actual targets must still come from the attached candidate and lawfully
+acquired baseline so unreviewed prose cannot silently become a gold standard.
 
 Early locale lanes may be run and reported independently, but passing them no
 longer authorizes an EU-wide superiority statement. The attested report exposes
@@ -317,6 +319,14 @@ thresholds. Those thresholds and fixed block reasons are included in the
 attested report. Joint case winners remain an additional conservative metric,
 but discarded cross-axis disagreements can no longer make a weak axis appear
 statistically convincing.
+
+Suite v2 also predeclares `commercial` as a required content-type lane with a
+minimum of eight cases per locale. The report repeats joint and independent
+axis statistics for that lane. A weak price/offer lane blocks its locale even
+when wins from the other content types make the all-content aggregate appear
+significant. The other seven content types remain diversity coverage, not yet
+standalone statistically supported content-type claims; adding such a claim
+requires a future bound suite and policy with enough cases for that type.
 
 The current suite source language is English, so its EU localization target
 scope contains the other 23 official-language locale profiles. `en-IE` is

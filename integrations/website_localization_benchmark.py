@@ -5,7 +5,8 @@ The harness compares one approved worker candidate with one externally supplied
 baseline artifact.  It never calls a baseline service, stores credentials, or
 shows system identities to reviewers.  Native quality is judged without the
 source before a separate source-aware fidelity comparison.  Aggregate claims
-are gated per locale so a strong language cannot hide a weak one.
+are gated per locale and required content-type lane so stronger results cannot
+hide a weak language or commercial category.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-re
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
 CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v6"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v8"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v9"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v1"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -140,7 +141,9 @@ class BenchmarkPolicy:
     native_reference_verifier_id: str
     native_reference_verifier_version: str
     required_locales: tuple[str, ...]
+    required_content_types: tuple[str, ...] = ("commercial",)
     minimum_cases_per_locale: int = 8
+    minimum_cases_per_content_type: int = 8
     minimum_decisive_rate: float = 0.75
     minimum_candidate_win_rate: float = 0.60
     maximum_one_sided_p: float = 0.05
@@ -264,6 +267,18 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
         raise BenchmarkBlocked("benchmark.policy.invalid")
     if not EARLY_REQUIRED_LOCALES.issubset(locales):
         raise BenchmarkBlocked("benchmark.policy.invalid")
+    if not isinstance(policy.required_content_types, tuple) or not policy.required_content_types:
+        raise BenchmarkBlocked("benchmark.policy.invalid")
+    if any(
+        not isinstance(item, str) or item not in _PLANNER.CONTENT_TYPES
+        for item in policy.required_content_types
+    ):
+        raise BenchmarkBlocked("benchmark.policy.invalid")
+    if (
+        len(set(policy.required_content_types)) != len(policy.required_content_types)
+        or tuple(sorted(policy.required_content_types)) != policy.required_content_types
+    ):
+        raise BenchmarkBlocked("benchmark.policy.invalid")
     independent_parties = {
         policy.candidate_provider_id,
         policy.baseline_id,
@@ -277,6 +292,22 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
         or not isinstance(policy.minimum_cases_per_locale, int)
         or policy.minimum_cases_per_locale < 1
         or policy.minimum_cases_per_locale > len(suite["cases"])
+    ):
+        raise BenchmarkBlocked("benchmark.policy.invalid")
+    available_by_type = {
+        content_type: sum(
+            item["content_type"] == content_type for item in suite["cases"]
+        )
+        for content_type in policy.required_content_types
+    }
+    if (
+        isinstance(policy.minimum_cases_per_content_type, bool)
+        or not isinstance(policy.minimum_cases_per_content_type, int)
+        or policy.minimum_cases_per_content_type < 1
+        or any(
+            count < policy.minimum_cases_per_content_type
+            for count in available_by_type.values()
+        )
     ):
         raise BenchmarkBlocked("benchmark.policy.invalid")
     for value in (
@@ -1075,6 +1106,7 @@ def _axis_report(
     phase: str,
     cases: Sequence[Mapping[str, Any]],
     policy: BenchmarkPolicy,
+    minimum_cases: int,
 ) -> dict[str, Any]:
     preferences = [
         next(item for item in case["passes"] if item["phase"] == phase)[
@@ -1090,7 +1122,7 @@ def _axis_report(
     candidate_win_rate = candidate_wins / decisive if decisive else 0.0
     one_sided_sign_p = _one_sided_sign_p(candidate_wins, decisive)
     block_reasons: list[str] = []
-    if len(cases) < policy.minimum_cases_per_locale:
+    if len(cases) < minimum_cases:
         block_reasons.append("insufficient_sample")
     if decisive_rate < policy.minimum_decisive_rate:
         block_reasons.append("insufficient_decisive_rate")
@@ -1108,6 +1140,49 @@ def _axis_report(
         "decisive_rate": decisive_rate,
         "candidate_win_rate": candidate_win_rate,
         "one_sided_sign_p": one_sided_sign_p,
+    }
+
+
+def _performance_report(
+    cases: Sequence[Mapping[str, Any]],
+    policy: BenchmarkPolicy,
+    minimum_cases: int,
+) -> dict[str, Any]:
+    candidate_wins = sum(item["winner"] == "candidate" for item in cases)
+    baseline_wins = sum(item["winner"] == "baseline" for item in cases)
+    inconclusive = len(cases) - candidate_wins - baseline_wins
+    decisive = candidate_wins + baseline_wins
+    decisive_rate = decisive / len(cases) if cases else 0.0
+    win_rate = candidate_wins / decisive if decisive else 0.0
+    p_value = _one_sided_sign_p(candidate_wins, decisive)
+    candidate_defect_cases = sum(
+        item["integrity"]["candidate"]["status"] != "PASS"
+        or item["defect_counts"]["candidate"]["blocking"] > 0
+        or item["defect_counts"]["candidate"]["major"] > 0
+        for item in cases
+    )
+    axes = [
+        _axis_report(phase, cases, policy, minimum_cases) for phase in PHASES
+    ]
+    passed = (
+        len(cases) >= minimum_cases
+        and decisive_rate >= policy.minimum_decisive_rate
+        and win_rate >= policy.minimum_candidate_win_rate
+        and p_value <= policy.maximum_one_sided_p
+        and candidate_defect_cases == 0
+        and all(axis["status"] == "PASS" for axis in axes)
+    )
+    return {
+        "status": "PASS" if passed else "BLOCK",
+        "case_count": len(cases),
+        "candidate_wins": candidate_wins,
+        "baseline_wins": baseline_wins,
+        "inconclusive": inconclusive,
+        "decisive_rate": decisive_rate,
+        "candidate_win_rate": win_rate,
+        "one_sided_sign_p": p_value,
+        "candidate_defect_cases": candidate_defect_cases,
+        "axes": axes,
     }
 
 
@@ -1295,18 +1370,8 @@ def _unsigned_benchmark_report(
     locale_reports: list[dict[str, Any]] = []
     for locale in policy.required_locales:
         cases = grouped[locale]
-        candidate_wins = sum(item["winner"] == "candidate" for item in cases)
-        baseline_wins = sum(item["winner"] == "baseline" for item in cases)
-        inconclusive = len(cases) - candidate_wins - baseline_wins
-        decisive = candidate_wins + baseline_wins
-        decisive_rate = decisive / len(cases) if cases else 0.0
-        win_rate = candidate_wins / decisive if decisive else 0.0
-        p_value = _one_sided_sign_p(candidate_wins, decisive)
-        candidate_defect_cases = sum(
-            item["integrity"]["candidate"]["status"] != "PASS"
-            or item["defect_counts"]["candidate"]["blocking"] > 0
-            or item["defect_counts"]["candidate"]["major"] > 0
-            for item in cases
+        performance = _performance_report(
+            cases, policy, policy.minimum_cases_per_locale,
         )
         required_case_keys = {item["key"] for item in _SUITE.manifest()["cases"]}
         observed_case_keys = {item["suite"]["case_key"] for item in cases}
@@ -1315,29 +1380,24 @@ def _unsigned_benchmark_report(
         domains = sorted({item["domain"] for item in cases})
         long_form_cases = sum(item["long_form"] for item in cases)
         adversarial_tags = sorted({tag for item in cases for tag in item["adversarial_tags"]})
-        axes = [_axis_report(phase, cases, policy) for phase in PHASES]
-        axes_passed = all(axis["status"] == "PASS" for axis in axes)
+        content_type_lanes = []
+        for content_type in policy.required_content_types:
+            lane = _performance_report(
+                [item for item in cases if item["content_type"] == content_type],
+                policy,
+                policy.minimum_cases_per_content_type,
+            )
+            content_type_lanes.append({"content_type": content_type, **lane})
         passed = (
-            len(cases) >= policy.minimum_cases_per_locale
+            performance["status"] == "PASS"
             and suite_complete
-            and decisive_rate >= policy.minimum_decisive_rate
-            and win_rate >= policy.minimum_candidate_win_rate
-            and p_value <= policy.maximum_one_sided_p
-            and candidate_defect_cases == 0
-            and axes_passed
+            and all(lane["status"] == "PASS" for lane in content_type_lanes)
         )
         locale_reports.append({
             "locale": locale,
+            **performance,
             "status": "PASS" if passed else "BLOCK",
-            "case_count": len(cases),
-            "candidate_wins": candidate_wins,
-            "baseline_wins": baseline_wins,
-            "inconclusive": inconclusive,
-            "decisive_rate": decisive_rate,
-            "candidate_win_rate": win_rate,
-            "one_sided_sign_p": p_value,
-            "candidate_defect_cases": candidate_defect_cases,
-            "axes": axes,
+            "content_type_lanes": content_type_lanes,
             "suite_complete": suite_complete,
             "content_types": content_types,
             "domains": domains,
@@ -1398,6 +1458,8 @@ def _unsigned_benchmark_report(
         "required_locales": list(policy.required_locales),
         "decision_policy": {
             "minimum_cases_per_locale": policy.minimum_cases_per_locale,
+            "required_content_types": list(policy.required_content_types),
+            "minimum_cases_per_content_type": policy.minimum_cases_per_content_type,
             "minimum_decisive_rate": policy.minimum_decisive_rate,
             "minimum_candidate_win_rate": policy.minimum_candidate_win_rate,
             "maximum_one_sided_p": policy.maximum_one_sided_p,
@@ -1429,7 +1491,7 @@ def summarize_benchmark(
     *,
     evidence_authority: BenchmarkEvidenceAuthority,
 ) -> dict[str, Any]:
-    """Attest a claim only when every eligible EU target locale passes."""
+    """Attest a claim only when every EU target and required content lane passes."""
     policy = _validate_policy(policy)
     report = _unsigned_benchmark_report(policy, case_results, evidence_authority)
     return _attest(report, policy, evidence_authority)

@@ -68,7 +68,9 @@ def policy(**overrides):
         "native_reference_verifier_id": "qualified-review-registry",
         "native_reference_verifier_version": "2026-08-30",
         "required_locales": ("mt-MT", "fi-FI"),
+        "required_content_types": ("commercial",),
         "minimum_cases_per_locale": len(SUITE.SOURCE_CASES),
+        "minimum_cases_per_content_type": 8,
         "minimum_decisive_rate": 0.75,
         "minimum_candidate_win_rate": 0.60,
         "maximum_one_sided_p": 0.05,
@@ -679,6 +681,18 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.summarize(policy(required_locales=("mt-MT",)), [])
         self.assertEqual(caught.exception.code, "benchmark.policy.invalid")
 
+        for overrides in (
+            {"required_content_types": ("unknown",)},
+            {"required_content_types": ("commercial", 7)},
+            {"required_content_types": ("commercial", "commercial")},
+            {"minimum_cases_per_content_type": 9},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaises(
+                BENCHMARK.BenchmarkBlocked,
+            ) as caught:
+                self.summarize(policy(**overrides), [])
+            self.assertEqual(caught.exception.code, "benchmark.policy.invalid")
+
     def test_preferred_variant_cannot_have_major_or_blocking_defect(self):
         payload = job()
         result = candidate_result(payload)
@@ -802,12 +816,25 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         )
         for item in report["locales"]:
             self.assertEqual(item["candidate_wins"], len(SUITE.SOURCE_CASES))
-            self.assertEqual(item["one_sided_sign_p"], 0.00390625)
+            self.assertEqual(
+                item["one_sided_sign_p"],
+                BENCHMARK._one_sided_sign_p(
+                    len(SUITE.SOURCE_CASES), len(SUITE.SOURCE_CASES),
+                ),
+            )
             self.assertTrue(item["suite_complete"])
             self.assertEqual(set(item["content_types"]), set(PLANNER.CONTENT_TYPES))
-            self.assertEqual(item["long_form_cases"], 2)
+            self.assertGreaterEqual(item["long_form_cases"], 6)
             self.assertGreaterEqual(len(item["domains"]), 6)
             self.assertIn("marketing_calque", item["adversarial_tags"])
+            self.assertEqual(len(item["content_type_lanes"]), 1)
+            lane = item["content_type_lanes"][0]
+            self.assertEqual(lane["content_type"], "commercial")
+            self.assertEqual(lane["case_count"], 8)
+            self.assertEqual(lane["status"], "PASS")
+            self.assertTrue(all(
+                axis["status"] == "PASS" for axis in lane["axes"]
+            ))
 
     def test_only_complete_successful_eu_target_scope_allows_claim(self):
         # Scripted fixtures prove report gating, not linguistic quality.
@@ -830,6 +857,8 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(report["claim_block_reasons"], [])
         self.assertEqual(report["decision_policy"], {
             "minimum_cases_per_locale": len(SUITE.SOURCE_CASES),
+            "required_content_types": ["commercial"],
+            "minimum_cases_per_content_type": 8,
             "minimum_decisive_rate": 0.75,
             "minimum_candidate_win_rate": 0.60,
             "maximum_one_sided_p": 0.05,
@@ -863,11 +892,20 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 and axis["block_reasons"] == []
                 for axis in locale_report["axes"]
             ))
+            self.assertEqual(
+                [lane["content_type"] for lane in locale_report["content_type_lanes"]],
+                ["commercial"],
+            )
+            self.assertTrue(all(
+                lane["status"] == "PASS"
+                and all(axis["status"] == "PASS" for axis in lane["axes"])
+                for lane in locale_report["content_type_lanes"]
+            ))
 
         blocked_locale = BENCHMARK.EU_BENCHMARK_TARGET_LOCALES[-1]
         replaced_keys = {
             SUITE.SOURCE_CASES[index].as_payload()["key"]
-            for index in (0, 1)
+            for index in range(4)
         }
         weakened_results = [
             item for item in results
@@ -876,7 +914,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 and item["suite"]["case_key"] in replaced_keys
             )
         ]
-        for index in (0, 1):
+        for index in range(4):
             outcome, _ = self.run_case(
                 blocked_locale,
                 f"blocked-{blocked_locale}-{index}",
@@ -952,7 +990,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 result = candidate_result(payload)
                 reviewer = (
                     PreferenceReviewer(result["candidate"])
-                    if index < 6
+                    if index < 11
                     else DivergentAxisReviewer(result["candidate"])
                 )
                 results.append(self.run_benchmark(
@@ -964,26 +1002,92 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         by_locale = {item["locale"]: item for item in report["locales"]}
         for locale in ("mt-MT", "fi-FI"):
             locale_report = by_locale[locale]
-            # Six unanimous wins and two split cases made the old joint-only
-            # calculation look significant: 6/6 decisive, p=0.015625.
-            self.assertEqual(locale_report["candidate_wins"], 6)
+            # Eleven unanimous wins and four split cases make the joint-only
+            # calculation significant while source fidelity remains weak.
+            self.assertEqual(locale_report["candidate_wins"], 11)
             self.assertEqual(locale_report["baseline_wins"], 0)
-            self.assertEqual(locale_report["one_sided_sign_p"], 0.015625)
+            self.assertEqual(locale_report["one_sided_sign_p"], 0.00048828125)
             self.assertEqual(locale_report["status"], "BLOCK")
             axes = {item["phase"]: item for item in locale_report["axes"]}
             self.assertEqual(axes["target_native"]["status"], "PASS")
-            self.assertEqual(axes["target_native"]["candidate_wins"], 8)
+            self.assertEqual(axes["target_native"]["candidate_wins"], 15)
             self.assertEqual(axes["source_fidelity"]["status"], "BLOCK")
-            self.assertEqual(axes["source_fidelity"]["candidate_wins"], 6)
-            self.assertEqual(axes["source_fidelity"]["baseline_wins"], 2)
+            self.assertEqual(axes["source_fidelity"]["candidate_wins"], 11)
+            self.assertEqual(axes["source_fidelity"]["baseline_wins"], 4)
             self.assertEqual(
-                axes["source_fidelity"]["one_sided_sign_p"], 0.14453125,
+                axes["source_fidelity"]["one_sided_sign_p"], 0.059234619140625,
             )
             self.assertEqual(
                 axes["source_fidelity"]["block_reasons"],
                 ["not_statistically_significant"],
             )
         self.assertFalse(report["superiority_claim_allowed"])
+
+    def test_aggregate_and_joint_wins_cannot_hide_weak_commercial_fidelity(self):
+        class CommercialFidelityLossReviewer(PreferenceReviewer):
+            def review(self, request):
+                self.requests.append(request)
+                by_text = {
+                    item["text"]: item["label"]
+                    for item in request.input["variants"]
+                }
+                candidate = by_text[self.preferred_text]
+                preference = candidate
+                if request.phase == "source_fidelity":
+                    preference = "B" if candidate == "A" else "A"
+                return review_response(request, preference)
+
+        results = []
+        for locale in ("mt-MT", "fi-FI"):
+            commercial_seen = 0
+            for index, source_case in enumerate(SUITE.SOURCE_CASES):
+                payload = job(locale, f"commercial-lane-{locale}-{index}")
+                result = candidate_result(payload)
+                reviewer = PreferenceReviewer(result["candidate"])
+                if source_case.content_type == "commercial":
+                    commercial_seen += 1
+                    if commercial_seen > 6:
+                        reviewer = CommercialFidelityLossReviewer(
+                            result["candidate"]
+                        )
+                results.append(self.run_benchmark(
+                    payload, result, baseline(payload), assets(locale),
+                    policy(), reviewer, blinding_key=self.key,
+                ))
+
+        report = self.summarize(policy(), results)
+        self.assertEqual(report["configured_lanes_status"], "BLOCK")
+        self.assertFalse(report["superiority_claim_allowed"])
+        for locale_report in report["locales"]:
+            self.assertTrue(locale_report["suite_complete"])
+            self.assertEqual(locale_report["candidate_wins"], 13)
+            self.assertEqual(locale_report["baseline_wins"], 0)
+            self.assertEqual(locale_report["inconclusive"], 2)
+            self.assertEqual(
+                locale_report["one_sided_sign_p"], 0.0001220703125,
+            )
+            self.assertTrue(all(
+                axis["status"] == "PASS" for axis in locale_report["axes"]
+            ))
+            self.assertEqual(locale_report["status"], "BLOCK")
+            lane = locale_report["content_type_lanes"][0]
+            self.assertEqual(lane["content_type"], "commercial")
+            self.assertEqual(lane["case_count"], 8)
+            self.assertEqual(lane["candidate_wins"], 6)
+            self.assertEqual(lane["baseline_wins"], 0)
+            self.assertEqual(lane["inconclusive"], 2)
+            self.assertEqual(lane["one_sided_sign_p"], 0.015625)
+            self.assertEqual(lane["status"], "BLOCK")
+            lane_axes = {axis["phase"]: axis for axis in lane["axes"]}
+            self.assertEqual(lane_axes["target_native"]["status"], "PASS")
+            self.assertEqual(lane_axes["target_native"]["candidate_wins"], 8)
+            self.assertEqual(lane_axes["source_fidelity"]["status"], "BLOCK")
+            self.assertEqual(lane_axes["source_fidelity"]["candidate_wins"], 6)
+            self.assertEqual(lane_axes["source_fidelity"]["baseline_wins"], 2)
+            self.assertEqual(
+                lane_axes["source_fidelity"]["block_reasons"],
+                ["not_statistically_significant"],
+            )
 
     def test_small_or_inconclusive_sample_never_claims_superiority(self):
         results = []
