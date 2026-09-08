@@ -903,9 +903,25 @@ def run_next_benchmark_case(
         }
     except BenchmarkCampaignBlocked:
         raise
-    except Exception:
-        code = "benchmark.campaign.unexpected"
-        retryable = True
+    except Exception as error:
+        if getattr(error, "benchmark_campaign_dependency_failure", None) is True:
+            dependency_code = getattr(error, "code", None)
+            dependency_retryable = getattr(error, "retryable", None)
+            if (
+                isinstance(dependency_code, str)
+                and ERROR_CODE.fullmatch(dependency_code) is not None
+                and isinstance(dependency_retryable, bool)
+            ):
+                code = "benchmark.campaign.dependency." + dependency_code
+                if len(code) > 128:
+                    code = "benchmark.campaign.dependency_failed"
+                retryable = dependency_retryable
+            else:
+                code = "benchmark.campaign.unexpected"
+                retryable = True
+        else:
+            code = "benchmark.campaign.unexpected"
+            retryable = True
     else:
         return store.complete(
             policy, active, result, evidence_authority, now=_timestamp(clock()),

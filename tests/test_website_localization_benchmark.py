@@ -1494,6 +1494,35 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertIn("benchmark.campaign.failed", health.reasons)
             self.assertNotIn(secret, json.dumps(health.as_payload()))
 
+    def test_campaign_accepts_content_free_baseline_adapter_failures(self):
+        benchmark_policy = campaign_policy()
+
+        class ExternalBaselineFailure(RuntimeError):
+            benchmark_campaign_dependency_failure = True
+
+            def __init__(self):
+                self.code = "deepl.rate_limited"
+                self.retryable = True
+
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+
+            def rate_limited(_):
+                raise ExternalBaselineFailure()
+
+            outcome = CAMPAIGN.run_next_benchmark_case(
+                store, benchmark_policy, campaign_id, "worker", rate_limited,
+                CampaignCandidateReviewer(), blinding_key=self.key,
+                native_reference_verifier=CampaignNativeReferenceVerifier(),
+                evidence_authority=CampaignAuthority(), clock=lambda: 100,
+            )
+            self.assertEqual(outcome.status, "retry_wait")
+            self.assertEqual(
+                outcome.error_code,
+                "benchmark.campaign.dependency.deepl.rate_limited",
+            )
+
     def test_campaign_runs_one_case_per_tick_and_blocks_incomplete_report(self):
         benchmark_policy = campaign_policy()
         authority = CampaignAuthority()

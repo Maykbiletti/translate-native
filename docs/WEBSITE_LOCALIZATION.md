@@ -260,6 +260,63 @@ proves integrity and host approval, not that a false provenance statement is
 legally true, so the host must preserve the API receipt or fixture licence for
 audit. Credentials and transport code do not belong in benchmark artifacts.
 
+### Official DeepL baseline acquisition
+
+`integrations/website_localization_deepl_baseline.py` is the optional concrete
+input adapter for that provider-neutral gate. The host chooses only `free` or
+`pro`; the adapter derives the corresponding documented origin and does not
+accept an arbitrary URL. It obtains the API key from a callback immediately
+before each request, sends it with the documented `DeepL-Auth-Key` scheme, and
+disables redirects. Neither the key nor the raw provider response envelope
+appears in an exception, representation, artifact, or provenance-evidence
+record; the exact translated target is retained only where the benchmark
+artifact contract requires it.
+
+Before translation, the adapter queries
+`GET /v3/languages?resource=translate_text` and caches a validated stable
+capability snapshot for no more than one hour. It prefers an exact BCP-47
+variant and otherwise uses a provider-advertised base language only when that
+base is explicitly usable in the required source or target role. New stable
+languages can therefore become available without a release, while removed,
+beta, malformed, or unsupported entries block fail-closed. In particular, the
+adapter does not manufacture a Maltese result when the current API capability
+response does not advertise `mt` as a target.
+
+One benchmark case produces one `POST /v2/translate` request. Its `text` array
+contains exactly the complete bound source document, never separately scored
+segments or several locales; the request selects `prefer_quality_optimized`
+and preserves formatting. The adapter enforces DeepL's 128-KiB request limit,
+a bounded response, strict UTF-8 JSON with no duplicate keys, exactly one
+translation, source-language consistency, NFC target text, and the benchmark's
+target-size limit. It classifies HTTP 429 and 5xx responses as retryable for
+the campaign's existing bounded exponential backoff. Authentication, quota,
+other HTTP 4xx, unsupported-language, schema, binding, and attestation failures
+remain terminal. Adapter errors carry a validated content-free campaign marker,
+so `run_next_benchmark_case` stores only a stable code and retry decision.
+
+On success, `BaselineAcquisition.artifact` is the existing signed benchmark
+artifact. `BaselineAcquisition.evidence` contains only endpoint, language,
+model label, and exact request/response/source/target digests. Its canonical
+digest becomes the artifact's `official_api` provenance; the host must retain
+that evidence beside its authorized API audit record.
+
+For a provider-unsupported locale, the host may instead call
+`create_lawful_fixture_acquisition`. The fixed target remains host-supplied and
+must match a strict evidence record binding fixture ID and revision, supplier,
+rights basis (`owned`, `licensed`, or `permission`), rights-evidence digest,
+source digest, target locale, and target digest. The function neither retrieves
+nor creates a translation. The host-owned authority attests the resulting
+`lawful_fixture` artifact, and the host remains responsible for the truth and
+retention of the underlying licence or permission.
+
+The implementation follows DeepL's official
+[translation request](https://developers.deepl.com/api-reference/translate/request-translation),
+[Languages API](https://developers.deepl.com/docs/languages/using-the-languages-api),
+[error handling](https://developers.deepl.com/docs/best-practices/error-handling),
+and [usage limits](https://developers.deepl.com/docs/resources/usage-limits)
+documentation. No API credential or real baseline output is included in this
+repository.
+
 Every policy-required locale and source case also requires one versioned native
 reference artifact before the first blind review can run. The repository does
 not ship or invent reference translations. A host obtains the exact
