@@ -300,6 +300,39 @@ model label, and exact request/response/source/target digests. Its canonical
 digest becomes the artifact's `official_api` provenance; the host must retain
 that evidence beside its authorized API audit record.
 
+`BaselineAcquisitionStore` provides the durable hand-off between acquisition
+and blind review. Give it a dedicated host-owned SQLite connection and resolve
+each acquisition with `resolve_baseline_acquisition`. The caller supplies a
+stable route ID such as an account/environment reference that contains no
+credential. Store identity binds that route, the complete validated benchmark
+policy, and the complete validated suite job. It therefore changes with the
+source, locale, candidate configuration, suite, baseline identity or version,
+quality policy, and every other benchmark-policy field.
+
+The resolver first reads and reverifies the exact stored artifact, provenance
+evidence, canonical hashes, and host attestation. A valid hit is returned
+without calling the acquisition callback; a missing row calls it once and
+persists the complete acquisition before review. Corrupt state is not a cache
+miss: it blocks before any callback or provider request. Concurrent identical
+writes converge, while a different valid output under the same identity is a
+terminal conflict and never replaces the first acquisition. Rotate
+`baseline_version` deliberately when a fresh current-API comparison is
+required.
+
+The database necessarily contains the baseline target because the blind
+benchmark consumes it. Keep the database owner-only and apply host storage
+encryption, backup, retention, and deletion policy appropriate to the source
+content; never place API keys or raw provider envelopes in it. A separate
+campaign database may retain only the already defined text-free case results.
+Constructing the store neither opens a network connection nor invents a
+fallback translation.
+
+Long-running hosts should also pass an `operation_guard` to
+`DeepLBaselineAdapter`. It runs immediately before credentials are requested
+and before each Languages or Translate API call. A lost lease therefore blocks
+the external operation; the campaign still owns bounded retry and terminal
+failure policy.
+
 For a provider-unsupported locale, the host may instead call
 `create_lawful_fixture_acquisition`. The fixed target remains host-supplied and
 must match a strict evidence record binding fixture ID and revision, supplier,

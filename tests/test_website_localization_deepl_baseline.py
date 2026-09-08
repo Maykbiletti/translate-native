@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import sqlite3
 import sys
 import unittest
 from pathlib import Path
@@ -495,6 +496,233 @@ class DeepLBaselineTest(unittest.TestCase):
             ),
             retryable=False,
         )
+
+    def test_request_guard_runs_before_credentials_and_transport(self):
+        events = []
+
+        class GuardedTransport(Transport):
+            def request(self, *args, **kwargs):
+                events.append("transport")
+                return super().request(*args, **kwargs)
+
+        transport = GuardedTransport(languages(), translation())
+
+        def credentials():
+            events.append("credentials")
+            return "private-api-key"
+
+        adapter = BASELINE.DeepLBaselineAdapter(
+            "pro", credentials, transport=transport,
+            operation_guard=lambda: events.append("guard"),
+        )
+        adapter.acquire(job(), policy(), evidence_authority=HmacAuthority())
+        self.assertEqual(events, [
+            "guard", "credentials", "transport",
+            "guard", "credentials", "transport",
+        ])
+
+    def test_failed_request_guard_blocks_before_credentials_and_transport(self):
+        events = []
+
+        def guard():
+            events.append("guard")
+            raise RuntimeError("lease lost")
+
+        adapter = BASELINE.DeepLBaselineAdapter(
+            "pro", lambda: events.append("credentials") or "key",
+            transport=Transport(languages()), operation_guard=guard,
+        )
+        self.assert_failure(
+            "deepl.operation_guard_failed",
+            lambda: adapter.acquire(
+                job(), policy(), evidence_authority=HmacAuthority(),
+            ),
+            retryable=True,
+        )
+        self.assertEqual(events, ["guard"])
+
+    def test_durable_store_reuses_exact_acquisition_after_restart(self):
+        payload = job()
+        benchmark_policy = policy()
+        authority = HmacAuthority()
+        transport = Transport(languages(), translation())
+        adapter = self.adapter(transport)
+        calls = []
+
+        with sqlite3.connect(":memory:") as connection:
+            store = BASELINE.BaselineAcquisitionStore(connection)
+
+            def acquire():
+                calls.append("acquire")
+                return adapter.acquire(
+                    payload, benchmark_policy, evidence_authority=authority,
+                )
+
+            first = BASELINE.resolve_baseline_acquisition(
+                store, payload, benchmark_policy, "deepl-pro",
+                acquire, evidence_authority=authority, now=100,
+            )
+            restarted = BASELINE.BaselineAcquisitionStore(connection)
+            second = BASELINE.resolve_baseline_acquisition(
+                restarted, payload, benchmark_policy, "deepl-pro",
+                acquire, evidence_authority=authority, now=200,
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(calls, ["acquire"])
+        self.assertEqual([call[0] for call in transport.calls], ["GET", "POST"])
+
+    def test_store_binding_changes_are_clean_misses(self):
+        benchmark_policy = policy()
+        payload = job(benchmark_policy=benchmark_policy)
+        authority = HmacAuthority()
+        acquisition = self.adapter(
+            Transport(languages(), translation()),
+        ).acquire(payload, benchmark_policy, evidence_authority=authority)
+        changed_policy = policy(baseline_version="current-api-2026-09-09")
+        changed_job = job(
+            case_index=1, benchmark_policy=benchmark_policy,
+        )
+        with sqlite3.connect(":memory:") as connection:
+            store = BASELINE.BaselineAcquisitionStore(connection)
+            store.save(
+                payload, benchmark_policy, "deepl-pro", acquisition,
+                evidence_authority=authority, now=100,
+            )
+            self.assertIsNone(store.load(
+                payload, benchmark_policy, "deepl-free",
+                evidence_authority=authority,
+            ))
+            self.assertIsNone(store.load(
+                changed_job, benchmark_policy, "deepl-pro",
+                evidence_authority=authority,
+            ))
+            self.assertIsNone(store.load(
+                payload, changed_policy, "deepl-pro",
+                evidence_authority=authority,
+            ))
+
+    def test_durable_store_reuses_lawful_fixture_without_callback(self):
+        payload = job("mt-MT")
+        benchmark_policy = policy()
+        authority = HmacAuthority()
+        text = "Kabbar in-negozju tiegħek b’mod naturali."
+        fixture = BASELINE.create_lawful_fixture_acquisition(
+            payload, text, benchmark_policy,
+            {
+                "schema": BASELINE.FIXTURE_EVIDENCE_SCHEMA,
+                "fixture_id": "deepl-maltese-case-1",
+                "fixture_revision": "2026-09-08",
+                "supplier_id": "customer-owned-evidence",
+                "rights_basis": "licensed",
+                "rights_evidence_sha256": hashlib.sha256(b"license").hexdigest(),
+                "source_sha256": payload["source"]["sha256"],
+                "target_locale": "mt-MT",
+                "target_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            },
+            evidence_authority=authority,
+        )
+        calls = []
+        with sqlite3.connect(":memory:") as connection:
+            store = BASELINE.BaselineAcquisitionStore(connection)
+            store.save(
+                payload, benchmark_policy, "licensed-fixture-2026-09",
+                fixture, evidence_authority=authority, now=100,
+            )
+            result = BASELINE.resolve_baseline_acquisition(
+                store, payload, benchmark_policy,
+                "licensed-fixture-2026-09",
+                lambda: calls.append("acquire"),
+                evidence_authority=authority,
+            )
+        self.assertEqual(result, fixture)
+        self.assertEqual(calls, [])
+
+    def test_store_tampering_blocks_before_reacquisition(self):
+        payload = job()
+        benchmark_policy = policy()
+        authority = HmacAuthority()
+        acquisition = self.adapter(
+            Transport(languages(), translation()),
+        ).acquire(payload, benchmark_policy, evidence_authority=authority)
+        called = []
+        with sqlite3.connect(":memory:") as connection:
+            store = BASELINE.BaselineAcquisitionStore(connection)
+            store.save(
+                payload, benchmark_policy, "deepl-pro", acquisition,
+                evidence_authority=authority, now=100,
+            )
+            connection.execute("""
+                UPDATE benchmark_baseline_acquisitions
+                SET evidence_json = '{}'
+            """)
+            connection.commit()
+            self.assert_failure(
+                "baseline.store.state_invalid",
+                lambda: BASELINE.resolve_baseline_acquisition(
+                    store, payload, benchmark_policy, "deepl-pro",
+                    lambda: called.append("acquire"),
+                    evidence_authority=authority,
+                ),
+                retryable=False,
+            )
+        self.assertEqual(called, [])
+
+    def test_store_rejects_foreign_authority_and_conflicting_output(self):
+        payload = job()
+        benchmark_policy = policy()
+        authority = HmacAuthority()
+        first = self.adapter(
+            Transport(languages(), translation("Ensimmäinen.")),
+        ).acquire(payload, benchmark_policy, evidence_authority=authority)
+        second = self.adapter(
+            Transport(languages(), translation("Toinen.")),
+        ).acquire(payload, benchmark_policy, evidence_authority=authority)
+        with sqlite3.connect(":memory:") as connection:
+            store = BASELINE.BaselineAcquisitionStore(connection)
+            store.save(
+                payload, benchmark_policy, "deepl-pro", first,
+                evidence_authority=authority, now=100,
+            )
+            self.assert_failure(
+                "baseline.store.conflict",
+                lambda: store.save(
+                    payload, benchmark_policy, "deepl-pro", second,
+                    evidence_authority=authority, now=101,
+                ),
+                retryable=False,
+            )
+            self.assert_failure(
+                "baseline.store.acquisition_invalid",
+                lambda: store.load(
+                    payload, benchmark_policy, "deepl-pro",
+                    evidence_authority=HmacAuthority(b"foreign-key"),
+                ),
+                retryable=False,
+            )
+
+    def test_identical_concurrent_store_writes_converge(self):
+        payload = job()
+        benchmark_policy = policy()
+        authority = HmacAuthority()
+        acquisition = self.adapter(
+            Transport(languages(), translation()),
+        ).acquire(payload, benchmark_policy, evidence_authority=authority)
+        with sqlite3.connect(":memory:") as connection:
+            store = BASELINE.BaselineAcquisitionStore(connection)
+            first = store.save(
+                payload, benchmark_policy, "deepl-pro", acquisition,
+                evidence_authority=authority, now=100,
+            )
+            second = store.save(
+                payload, benchmark_policy, "deepl-pro", acquisition,
+                evidence_authority=authority, now=101,
+            )
+            count = connection.execute(
+                "SELECT COUNT(*) FROM benchmark_baseline_acquisitions"
+            ).fetchone()[0]
+        self.assertEqual(first, second)
+        self.assertEqual(count, 1)
 
 
 if __name__ == "__main__":

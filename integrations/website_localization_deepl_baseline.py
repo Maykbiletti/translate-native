@@ -4,7 +4,9 @@
 The adapter calls only DeepL's documented API origins. It discovers stable
 language support at runtime, sends exactly one complete source document, and
 returns text-free provenance evidence beside the attested baseline artifact.
-Credentials never enter artifacts, evidence, exceptions, or object reprs.
+The durable store binds an exact acquisition to its route, policy, and job so a
+worker restart cannot silently replace it. Credentials never enter artifacts,
+evidence, exceptions, persisted state, or object reprs.
 """
 
 from __future__ import annotations
@@ -15,14 +17,16 @@ import json
 import math
 import re
 import socket
+import sqlite3
 import sys
 import time
 import unicodedata
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterator, Mapping, Protocol
 
 
 EVIDENCE_SCHEMA = "blun.website-localization-deepl-api-evidence.v1"
@@ -40,6 +44,12 @@ MAX_LANGUAGES = 10_000
 BCP47 = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,8}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 RIGHTS_BASES = frozenset(("owned", "licensed", "permission"))
+STORE_SCHEMA = "blun.website-localization-baseline-acquisition-store.v1"
+STORE_COLUMNS = (
+    "acquisition_id", "route_id", "policy_sha256", "job_sha256",
+    "artifact_json", "artifact_sha256", "evidence_json", "evidence_sha256",
+    "created_at",
+)
 
 
 def _load_module(name: str, path: Path):
@@ -143,6 +153,319 @@ class URLTransport:
 class BaselineAcquisition:
     artifact: dict[str, Any]
     evidence: dict[str, Any]
+
+
+def _canonical_json(value: Any, *, code: str, maximum: int) -> str:
+    return _json_bytes(value, code=code, maximum=maximum).decode("utf-8")
+
+
+def _parse_stored_json(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        raise DeepLBaselineFailed("baseline.store.state_invalid", retryable=False)
+    try:
+        if len(value.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            raise ValueError("stored JSON is too large")
+        return json.loads(
+            value, object_pairs_hook=_pairs, parse_constant=_constant,
+        )
+    except (UnicodeEncodeError, ValueError, RecursionError):
+        raise DeepLBaselineFailed("baseline.store.state_invalid", retryable=False) from None
+
+
+def _timestamp(value: Any) -> float:
+    value = time.time() if value is None else value
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise DeepLBaselineFailed("baseline.store.time_invalid", retryable=False)
+    return float(value)
+
+
+def _policy_sha256(policy: Any) -> str:
+    try:
+        validated = _BENCHMARK._validate_policy(policy)
+        payload = {
+            field: getattr(validated, field)
+            for field in validated.__dataclass_fields__
+        }
+    except Exception:
+        raise DeepLBaselineFailed("baseline.store.binding_invalid", retryable=False) from None
+    return _hash_bytes(_json_bytes(
+        payload, code="baseline.store.binding_invalid", maximum=MAX_RESPONSE_BYTES,
+    ))
+
+
+def _job_sha256(job_payload: Any, policy: Any) -> tuple[dict[str, Any], str]:
+    job = _validated_job(job_payload, policy)
+    return job, _hash_bytes(_json_bytes(
+        job, code="baseline.store.binding_invalid", maximum=MAX_RESPONSE_BYTES,
+    ))
+
+
+def _validate_acquisition(
+    acquisition: Any,
+    job_payload: Any,
+    policy: Any,
+    evidence_authority: Any,
+) -> BaselineAcquisition:
+    if not isinstance(acquisition, BaselineAcquisition):
+        raise DeepLBaselineFailed(
+            "baseline.store.acquisition_invalid", retryable=False,
+        )
+    job = _validated_job(job_payload, policy)
+    try:
+        artifact = _BENCHMARK._validate_baseline(
+            job, acquisition.artifact, policy, evidence_authority,
+        )
+    except Exception:
+        raise DeepLBaselineFailed("baseline.store.acquisition_invalid", retryable=False) from None
+    evidence = acquisition.evidence
+    if not isinstance(evidence, dict):
+        raise DeepLBaselineFailed("baseline.store.acquisition_invalid", retryable=False)
+    evidence_json = _canonical_json(
+        evidence, code="baseline.store.acquisition_invalid",
+        maximum=MAX_RESPONSE_BYTES,
+    )
+    evidence_sha256 = _hash_text(evidence_json)
+    provenance = artifact["provenance"]
+    method = provenance["method"]
+    common = (
+        provenance["evidence_sha256"] == evidence_sha256,
+        evidence.get("source_sha256") == job["source"]["sha256"],
+        evidence.get("target_locale") == job["target"]["locale"],
+        evidence.get("target_sha256") == artifact["target_sha256"],
+    )
+    if method == "official_api":
+        expected = {
+            "schema", "provider", "origin", "languages_response_sha256",
+            "request_sha256", "response_sha256", "source_sha256",
+            "source_locale", "source_language", "target_locale",
+            "target_language", "target_sha256", "model_type_used",
+        }
+        valid = (
+            set(evidence) == expected
+            and evidence.get("schema") == EVIDENCE_SCHEMA
+            and evidence.get("provider") == "DeepL"
+            and evidence.get("origin") in OFFICIAL_ORIGINS.values()
+            and evidence.get("source_locale") == job["source"]["locale"]
+            and provenance["evidence_id"] == "deepl-api:" + evidence_sha256
+        )
+        for field in (
+            "languages_response_sha256", "request_sha256", "response_sha256",
+        ):
+            try:
+                _sha256(
+                    evidence.get(field),
+                    code="baseline.store.acquisition_invalid",
+                )
+            except DeepLBaselineFailed:
+                valid = False
+        for field in ("source_language", "target_language"):
+            if (
+                not isinstance(evidence.get(field), str)
+                or BCP47.fullmatch(evidence[field]) is None
+            ):
+                valid = False
+        model = evidence.get("model_type_used")
+        if model is not None and (
+            not isinstance(model, str) or not model or len(model) > 128
+        ):
+            valid = False
+    elif method == "lawful_fixture":
+        expected = {
+            "schema", "fixture_id", "fixture_revision", "supplier_id",
+            "rights_basis", "rights_evidence_sha256", "source_sha256",
+            "target_locale", "target_sha256",
+        }
+        valid = (
+            set(evidence) == expected
+            and evidence.get("schema") == FIXTURE_EVIDENCE_SCHEMA
+            and evidence.get("rights_basis") in RIGHTS_BASES
+            and provenance["evidence_id"] == "lawful-fixture:" + evidence_sha256
+        )
+        try:
+            for field in ("fixture_id", "fixture_revision", "supplier_id"):
+                _identifier(evidence.get(field), code="baseline.store.acquisition_invalid")
+            _sha256(
+                evidence.get("rights_evidence_sha256"),
+                code="baseline.store.acquisition_invalid",
+            )
+        except DeepLBaselineFailed:
+            valid = False
+    else:
+        valid = False
+    if not valid or not all(common):
+        raise DeepLBaselineFailed("baseline.store.acquisition_invalid", retryable=False)
+    return BaselineAcquisition(artifact=artifact, evidence=json.loads(evidence_json))
+
+
+@contextmanager
+def _transaction(connection: sqlite3.Connection) -> Iterator[None]:
+    if connection.in_transaction:
+        raise DeepLBaselineFailed("baseline.store.external_transaction", retryable=False)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        yield
+    except Exception:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+
+
+class BaselineAcquisitionStore:
+    """Durable exact-output recovery for one attested baseline acquisition."""
+
+    def __init__(self, connection: sqlite3.Connection):
+        if not isinstance(connection, sqlite3.Connection):
+            raise DeepLBaselineFailed(
+                "baseline.store.connection_invalid", retryable=False,
+            )
+        self.connection = connection
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA busy_timeout = 5000")
+        with _transaction(self.connection):
+            self.connection.execute("""
+                CREATE TABLE IF NOT EXISTS benchmark_baseline_acquisitions (
+                    acquisition_id TEXT PRIMARY KEY,
+                    route_id TEXT NOT NULL,
+                    policy_sha256 TEXT NOT NULL,
+                    job_sha256 TEXT NOT NULL,
+                    artifact_json TEXT NOT NULL,
+                    artifact_sha256 TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    evidence_sha256 TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    UNIQUE(route_id, policy_sha256, job_sha256)
+                )
+            """)
+        columns = tuple(
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(benchmark_baseline_acquisitions)"
+            ).fetchall()
+        )
+        if columns != STORE_COLUMNS:
+            raise DeepLBaselineFailed(
+                "baseline.store.schema_unsupported", retryable=False,
+            )
+
+    @staticmethod
+    def _identity(
+        job_payload: Any, policy: Any, route_id: Any,
+    ) -> tuple[str, str, str, str]:
+        route = _identifier(route_id, code="baseline.store.route_invalid")
+        _, job_sha256 = _job_sha256(job_payload, policy)
+        policy_sha256 = _policy_sha256(policy)
+        acquisition_id = "baseline-acquisition:" + _hash_bytes(_json_bytes(
+            {
+                "schema": STORE_SCHEMA,
+                "route_id": route,
+                "policy_sha256": policy_sha256,
+                "job_sha256": job_sha256,
+            },
+            code="baseline.store.binding_invalid", maximum=MAX_RESPONSE_BYTES,
+        ))
+        return acquisition_id, route, policy_sha256, job_sha256
+
+    def load(
+        self, job_payload: Any, policy: Any, route_id: Any, *,
+        evidence_authority: Any,
+    ) -> BaselineAcquisition | None:
+        identity = self._identity(job_payload, policy, route_id)
+        row = self.connection.execute("""
+            SELECT * FROM benchmark_baseline_acquisitions
+            WHERE acquisition_id = ?
+        """, (identity[0],)).fetchone()
+        if row is None:
+            return None
+        if (
+            tuple(row.keys()) != STORE_COLUMNS
+            or tuple(row[name] for name in STORE_COLUMNS[:4]) != identity
+            or isinstance(row["created_at"], bool)
+            or not isinstance(row["created_at"], (int, float))
+            or not math.isfinite(float(row["created_at"]))
+            or float(row["created_at"]) < 0
+        ):
+            raise DeepLBaselineFailed("baseline.store.state_invalid", retryable=False)
+        artifact_json = row["artifact_json"]
+        evidence_json = row["evidence_json"]
+        if (
+            not isinstance(artifact_json, str)
+            or not isinstance(evidence_json, str)
+            or row["artifact_sha256"] != _hash_text(artifact_json)
+            or row["evidence_sha256"] != _hash_text(evidence_json)
+        ):
+            raise DeepLBaselineFailed("baseline.store.state_invalid", retryable=False)
+        acquisition = BaselineAcquisition(
+            artifact=_parse_stored_json(artifact_json),
+            evidence=_parse_stored_json(evidence_json),
+        )
+        return _validate_acquisition(
+            acquisition, job_payload, policy, evidence_authority,
+        )
+
+    def save(
+        self, job_payload: Any, policy: Any, route_id: Any,
+        acquisition: Any, *, evidence_authority: Any, now: Any = None,
+    ) -> BaselineAcquisition:
+        identity = self._identity(job_payload, policy, route_id)
+        verified = _validate_acquisition(
+            acquisition, job_payload, policy, evidence_authority,
+        )
+        artifact_json = _canonical_json(
+            verified.artifact, code="baseline.store.acquisition_invalid",
+            maximum=MAX_RESPONSE_BYTES,
+        )
+        evidence_json = _canonical_json(
+            verified.evidence, code="baseline.store.acquisition_invalid",
+            maximum=MAX_RESPONSE_BYTES,
+        )
+        values = identity + (
+            artifact_json, _hash_text(artifact_json), evidence_json,
+            _hash_text(evidence_json), _timestamp(now),
+        )
+        with _transaction(self.connection):
+            self.connection.execute("""
+                INSERT OR IGNORE INTO benchmark_baseline_acquisitions
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, values)
+        stored = self.load(
+            job_payload, policy, route_id,
+            evidence_authority=evidence_authority,
+        )
+        if stored != verified:
+            raise DeepLBaselineFailed("baseline.store.conflict", retryable=False)
+        return stored
+
+
+def resolve_baseline_acquisition(
+    store: BaselineAcquisitionStore,
+    job_payload: Any,
+    policy: Any,
+    route_id: Any,
+    acquire: Callable[[], BaselineAcquisition],
+    *,
+    evidence_authority: Any,
+    now: Any = None,
+) -> BaselineAcquisition:
+    """Reuse exact verified state, otherwise acquire once and persist before review."""
+    if not isinstance(store, BaselineAcquisitionStore):
+        raise TypeError("store must be BaselineAcquisitionStore")
+    if not callable(acquire):
+        raise TypeError("acquire must be callable")
+    cached = store.load(
+        job_payload, policy, route_id, evidence_authority=evidence_authority,
+    )
+    if cached is not None:
+        return cached
+    acquired = acquire()
+    return store.save(
+        job_payload, policy, route_id, acquired,
+        evidence_authority=evidence_authority, now=now,
+    )
 
 
 @dataclass(frozen=True)
@@ -287,6 +610,7 @@ class DeepLBaselineAdapter:
         timeout: float = 30.0,
         language_cache_seconds: float = 3600.0,
         clock: Callable[[], float] = time.time,
+        operation_guard: Callable[[], Any] | None = None,
     ):
         if account_tier not in OFFICIAL_ORIGINS:
             raise ValueError("account_tier must be free or pro")
@@ -308,6 +632,8 @@ class DeepLBaselineAdapter:
             raise ValueError("language_cache_seconds is outside the supported range")
         if not callable(clock):
             raise TypeError("clock must be callable")
+        if operation_guard is not None and not callable(operation_guard):
+            raise TypeError("operation_guard must be callable")
         self._origin = OFFICIAL_ORIGINS[account_tier]
         self._api_key_provider = api_key_provider
         self._transport = URLTransport() if transport is None else transport
@@ -316,6 +642,7 @@ class DeepLBaselineAdapter:
         self._timeout = float(timeout)
         self._cache_seconds = float(language_cache_seconds)
         self._clock = clock
+        self._operation_guard = operation_guard
         self._language_cache: tuple[
             float, dict[str, _LanguageCapability], str
         ] | None = None
@@ -349,6 +676,13 @@ class DeepLBaselineAdapter:
     def _request(
         self, method: str, path: str, body: bytes | None,
     ) -> tuple[Any, str]:
+        if self._operation_guard is not None:
+            try:
+                self._operation_guard()
+            except Exception:
+                raise DeepLBaselineFailed(
+                    "deepl.operation_guard_failed", retryable=True,
+                ) from None
         try:
             result = self._transport.request(
                 method, self._origin + path,
