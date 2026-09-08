@@ -151,6 +151,14 @@ class BenchmarkInputResolver(Protocol):
     def __call__(self, job_payload: dict[str, Any]) -> BenchmarkCaseInputs: ...
 
 
+class GuardedBenchmarkInputResolver(Protocol):
+    def resolve_with_operation_guard(
+        self,
+        job_payload: dict[str, Any],
+        operation_guard: Callable[[], None],
+    ) -> BenchmarkCaseInputs: ...
+
+
 def _benchmark_case_inputs(value: Any) -> BenchmarkCaseInputs:
     if isinstance(value, BenchmarkCaseInputs):
         return value
@@ -896,7 +904,16 @@ def run_next_benchmark_case(
 
     try:
         renew("dependencies")
-        inputs = _benchmark_case_inputs(input_resolver(claim.job_payload))
+        guarded_resolve = getattr(
+            input_resolver, "resolve_with_operation_guard", None,
+        )
+        if callable(guarded_resolve):
+            inputs = _benchmark_case_inputs(guarded_resolve(
+                claim.job_payload,
+                lambda: renew("dependency_operation"),
+            ))
+        else:
+            inputs = _benchmark_case_inputs(input_resolver(claim.job_payload))
         renew("benchmark")
         result = _BENCHMARK.run_blind_benchmark_case(
             claim.job_payload,

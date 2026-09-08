@@ -32,6 +32,10 @@ SUITE = load("blun_test_website_localization_benchmark_suite", ROOT / "integrati
 CAMPAIGN = load("blun_test_website_localization_benchmark_campaign", ROOT / "integrations" / "website_localization_benchmark_campaign.py")
 FOREIGN_CAMPAIGN = load("blun_test_foreign_benchmark_campaign", ROOT / "integrations" / "website_localization_benchmark_campaign.py")
 BASELINE_ADAPTER = load("blun_test_cross_module_deepl_baseline", ROOT / "integrations" / "website_localization_deepl_baseline.py")
+BENCHMARK_RUNTIME = load(
+    "blun_test_website_localization_benchmark_runtime",
+    ROOT / "integrations" / "website_localization_benchmark_runtime.py",
+)
 SUITE_MANIFEST = SUITE.manifest()
 
 
@@ -316,6 +320,47 @@ class CampaignCandidateReviewer:
             if marker in item["text"]
         )
         return review_response(request, preferred)
+
+
+class RuntimeCandidateProvider:
+    def __init__(self):
+        self.requests = []
+
+    def invoke(self, request):
+        self.requests.append(request)
+        locale = request.input["target"]["locale"]
+        if request.phase == "transcreation":
+            source = request.input["source"]["text"]
+            phrase = fixture_copy(locale)["candidate"]
+            repetitions = max(1, (len(source) + len(phrase) - 1) // len(phrase))
+            return {
+                "schema": BENCHMARK_RUNTIME._CANDIDATE._WORKER.CANDIDATE_SCHEMA,
+                "phase": "transcreation",
+                "locale": locale,
+                "candidate": " ".join((phrase,) * repetitions),
+            }
+        return {
+            "schema": BENCHMARK_RUNTIME._CANDIDATE._WORKER.REVIEW_SCHEMA,
+            "phase": request.phase,
+            "locale": locale,
+            "status": "PASS",
+            "confidence": "high",
+            "blocking_defects": [],
+            "major_defects": [],
+        }
+
+
+class RetryOnceCampaignReviewer(CampaignCandidateReviewer):
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def review(self, request):
+        if not self.failed:
+            self.failed = True
+            self.requests.append(request)
+            raise TimeoutError("private reviewer failure")
+        return super().review(request)
 
 
 def native_reference(
@@ -1525,6 +1570,218 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 outcome.error_code,
                 "benchmark.campaign.dependency.deepl.rate_limited",
             )
+
+    def _benchmark_runtime_fixture(self, *, reviewer=None, max_attempts=3):
+        connections = [sqlite3.connect(":memory:") for _ in range(4)]
+        for connection in connections:
+            self.addCleanup(connection.close)
+        benchmark_policy = campaign_policy()
+        authority = CampaignAuthority()
+        verifier = CampaignNativeReferenceVerifier()
+        provider = RuntimeCandidateProvider()
+        reviewer = reviewer or CampaignCandidateReviewer()
+        calls = {"candidate_provider": 0, "baseline": 0, "reference": 0}
+        current_time = [100.0]
+
+        def acquire_baseline(payload, selected_policy, selected_authority, guard):
+            calls["baseline"] += 1
+            guard()
+            target = _target_fixture(payload, "baseline")
+            return BENCHMARK_RUNTIME._BASELINE.create_lawful_fixture_acquisition(
+                payload,
+                target,
+                selected_policy,
+                {
+                    "schema": BENCHMARK_RUNTIME._BASELINE.FIXTURE_EVIDENCE_SCHEMA,
+                    "fixture_id": "licensed-baseline-fixture",
+                    "fixture_revision": "2026-09-08",
+                    "supplier_id": "licensed-supplier",
+                    "rights_basis": "licensed",
+                    "rights_evidence_sha256": "a" * 64,
+                    "source_sha256": payload["source"]["sha256"],
+                    "target_locale": payload["target"]["locale"],
+                    "target_sha256": hashlib.sha256(target.encode()).hexdigest(),
+                },
+                evidence_authority=selected_authority,
+            )
+
+        def load_reference(payload):
+            calls["reference"] += 1
+            return native_reference(
+                payload, benchmark_policy, verifier, authority,
+            )
+
+        def resolve_candidate_provider(_):
+            calls["candidate_provider"] += 1
+            return provider
+
+        runtime = BENCHMARK_RUNTIME.WebsiteLocalizationBenchmarkRuntime(
+            campaign_connection=connections[0],
+            candidate_connection=connections[1],
+            baseline_connection=connections[2],
+            native_reference_connection=connections[3],
+            policy=benchmark_policy,
+            candidate_route_id="attached-model-primary",
+            baseline_route_id="licensed-baseline",
+            native_reference_route_id="qualified-native-vault",
+            assets_resolver=lambda payload: assets(payload["target"]["locale"]),
+            candidate_provider_resolver=resolve_candidate_provider,
+            baseline_acquirer=acquire_baseline,
+            native_reference_loader=load_reference,
+            reviewer=reviewer,
+            native_reference_verifier=verifier,
+            evidence_authority=authority,
+            blinding_key=self.key,
+            worker_id="benchmark-worker-1",
+            max_attempts=max_attempts,
+            clock=lambda: current_time[0],
+        )
+        return runtime, connections, provider, calls, current_time
+
+    def test_benchmark_runtime_preflight_writes_no_schema_on_invalid_configuration(self):
+        connections = [sqlite3.connect(":memory:") for _ in range(3)]
+        for connection in connections:
+            self.addCleanup(connection.close)
+        with self.assertRaises(BENCHMARK_RUNTIME.BenchmarkRuntimeFailed) as caught:
+            BENCHMARK_RUNTIME.WebsiteLocalizationBenchmarkRuntime(
+                campaign_connection=connections[0],
+                candidate_connection=connections[0],
+                baseline_connection=connections[1],
+                native_reference_connection=connections[2],
+                policy=campaign_policy(),
+                candidate_route_id="candidate",
+                baseline_route_id="baseline",
+                native_reference_route_id="reference",
+                assets_resolver=lambda _: None,
+                candidate_provider_resolver=lambda _: None,
+                baseline_acquirer=lambda *_: None,
+                native_reference_loader=lambda _: None,
+                reviewer=CampaignCandidateReviewer(),
+                native_reference_verifier=CampaignNativeReferenceVerifier(),
+                evidence_authority=CampaignAuthority(),
+                blinding_key=self.key,
+                worker_id="worker",
+            )
+        self.assertEqual(caught.exception.code, "benchmark.runtime.connection_reused")
+        for connection in connections:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall(),
+                [],
+            )
+        late_connections = [sqlite3.connect(":memory:") for _ in range(4)]
+        for connection in late_connections:
+            self.addCleanup(connection.close)
+        with self.assertRaises(BENCHMARK_RUNTIME.BenchmarkRuntimeFailed) as caught:
+            BENCHMARK_RUNTIME.WebsiteLocalizationBenchmarkRuntime(
+                campaign_connection=late_connections[0],
+                candidate_connection=late_connections[1],
+                baseline_connection=late_connections[2],
+                native_reference_connection=late_connections[3],
+                policy=campaign_policy(),
+                candidate_route_id="candidate",
+                baseline_route_id="baseline",
+                native_reference_route_id="reference",
+                assets_resolver=lambda _: None,
+                candidate_provider_resolver=lambda _: None,
+                baseline_acquirer=lambda *_: None,
+                native_reference_loader=lambda _: None,
+                reviewer=CampaignCandidateReviewer(),
+                native_reference_verifier=CampaignNativeReferenceVerifier(),
+                evidence_authority=CampaignAuthority(),
+                blinding_key=self.key,
+                worker_id="worker",
+                clock=lambda: True,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.runtime.clock_invalid")
+        for connection in late_connections:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall(),
+                [],
+            )
+
+    def test_benchmark_runtime_retries_with_exact_durable_inputs(self):
+        reviewer = RetryOnceCampaignReviewer()
+        runtime, connections, provider, calls, current_time = (
+            self._benchmark_runtime_fixture(reviewer=reviewer)
+        )
+        guard_calls = []
+        first = runtime.run_once(
+            operation_guard=guard_calls.append,
+            retry_base_seconds=5,
+        )
+        self.assertEqual(first.status, "retry_wait")
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(
+            calls,
+            {"candidate_provider": 1, "baseline": 1, "reference": 1},
+        )
+        self.assertGreater(len(guard_calls), 10)
+
+        current_time[0] = 106
+        second = runtime.run_once(
+            operation_guard=guard_calls.append,
+            retry_base_seconds=5,
+        )
+        self.assertEqual(second.work_id, first.work_id)
+        self.assertEqual(second.status, "succeeded")
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(
+            calls,
+            {"candidate_provider": 1, "baseline": 1, "reference": 1},
+        )
+        self.assertEqual(len(reviewer.requests), 3)
+        status_text = json.dumps(runtime.status(), ensure_ascii=False)
+        payload = CAMPAIGN._job_payload(
+            runtime.policy, second.target_locale, second.suite_case_key,
+        )
+        for prohibited in (
+            payload["source"]["text"],
+            _target_fixture(payload, "candidate"),
+            _target_fixture(payload, "baseline"),
+            _target_fixture(payload, "reference"),
+        ):
+            self.assertNotIn(prohibited, status_text)
+        for connection, table in zip(connections[1:], (
+            "benchmark_candidate_acquisitions",
+            "benchmark_baseline_acquisitions",
+            "benchmark_native_references",
+        )):
+            self.assertEqual(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
+                1,
+            )
+
+    def test_benchmark_runtime_tamper_blocks_before_second_review_or_provider_call(self):
+        reviewer = RetryOnceCampaignReviewer()
+        runtime, connections, provider, calls, current_time = (
+            self._benchmark_runtime_fixture(reviewer=reviewer, max_attempts=2)
+        )
+        first = runtime.run_once(retry_base_seconds=5)
+        self.assertEqual(first.status, "retry_wait")
+        connections[1].execute("""
+            UPDATE benchmark_candidate_acquisitions
+            SET artifact_json = '{}'
+        """)
+        connections[1].commit()
+        current_time[0] = 106
+        second = runtime.run_once(retry_base_seconds=5)
+        self.assertEqual(second.work_id, first.work_id)
+        self.assertEqual(second.status, "failed")
+        self.assertEqual(
+            second.error_code,
+            "benchmark.campaign.dependency.candidate.store.state_invalid",
+        )
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(
+            calls,
+            {"candidate_provider": 1, "baseline": 1, "reference": 1},
+        )
+        self.assertEqual(len(reviewer.requests), 1)
+        self.assertNotIn("private reviewer failure", json.dumps(runtime.status()))
 
     def test_cross_loaded_deepl_adapter_store_and_inputs_complete_campaign_case(self):
         benchmark_policy = campaign_policy()

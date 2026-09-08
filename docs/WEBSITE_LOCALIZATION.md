@@ -472,6 +472,38 @@ locale-bound assets, and an attested qualified-native reference. The campaign
 store never fetches an API, chooses a provider, reads credentials, or invents a
 missing artifact.
 
+Production composition should use
+`integrations/website_localization_benchmark_runtime.py`. Its
+`WebsiteLocalizationBenchmarkRuntime` preflights the complete policy, routes,
+adapters, blinding key, worker identity, and four distinct idle SQLite
+connections before creating any schema. Those connections isolate campaign
+status, candidate text, baseline text and evidence, and qualified-native
+reference text and receipts so one store cannot silently share transaction or
+schema state with another. Construction creates the exact idempotent campaign;
+`run_once` processes at most one item, while `status`, `health`, and `summarize`
+retain the campaign's existing text-free and all-locales-complete contracts.
+
+The runtime owns the only `BenchmarkCaseInputs` construction. It resolves
+locale assets, then uses the durable candidate, baseline, and native-reference
+stores under their exact route, policy, and canonical suite-job identities.
+The configured candidate adapter is resolved lazily only when no verified
+candidate is stored. The baseline callback receives the
+job, bound policy, evidence authority, and current operation guard; an official
+API adapter must pass that guard into its transport boundary. The native
+reference callback receives only the canonical job and must return externally
+qualified evidence—it is never asked to generate text. Corrupt or conflicting
+state blocks instead of falling through to another external call.
+
+For this trusted resolver, the campaign passes a no-argument token-bound guard
+that renews the current lease. It runs before and after host resolvers, before
+every candidate-model operation, throughout evidence verification, before the
+baseline acquisition boundary, and before the external reference lookup. A
+restart after a reviewer outage therefore reloads the same three verified
+artifacts without invoking the model, baseline API or reference vault again.
+Legacy callable resolvers remain compatible, but they receive only the older
+single guard before dependency resolution and should not be used as the
+production composition root.
+
 Adapters may load these zero-dependency modules independently, as happens when
 a host composes the campaign, DeepL baseline adapter, acquisition store, and
 its own resolver without installing a Python package. Public frozen
