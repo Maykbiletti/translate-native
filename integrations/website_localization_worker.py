@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
-WORKER_SCHEMA = "blun.website-localization-worker.v2"
+WORKER_SCHEMA = "blun.website-localization-worker.v3"
 CANDIDATE_SCHEMA = "blun.website-localization-candidate.v1"
 REVIEW_SCHEMA = "blun.website-localization-review.v2"
-RESULT_SCHEMA = "blun.website-localization-result.v2"
+RESULT_SCHEMA = "blun.website-localization-result.v3"
 MAX_TEXT_BYTES = 2_000_000
 MAX_FIELD_LENGTH = 2_000
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -435,6 +435,13 @@ def _integrity_errors(source: str, target: str) -> list[str]:
 
 
 def _base_context(job: dict[str, Any], assets: LocalizationAssets) -> dict[str, Any]:
+    quality_profile = _PLANNER.quality_profile_for(job["target"]["locale"])
+    expected_quality = {
+        "version": job["target"]["quality_profile_version"],
+        "sha256": job["target"]["quality_profile_sha256"],
+    }
+    if any(quality_profile[name] != value for name, value in expected_quality.items()):
+        raise LocalizationWorkerBlocked("quality_profile.binding_mismatch", retryable=False)
     return {
         "job_id": job["job_id"],
         "target": job["target"],
@@ -445,6 +452,7 @@ def _base_context(job: dict[str, Any], assets: LocalizationAssets) -> dict[str, 
         "glossary_version": assets.glossary_version,
         "policy_version": assets.policy_version,
         "protected_terms": list(assets.protected_terms),
+        "quality_profile": quality_profile,
     }
 
 
@@ -614,6 +622,11 @@ def run_localization_job(
         "review_confidence": {
             "target_native": native_confidence,
             "source_fidelity": fidelity_confidence,
+        },
+        "quality_profile": {
+            "locale": locale,
+            "version": job["target"]["quality_profile_version"],
+            "sha256": job["target"]["quality_profile_sha256"],
         },
         "human_review_required": (
             job["content_type"] == "legal"

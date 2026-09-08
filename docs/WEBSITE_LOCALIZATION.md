@@ -24,6 +24,32 @@ profile is `de-AT`; English is `en-IE`, Portuguese is `pt-PT`, Spanish is
 `es-ES`, and Swedish is `sv-SE`. A source whose primary language is already in
 the registry produces 23 jobs. A non-EU source produces all 24.
 
+`integrations/website_localization_quality_profiles.py` adds one immutable,
+versioned evaluation profile for each of those 24 locales. Each profile has
+separate target-only nativeness criteria, source-aware fidelity criteria, and
+locale-specific adversarial cases. Every profile also requires the complete
+red-team matrix for translationese, wrong neighbouring language, mixed
+varieties, ASCII folding, missing diacritics or native script, wrong
+inflection, omitted meaning, unnatural CTAs, and marketing calques. This
+shared minimum does not replace the language-specific criteria.
+
+The canonical profile hash and version are part of the target profile and job
+identity. The complete profile is supplied independently to transcreation,
+target-only review, source-aware review, and blinded benchmark review. Worker
+results carry the locale, version, and hash; quality-evidence requests and
+signed approvals bind that triplet again. A missing, substituted, or stale
+profile therefore blocks before a provider call or release instead of falling
+back to generic instructions.
+
+Finnish criteria explicitly cover natural information structure, case
+government, agglutination, possessive suffixes, vowel harmony, consonant
+gradation, clitics, compounds, politeness, and non-calqued web CTAs. Maltese
+criteria cover `ċ`, `ġ`, `għ`, `ħ`, and `ż`, morphology, fused articles and
+prepositions, idiom, and English/Italian calques. The Maltese institutional
+reference is the [Kunsill Nazzjonali tal-Ilsien Malti](https://kunsilltalmalti.gov.mt/mistoqssija-u-twegiba-51-76/);
+locale exemplar and convention references are pinned to
+[Unicode CLDR 48](https://www.unicode.org/cldr/charts/48/summary/mt.html).
+
 ## JSON contract
 
 ```bash
@@ -57,7 +83,8 @@ text and its SHA-256 hash, both required quality-pass names, and
 are derived from canonical JSON bound to:
 
 - source ID, revision, text hash, and locale;
-- target locale and content type;
+- complete target-locale metadata, including quality-profile version and hash,
+  plus content type;
 - glossary and quality-policy versions;
 - provider, model ID, and model version;
 - Translate Native software version.
@@ -147,6 +174,9 @@ review, leak the source into the native-only judgment, return convincing but
 unstructured prose, or pass a candidate with a broken placeholder. Exact
 phase and locale schemas, separate inputs, ordered calls, version matching,
 response hashes, and the final local integrity gate make each case fail closed.
+The same profile version and hash are carried into the unsigned worker result,
+then into external quality evidence and the signed approval, so a later profile
+change cannot reuse an older translation-memory entry.
 
 ## Queue-to-worker execution
 

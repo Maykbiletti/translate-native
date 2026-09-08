@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -20,8 +21,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA = "blun.website-localization-plan.v1"
-JOB_SCHEMA = "blun.website-localization-job.v1"
+SCHEMA = "blun.website-localization-plan.v2"
+JOB_SCHEMA = "blun.website-localization-job.v2"
 EU_LANGUAGE_SOURCE = (
     "https://european-union.europa.eu/principles-countries-history/languages_en"
 )
@@ -55,40 +56,71 @@ class LocaleProfile:
     language: str
     native_name: str
     script: str
+    quality_profile_version: str
+    quality_profile_sha256: str
     direction: str = "ltr"
 
 
 # The European Union currently has 24 official languages. A single explicit
 # website locale is selected for each language so every queue item has regional
-# conventions rather than an ambiguous bare language tag. German defaults to
-# Austrian usage for BLUN; callers may add future profiles in a schema revision.
+# conventions rather than an ambiguous bare language tag. This public default
+# uses Austrian German; projects can introduce other regional profiles in a
+# future schema revision without embedding brand-specific vocabulary here.
+def _load_quality_profiles():
+    path = Path(__file__).with_name("website_localization_quality_profiles.py")
+    spec = importlib.util.spec_from_file_location("blun_website_quality_profiles", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load website-localization quality profiles")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_QUALITY_PROFILES = _load_quality_profiles()
+
+
+def _locale(locale: str, eu_code: str, language: str, native_name: str, script: str) -> LocaleProfile:
+    quality = _QUALITY_PROFILES.quality_profile_for(locale)
+    return LocaleProfile(
+        locale, eu_code, language, native_name, script,
+        quality["version"], quality["sha256"],
+    )
+
+
 EU_OFFICIAL_LOCALES: tuple[LocaleProfile, ...] = (
-    LocaleProfile("bg-BG", "BG", "bg", "български", "Cyrl"),
-    LocaleProfile("hr-HR", "HR", "hr", "hrvatski", "Latn"),
-    LocaleProfile("cs-CZ", "CS", "cs", "čeština", "Latn"),
-    LocaleProfile("da-DK", "DA", "da", "dansk", "Latn"),
-    LocaleProfile("nl-NL", "NL", "nl", "Nederlands", "Latn"),
-    LocaleProfile("en-IE", "EN", "en", "English", "Latn"),
-    LocaleProfile("et-EE", "ET", "et", "eesti", "Latn"),
-    LocaleProfile("fi-FI", "FI", "fi", "suomi", "Latn"),
-    LocaleProfile("fr-FR", "FR", "fr", "français", "Latn"),
-    LocaleProfile("de-AT", "DE", "de", "Deutsch", "Latn"),
-    LocaleProfile("el-GR", "EL", "el", "ελληνικά", "Grek"),
-    LocaleProfile("hu-HU", "HU", "hu", "magyar", "Latn"),
-    LocaleProfile("ga-IE", "GA", "ga", "Gaeilge", "Latn"),
-    LocaleProfile("it-IT", "IT", "it", "italiano", "Latn"),
-    LocaleProfile("lv-LV", "LV", "lv", "latviešu", "Latn"),
-    LocaleProfile("lt-LT", "LT", "lt", "lietuvių", "Latn"),
-    LocaleProfile("mt-MT", "MT", "mt", "Malti", "Latn"),
-    LocaleProfile("pl-PL", "PL", "pl", "polski", "Latn"),
-    LocaleProfile("pt-PT", "PT", "pt", "português", "Latn"),
-    LocaleProfile("ro-RO", "RO", "ro", "română", "Latn"),
-    LocaleProfile("sk-SK", "SK", "sk", "slovenčina", "Latn"),
-    LocaleProfile("sl-SI", "SL", "sl", "slovenščina", "Latn"),
-    LocaleProfile("es-ES", "ES", "es", "español", "Latn"),
-    LocaleProfile("sv-SE", "SV", "sv", "svenska", "Latn"),
+    _locale("bg-BG", "BG", "bg", "български", "Cyrl"),
+    _locale("hr-HR", "HR", "hr", "hrvatski", "Latn"),
+    _locale("cs-CZ", "CS", "cs", "čeština", "Latn"),
+    _locale("da-DK", "DA", "da", "dansk", "Latn"),
+    _locale("nl-NL", "NL", "nl", "Nederlands", "Latn"),
+    _locale("en-IE", "EN", "en", "English", "Latn"),
+    _locale("et-EE", "ET", "et", "eesti", "Latn"),
+    _locale("fi-FI", "FI", "fi", "suomi", "Latn"),
+    _locale("fr-FR", "FR", "fr", "français", "Latn"),
+    _locale("de-AT", "DE", "de", "Deutsch", "Latn"),
+    _locale("el-GR", "EL", "el", "ελληνικά", "Grek"),
+    _locale("hu-HU", "HU", "hu", "magyar", "Latn"),
+    _locale("ga-IE", "GA", "ga", "Gaeilge", "Latn"),
+    _locale("it-IT", "IT", "it", "italiano", "Latn"),
+    _locale("lv-LV", "LV", "lv", "latviešu", "Latn"),
+    _locale("lt-LT", "LT", "lt", "lietuvių", "Latn"),
+    _locale("mt-MT", "MT", "mt", "Malti", "Latn"),
+    _locale("pl-PL", "PL", "pl", "polski", "Latn"),
+    _locale("pt-PT", "PT", "pt", "português", "Latn"),
+    _locale("ro-RO", "RO", "ro", "română", "Latn"),
+    _locale("sk-SK", "SK", "sk", "slovenčina", "Latn"),
+    _locale("sl-SI", "SL", "sl", "slovenščina", "Latn"),
+    _locale("es-ES", "ES", "es", "español", "Latn"),
+    _locale("sv-SE", "SV", "sv", "svenska", "Latn"),
 )
 _PROFILE_BY_LOCALE = {profile.locale: profile for profile in EU_OFFICIAL_LOCALES}
+if set(_PROFILE_BY_LOCALE) != {profile.locale for profile in _QUALITY_PROFILES.PROFILES}:
+    raise RuntimeError("EU locale and quality-profile registries differ")
+
+
+def quality_profile_for(locale: str) -> dict[str, Any]:
+    return _QUALITY_PROFILES.quality_profile_for(locale)
 
 
 @dataclass(frozen=True)
@@ -291,7 +323,7 @@ def plan_website_localization(
         common["commercial_profile"] = COMMERCIAL_PROFILE
     jobs = tuple(
         LocalizationJob(
-            job_id="blun-l10n-" + _digest({**common, "target_locale": profile.locale}),
+            job_id="blun-l10n-" + _digest({**common, "target": asdict(profile)}),
             source_id=source_id,
             source_revision=source_revision,
             source_text=source_text,

@@ -126,6 +126,14 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
             hashlib.sha256(result["candidate"].encode("utf-8")).hexdigest(),
         )
         self.assertEqual(len(result["quality_passes"]), 3)
+        expected_profile = PLANNER.quality_profile_for("sv-SE")
+        for request in provider.requests:
+            self.assertEqual(request.input["quality_profile"], expected_profile)
+        self.assertEqual(result["quality_profile"], {
+            "locale": "sv-SE",
+            "version": expected_profile["version"],
+            "sha256": expected_profile["sha256"],
+        })
         self.assertTrue(result["release_required"])
 
     def test_progress_callback_follows_only_validated_phase_boundaries(self):
@@ -288,6 +296,20 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
             WORKER.run_localization_job(payload, assets(), provider)
         self.assertEqual(caught.exception.code, "job.binding_mismatch")
         self.assertEqual(provider.requests, [])
+
+    def test_quality_profile_tamper_blocks_before_provider_call(self):
+        for field, value in (
+            ("quality_profile_version", "stale-profile"),
+            ("quality_profile_sha256", "0" * 64),
+        ):
+            with self.subTest(field=field):
+                payload = job()
+                payload["target"][field] = value
+                provider = self.successful_provider()
+                with self.assertRaises(WORKER.LocalizationWorkerBlocked) as caught:
+                    WORKER.run_localization_job(payload, assets(), provider)
+                self.assertEqual(caught.exception.code, "job.binding_mismatch")
+                self.assertEqual(provider.requests, [])
 
     def test_provider_failure_is_content_free_and_preserves_retryability(self):
         provider = ScriptedProvider([

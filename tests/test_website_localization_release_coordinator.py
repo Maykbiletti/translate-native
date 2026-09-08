@@ -186,6 +186,11 @@ def completed_result(job, target_text):
         ],
         "integrity": {"status": "PASS", "guard": "translate-native-structure-and-token-gate"},
         "review_confidence": {"target_native": "high", "source_fidelity": "high"},
+        "quality_profile": {
+            "locale": payload["target"]["locale"],
+            "version": payload["target"]["quality_profile_version"],
+            "sha256": payload["target"]["quality_profile_sha256"],
+        },
         "human_review_required": payload["content_type"] == "legal",
         "release_required": True,
     }
@@ -308,6 +313,11 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertEqual(payload["source_text"], self.event["localization"]["source_text"])
         self.assertEqual(payload["target_text"], "Bring dein Unternehmen voran.")
         self.assertEqual(payload["provider"]["model_id"], "configured-model")
+        self.assertEqual(payload["quality_profile"], {
+            "locale": "de-AT",
+            "version": self.plan.jobs[0].target.quality_profile_version,
+            "sha256": self.plan.jobs[0].target.quality_profile_sha256,
+        })
         self.assertTrue(payload["request_id"].startswith("blun-l10n-evidence-"))
         self.assertNotIn("target_locales", json.dumps(payload))
 

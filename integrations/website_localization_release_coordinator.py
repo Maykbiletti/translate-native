@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 SCHEMA = "blun.website-localization-release-coordinator.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v1"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v2"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v1"
 EVIDENCE_STATE_SCHEMA = "blun.localization-quality-evidence-state.v1"
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
@@ -103,6 +103,7 @@ class QualityEvidenceRequest:
     source_text: str
     target_text: str
     review_confidence: dict[str, str]
+    quality_profile: dict[str, str]
     human_review_required: bool
 
     def as_payload(self) -> dict[str, Any]:
@@ -635,6 +636,7 @@ def _request(
         "provider": json.loads(_canonical_json(result["provider"])),
         "software_version": result["software_version"],
         "review_confidence": json.loads(_canonical_json(result["review_confidence"])),
+        "quality_profile": json.loads(_canonical_json(result["quality_profile"])),
         "human_review_required": result["human_review_required"],
     }
     request_id = "blun-l10n-evidence-" + _hash(_canonical_json(binding))

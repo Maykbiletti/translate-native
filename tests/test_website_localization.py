@@ -45,6 +45,9 @@ class WebsiteLocalizationPlannerTests(unittest.TestCase):
         self.assertEqual({profile.script for profile in profiles}, {"Latn", "Cyrl", "Grek"})
         for profile in profiles:
             self.assertTrue(unicodedata.is_normalized("NFC", profile.native_name))
+            quality = MODULE.quality_profile_for(profile.locale)
+            self.assertEqual(profile.quality_profile_version, quality["version"])
+            self.assertEqual(profile.quality_profile_sha256, quality["sha256"])
 
     def test_eu_source_creates_one_job_for_each_other_language(self) -> None:
         plan = MODULE.plan_website_localization(**request())
@@ -55,6 +58,7 @@ class WebsiteLocalizationPlannerTests(unittest.TestCase):
             payload = job.as_payload()
             self.assertEqual(payload["idempotency_key"], job.job_id)
             self.assertEqual(payload["quality_passes"], ["target_native", "source_fidelity"])
+            self.assertRegex(payload["target"]["quality_profile_sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(payload["release_required"])
 
     def test_non_eu_source_creates_all_24_jobs(self) -> None:

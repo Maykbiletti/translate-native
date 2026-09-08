@@ -111,6 +111,11 @@ def candidate_result(payload, text=None):
         "quality_passes": [phase(name) for name in ("transcreation", "target_native", "source_fidelity")],
         "integrity": {"status": "PASS", "guard": "translate-native-structure-and-token-gate"},
         "review_confidence": {"target_native": "high", "source_fidelity": "high"},
+        "quality_profile": {
+            "locale": payload["target"]["locale"],
+            "version": payload["target"]["quality_profile_version"],
+            "sha256": payload["target"]["quality_profile_sha256"],
+        },
         "human_review_required": False,
         "release_required": True,
     }
@@ -227,6 +232,10 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 request = reviewer.requests[0]
                 self.assertEqual(request.target_locale, locale)
                 self.assertEqual(request.input["target"]["native_name"], "Malti" if locale == "mt-MT" else "suomi")
+                self.assertEqual(
+                    request.input["quality_profile"],
+                    PLANNER.quality_profile_for(locale),
+                )
                 marker = "għ" if locale == "mt-MT" else "ä"
                 self.assertIn(marker, TARGETS[locale]["candidate"])
                 self.assertEqual(outcome["winner"], "candidate")
@@ -255,6 +264,19 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         payload = job()
         result = candidate_result(payload)
         result["target_sha256"] = "0" * 64
+        reviewer = PreferenceReviewer(result["candidate"])
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.run_blind_benchmark_case(
+                payload, result, baseline(payload), assets(), policy(), reviewer,
+                blinding_key=self.key,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.candidate.binding_mismatch")
+        self.assertEqual(reviewer.requests, [])
+
+    def test_substituted_candidate_quality_profile_blocks_before_review(self):
+        payload = job()
+        result = candidate_result(payload)
+        result["quality_profile"]["version"] = "stale-profile"
         reviewer = PreferenceReviewer(result["candidate"])
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
             BENCHMARK.run_blind_benchmark_case(

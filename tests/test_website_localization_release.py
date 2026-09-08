@@ -88,6 +88,11 @@ def completed_result(job, candidate, *, review_confidence=None):
             "guard": "translate-native-structure-and-token-gate",
         },
         "review_confidence": review_confidence,
+        "quality_profile": {
+            "locale": payload["target"]["locale"],
+            "version": payload["target"]["quality_profile_version"],
+            "sha256": payload["target"]["quality_profile_sha256"],
+        },
         "human_review_required": (
             payload["content_type"] == "legal" or "low" in review_confidence.values()
         ),
@@ -190,6 +195,11 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertEqual(payload["policy_version"], "native-web-1")
         self.assertEqual(payload["provider"]["model_id"], "king")
         self.assertEqual(payload["software_version"], "6.43.0-dev")
+        self.assertEqual(payload["quality_profile"], {
+            "locale": "sv-SE",
+            "version": plan.jobs[0].target.quality_profile_version,
+            "sha256": plan.jobs[0].target.quality_profile_sha256,
+        })
         self.assertNotIn("quality-receipt", row[0])
         self.assertEqual(self.verifier.calls[0]["target_text"], approved.candidate)
 
@@ -339,6 +349,14 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
             RELEASE._validate_result(job.as_payload(), result)
         self.assertEqual(caught.exception.code, "result.human_review.invalid")
+
+    def test_substituted_quality_profile_cannot_reach_signing(self):
+        plan = make_plan(("sv-SE",))
+        result = completed_result(plan.jobs[0], "Bygg ditt företag med BLUN.")
+        result["quality_profile"]["sha256"] = "0" * 64
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            RELEASE._validate_result(plan.jobs[0].as_payload(), result)
+        self.assertEqual(caught.exception.code, "result.quality_profile.invalid")
 
     def test_tampered_result_payload_or_signature_blocks_lookup(self):
         plan = make_plan(("sv-SE",))

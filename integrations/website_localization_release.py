@@ -21,7 +21,7 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v1"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v2"
 MAX_TEXT_BYTES = 2_000_000
 MAX_RECEIPT_LENGTH = 16_384
 MAX_TTL_SECONDS = 31_536_000.0
@@ -214,7 +214,7 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "human_review_required", "release_required",
+        "quality_profile", "human_review_required", "release_required",
     }
     if set(result) != expected:
         raise LocalizationReleaseBlocked("result.invalid")
@@ -236,6 +236,13 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     }
     if any(result.get(name) != value for name, value in binding.items()):
         raise LocalizationReleaseBlocked("result.binding_mismatch")
+    expected_quality_profile = {
+        "locale": job["target"]["locale"],
+        "version": job["target"]["quality_profile_version"],
+        "sha256": job["target"]["quality_profile_sha256"],
+    }
+    if result.get("quality_profile") != expected_quality_profile:
+        raise LocalizationReleaseBlocked("result.quality_profile.invalid")
     if result.get("schema") != _WORKER.RESULT_SCHEMA or result.get("worker_schema") != _WORKER.WORKER_SCHEMA:
         raise LocalizationReleaseBlocked("result.schema.invalid")
     if result.get("target_sha256") != _hash_text(candidate):
@@ -392,6 +399,7 @@ class LocalizationReleaseStore:
             "software_version": result["software_version"],
             "worker_schema": result["worker_schema"],
             "review_confidence": result["review_confidence"],
+            "quality_profile": result["quality_profile"],
             "result_sha256": result_hash,
             "quality_receipt_sha256": _hash_text(quality_receipt),
             "human_review_receipt_sha256": human_hash,
@@ -481,6 +489,7 @@ class LocalizationReleaseStore:
             "target_locale", "content_type", "glossary_version", "policy_version",
             "provider", "software_version", "worker_schema", "result_sha256",
             "review_confidence",
+            "quality_profile",
             "quality_receipt_sha256", "human_review_receipt_sha256", "approval_id",
             "approved_at", "expires_at",
         }
@@ -500,6 +509,7 @@ class LocalizationReleaseStore:
             "software_version": result["software_version"],
             "worker_schema": result["worker_schema"],
             "review_confidence": result["review_confidence"],
+            "quality_profile": result["quality_profile"],
             "result_sha256": row["result_sha256"],
             "approved_at": row["approved_at"],
             "expires_at": row["expires_at"],

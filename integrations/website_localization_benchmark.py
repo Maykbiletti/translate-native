@@ -208,7 +208,7 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "human_review_required", "release_required",
+        "quality_profile", "human_review_required", "release_required",
     }
     if not isinstance(result, dict) or set(result) != expected_keys:
         raise BenchmarkBlocked("benchmark.candidate.invalid")
@@ -242,6 +242,11 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     expected_human_review = (
         job["content_type"] == "legal" or "low" in review_confidence.values()
     )
+    expected_quality_profile = {
+        "locale": job["target"]["locale"],
+        "version": job["target"]["quality_profile_version"],
+        "sha256": job["target"]["quality_profile_sha256"],
+    }
     bindings = (
         result["schema"] == _WORKER.RESULT_SCHEMA,
         result["worker_schema"] == _WORKER.WORKER_SCHEMA,
@@ -255,6 +260,7 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         result["policy_version"] == job["policy_version"],
         result["provider"] == job["provider"],
         result["software_version"] == job["software_version"],
+        result["quality_profile"] == expected_quality_profile,
         isinstance(result["human_review_required"], bool),
         result["human_review_required"] is expected_human_review,
         result["release_required"] is True,
@@ -367,6 +373,7 @@ def _review_request(
         "audience": assets.audience,
         "tone_profile": assets.tone_profile,
         "policy_version": job["policy_version"],
+        "quality_profile": _PLANNER.quality_profile_for(job["target"]["locale"]),
         "variants": [{"label": label, "text": variants[label]} for label in VARIANTS],
         "response_schema": response_schema,
     }
