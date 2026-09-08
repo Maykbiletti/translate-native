@@ -23,13 +23,15 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v5"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v6"
 BASELINE_SCHEMA = "blun.website-localization-baseline.v2"
 BASELINE_PROVENANCE_SCHEMA = "blun.website-localization-baseline-provenance.v1"
+NATIVE_REFERENCE_SCHEMA = "blun.website-localization-native-reference.v1"
+NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-request.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v5"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v5"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v6"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v6"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
 BASELINE_PROVENANCE_METHODS = frozenset(("official_api", "lawful_fixture"))
@@ -96,6 +98,10 @@ class BenchmarkEvidenceAuthority(Protocol):
     def verify(self, payload: bytes, signature: BenchmarkSignature) -> bool: ...
 
 
+class NativeReferenceVerifier(Protocol):
+    def verify(self, request: Mapping[str, Any], receipt: str) -> bool: ...
+
+
 @dataclass(frozen=True)
 class BenchmarkPolicy:
     benchmark_version: str
@@ -114,6 +120,9 @@ class BenchmarkPolicy:
     baseline_version: str
     reviewer_id: str
     reviewer_version: str
+    native_reference_revision: str
+    native_reference_verifier_id: str
+    native_reference_verifier_version: str
     required_locales: tuple[str, ...]
     minimum_cases_per_locale: int = 8
     minimum_decisive_rate: float = 0.75
@@ -213,6 +222,9 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
         policy.baseline_version,
         policy.reviewer_id,
         policy.reviewer_version,
+        policy.native_reference_revision,
+        policy.native_reference_verifier_id,
+        policy.native_reference_verifier_version,
     ):
         _identifier(value)
     suite = _SUITE.manifest()
@@ -235,6 +247,14 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
     if locales != policy.required_locales:
         raise BenchmarkBlocked("benchmark.policy.invalid")
     if not EARLY_REQUIRED_LOCALES.issubset(locales):
+        raise BenchmarkBlocked("benchmark.policy.invalid")
+    independent_parties = {
+        policy.candidate_provider_id,
+        policy.baseline_id,
+        policy.reviewer_id,
+        policy.native_reference_verifier_id,
+    }
+    if len(independent_parties) != 4:
         raise BenchmarkBlocked("benchmark.policy.invalid")
     if (
         isinstance(policy.minimum_cases_per_locale, bool)
@@ -443,6 +463,166 @@ def create_baseline_artifact(
     return _attest(artifact, policy, evidence_authority)
 
 
+def _native_reference_request(
+    job: dict[str, Any],
+    target_text: Any,
+    policy: BenchmarkPolicy,
+    reviewer_id: Any,
+    reviewer_version: Any,
+) -> dict[str, Any]:
+    target = _target_text(target_text)
+    reviewer_id = _identifier(reviewer_id)
+    reviewer_version = _identifier(reviewer_version)
+    if reviewer_id in {
+        policy.candidate_provider_id,
+        policy.baseline_id,
+        policy.reviewer_id,
+        policy.native_reference_verifier_id,
+    }:
+        raise BenchmarkBlocked("benchmark.native_reference.independence_invalid")
+    try:
+        benchmark_case = _SUITE.case_for_job(job)
+    except ValueError as error:
+        raise BenchmarkBlocked("benchmark.suite.case_mismatch") from error
+    return {
+        "schema": NATIVE_REFERENCE_REQUEST_SCHEMA,
+        "reference_revision": policy.native_reference_revision,
+        "suite": {
+            "version": policy.suite_version,
+            "sha256": policy.suite_sha256,
+            "case_key": benchmark_case["key"],
+        },
+        "source": {
+            "locale": job["source"]["locale"],
+            "text": job["source"]["text"],
+            "sha256": job["source"]["sha256"],
+        },
+        "target_locale": job["target"]["locale"],
+        "content_type": job["content_type"],
+        "quality_profile": _quality_profile_binding(job["target"]["locale"]),
+        "localization_policy": {
+            "glossary_version": policy.candidate_glossary_version,
+            "policy_version": policy.candidate_policy_version,
+        },
+        "qualification": {
+            "method": "qualified_native_human",
+            "reviewer_id": reviewer_id,
+            "reviewer_version": reviewer_version,
+            "verifier_id": policy.native_reference_verifier_id,
+            "verifier_version": policy.native_reference_verifier_version,
+        },
+        "target_text": target,
+        "target_sha256": _hash_text(target),
+    }
+
+
+def native_reference_verification_request(
+    job_payload: Any,
+    target_text: Any,
+    policy: BenchmarkPolicy,
+    *,
+    reviewer_id: str,
+    reviewer_version: str,
+) -> dict[str, Any]:
+    """Build the exact request a qualified-native receipt must authorize."""
+    policy = _validate_policy(policy)
+    try:
+        job = _WORKER._validated_job(job_payload)
+    except _WORKER.LocalizationWorkerBlocked as error:
+        raise BenchmarkBlocked("benchmark.job_or_assets.invalid") from error
+    _validate_candidate_job_binding(job, policy)
+    if job["target"]["locale"] not in policy.required_locales:
+        raise BenchmarkBlocked("benchmark.locale.not_required")
+    return _native_reference_request(
+        job, target_text, policy, reviewer_id, reviewer_version,
+    )
+
+
+def _verify_native_reference_receipt(
+    request: dict[str, Any],
+    receipt: Any,
+    verifier: NativeReferenceVerifier,
+) -> str:
+    if not isinstance(receipt, str) or SIGNATURE_TOKEN.fullmatch(receipt) is None:
+        raise BenchmarkBlocked("benchmark.native_reference.receipt_invalid")
+    verify = getattr(verifier, "verify", None)
+    if not callable(verify):
+        raise BenchmarkBlocked("benchmark.native_reference.verifier_invalid")
+    immutable_request = _canonical_json(request)
+    verifier_request = json.loads(immutable_request)
+    try:
+        accepted = verify(verifier_request, receipt) is True
+    except Exception:
+        raise BenchmarkBlocked("benchmark.native_reference.verify_failed") from None
+    if _canonical_json(verifier_request) != immutable_request:
+        raise BenchmarkBlocked("benchmark.native_reference.verifier_mutated_request")
+    if not accepted:
+        raise BenchmarkBlocked("benchmark.native_reference.rejected")
+    return receipt
+
+
+def create_native_reference_artifact(
+    job_payload: Any,
+    target_text: Any,
+    policy: BenchmarkPolicy,
+    *,
+    reviewer_id: str,
+    reviewer_version: str,
+    qualification_receipt: str,
+    native_reference_verifier: NativeReferenceVerifier,
+    evidence_authority: BenchmarkEvidenceAuthority,
+) -> dict[str, Any]:
+    """Attest one externally verified, qualified-native reference target."""
+    request = native_reference_verification_request(
+        job_payload, target_text, policy,
+        reviewer_id=reviewer_id, reviewer_version=reviewer_version,
+    )
+    receipt = _verify_native_reference_receipt(
+        request, qualification_receipt, native_reference_verifier,
+    )
+    artifact = {
+        "schema": NATIVE_REFERENCE_SCHEMA,
+        "request": request,
+        "qualification_receipt": receipt,
+    }
+    return _attest(artifact, policy, evidence_authority)
+
+
+def _validate_native_reference(
+    job: dict[str, Any],
+    artifact: Any,
+    policy: BenchmarkPolicy,
+    verifier: NativeReferenceVerifier,
+    authority: BenchmarkEvidenceAuthority,
+) -> dict[str, Any]:
+    expected = {"schema", "request", "qualification_receipt", "attestation"}
+    if not isinstance(artifact, dict) or set(artifact) != expected:
+        raise BenchmarkBlocked("benchmark.native_reference.invalid")
+    unsigned = dict(artifact)
+    attestation = unsigned.pop("attestation")
+    _verify_attestation(unsigned, attestation, policy, authority)
+    if unsigned["schema"] != NATIVE_REFERENCE_SCHEMA:
+        raise BenchmarkBlocked("benchmark.native_reference.invalid")
+    request = unsigned["request"]
+    if not isinstance(request, dict):
+        raise BenchmarkBlocked("benchmark.native_reference.invalid")
+    expected_request = _native_reference_request(
+        job,
+        request.get("target_text"),
+        policy,
+        request.get("qualification", {}).get("reviewer_id")
+        if isinstance(request.get("qualification"), dict) else None,
+        request.get("qualification", {}).get("reviewer_version")
+        if isinstance(request.get("qualification"), dict) else None,
+    )
+    if _canonical_json(request) != _canonical_json(expected_request):
+        raise BenchmarkBlocked("benchmark.native_reference.binding_mismatch")
+    _verify_native_reference_receipt(
+        expected_request, unsigned["qualification_receipt"], verifier,
+    )
+    return json.loads(_canonical_json(artifact))
+
+
 def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     expected_keys = {
         "schema", "worker_schema", "job_id", "source_sha256", "target_sha256",
@@ -578,8 +758,8 @@ def _validated_assets(job: dict[str, Any], assets: Any):
 
 def _blinding(
     job: dict[str, Any], candidate_hash: str, baseline_hash: str,
-    baseline_evidence_hash: str, benchmark_case: dict[str, Any],
-    policy: BenchmarkPolicy, key: Any,
+    baseline_evidence_hash: str, native_reference_evidence_hash: str,
+    benchmark_case: dict[str, Any], policy: BenchmarkPolicy, key: Any,
 ) -> tuple[str, dict[str, str], str]:
     if not isinstance(key, bytes) or len(key) < 32:
         raise BenchmarkBlocked("benchmark.blinding_key.invalid")
@@ -594,6 +774,7 @@ def _blinding(
         "candidate_sha256": candidate_hash,
         "baseline_sha256": baseline_hash,
         "baseline_evidence_sha256": baseline_evidence_hash,
+        "native_reference_evidence_sha256": native_reference_evidence_hash,
         "baseline_id": policy.baseline_id,
         "baseline_version": policy.baseline_version,
         "reviewer_id": policy.reviewer_id,
@@ -746,6 +927,8 @@ def run_blind_benchmark_case(
     reviewer: BenchmarkReviewer,
     *,
     blinding_key: bytes,
+    native_reference_artifact: Any,
+    native_reference_verifier: NativeReferenceVerifier,
     evidence_authority: BenchmarkEvidenceAuthority,
 ) -> dict[str, Any]:
     """Run one locale case through source-blind and source-aware A/B review."""
@@ -766,11 +949,16 @@ def run_blind_benchmark_case(
     baseline = _validate_baseline(
         job, baseline_artifact, policy, evidence_authority,
     )
+    native_reference = _validate_native_reference(
+        job, native_reference_artifact, policy,
+        native_reference_verifier, evidence_authority,
+    )
     candidate_text = candidate_result["candidate"]
     baseline_text = baseline["target_text"]
     case_id, origins, blind_id = _blinding(
         job, candidate_result["target_sha256"], baseline["target_sha256"],
-        _hash_json(baseline), benchmark_case, policy, blinding_key,
+        _hash_json(baseline), _hash_json(native_reference), benchmark_case,
+        policy, blinding_key,
     )
     texts = {"candidate": candidate_text, "baseline": baseline_text}
     variants = {label: texts[origin] for label, origin in origins.items()}
@@ -831,6 +1019,14 @@ def run_blind_benchmark_case(
         "candidate": _candidate_binding(policy),
         "candidate_sha256": candidate_result["target_sha256"],
         "quality_profile": _quality_profile_binding(job["target"]["locale"]),
+        "native_reference": {
+            "revision": policy.native_reference_revision,
+            "target_sha256": native_reference["request"]["target_sha256"],
+            "qualification_sha256": _hash_json(
+                native_reference["request"]["qualification"]
+            ),
+            "evidence_sha256": _hash_json(native_reference),
+        },
         "baseline": {
             "id": policy.baseline_id,
             "version": policy.baseline_version,
@@ -870,8 +1066,9 @@ def _validated_case_result(
     required = {
         "schema", "benchmark_version", "suite", "case_id", "job_id", "target_locale",
         "content_type", "source_sha256", "domain", "long_form", "adversarial_tags",
-        "candidate", "candidate_sha256", "quality_profile", "baseline", "reviewer",
-        "blind_commitment_sha256", "passes", "integrity", "defect_counts", "winner",
+        "candidate", "candidate_sha256", "quality_profile", "native_reference",
+        "baseline", "reviewer", "blind_commitment_sha256", "passes", "integrity",
+        "defect_counts", "winner",
     }
     if set(result) != required or result["schema"] != CASE_RESULT_SCHEMA:
         raise BenchmarkBlocked("benchmark.results.invalid")
@@ -926,6 +1123,16 @@ def _validated_case_result(
         raise BenchmarkBlocked("benchmark.results.version_mismatch")
     _sha256(result["candidate_sha256"])
     _sha256(result["blind_commitment_sha256"])
+    native_reference = result["native_reference"]
+    if not isinstance(native_reference, dict) or set(native_reference) != {
+        "revision", "target_sha256", "qualification_sha256", "evidence_sha256",
+    }:
+        raise BenchmarkBlocked("benchmark.results.invalid")
+    if native_reference["revision"] != policy.native_reference_revision:
+        raise BenchmarkBlocked("benchmark.results.version_mismatch")
+    _sha256(native_reference["target_sha256"])
+    _sha256(native_reference["qualification_sha256"])
+    _sha256(native_reference["evidence_sha256"])
     baseline = result["baseline"]
     if not isinstance(baseline, dict) or set(baseline) != {
         "id", "version", "target_sha256", "provenance_method",
@@ -1013,6 +1220,7 @@ def _unsigned_benchmark_report(
     seen: set[tuple[str, str]] = set()
     evidence_hashes: list[str] = []
     baseline_evidence_hashes: list[str] = []
+    native_reference_evidence_hashes: list[str] = []
     for raw in case_results:
         if not isinstance(raw, Mapping):
             raise BenchmarkBlocked("benchmark.results.invalid")
@@ -1025,6 +1233,9 @@ def _unsigned_benchmark_report(
         grouped[result["target_locale"]].append(result)
         evidence_hashes.append(_hash_json(signed_result))
         baseline_evidence_hashes.append(result["baseline"]["evidence_sha256"])
+        native_reference_evidence_hashes.append(
+            result["native_reference"]["evidence_sha256"]
+        )
     locale_reports: list[dict[str, Any]] = []
     for locale in policy.required_locales:
         cases = grouped[locale]
@@ -1082,6 +1293,16 @@ def _unsigned_benchmark_report(
         "quality_profiles": [
             _quality_profile_binding(locale) for locale in policy.required_locales
         ],
+        "native_references": {
+            "revision": policy.native_reference_revision,
+            "verifier": {
+                "id": policy.native_reference_verifier_id,
+                "version": policy.native_reference_verifier_version,
+            },
+            "evidence_sha256": _hash_json(
+                sorted(native_reference_evidence_hashes)
+            ),
+        },
         "baseline": {
             "id": policy.baseline_id,
             "version": policy.baseline_version,

@@ -34,11 +34,13 @@ TARGETS = {
     "mt-MT": {
         "candidate": "Kabbar in-negozju tiegħek ma’ BLUN.",
         "baseline": "Ibni n-negozju tiegħek ma’ BLUN.",
+        "reference": "Kabbar in-negozju tiegħek b’mod naturali f’Malta.",
         "audience": "Sidien ta’ negozji żgħar f’Malta",
     },
     "fi-FI": {
         "candidate": "Kasvata yritystäsi BLUNin avulla.",
         "baseline": "Rakenna yrityksesi BLUNin kanssa.",
+        "reference": "Kasvata yritystäsi luontevasti Suomessa.",
         "audience": "Suomalaiset pienyrittäjät",
     },
 }
@@ -62,6 +64,9 @@ def policy(**overrides):
         "baseline_version": "fixture-2026-08-30",
         "reviewer_id": "independent-native-panel",
         "reviewer_version": "2026-08-30",
+        "native_reference_revision": "qualified-native-reference-1",
+        "native_reference_verifier_id": "qualified-review-registry",
+        "native_reference_verifier_version": "2026-08-30",
         "required_locales": ("mt-MT", "fi-FI"),
         "minimum_cases_per_locale": len(SUITE.SOURCE_CASES),
         "minimum_decisive_rate": 0.75,
@@ -244,14 +249,56 @@ class HmacBenchmarkAuthority:
         )
 
 
+class HmacNativeReferenceVerifier:
+    def __init__(self, key=b"isolated-qualified-native-reference-key"):
+        self.key = key
+
+    def receipt(self, request):
+        payload = BENCHMARK._canonical_json(request).encode("utf-8")
+        return base64.b64encode(
+            hmac.new(self.key, payload, hashlib.sha256).digest()
+        ).decode("ascii")
+
+    def verify(self, request, receipt):
+        return hmac.compare_digest(self.receipt(request), receipt)
+
+
+def native_reference(
+    payload, benchmark_policy, verifier, authority, text=None,
+    *, reviewer_id="qualified-native-reviewer-17",
+    reviewer_version="credential-2026-08-30",
+):
+    text = _target_fixture(payload, "reference") if text is None else text
+    request = BENCHMARK.native_reference_verification_request(
+        payload, text, benchmark_policy,
+        reviewer_id=reviewer_id, reviewer_version=reviewer_version,
+    )
+    return BENCHMARK.create_native_reference_artifact(
+        payload, text, benchmark_policy,
+        reviewer_id=reviewer_id,
+        reviewer_version=reviewer_version,
+        qualification_receipt=verifier.receipt(request),
+        native_reference_verifier=verifier,
+        evidence_authority=authority,
+    )
+
+
 class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
     key = b"benchmark-host-secret-key-material-32"
 
     def setUp(self):
         self.authority = HmacBenchmarkAuthority()
+        self.native_reference_verifier = HmacNativeReferenceVerifier()
 
     def run_benchmark(self, *args, **kwargs):
         kwargs["evidence_authority"] = self.authority
+        kwargs.setdefault("native_reference_verifier", self.native_reference_verifier)
+        kwargs.setdefault(
+            "native_reference_artifact",
+            native_reference(
+                args[0], args[4], self.native_reference_verifier, self.authority,
+            ),
+        )
         return BENCHMARK.run_blind_benchmark_case(*args, **kwargs)
 
     def summarize(self, benchmark_policy, results):
@@ -288,6 +335,8 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertNotIn("lawful_fixture", native + fidelity)
         self.assertNotIn("official_api", native + fidelity)
         self.assertNotIn("evidence_id", native + fidelity)
+        self.assertNotIn("qualified-native-reviewer", native + fidelity)
+        self.assertNotIn(TARGETS["mt-MT"]["reference"], native + fidelity)
         self.assertNotIn('"origin"', native + fidelity)
         self.assertNotIn('"case_key"', native)
         self.assertNotIn('"adversarial_tags"', native)
@@ -299,6 +348,126 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             SUITE_MANIFEST["sha256"],
         )
         self.assertEqual(outcome["winner"], "candidate")
+
+    def test_qualified_native_reference_is_verified_bound_and_text_free(self):
+        payload = job()
+        benchmark_policy = policy()
+        artifact = native_reference(
+            payload, benchmark_policy, self.native_reference_verifier,
+            self.authority,
+        )
+        self.assertEqual(artifact["schema"], BENCHMARK.NATIVE_REFERENCE_SCHEMA)
+        self.assertEqual(
+            artifact["request"]["qualification"]["method"],
+            "qualified_native_human",
+        )
+        self.assertEqual(artifact["request"]["source"], {
+            "locale": payload["source"]["locale"],
+            "text": payload["source"]["text"],
+            "sha256": payload["source"]["sha256"],
+        })
+        self.assertEqual(artifact["request"]["localization_policy"], {
+            "glossary_version": "blun-glossary-3",
+            "policy_version": "native-web-2",
+        })
+        reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
+        outcome = self.run_benchmark(
+            payload, candidate_result(payload), baseline(payload), assets(),
+            benchmark_policy, reviewer, blinding_key=self.key,
+            native_reference_artifact=artifact,
+        )
+        self.assertEqual(outcome["native_reference"]["revision"], "qualified-native-reference-1")
+        serialized = json.dumps(outcome, ensure_ascii=False)
+        self.assertNotIn(TARGETS["mt-MT"]["reference"], serialized)
+        self.assertNotIn("qualified-native-reviewer-17", serialized)
+        self.assertRegex(
+            outcome["native_reference"]["evidence_sha256"], r"^[0-9a-f]{64}$",
+        )
+
+    def test_missing_replayed_or_unverified_native_reference_blocks_before_review(self):
+        payload = job("mt-MT", "1")
+        benchmark_policy = policy()
+        artifact = native_reference(
+            payload, benchmark_policy, self.native_reference_verifier,
+            self.authority,
+        )
+        cases = [
+            (None, self.native_reference_verifier, "benchmark.native_reference.invalid"),
+            (
+                artifact,
+                HmacNativeReferenceVerifier(key=b"different-qualified-review-key"),
+                "benchmark.native_reference.rejected",
+            ),
+        ]
+        for reference_artifact, verifier, code in cases:
+            with self.subTest(code=code):
+                reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
+                with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+                    self.run_benchmark(
+                        payload, candidate_result(payload), baseline(payload),
+                        assets(), benchmark_policy, reviewer,
+                        blinding_key=self.key,
+                        native_reference_artifact=reference_artifact,
+                        native_reference_verifier=verifier,
+                    )
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(reviewer.requests, [])
+
+        other_payload = job("mt-MT", "2")
+        reviewer = PreferenceReviewer(candidate_result(other_payload)["candidate"])
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                other_payload, candidate_result(other_payload), baseline(other_payload),
+                assets(), benchmark_policy, reviewer, blinding_key=self.key,
+                native_reference_artifact=artifact,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.native_reference.binding_mismatch")
+        self.assertEqual(reviewer.requests, [])
+
+    def test_native_reference_verifier_cannot_mutate_its_request(self):
+        payload = job()
+        benchmark_policy = policy()
+        request = BENCHMARK.native_reference_verification_request(
+            payload, TARGETS["mt-MT"]["reference"], benchmark_policy,
+            reviewer_id="qualified-native-reviewer-17",
+            reviewer_version="credential-2026-08-30",
+        )
+
+        class MutatingVerifier:
+            def verify(self, received, receipt):
+                received["target_text"] = "changed"
+                return True
+
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.create_native_reference_artifact(
+                payload, TARGETS["mt-MT"]["reference"], benchmark_policy,
+                reviewer_id="qualified-native-reviewer-17",
+                reviewer_version="credential-2026-08-30",
+                qualification_receipt=self.native_reference_verifier.receipt(request),
+                native_reference_verifier=MutatingVerifier(),
+                evidence_authority=self.authority,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "benchmark.native_reference.verifier_mutated_request",
+        )
+
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.native_reference_verification_request(
+                payload, TARGETS["mt-MT"]["reference"], benchmark_policy,
+                reviewer_id=benchmark_policy.reviewer_id,
+                reviewer_version="credential-2026-08-30",
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "benchmark.native_reference.independence_invalid",
+        )
+
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(
+                policy(native_reference_verifier_id="customer-llm"), [],
+            )
+        self.assertEqual(caught.exception.code, "benchmark.policy.invalid")
 
     def test_blinding_is_reproducible_and_keyed(self):
         payload = job()
@@ -576,6 +745,14 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             "provenance_methods": ["lawful_fixture"],
         })
         self.assertRegex(report["baseline_evidence_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(report["native_references"]["revision"], "qualified-native-reference-1")
+        self.assertEqual(report["native_references"]["verifier"], {
+            "id": "qualified-review-registry",
+            "version": "2026-08-30",
+        })
+        self.assertRegex(
+            report["native_references"]["evidence_sha256"], r"^[0-9a-f]{64}$",
+        )
         self.assertEqual(
             report["quality_profiles"],
             [
@@ -746,6 +923,11 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             BENCHMARK.run_blind_benchmark_case(
                 payload, candidate_result(payload), baseline(payload), assets(),
                 policy(), reviewer, blinding_key=self.key,
+                native_reference_artifact=native_reference(
+                    payload, policy(), self.native_reference_verifier,
+                    self.authority,
+                ),
+                native_reference_verifier=self.native_reference_verifier,
                 evidence_authority=RejectingAuthority(),
             )
         self.assertEqual(caught.exception.code, "benchmark.attestation.rejected")

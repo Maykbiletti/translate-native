@@ -260,6 +260,35 @@ proves integrity and host approval, not that a false provenance statement is
 legally true, so the host must preserve the API receipt or fixture licence for
 audit. Credentials and transport code do not belong in benchmark artifacts.
 
+Every policy-required locale and source case also requires one versioned native
+reference artifact before the first blind review can run. The repository does
+not ship or invent reference translations. A host obtains the exact
+`native_reference_verification_request`, including the complete source and its
+hash, suite case, target locale, content type, glossary and localization-policy
+versions, locale-profile version and hash, complete reference target, and
+reference revision. A configured `NativeReferenceVerifier` must
+then validate an opaque receipt from a separately identified qualified native
+human reviewer. Candidate provider, baseline, A/B reviewer, reference verifier,
+and reference reviewer identities must remain distinct.
+
+`create_native_reference_artifact` verifies that receipt before a host-owned
+`BenchmarkEvidenceAuthority` attests the complete artifact. The benchmark
+rechecks both the attestation and qualified-review receipt immediately before
+review and binds the complete evidence hash into the keyed blind assignment,
+case result, and final report. A receipt therefore cannot be replayed across a
+source case, source text, locale, content type, glossary, localization policy,
+quality profile, reference revision, or reviewer credential. Missing, altered,
+rejected, or contradictory reference evidence blocks without calling the A/B
+reviewer.
+
+Reference text, reviewer identity, and receipt never enter either A/B request
+or the text-free case result; only hashes and the public reference revision are
+retained. This preserves the strictly ordered two-stage decision: source-blind
+native quality first, then source-aware fidelity. The reference is auditable
+eligibility and calibration evidence, not a hidden third score and not proof
+that a model is linguistically superior. The test references are synthetic
+contract fixtures only and make no native-quality claim.
+
 Every benchmark policy must bind the exact version and SHA-256 digest of the
 output-free source manifest in
 `integrations/website_localization_benchmark_suite.py`. Its eight cases cover
