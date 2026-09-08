@@ -300,6 +300,23 @@ no target, candidate, baseline, or supposed reference translation. Actual
 targets must still come from the attached candidate and lawfully acquired
 baseline so unreviewed prose cannot silently become a gold standard.
 
+Early locale lanes may be run and reported independently, but passing them no
+longer authorizes an EU-wide superiority statement. The attested report exposes
+`configured_lanes_status` separately from `superiority_claim_allowed` and
+includes an exact `claim_scope` with required, evaluated, missing, unexpected,
+and source-language locales. A public claim is allowed only when the configured
+locale set exactly covers every EU target eligible for the bound source suite
+and every one of those locale reports passes on its own. One missing or blocked
+locale therefore blocks the overall report; no aggregate can conceal it.
+
+The current suite source language is English, so its EU localization target
+scope contains the other 23 official-language locale profiles. `en-IE` is
+recorded explicitly as the source-language locale and is not sent through a
+same-language translation job, matching the planner's source-exclusion rule.
+This report does not claim that English localization from a non-English source
+was evaluated. A future suite revision with a different source-language design
+must change the bound suite digest and will derive a new exact claim scope.
+
 Each case compares one fully validated worker result with one bound baseline
 artifact. A host-held blinding key assigns them reproducibly to anonymous `A`
 and `B` positions. Neither reviewer request contains candidate-provider or

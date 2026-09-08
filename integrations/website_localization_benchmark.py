@@ -31,7 +31,8 @@ NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-re
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
 CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v6"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v6"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v7"
+CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v1"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
 BASELINE_PROVENANCE_METHODS = frozenset(("official_api", "lawful_fixture"))
@@ -63,6 +64,21 @@ _WORKER = _load_module(
 _SUITE = _load_module(
     "blun_website_localization_benchmark_suite",
     _ROOT / "integrations" / "website_localization_benchmark_suite.py",
+)
+
+_SUITE_SOURCE_LANGUAGES = tuple(sorted({
+    item["source_locale"].split("-", 1)[0]
+    for item in _SUITE.manifest()["cases"]
+}))
+EU_BENCHMARK_TARGET_LOCALES = tuple(
+    profile.locale
+    for profile in _PLANNER.EU_OFFICIAL_LOCALES
+    if profile.language not in _SUITE_SOURCE_LANGUAGES
+)
+EU_BENCHMARK_SOURCE_LOCALES = tuple(
+    profile.locale
+    for profile in _PLANNER.EU_OFFICIAL_LOCALES
+    if profile.language in _SUITE_SOURCE_LANGUAGES
 )
 
 
@@ -1284,7 +1300,28 @@ def _unsigned_benchmark_report(
             "long_form_cases": long_form_cases,
             "adversarial_tags": adversarial_tags,
         })
-    claim_allowed = all(item["status"] == "PASS" for item in locale_reports)
+    configured_lanes_passed = all(
+        item["status"] == "PASS" for item in locale_reports
+    )
+    configured_locales = set(policy.required_locales)
+    required_target_locales = set(EU_BENCHMARK_TARGET_LOCALES)
+    missing_target_locales = [
+        locale for locale in EU_BENCHMARK_TARGET_LOCALES
+        if locale not in configured_locales
+    ]
+    unexpected_target_locales = [
+        locale for locale in policy.required_locales
+        if locale not in required_target_locales
+    ]
+    eu_target_scope_complete = (
+        not missing_target_locales and not unexpected_target_locales
+    )
+    claim_allowed = configured_lanes_passed and eu_target_scope_complete
+    claim_block_reasons: list[str] = []
+    if not eu_target_scope_complete:
+        claim_block_reasons.append("eu_target_locale_coverage_incomplete")
+    if not configured_lanes_passed:
+        claim_block_reasons.append("configured_locale_evaluation_failed")
     return {
         "schema": REPORT_SCHEMA,
         "benchmark_version": policy.benchmark_version,
@@ -1315,6 +1352,20 @@ def _unsigned_benchmark_report(
         "case_evidence_sha256": _hash_json(sorted(evidence_hashes)),
         "baseline_evidence_sha256": _hash_json(sorted(baseline_evidence_hashes)),
         "required_locales": list(policy.required_locales),
+        "claim_scope": {
+            "schema": CLAIM_SCOPE_SCHEMA,
+            "source_languages": list(_SUITE_SOURCE_LANGUAGES),
+            "source_language_locales": list(EU_BENCHMARK_SOURCE_LOCALES),
+            "required_target_locales": list(EU_BENCHMARK_TARGET_LOCALES),
+            "evaluated_target_locales": list(policy.required_locales),
+            "missing_target_locales": missing_target_locales,
+            "unexpected_target_locales": unexpected_target_locales,
+            "complete": eu_target_scope_complete,
+        },
+        "configured_lanes_status": (
+            "PASS" if configured_lanes_passed else "BLOCK"
+        ),
+        "claim_block_reasons": claim_block_reasons,
         "status": "PASS" if claim_allowed else "BLOCK",
         "superiority_claim_allowed": claim_allowed,
         "locales": locale_reports,
@@ -1327,7 +1378,7 @@ def summarize_benchmark(
     *,
     evidence_authority: BenchmarkEvidenceAuthority,
 ) -> dict[str, Any]:
-    """Return an attested claim only when every required locale passes."""
+    """Attest a claim only when every eligible EU target locale passes."""
     policy = _validate_policy(policy)
     report = _unsigned_benchmark_report(policy, case_results, evidence_authority)
     return _attest(report, policy, evidence_authority)

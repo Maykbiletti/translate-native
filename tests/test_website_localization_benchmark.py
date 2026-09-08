@@ -97,12 +97,28 @@ def job(locale="mt-MT", suffix="1"):
     ).jobs[0].as_payload()
 
 
+def fixture_copy(locale):
+    if locale in TARGETS:
+        return TARGETS[locale]
+    profile = next(
+        item for item in PLANNER.EU_OFFICIAL_LOCALES if item.locale == locale
+    )
+    return {
+        "candidate": f"{profile.native_name} candidate contract fixture.",
+        "baseline": f"{profile.native_name} baseline contract fixture.",
+        "reference": f"{profile.native_name} reference contract fixture.",
+        "audience": f"{profile.native_name} contract-test audience",
+    }
+
+
 def assets(locale="mt-MT"):
-    target = "negozju" if locale == "mt-MT" else "yritys"
+    target = "negozju" if locale == "mt-MT" else (
+        "yritys" if locale == "fi-FI" else fixture_copy(locale)["candidate"]
+    )
     return WORKER.LocalizationAssets(
         glossary_version="blun-glossary-3",
         policy_version="native-web-2",
-        audience=TARGETS[locale]["audience"],
+        audience=fixture_copy(locale)["audience"],
         tone_profile="Natural, confident, warm, concise, and never inflated",
         glossary=(WORKER.GlossaryTerm("business", target),),
         protected_terms=("BLUN",),
@@ -147,7 +163,7 @@ def candidate_result(payload, text=None):
 
 def baseline(
     payload, text=None, *, method="lawful_fixture", evidence_id=None,
-    authority=None,
+    authority=None, benchmark_policy=None,
 ):
     text = _target_fixture(payload, "baseline") if text is None else text
     evidence_id = evidence_id or "fixture-" + payload["job_id"]
@@ -160,14 +176,14 @@ def baseline(
         ).hexdigest(),
     }
     return BENCHMARK.create_baseline_artifact(
-        payload, text, policy(), provenance,
+        payload, text, benchmark_policy or policy(), provenance,
         evidence_authority=authority or HmacBenchmarkAuthority(),
     )
 
 
 def _target_fixture(payload, variant):
     locale = payload["target"]["locale"]
-    phrase = TARGETS[locale][variant]
+    phrase = fixture_copy(locale)[variant]
     source_id = payload["source"]["id"]
     if source_id.endswith("travel-marketing"):
         return (
@@ -306,16 +322,22 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             benchmark_policy, results, evidence_authority=self.authority,
         )
 
-    def run_case(self, locale="mt-MT", suffix="1", *, prefer="preferred", baseline_text=None):
+    def run_case(
+        self, locale="mt-MT", suffix="1", *, prefer="preferred",
+        baseline_text=None, benchmark_policy=None,
+    ):
+        benchmark_policy = benchmark_policy or policy()
         payload = job(locale, suffix)
         result = candidate_result(payload)
         reviewer = PreferenceReviewer(result["candidate"], prefer=prefer)
         outcome = self.run_benchmark(
             payload,
             result,
-            baseline(payload, baseline_text),
+            baseline(
+                payload, baseline_text, benchmark_policy=benchmark_policy,
+            ),
             assets(locale),
-            policy(),
+            benchmark_policy,
             reviewer,
             blinding_key=self.key,
         )
@@ -719,15 +741,29 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertNotIn("excerpt", serialized)
         self.assertNotIn("reason", serialized)
 
-    def test_report_requires_each_locale_to_win_with_significance(self):
+    def test_successful_early_lanes_do_not_authorize_an_eu_wide_claim(self):
         results = []
         for locale in ("mt-MT", "fi-FI"):
             for index in range(len(SUITE.SOURCE_CASES)):
                 outcome, _ = self.run_case(locale, f"{locale}-{index}")
                 results.append(outcome)
         report = self.summarize(policy(), results)
-        self.assertTrue(report["superiority_claim_allowed"])
-        self.assertEqual(report["status"], "PASS")
+        self.assertFalse(report["superiority_claim_allowed"])
+        self.assertEqual(report["status"], "BLOCK")
+        self.assertEqual(report["configured_lanes_status"], "PASS")
+        self.assertEqual(
+            report["claim_block_reasons"],
+            ["eu_target_locale_coverage_incomplete"],
+        )
+        self.assertFalse(report["claim_scope"]["complete"])
+        self.assertEqual(report["claim_scope"]["source_languages"], ["en"])
+        self.assertEqual(
+            report["claim_scope"]["source_language_locales"], ["en-IE"],
+        )
+        self.assertEqual(
+            set(report["claim_scope"]["missing_target_locales"]),
+            set(BENCHMARK.EU_BENCHMARK_TARGET_LOCALES) - {"mt-MT", "fi-FI"},
+        )
         self.assertEqual(report["candidate"], {
             "provider": {
                 "id": "customer-llm",
@@ -772,6 +808,79 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertEqual(item["long_form_cases"], 2)
             self.assertGreaterEqual(len(item["domains"]), 6)
             self.assertIn("marketing_calque", item["adversarial_tags"])
+
+    def test_only_complete_successful_eu_target_scope_allows_claim(self):
+        # Scripted fixtures prove report gating, not linguistic quality.
+        benchmark_policy = policy(
+            required_locales=BENCHMARK.EU_BENCHMARK_TARGET_LOCALES,
+        )
+        results = []
+        for locale in BENCHMARK.EU_BENCHMARK_TARGET_LOCALES:
+            for index in range(len(SUITE.SOURCE_CASES)):
+                outcome, _ = self.run_case(
+                    locale,
+                    f"full-{locale}-{index}",
+                    benchmark_policy=benchmark_policy,
+                )
+                results.append(outcome)
+        report = self.summarize(benchmark_policy, results)
+        self.assertTrue(report["superiority_claim_allowed"])
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["configured_lanes_status"], "PASS")
+        self.assertEqual(report["claim_block_reasons"], [])
+        self.assertEqual(report["claim_scope"], {
+            "schema": BENCHMARK.CLAIM_SCOPE_SCHEMA,
+            "source_languages": ["en"],
+            "source_language_locales": ["en-IE"],
+            "required_target_locales": list(
+                BENCHMARK.EU_BENCHMARK_TARGET_LOCALES
+            ),
+            "evaluated_target_locales": list(
+                BENCHMARK.EU_BENCHMARK_TARGET_LOCALES
+            ),
+            "missing_target_locales": [],
+            "unexpected_target_locales": [],
+            "complete": True,
+        })
+        self.assertEqual(len(report["locales"]), 23)
+        self.assertTrue(all(
+            item["status"] == "PASS" for item in report["locales"]
+        ))
+
+        blocked_locale = BENCHMARK.EU_BENCHMARK_TARGET_LOCALES[-1]
+        replaced_keys = {
+            SUITE.SOURCE_CASES[index].as_payload()["key"]
+            for index in (0, 1)
+        }
+        weakened_results = [
+            item for item in results
+            if not (
+                item["target_locale"] == blocked_locale
+                and item["suite"]["case_key"] in replaced_keys
+            )
+        ]
+        for index in (0, 1):
+            outcome, _ = self.run_case(
+                blocked_locale,
+                f"blocked-{blocked_locale}-{index}",
+                prefer="other",
+                benchmark_policy=benchmark_policy,
+            )
+            weakened_results.append(outcome)
+        blocked_report = self.summarize(
+            benchmark_policy, weakened_results,
+        )
+        self.assertTrue(blocked_report["claim_scope"]["complete"])
+        self.assertEqual(blocked_report["configured_lanes_status"], "BLOCK")
+        self.assertFalse(blocked_report["superiority_claim_allowed"])
+        self.assertEqual(
+            blocked_report["claim_block_reasons"],
+            ["configured_locale_evaluation_failed"],
+        )
+        blocked_by_locale = {
+            item["locale"]: item for item in blocked_report["locales"]
+        }
+        self.assertEqual(blocked_by_locale[blocked_locale]["status"], "BLOCK")
 
     def test_non_suite_job_blocks_before_review(self):
         payload = PLANNER.plan_website_localization(
