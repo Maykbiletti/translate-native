@@ -181,7 +181,7 @@ def _validate_dependencies(values: Mapping[str, Any]) -> MappingProxyType:
 
 
 def _validate_connections(connections: tuple[Any, ...]) -> None:
-    if len(connections) not in {5, 6, 9} or any(
+    if len(connections) not in {5, 6, 10} or any(
         not isinstance(connection, sqlite3.Connection) for connection in connections
     ):
         raise LocalizationRuntimeBlocked("runtime.connections.invalid")
@@ -227,8 +227,9 @@ def _validate_lease_hierarchy(
 
 BENCHMARK_EXECUTION_KEYS = frozenset({
     "candidate_connection", "baseline_connection",
-    "native_reference_connection", "candidate_route_id",
-    "baseline_route_id", "native_reference_route_id", "assets_resolver",
+    "native_reference_connection", "review_connection", "candidate_route_id",
+    "baseline_route_id", "native_reference_route_id", "reviewer_route_id",
+    "assets_resolver",
     "candidate_provider_resolver", "baseline_acquirer",
     "native_reference_loader", "reviewer", "native_reference_verifier",
     "blinding_key", "worker_id", "max_attempts", "lease_seconds",
@@ -245,12 +246,12 @@ def _benchmark_execution(value: Any) -> MappingProxyType | None:
     try:
         for name in (
             "candidate_connection", "baseline_connection",
-            "native_reference_connection",
+            "native_reference_connection", "review_connection",
         ):
             _BENCHMARK_RUNTIME._connection(copied[name])
         for name in (
             "candidate_route_id", "baseline_route_id",
-            "native_reference_route_id",
+            "native_reference_route_id", "reviewer_route_id",
         ):
             _BENCHMARK_RUNTIME._route(
                 copied[name], "benchmark.runtime.route_invalid",
@@ -390,6 +391,7 @@ class WebsiteLocalizationRuntime:
                 benchmark_execution["candidate_connection"],
                 benchmark_execution["baseline_connection"],
                 benchmark_execution["native_reference_connection"],
+                benchmark_execution["review_connection"],
             ) if benchmark_execution is not None else ()
         )
         _validate_connections(connections)
@@ -454,6 +456,7 @@ class WebsiteLocalizationRuntime:
                         native_reference_connection=(
                             benchmark_execution["native_reference_connection"]
                         ),
+                        review_connection=benchmark_execution["review_connection"],
                         policy=benchmark_policy,
                         candidate_route_id=(
                             benchmark_execution["candidate_route_id"]
@@ -461,6 +464,9 @@ class WebsiteLocalizationRuntime:
                         baseline_route_id=benchmark_execution["baseline_route_id"],
                         native_reference_route_id=(
                             benchmark_execution["native_reference_route_id"]
+                        ),
+                        reviewer_route_id=(
+                            benchmark_execution["reviewer_route_id"]
                         ),
                         assets_resolver=benchmark_execution["assets_resolver"],
                         candidate_provider_resolver=(

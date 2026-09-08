@@ -248,7 +248,7 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             b"benchmark-key",
             "benchmark-key",
         )
-        benchmark_connections = [sqlite3.connect(":memory:") for _ in range(4)]
+        benchmark_connections = [sqlite3.connect(":memory:") for _ in range(5)]
         self.connections.extend(benchmark_connections)
         reviewer = type("Reviewer", (), {"review": lambda self, request: None})()
         verifier = type("Verifier", (), {"verify": lambda self, **values: True})()
@@ -256,9 +256,11 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             "candidate_connection": benchmark_connections[1],
             "baseline_connection": benchmark_connections[2],
             "native_reference_connection": benchmark_connections[3],
+            "review_connection": benchmark_connections[4],
             "candidate_route_id": "attached-model-primary",
             "baseline_route_id": "official-baseline",
             "native_reference_route_id": "qualified-native-vault",
+            "reviewer_route_id": "independent-review-panel",
             "assets_resolver": lambda payload: None,
             "candidate_provider_resolver": lambda payload: None,
             "baseline_acquirer": lambda *values: None,

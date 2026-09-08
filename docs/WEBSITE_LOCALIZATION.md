@@ -475,11 +475,12 @@ missing artifact.
 Production composition should use
 `integrations/website_localization_benchmark_runtime.py`. Its
 `WebsiteLocalizationBenchmarkRuntime` preflights the complete policy, routes,
-adapters, blinding key, worker identity, and four distinct idle SQLite
+adapters, blinding key, worker identity, and five distinct idle SQLite
 connections before creating any schema. Those connections isolate campaign
 status, candidate text, baseline text and evidence, and qualified-native
-reference text and receipts so one store cannot silently share transaction or
-schema state with another. Construction creates the exact idempotent campaign;
+reference text and receipts, plus signed anonymous-review evidence, so one
+store cannot silently share transaction or schema state with another.
+Construction creates the exact idempotent campaign;
 `run_once` processes at most one item, while `status`, `health`, and `summarize`
 retain the campaign's existing text-free and all-locales-complete contracts.
 
@@ -516,6 +517,28 @@ Mappings, mutable objects, extra or missing fields, and similarly named
 lookalikes are not compatibility values and block before persistence or blind
 review. This structural boundary prevents Python class identity from becoming
 an accidental vendor lock while retaining fail-closed validation.
+
+`integrations/website_localization_benchmark_review_store.py` closes the
+remaining restart boundary around the two ordered blind reviews. Immediately
+after a response passes the exact phase, locale, blind-ID, preference and
+defect-schema checks, the runtime binds it to the canonical request hash,
+benchmark policy, configured reviewer route and reviewer identity, then signs
+and verifies that artifact before continuing. The source-blind
+`target_native` response is therefore durable before `source_fidelity` begins.
+If the second review or final campaign commit fails, a retry reverifies and
+reuses the first response; after both are stored, neither review is called
+again. The deterministic `review_id` remains the external adapter's
+idempotency key for the unavoidable crash window after the reviewer accepts a
+request but before the local transaction commits.
+
+Stored review state is immutable. A repeated review ID with another request
+hash, invalid JSON or digest, a wrong reviewer binding, failed attestation, or
+a second valid but different response blocks without calling the reviewer
+again. Changed routes and policies cannot reuse old evidence. Verifier outages
+remain retryable, while corruption and conflicts are terminal. Operational
+campaign status and final case results still expose only response hashes,
+preferences, defect counts and finding hashes—not reviewer reasons, excerpts,
+source text or either target.
 
 `run_next_benchmark_case` claims and processes at most one exact
 case/locale pair. Random token-bound leases are renewed before dependency
@@ -1115,10 +1138,11 @@ staleness threshold. Monitor-only configuration remains supported and performs
 no benchmark work.
 
 To execute the same campaign, supply the exact `benchmark_execution` mapping.
-It adds separate `candidate_connection`, `baseline_connection`, and
-`native_reference_connection` stores, making nine distinct connections in
-total. The remaining required fields are `candidate_route_id`,
-`baseline_route_id`, `native_reference_route_id`, `assets_resolver`,
+It adds separate `candidate_connection`, `baseline_connection`,
+`native_reference_connection`, and `review_connection` stores, making ten
+distinct connections in total. The remaining required fields are
+`candidate_route_id`, `baseline_route_id`, `native_reference_route_id`,
+`reviewer_route_id`, `assets_resolver`,
 `candidate_provider_resolver`, `baseline_acquirer`,
 `native_reference_loader`, `reviewer`, `native_reference_verifier`,
 `blinding_key`, `worker_id`, `max_attempts`, `lease_seconds`,
@@ -1154,7 +1178,7 @@ Premortem: a mirrored database could yield inconsistent status, a dead worker
 could leave a lease that looks active, terminal cases could hide behind overall
 progress, status could leak reviewer prose, an incomplete campaign could be
 mistaken for a passed comparison, or background evaluation could delay a real
-publication. Nine-store validation, customer-first scheduling, strict lease
+publication. Ten-store validation, customer-first scheduling, strict lease
 hierarchy, snapshot verification, lease and staleness reasons, per-row
 attestation checks, code-and-count-only output, and a separate `report_ready`
 flag close those paths.

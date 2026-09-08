@@ -86,21 +86,29 @@ EU_BENCHMARK_SOURCE_LOCALES = tuple(
 class BenchmarkBlocked(RuntimeError):
     """Content-free benchmark failure safe to expose to orchestration."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, retryable: bool | None = None):
         if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,127}", code):
             raise ValueError("benchmark error code is invalid")
+        if retryable is not None and not isinstance(retryable, bool):
+            raise ValueError("benchmark retryability must be boolean or None")
         super().__init__(code)
         self.code = code
+        self.retryable = retryable
 
 
 class BenchmarkReviewerFailed(RuntimeError):
     """Adapter-declared review failure without source or target prose."""
 
-    def __init__(self, code: str):
+    benchmark_reviewer_failure = True
+
+    def __init__(self, code: str, *, retryable: bool = True):
         if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,127}", code):
             raise ValueError("reviewer error code is invalid")
+        if not isinstance(retryable, bool):
+            raise ValueError("reviewer retryability must be boolean")
         super().__init__(code)
         self.code = code
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -927,9 +935,18 @@ def _invoke(reviewer: Any, request: BenchmarkReviewRequest) -> tuple[dict[str, A
     request_hash = _hash_json(request.as_payload())
     try:
         response = review(request)
-    except BenchmarkReviewerFailed as error:
-        raise BenchmarkBlocked("reviewer." + error.code) from None
-    except Exception:
+    except Exception as error:
+        if getattr(error, "benchmark_reviewer_failure", None) is True:
+            code = getattr(error, "code", None)
+            retryable = getattr(error, "retryable", None)
+            if (
+                isinstance(code, str)
+                and re.fullmatch(r"[a-z][a-z0-9_.-]{0,118}", code)
+                and isinstance(retryable, bool)
+            ):
+                raise BenchmarkBlocked(
+                    "reviewer." + code, retryable=retryable,
+                ) from None
         raise BenchmarkBlocked("reviewer.unexpected") from None
     if _hash_json(request.as_payload()) != request_hash:
         raise BenchmarkBlocked("benchmark.reviewer.mutated_request")

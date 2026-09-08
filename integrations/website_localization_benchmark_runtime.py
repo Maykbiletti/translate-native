@@ -47,6 +47,10 @@ _REFERENCE = _load_module(
     "blun_website_localization_runtime_reference",
     _ROOT / "integrations" / "website_localization_native_reference_store.py",
 )
+_REVIEW = _load_module(
+    "blun_website_localization_runtime_review_store",
+    _ROOT / "integrations" / "website_localization_benchmark_review_store.py",
+)
 _BENCHMARK = _CAMPAIGN._BENCHMARK
 
 
@@ -313,10 +317,12 @@ class WebsiteLocalizationBenchmarkRuntime:
         candidate_connection: sqlite3.Connection,
         baseline_connection: sqlite3.Connection,
         native_reference_connection: sqlite3.Connection,
+        review_connection: sqlite3.Connection,
         policy: Any,
         candidate_route_id: str,
         baseline_route_id: str,
         native_reference_route_id: str,
+        reviewer_route_id: str,
         assets_resolver: Callable[[dict[str, Any]], Any],
         candidate_provider_resolver: Callable[[dict[str, Any]], Any],
         baseline_acquirer: Callable[..., Any],
@@ -334,6 +340,7 @@ class WebsiteLocalizationBenchmarkRuntime:
             candidate_connection,
             baseline_connection,
             native_reference_connection,
+            review_connection,
         ))
         if len({id(item) for item in connections}) != len(connections):
             raise BenchmarkRuntimeFailed("benchmark.runtime.connection_reused")
@@ -349,6 +356,9 @@ class WebsiteLocalizationBenchmarkRuntime:
         )
         native_reference_route_id = _route(
             native_reference_route_id, "benchmark.runtime.reference_route_invalid",
+        )
+        reviewer_route_id = _route(
+            reviewer_route_id, "benchmark.runtime.reviewer_route_invalid",
         )
         _callable(assets_resolver, "benchmark.runtime.assets_resolver_invalid")
         _callable(
@@ -387,6 +397,7 @@ class WebsiteLocalizationBenchmarkRuntime:
 
         self.policy = policy
         self.reviewer = reviewer
+        self.reviewer_route_id = reviewer_route_id
         self.native_reference_verifier = native_reference_verifier
         self.evidence_authority = evidence_authority
         self.blinding_key = blinding_key
@@ -396,6 +407,7 @@ class WebsiteLocalizationBenchmarkRuntime:
         candidate_store = _CANDIDATE.CandidateAcquisitionStore(connections[1])
         baseline_store = _BASELINE.BaselineAcquisitionStore(connections[2])
         reference_store = _REFERENCE.NativeReferenceArtifactStore(connections[3])
+        self.review_store = _REVIEW.BenchmarkReviewEvidenceStore(connections[4])
         self.campaign_id = self.campaign_store.create(
             policy, max_attempts=max_attempts, now=initial_now,
         )
@@ -424,13 +436,27 @@ class WebsiteLocalizationBenchmarkRuntime:
         retry_base_seconds: Any = 5,
         retry_max_seconds: Any = 3600,
     ):
+        review_guard = (
+            None
+            if operation_guard is None
+            else lambda: operation_guard(lease_seconds)
+        )
+        durable_reviewer = _REVIEW.DurableBenchmarkReviewer(
+            store=self.review_store,
+            policy=self.policy,
+            route_id=self.reviewer_route_id,
+            reviewer=self.reviewer,
+            evidence_authority=self.evidence_authority,
+            operation_guard=review_guard,
+            clock=self.clock,
+        )
         return _CAMPAIGN.run_next_benchmark_case(
             self.campaign_store,
             self.policy,
             self.campaign_id,
             self.worker_id,
             self.input_resolver,
-            self.reviewer,
+            durable_reviewer,
             blinding_key=self.blinding_key,
             native_reference_verifier=self.native_reference_verifier,
             evidence_authority=self.evidence_authority,

@@ -363,6 +363,19 @@ class RetryOnceCampaignReviewer(CampaignCandidateReviewer):
         return super().review(request)
 
 
+class RetryFidelityOnceCampaignReviewer(CampaignCandidateReviewer):
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def review(self, request):
+        if request.phase == "source_fidelity" and not self.failed:
+            self.failed = True
+            self.requests.append(request)
+            raise TimeoutError("private fidelity reviewer failure")
+        return super().review(request)
+
+
 def native_reference(
     payload, benchmark_policy, verifier, authority, text=None,
     *, reviewer_id="qualified-native-reviewer-17",
@@ -1572,7 +1585,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             )
 
     def _benchmark_runtime_fixture(self, *, reviewer=None, max_attempts=3):
-        connections = [sqlite3.connect(":memory:") for _ in range(4)]
+        connections = [sqlite3.connect(":memory:") for _ in range(5)]
         for connection in connections:
             self.addCleanup(connection.close)
         benchmark_policy = campaign_policy()
@@ -1620,10 +1633,12 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             candidate_connection=connections[1],
             baseline_connection=connections[2],
             native_reference_connection=connections[3],
+            review_connection=connections[4],
             policy=benchmark_policy,
             candidate_route_id="attached-model-primary",
             baseline_route_id="licensed-baseline",
             native_reference_route_id="qualified-native-vault",
+            reviewer_route_id="independent-review-panel",
             assets_resolver=lambda payload: assets(payload["target"]["locale"]),
             candidate_provider_resolver=resolve_candidate_provider,
             baseline_acquirer=acquire_baseline,
@@ -1639,7 +1654,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         return runtime, connections, provider, calls, current_time
 
     def test_benchmark_runtime_preflight_writes_no_schema_on_invalid_configuration(self):
-        connections = [sqlite3.connect(":memory:") for _ in range(3)]
+        connections = [sqlite3.connect(":memory:") for _ in range(4)]
         for connection in connections:
             self.addCleanup(connection.close)
         with self.assertRaises(BENCHMARK_RUNTIME.BenchmarkRuntimeFailed) as caught:
@@ -1648,10 +1663,12 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 candidate_connection=connections[0],
                 baseline_connection=connections[1],
                 native_reference_connection=connections[2],
+                review_connection=connections[3],
                 policy=campaign_policy(),
                 candidate_route_id="candidate",
                 baseline_route_id="baseline",
                 native_reference_route_id="reference",
+                reviewer_route_id="reviewer",
                 assets_resolver=lambda _: None,
                 candidate_provider_resolver=lambda _: None,
                 baseline_acquirer=lambda *_: None,
@@ -1670,7 +1687,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 ).fetchall(),
                 [],
             )
-        late_connections = [sqlite3.connect(":memory:") for _ in range(4)]
+        late_connections = [sqlite3.connect(":memory:") for _ in range(5)]
         for connection in late_connections:
             self.addCleanup(connection.close)
         with self.assertRaises(BENCHMARK_RUNTIME.BenchmarkRuntimeFailed) as caught:
@@ -1679,10 +1696,12 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 candidate_connection=late_connections[1],
                 baseline_connection=late_connections[2],
                 native_reference_connection=late_connections[3],
+                review_connection=late_connections[4],
                 policy=campaign_policy(),
                 candidate_route_id="candidate",
                 baseline_route_id="baseline",
                 native_reference_route_id="reference",
+                reviewer_route_id="reviewer",
                 assets_resolver=lambda _: None,
                 candidate_provider_resolver=lambda _: None,
                 baseline_acquirer=lambda *_: None,
@@ -1745,15 +1764,89 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             _target_fixture(payload, "reference"),
         ):
             self.assertNotIn(prohibited, status_text)
-        for connection, table in zip(connections[1:], (
-            "benchmark_candidate_acquisitions",
-            "benchmark_baseline_acquisitions",
-            "benchmark_native_references",
+        for connection, (table, expected_count) in zip(connections[1:], (
+            ("benchmark_candidate_acquisitions", 1),
+            ("benchmark_baseline_acquisitions", 1),
+            ("benchmark_native_references", 1),
+            ("benchmark_review_evidence", 2),
         )):
             self.assertEqual(
                 connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
-                1,
+                expected_count,
             )
+
+    def test_benchmark_runtime_resumes_after_persisted_first_review(self):
+        reviewer = RetryFidelityOnceCampaignReviewer()
+        runtime, connections, provider, calls, current_time = (
+            self._benchmark_runtime_fixture(reviewer=reviewer)
+        )
+
+        first = runtime.run_once(retry_base_seconds=5)
+
+        self.assertEqual(first.status, "retry_wait")
+        self.assertEqual(
+            [item.phase for item in reviewer.requests],
+            ["target_native", "source_fidelity"],
+        )
+        self.assertEqual(
+            connections[4].execute(
+                "SELECT COUNT(*) FROM benchmark_review_evidence"
+            ).fetchone()[0],
+            1,
+        )
+        current_time[0] = 106
+
+        second = runtime.run_once(retry_base_seconds=5)
+
+        self.assertEqual(second.work_id, first.work_id)
+        self.assertEqual(second.status, "succeeded")
+        self.assertEqual(
+            [item.phase for item in reviewer.requests],
+            ["target_native", "source_fidelity", "source_fidelity"],
+        )
+        self.assertEqual(
+            connections[4].execute(
+                "SELECT COUNT(*) FROM benchmark_review_evidence"
+            ).fetchone()[0],
+            2,
+        )
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(
+            calls,
+            {"candidate_provider": 1, "baseline": 1, "reference": 1},
+        )
+
+    def test_benchmark_runtime_review_tamper_is_terminal_before_reviewer(self):
+        reviewer = RetryFidelityOnceCampaignReviewer()
+        runtime, connections, provider, calls, current_time = (
+            self._benchmark_runtime_fixture(reviewer=reviewer, max_attempts=3)
+        )
+        first = runtime.run_once(retry_base_seconds=5)
+        self.assertEqual(first.status, "retry_wait")
+        connections[4].execute("""
+            UPDATE benchmark_review_evidence SET artifact_json = '{}'
+        """)
+        connections[4].commit()
+        current_time[0] = 106
+
+        second = runtime.run_once(retry_base_seconds=5)
+
+        self.assertEqual(second.work_id, first.work_id)
+        self.assertEqual(second.status, "failed")
+        self.assertEqual(
+            second.error_code,
+            "reviewer.review.store.state_invalid",
+        )
+        self.assertEqual(len(reviewer.requests), 2)
+        self.assertEqual(len(provider.requests), 3)
+        self.assertEqual(
+            calls,
+            {"candidate_provider": 1, "baseline": 1, "reference": 1},
+        )
+        self.assertNotIn(
+            "private fidelity reviewer failure",
+            json.dumps(runtime.status()),
+        )
 
     def test_benchmark_runtime_tamper_blocks_before_second_review_or_provider_call(self):
         reviewer = RetryOnceCampaignReviewer()

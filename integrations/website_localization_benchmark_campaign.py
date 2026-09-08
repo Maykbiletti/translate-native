@@ -935,10 +935,15 @@ def run_next_benchmark_case(
         retryable = error.retryable
     except _BENCHMARK.BenchmarkBlocked as error:
         code = error.code
-        retryable = code.startswith("reviewer.") or code in {
-            "benchmark.attestation.sign_failed",
-            "benchmark.attestation.verify_failed",
-        }
+        declared_retryability = getattr(error, "retryable", None)
+        retryable = (
+            declared_retryability
+            if isinstance(declared_retryability, bool)
+            else code.startswith("reviewer.") or code in {
+                "benchmark.attestation.sign_failed",
+                "benchmark.attestation.verify_failed",
+            }
+        )
     except BenchmarkCampaignBlocked:
         raise
     except Exception as error:
