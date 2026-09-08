@@ -19,7 +19,7 @@ import math
 import re
 import sys
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -222,9 +222,34 @@ def _target_text(value: Any) -> str:
     return value
 
 
+def _coerce_cross_module_dataclass(value: Any, expected_type: type, code: str):
+    """Normalize an exact frozen public value loaded through another module."""
+    if isinstance(value, expected_type):
+        return value
+    expected_fields = tuple(field.name for field in fields(expected_type))
+    try:
+        actual_fields = tuple(field.name for field in fields(value))
+        parameters = type(value).__dataclass_params__
+        valid_shape = (
+            is_dataclass(value)
+            and not isinstance(value, type)
+            and type(value).__name__ == expected_type.__name__
+            and parameters.frozen is True
+            and actual_fields == expected_fields
+        )
+        if not valid_shape:
+            raise TypeError("incompatible dataclass")
+        return expected_type(**{
+            field: getattr(value, field) for field in expected_fields
+        })
+    except Exception:
+        raise BenchmarkBlocked(code) from None
+
+
 def _validate_policy(policy: Any) -> BenchmarkPolicy:
-    if not isinstance(policy, BenchmarkPolicy):
-        raise BenchmarkBlocked("benchmark.policy.invalid")
+    policy = _coerce_cross_module_dataclass(
+        policy, BenchmarkPolicy, "benchmark.policy.invalid",
+    )
     for value in (
         policy.benchmark_version,
         policy.suite_version,
@@ -359,8 +384,9 @@ def _validate_candidate_job_binding(
 
 
 def _benchmark_signature(value: Any) -> BenchmarkSignature:
-    if not isinstance(value, BenchmarkSignature):
-        raise BenchmarkBlocked("benchmark.attestation.invalid")
+    value = _coerce_cross_module_dataclass(
+        value, BenchmarkSignature, "benchmark.attestation.invalid",
+    )
     if (
         not isinstance(value.algorithm, str)
         or IDENTIFIER.fullmatch(value.algorithm) is None

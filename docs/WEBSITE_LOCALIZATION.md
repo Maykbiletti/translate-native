@@ -412,6 +412,19 @@ locale-bound assets, and an attested qualified-native reference. The campaign
 store never fetches an API, chooses a provider, reads credentials, or invents a
 missing artifact.
 
+Adapters may load these zero-dependency modules independently, as happens when
+a host composes the campaign, DeepL baseline adapter, acquisition store, and
+its own resolver without installing a Python package. Public frozen
+`BenchmarkPolicy`, `BenchmarkSignature`, `BenchmarkCaseInputs`, and
+`BaselineAcquisition` values from another module instance are normalized into
+the receiving module only when the dataclass name, frozen status, field order,
+and complete field set match exactly. Every ordinary policy, suite, job,
+signature, evidence, authority, and artifact check then runs unchanged.
+Mappings, mutable objects, extra or missing fields, and similarly named
+lookalikes are not compatibility values and block before persistence or blind
+review. This structural boundary prevents Python class identity from becoming
+an accidental vendor lock while retaining fail-closed validation.
+
 `run_next_benchmark_case` claims and processes at most one exact
 case/locale pair. Random token-bound leases are renewed before dependency
 resolution and before each of the two reviewer calls. An abandoned lease can

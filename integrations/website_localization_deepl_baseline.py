@@ -24,7 +24,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
@@ -212,9 +212,26 @@ def _validate_acquisition(
     evidence_authority: Any,
 ) -> BaselineAcquisition:
     if not isinstance(acquisition, BaselineAcquisition):
-        raise DeepLBaselineFailed(
-            "baseline.store.acquisition_invalid", retryable=False,
-        )
+        expected = tuple(field.name for field in fields(BaselineAcquisition))
+        try:
+            actual = tuple(field.name for field in fields(acquisition))
+            parameters = type(acquisition).__dataclass_params__
+            valid = (
+                is_dataclass(acquisition)
+                and not isinstance(acquisition, type)
+                and type(acquisition).__name__ == BaselineAcquisition.__name__
+                and parameters.frozen is True
+                and actual == expected
+            )
+            if not valid:
+                raise TypeError("incompatible baseline acquisition")
+            acquisition = BaselineAcquisition(**{
+                field: getattr(acquisition, field) for field in expected
+            })
+        except Exception:
+            raise DeepLBaselineFailed(
+                "baseline.store.acquisition_invalid", retryable=False,
+            ) from None
     job = _validated_job(job_payload, policy)
     try:
         artifact = _BENCHMARK._validate_baseline(

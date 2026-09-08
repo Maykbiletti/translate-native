@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import dataclasses
 import hashlib
 import hmac
 import importlib.util
@@ -29,6 +30,8 @@ WORKER = load("blun_test_benchmark_worker", ROOT / "integrations" / "website_loc
 BENCHMARK = load("blun_test_website_localization_benchmark", ROOT / "integrations" / "website_localization_benchmark.py")
 SUITE = load("blun_test_website_localization_benchmark_suite", ROOT / "integrations" / "website_localization_benchmark_suite.py")
 CAMPAIGN = load("blun_test_website_localization_benchmark_campaign", ROOT / "integrations" / "website_localization_benchmark_campaign.py")
+FOREIGN_CAMPAIGN = load("blun_test_foreign_benchmark_campaign", ROOT / "integrations" / "website_localization_benchmark_campaign.py")
+BASELINE_ADAPTER = load("blun_test_cross_module_deepl_baseline", ROOT / "integrations" / "website_localization_deepl_baseline.py")
 SUITE_MANIFEST = SUITE.manifest()
 
 
@@ -1522,6 +1525,224 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 outcome.error_code,
                 "benchmark.campaign.dependency.deepl.rate_limited",
             )
+
+    def test_cross_loaded_deepl_adapter_store_and_inputs_complete_campaign_case(self):
+        benchmark_policy = campaign_policy()
+        authority = CampaignAuthority()
+        verifier = CampaignNativeReferenceVerifier()
+        reviewer = CampaignCandidateReviewer()
+
+        def http_result(value):
+            body = json.dumps(
+                value, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return BASELINE_ADAPTER.HTTPResult(
+                200,
+                (("Content-Type", "application/json"),
+                 ("Content-Length", str(len(body)))),
+                body,
+            )
+
+        class Transport:
+            def __init__(self):
+                self.calls = []
+                self.results = [
+                    http_result([
+                        {
+                            "lang": "en", "usable_as_source": True,
+                            "usable_as_target": False, "status": "stable",
+                        },
+                        {
+                            "lang": "fi", "usable_as_source": True,
+                            "usable_as_target": True, "status": "stable",
+                        },
+                    ]),
+                    http_result({"translations": [{
+                        "detected_source_language": "EN",
+                        "model_type_used": "quality_optimized",
+                        "text": TARGETS["fi-FI"]["baseline"],
+                    }]}),
+                ]
+
+            def request(self, method, url, headers, body, *, timeout):
+                self.calls.append((method, url))
+                return self.results.pop(0)
+
+        transport = Transport()
+        adapter = BASELINE_ADAPTER.DeepLBaselineAdapter(
+            "pro", lambda: "private-api-key", transport=transport,
+        )
+        with (
+            sqlite3.connect(":memory:") as campaign_connection,
+            sqlite3.connect(":memory:") as baseline_connection,
+        ):
+            campaign_store = CAMPAIGN.BenchmarkCampaignStore(
+                campaign_connection,
+            )
+            acquisition_store = BASELINE_ADAPTER.BaselineAcquisitionStore(
+                baseline_connection,
+            )
+            campaign_id = campaign_store.create(benchmark_policy, now=100)
+
+            def resolve(payload):
+                acquisition = BASELINE_ADAPTER.resolve_baseline_acquisition(
+                    acquisition_store,
+                    payload,
+                    benchmark_policy,
+                    "deepl-pro",
+                    lambda: adapter.acquire(
+                        payload, benchmark_policy,
+                        evidence_authority=authority,
+                    ),
+                    evidence_authority=authority,
+                    now=100,
+                )
+                reference_text = _target_fixture(payload, "reference")
+                request = CAMPAIGN._BENCHMARK.native_reference_verification_request(
+                    payload,
+                    reference_text,
+                    benchmark_policy,
+                    reviewer_id="qualified-native-reviewer-17",
+                    reviewer_version="credential-2026-08-30",
+                )
+                reference = CAMPAIGN._BENCHMARK.create_native_reference_artifact(
+                    payload,
+                    reference_text,
+                    benchmark_policy,
+                    reviewer_id="qualified-native-reviewer-17",
+                    reviewer_version="credential-2026-08-30",
+                    qualification_receipt=verifier.receipt(request),
+                    native_reference_verifier=verifier,
+                    evidence_authority=authority,
+                )
+                return FOREIGN_CAMPAIGN.BenchmarkCaseInputs(
+                    candidate_result=candidate_result(payload),
+                    baseline_artifact=acquisition.artifact,
+                    assets=assets(payload["target"]["locale"]),
+                    native_reference_artifact=reference,
+                )
+
+            outcome = CAMPAIGN.run_next_benchmark_case(
+                campaign_store,
+                benchmark_policy,
+                campaign_id,
+                "worker",
+                resolve,
+                reviewer,
+                blinding_key=self.key,
+                native_reference_verifier=verifier,
+                evidence_authority=authority,
+                clock=lambda: 100,
+            )
+            self.assertEqual(outcome.status, "succeeded")
+            cached = acquisition_store.load(
+                CAMPAIGN._job_payload(
+                    benchmark_policy, outcome.target_locale,
+                    outcome.suite_case_key,
+                ),
+                benchmark_policy,
+                "deepl-pro",
+                evidence_authority=authority,
+            )
+            self.assertEqual(cached.artifact["target_locale"], "fi-FI")
+        self.assertEqual(
+            transport.calls,
+            [
+                ("GET", "https://api.deepl.com/v3/languages?resource=translate_text"),
+                ("POST", "https://api.deepl.com/v2/translate"),
+            ],
+        )
+
+    def test_cross_module_normalization_rejects_mutable_lookalikes(self):
+        benchmark_policy = campaign_policy()
+
+        class BenchmarkPolicy:
+            pass
+
+        lookalike = BenchmarkPolicy()
+        for field, value in CAMPAIGN.asdict(benchmark_policy).items():
+            setattr(lookalike, field, value)
+        with self.assertRaises(
+            BASELINE_ADAPTER._BENCHMARK.BenchmarkBlocked,
+        ) as caught:
+            BASELINE_ADAPTER._BENCHMARK._validate_policy(lookalike)
+        self.assertEqual(caught.exception.code, "benchmark.policy.invalid")
+
+        class BenchmarkSignature:
+            def __init__(self):
+                self.algorithm = "hmac-sha256-test"
+                self.key_id = "benchmark-test-key-1"
+                self.signature = "valid-looking-token"
+
+        with self.assertRaises(
+            BASELINE_ADAPTER._BENCHMARK.BenchmarkBlocked,
+        ) as caught:
+            BASELINE_ADAPTER._BENCHMARK._benchmark_signature(
+                BenchmarkSignature(),
+            )
+        self.assertEqual(caught.exception.code, "benchmark.attestation.invalid")
+
+        class BenchmarkCaseInputs:
+            candidate_result = {}
+            baseline_artifact = {}
+            assets = None
+            native_reference_artifact = {}
+
+        reviewer = CampaignCandidateReviewer()
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(
+                benchmark_policy, max_attempts=1, now=100,
+            )
+            outcome = CAMPAIGN.run_next_benchmark_case(
+                store,
+                benchmark_policy,
+                campaign_id,
+                "worker",
+                lambda _: BenchmarkCaseInputs(),
+                reviewer,
+                blinding_key=self.key,
+                native_reference_verifier=CampaignNativeReferenceVerifier(),
+                evidence_authority=CampaignAuthority(),
+                clock=lambda: 100,
+            )
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(
+            outcome.error_code,
+            "benchmark.campaign.dependency.inputs_invalid",
+        )
+        self.assertEqual(reviewer.requests, [])
+
+        fields = [
+            (field.name, object)
+            for field in dataclasses.fields(CAMPAIGN.BenchmarkCaseInputs)
+        ]
+        ExtraInputs = dataclasses.make_dataclass(
+            "BenchmarkCaseInputs", fields + [("extra", object)], frozen=True,
+        )
+        MissingInputs = dataclasses.make_dataclass(
+            "BenchmarkCaseInputs", fields[:-1], frozen=True,
+        )
+        values = ({
+            "candidate_result": {},
+            "baseline_artifact": {},
+            "assets": None,
+            "native_reference_artifact": {},
+        })
+        for malformed in (
+            ExtraInputs(**values, extra=None),
+            MissingInputs(**{
+                key: value for key, value in values.items()
+                if key != "native_reference_artifact"
+            }),
+        ):
+            with self.subTest(shape=type(malformed).__name__):
+                with self.assertRaises(
+                    CAMPAIGN.BenchmarkCampaignDependencyFailed,
+                ) as caught:
+                    CAMPAIGN._benchmark_case_inputs(malformed)
+                self.assertEqual(caught.exception.code, "inputs_invalid")
 
     def test_campaign_runs_one_case_per_tick_and_blocks_incomplete_report(self):
         benchmark_policy = campaign_policy()

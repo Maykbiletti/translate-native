@@ -19,7 +19,7 @@ import sys
 import time
 import unicodedata
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
@@ -149,6 +149,31 @@ class BenchmarkCampaignHealth:
 
 class BenchmarkInputResolver(Protocol):
     def __call__(self, job_payload: dict[str, Any]) -> BenchmarkCaseInputs: ...
+
+
+def _benchmark_case_inputs(value: Any) -> BenchmarkCaseInputs:
+    if isinstance(value, BenchmarkCaseInputs):
+        return value
+    expected = tuple(field.name for field in fields(BenchmarkCaseInputs))
+    try:
+        actual = tuple(field.name for field in fields(value))
+        parameters = type(value).__dataclass_params__
+        valid = (
+            is_dataclass(value)
+            and not isinstance(value, type)
+            and type(value).__name__ == BenchmarkCaseInputs.__name__
+            and parameters.frozen is True
+            and actual == expected
+        )
+        if not valid:
+            raise TypeError("incompatible benchmark inputs")
+        return BenchmarkCaseInputs(**{
+            field: getattr(value, field) for field in expected
+        })
+    except Exception:
+        raise BenchmarkCampaignDependencyFailed(
+            "inputs_invalid", retryable=False,
+        ) from None
 
 
 def _canonical_json(value: Any) -> str:
@@ -871,11 +896,7 @@ def run_next_benchmark_case(
 
     try:
         renew("dependencies")
-        inputs = input_resolver(claim.job_payload)
-        if not isinstance(inputs, BenchmarkCaseInputs):
-            raise BenchmarkCampaignDependencyFailed(
-                "inputs_invalid", retryable=False,
-            )
+        inputs = _benchmark_case_inputs(input_resolver(claim.job_payload))
         renew("benchmark")
         result = _BENCHMARK.run_blind_benchmark_case(
             claim.job_payload,
