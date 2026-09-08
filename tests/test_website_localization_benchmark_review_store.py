@@ -191,10 +191,16 @@ class BenchmarkReviewEvidenceStoreTests(unittest.TestCase):
             ("artifact_json = '{}'", "review.store.state_invalid"),
             ("artifact_sha256 = '" + "0" * 64 + "'", "review.store.state_invalid"),
         )
-        original = self.connection.serialize()
+        original = self.connection.execute(
+            "SELECT artifact_json, artifact_sha256 FROM benchmark_review_evidence"
+        ).fetchone()
         for mutation, code in cases:
             with self.subTest(mutation=mutation):
-                self.connection.deserialize(original)
+                self.connection.execute(
+                    "UPDATE benchmark_review_evidence "
+                    "SET artifact_json = ?, artifact_sha256 = ?",
+                    tuple(original),
+                )
                 self.connection.execute(
                     "UPDATE benchmark_review_evidence SET " + mutation
                 )
