@@ -379,6 +379,33 @@ eligibility and calibration evidence, not a hidden third score and not proof
 that a model is linguistically superior. The test references are synthetic
 contract fixtures only and make no native-quality claim.
 
+`integrations/website_localization_native_reference_store.py` provides the
+durable hand-off from that qualified-human workflow into a benchmark campaign.
+Give `NativeReferenceArtifactStore` a dedicated host-owned SQLite connection
+and a stable route ID identifying the approved vault or editorial workflow,
+never a credential. The record identity binds that route, the complete
+benchmark policy, and the complete canonical suite job. A source, locale,
+candidate configuration, policy, suite, quality profile, verifier, reference
+revision, or route change therefore cannot inherit an older reference.
+
+Every read checks the stored JSON and digest, then reverifies the artifact's
+host attestation and qualified-native receipt against the exact current job.
+Corrupt state blocks instead of becoming a miss. Identical independent writes
+converge, while a different valid artifact under the same identity is a
+terminal conflict and never replaces the first. The database necessarily
+contains the complete reference target and receipt; keep it owner-only and
+apply the host's encryption, backup, retention, and deletion policy. The
+campaign database continues to retain only text-free case evidence.
+
+`resolve_native_reference_artifact` returns a verified stored artifact or calls
+one host-supplied external loader and persists its result before blind review.
+Its optional operation guard runs before cached receipt verification, before
+the external lookup, and before verification on save. Guard, loader, temporary
+attestation-authority, and receipt-verifier outages become bounded,
+content-free campaign dependency failures. Invalid artifacts, altered state,
+binding mismatches, and conflicts remain terminal; no missing reference is
+generated locally.
+
 Every benchmark policy must bind the exact version and SHA-256 digest of the
 output-free source manifest in
 `integrations/website_localization_benchmark_suite.py`. Suite v2 contains
