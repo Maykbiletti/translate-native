@@ -23,14 +23,15 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v1"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v2"
 BASELINE_SCHEMA = "blun.website-localization-baseline.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v1"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v1"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v2"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
 MAX_TEXT_BYTES = 2_000_000
+EARLY_REQUIRED_LOCALES = frozenset(("mt-MT", "fi-FI"))
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 
 
@@ -52,6 +53,10 @@ _PLANNER = _load_module(
 _WORKER = _load_module(
     "blun_website_localization_benchmark_worker",
     _ROOT / "integrations" / "website_localization_worker.py",
+)
+_SUITE = _load_module(
+    "blun_website_localization_benchmark_suite",
+    _ROOT / "integrations" / "website_localization_benchmark_suite.py",
 )
 
 
@@ -78,12 +83,14 @@ class BenchmarkReviewerFailed(RuntimeError):
 @dataclass(frozen=True)
 class BenchmarkPolicy:
     benchmark_version: str
+    suite_version: str
+    suite_sha256: str
     baseline_id: str
     baseline_version: str
     reviewer_id: str
     reviewer_version: str
     required_locales: tuple[str, ...]
-    minimum_cases_per_locale: int = 20
+    minimum_cases_per_locale: int = 8
     minimum_decisive_rate: float = 0.75
     minimum_candidate_win_rate: float = 0.60
     maximum_one_sided_p: float = 0.05
@@ -167,12 +174,19 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
         raise BenchmarkBlocked("benchmark.policy.invalid")
     for value in (
         policy.benchmark_version,
+        policy.suite_version,
         policy.baseline_id,
         policy.baseline_version,
         policy.reviewer_id,
         policy.reviewer_version,
     ):
         _identifier(value)
+    suite = _SUITE.manifest()
+    if (
+        policy.suite_version != suite["version"]
+        or policy.suite_sha256 != suite["sha256"]
+    ):
+        raise BenchmarkBlocked("benchmark.suite.version_mismatch")
     if not isinstance(policy.required_locales, tuple) or not policy.required_locales:
         raise BenchmarkBlocked("benchmark.policy.invalid")
     try:
@@ -184,10 +198,13 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
         raise BenchmarkBlocked("benchmark.policy.invalid")
     if locales != policy.required_locales:
         raise BenchmarkBlocked("benchmark.policy.invalid")
+    if not EARLY_REQUIRED_LOCALES.issubset(locales):
+        raise BenchmarkBlocked("benchmark.policy.invalid")
     if (
         isinstance(policy.minimum_cases_per_locale, bool)
         or not isinstance(policy.minimum_cases_per_locale, int)
         or policy.minimum_cases_per_locale < 1
+        or policy.minimum_cases_per_locale > len(suite["cases"])
     ):
         raise BenchmarkBlocked("benchmark.policy.invalid")
     for value in (
@@ -326,13 +343,16 @@ def _validated_assets(job: dict[str, Any], assets: Any):
 
 def _blinding(
     job: dict[str, Any], candidate_hash: str, baseline_hash: str,
-    policy: BenchmarkPolicy, key: Any,
+    benchmark_case: dict[str, Any], policy: BenchmarkPolicy, key: Any,
 ) -> tuple[str, dict[str, str], str]:
     if not isinstance(key, bytes) or len(key) < 32:
         raise BenchmarkBlocked("benchmark.blinding_key.invalid")
     binding = {
         "schema": BENCHMARK_SCHEMA,
         "benchmark_version": policy.benchmark_version,
+        "suite_version": policy.suite_version,
+        "suite_sha256": policy.suite_sha256,
+        "suite_case_key": benchmark_case["key"],
         "job_id": job["job_id"],
         "candidate_sha256": candidate_hash,
         "baseline_sha256": baseline_hash,
@@ -352,7 +372,8 @@ def _blinding(
 
 def _review_request(
     *, phase: str, case_id: str, blind_id: str, job: dict[str, Any],
-    assets: Any, variants: dict[str, str], policy: BenchmarkPolicy,
+    benchmark_case: dict[str, Any], assets: Any,
+    variants: dict[str, str], policy: BenchmarkPolicy,
 ) -> BenchmarkReviewRequest:
     response_schema = {
         "schema": REVIEW_SCHEMA,
@@ -368,6 +389,11 @@ def _review_request(
     common = {
         "blind_id": blind_id,
         "benchmark_version": policy.benchmark_version,
+        "benchmark_suite": {
+            "version": policy.suite_version,
+            "sha256": policy.suite_sha256,
+            "case_key_sha256": _hash_text(benchmark_case["key"]),
+        },
         "target": job["target"],
         "content_type": job["content_type"],
         "audience": assets.audience,
@@ -381,6 +407,12 @@ def _review_request(
         common["target_terms"] = [{"target": term.target} for term in assets.glossary]
         system = _NATIVE_SYSTEM
     else:
+        common["benchmark_suite"].update({
+            "case_key": benchmark_case["key"],
+            "domain": benchmark_case["domain"],
+            "long_form": benchmark_case["long_form"],
+            "adversarial_tags": benchmark_case["adversarial_tags"],
+        })
         common["source"] = job["source"]
         common["glossary"] = [asdict(term) for term in assets.glossary]
         common["protected_terms"] = list(assets.protected_terms)
@@ -486,12 +518,17 @@ def run_blind_benchmark_case(
     assets = _validated_assets(job, assets)
     if job["target"]["locale"] not in policy.required_locales:
         raise BenchmarkBlocked("benchmark.locale.not_required")
+    try:
+        benchmark_case = _SUITE.case_for_job(job)
+    except ValueError as error:
+        raise BenchmarkBlocked("benchmark.suite.case_mismatch") from error
     candidate_result = _validate_worker_result(job, candidate_result)
     baseline = _validate_baseline(job, baseline_artifact, policy)
     candidate_text = candidate_result["candidate"]
     baseline_text = baseline["target_text"]
     case_id, origins, blind_id = _blinding(
-        job, candidate_result["target_sha256"], baseline["target_sha256"], policy, blinding_key,
+        job, candidate_result["target_sha256"], baseline["target_sha256"],
+        benchmark_case, policy, blinding_key,
     )
     texts = {"candidate": candidate_text, "baseline": baseline_text}
     variants = {label: texts[origin] for label, origin in origins.items()}
@@ -508,7 +545,8 @@ def run_blind_benchmark_case(
     for phase in PHASES:
         request = _review_request(
             phase=phase, case_id=case_id, blind_id=blind_id, job=job,
-            assets=assets, variants=variants, policy=policy,
+            benchmark_case=benchmark_case, assets=assets,
+            variants=variants, policy=policy,
         )
         response, request_hash, response_hash = _invoke(reviewer, request)
         parsed = _validate_review(
@@ -535,10 +573,19 @@ def run_blind_benchmark_case(
     return {
         "schema": CASE_RESULT_SCHEMA,
         "benchmark_version": policy.benchmark_version,
+        "suite": {
+            "version": policy.suite_version,
+            "sha256": policy.suite_sha256,
+            "case_key": benchmark_case["key"],
+        },
         "case_id": case_id,
         "job_id": job["job_id"],
         "target_locale": job["target"]["locale"],
         "content_type": job["content_type"],
+        "source_sha256": job["source"]["sha256"],
+        "domain": benchmark_case["domain"],
+        "long_form": benchmark_case["long_form"],
+        "adversarial_tags": benchmark_case["adversarial_tags"],
         "candidate_sha256": candidate_result["target_sha256"],
         "baseline": {
             "id": policy.baseline_id,
@@ -567,19 +614,39 @@ def _one_sided_sign_p(candidate_wins: int, decisive: int) -> float:
 def _validated_case_result(raw: Mapping[str, Any], policy: BenchmarkPolicy) -> dict[str, Any]:
     result = dict(raw)
     required = {
-        "schema", "benchmark_version", "case_id", "job_id", "target_locale",
-        "content_type", "candidate_sha256", "baseline", "reviewer",
+        "schema", "benchmark_version", "suite", "case_id", "job_id", "target_locale",
+        "content_type", "source_sha256", "domain", "long_form", "adversarial_tags",
+        "candidate_sha256", "baseline", "reviewer",
         "blind_commitment_sha256", "passes", "integrity", "defect_counts", "winner",
     }
     if set(result) != required or result["schema"] != CASE_RESULT_SCHEMA:
         raise BenchmarkBlocked("benchmark.results.invalid")
     if result["benchmark_version"] != policy.benchmark_version:
         raise BenchmarkBlocked("benchmark.results.version_mismatch")
+    suite = result["suite"]
+    if (
+        not isinstance(suite, dict)
+        or set(suite) != {"version", "sha256", "case_key"}
+        or suite["version"] != policy.suite_version
+        or suite["sha256"] != policy.suite_sha256
+    ):
+        raise BenchmarkBlocked("benchmark.results.version_mismatch")
+    if not isinstance(suite["case_key"], str):
+        raise BenchmarkBlocked("benchmark.results.invalid")
+    manifest_cases = {item["key"]: item for item in _SUITE.manifest()["cases"]}
+    benchmark_case = manifest_cases.get(suite["case_key"])
+    if benchmark_case is None:
+        raise BenchmarkBlocked("benchmark.results.invalid")
     if (
         not isinstance(result["case_id"], str)
         or not result["case_id"].startswith("benchmark-case-")
         or not isinstance(result["job_id"], str)
         or result["content_type"] not in _PLANNER.CONTENT_TYPES
+        or result["content_type"] != benchmark_case["content_type"]
+        or result["source_sha256"] != benchmark_case["source_sha256"]
+        or result["domain"] != benchmark_case["domain"]
+        or result["long_form"] is not benchmark_case["long_form"]
+        or result["adversarial_tags"] != benchmark_case["adversarial_tags"]
     ):
         raise BenchmarkBlocked("benchmark.results.invalid")
     _sha256(result["candidate_sha256"])
@@ -661,14 +728,15 @@ def summarize_benchmark(
     if isinstance(case_results, (str, bytes)) or not isinstance(case_results, Sequence):
         raise BenchmarkBlocked("benchmark.results.invalid")
     grouped: dict[str, list[dict[str, Any]]] = {locale: [] for locale in policy.required_locales}
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for raw in case_results:
         if not isinstance(raw, Mapping):
             raise BenchmarkBlocked("benchmark.results.invalid")
         result = _validated_case_result(raw, policy)
-        if result["case_id"] in seen or result["target_locale"] not in grouped:
+        suite_key = (result["target_locale"], result["suite"]["case_key"])
+        if suite_key in seen or result["target_locale"] not in grouped:
             raise BenchmarkBlocked("benchmark.results.invalid")
-        seen.add(result["case_id"])
+        seen.add(suite_key)
         grouped[result["target_locale"]].append(result)
     locale_reports: list[dict[str, Any]] = []
     for locale in policy.required_locales:
@@ -686,8 +754,16 @@ def summarize_benchmark(
             or item["defect_counts"]["candidate"]["major"] > 0
             for item in cases
         )
+        required_case_keys = {item["key"] for item in _SUITE.manifest()["cases"]}
+        observed_case_keys = {item["suite"]["case_key"] for item in cases}
+        suite_complete = observed_case_keys == required_case_keys
+        content_types = sorted({item["content_type"] for item in cases})
+        domains = sorted({item["domain"] for item in cases})
+        long_form_cases = sum(item["long_form"] for item in cases)
+        adversarial_tags = sorted({tag for item in cases for tag in item["adversarial_tags"]})
         passed = (
             len(cases) >= policy.minimum_cases_per_locale
+            and suite_complete
             and decisive_rate >= policy.minimum_decisive_rate
             and win_rate >= policy.minimum_candidate_win_rate
             and p_value <= policy.maximum_one_sided_p
@@ -704,11 +780,17 @@ def summarize_benchmark(
             "candidate_win_rate": win_rate,
             "one_sided_sign_p": p_value,
             "candidate_defect_cases": candidate_defect_cases,
+            "suite_complete": suite_complete,
+            "content_types": content_types,
+            "domains": domains,
+            "long_form_cases": long_form_cases,
+            "adversarial_tags": adversarial_tags,
         })
     claim_allowed = all(item["status"] == "PASS" for item in locale_reports)
     return {
         "schema": REPORT_SCHEMA,
         "benchmark_version": policy.benchmark_version,
+        "suite": {"version": policy.suite_version, "sha256": policy.suite_sha256},
         "baseline": {"id": policy.baseline_id, "version": policy.baseline_version},
         "reviewer": {"id": policy.reviewer_id, "version": policy.reviewer_version},
         "required_locales": list(policy.required_locales),

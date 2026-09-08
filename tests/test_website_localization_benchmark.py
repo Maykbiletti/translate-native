@@ -24,6 +24,8 @@ def load(name: str, path: Path):
 PLANNER = load("blun_test_benchmark_planner", ROOT / "integrations" / "website_localization.py")
 WORKER = load("blun_test_benchmark_worker", ROOT / "integrations" / "website_localization_worker.py")
 BENCHMARK = load("blun_test_website_localization_benchmark", ROOT / "integrations" / "website_localization_benchmark.py")
+SUITE = load("blun_test_website_localization_benchmark_suite", ROOT / "integrations" / "website_localization_benchmark_suite.py")
+SUITE_MANIFEST = SUITE.manifest()
 
 
 TARGETS = {
@@ -43,12 +45,14 @@ TARGETS = {
 def policy(**overrides):
     values = {
         "benchmark_version": "native-vs-baseline-1",
+        "suite_version": SUITE_MANIFEST["version"],
+        "suite_sha256": SUITE_MANIFEST["sha256"],
         "baseline_id": "deepl-official-api",
         "baseline_version": "fixture-2026-08-30",
         "reviewer_id": "independent-native-panel",
         "reviewer_version": "2026-08-30",
         "required_locales": ("mt-MT", "fi-FI"),
-        "minimum_cases_per_locale": 6,
+        "minimum_cases_per_locale": len(SUITE.SOURCE_CASES),
         "minimum_decisive_rate": 0.75,
         "minimum_candidate_win_rate": 0.60,
         "maximum_one_sided_p": 0.05,
@@ -58,12 +62,15 @@ def policy(**overrides):
 
 
 def job(locale="mt-MT", suffix="1"):
+    final = str(suffix).rsplit("-", 1)[-1]
+    case_index = int(final) if final.isdigit() else 0
+    case = SUITE.SOURCE_CASES[case_index % len(SUITE.SOURCE_CASES)].as_payload()
     return PLANNER.plan_website_localization(
-        source_id=f"homepage.hero.{suffix}",
-        source_revision=f"cms-{suffix}",
-        source_text="Grow your business with BLUN.",
-        source_locale="en-IE",
-        content_type="headline",
+        source_id=case["source_id"],
+        source_revision=case["source_revision"],
+        source_text=case["source_text"],
+        source_locale=case["source_locale"],
+        content_type=case["content_type"],
         glossary_version="blun-glossary-3",
         policy_version="native-web-2",
         provider_id="customer-llm",
@@ -87,7 +94,7 @@ def assets(locale="mt-MT"):
 
 
 def candidate_result(payload, text=None):
-    text = TARGETS[payload["target"]["locale"]]["candidate"] if text is None else text
+    text = _target_fixture(payload, "candidate") if text is None else text
     phase = lambda name: {
         "phase": name,
         "request_sha256": hashlib.sha256((name + "-request").encode()).hexdigest(),
@@ -116,13 +123,13 @@ def candidate_result(payload, text=None):
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
         },
-        "human_review_required": False,
+        "human_review_required": payload["content_type"] == "legal",
         "release_required": True,
     }
 
 
 def baseline(payload, text=None):
-    text = TARGETS[payload["target"]["locale"]]["baseline"] if text is None else text
+    text = _target_fixture(payload, "baseline") if text is None else text
     return {
         "schema": BENCHMARK.BASELINE_SCHEMA,
         "baseline_id": "deepl-official-api",
@@ -133,6 +140,27 @@ def baseline(payload, text=None):
         "target_text": text,
         "target_sha256": hashlib.sha256(text.encode()).hexdigest(),
     }
+
+
+def _target_fixture(payload, variant):
+    locale = payload["target"]["locale"]
+    phrase = TARGETS[locale][variant]
+    source_id = payload["source"]["id"]
+    if source_id.endswith("travel-marketing"):
+        return (
+            f'<section><h2>{phrase}</h2><p>{phrase} {{{{season}}}}.</p>'
+            '<a href="https://example.test/routes">Route</a></section>'
+        )
+    if source_id.endswith("payments-ui"):
+        return json.dumps(
+            {"error": phrase, "retry": phrase}, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"),
+        )
+    repetitions = max(
+        1,
+        (len(payload["source"]["text"]) + len(phrase) - 1) // len(phrase),
+    )
+    return " ".join((phrase,) * repetitions)
 
 
 def review_response(request, preference, defects=None):
@@ -191,14 +219,23 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
 
     def test_runs_two_ordered_origin_blind_reviews(self):
         outcome, reviewer = self.run_case()
+        source_text = job()["source"]["text"]
         self.assertEqual([item.phase for item in reviewer.requests], ["target_native", "source_fidelity"])
         native = json.dumps(reviewer.requests[0].as_payload(), ensure_ascii=False)
         fidelity = json.dumps(reviewer.requests[1].as_payload(), ensure_ascii=False)
-        self.assertNotIn("Grow your business", native)
+        self.assertNotIn(source_text, native)
         self.assertNotIn("customer-llm", native + fidelity)
         self.assertNotIn("deepl", (native + fidelity).lower())
         self.assertNotIn('"origin"', native + fidelity)
-        self.assertIn("Grow your business", fidelity)
+        self.assertNotIn('"case_key"', native)
+        self.assertNotIn('"adversarial_tags"', native)
+        self.assertIn('"case_key"', fidelity)
+        self.assertIn('"adversarial_tags"', fidelity)
+        self.assertIn(source_text, fidelity)
+        self.assertEqual(
+            reviewer.requests[0].input["benchmark_suite"]["sha256"],
+            SUITE_MANIFEST["sha256"],
+        )
         self.assertEqual(outcome["winner"], "candidate")
 
     def test_blinding_is_reproducible_and_keyed(self):
@@ -303,6 +340,14 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             BENCHMARK.summarize_benchmark(policy(minimum_cases_per_locale="six"), [])
         self.assertEqual(caught.exception.code, "benchmark.policy.invalid")
 
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.summarize_benchmark(policy(suite_sha256="0" * 64), [])
+        self.assertEqual(caught.exception.code, "benchmark.suite.version_mismatch")
+
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.summarize_benchmark(policy(required_locales=("mt-MT",)), [])
+        self.assertEqual(caught.exception.code, "benchmark.policy.invalid")
+
     def test_preferred_variant_cannot_have_major_or_blocking_defect(self):
         payload = job()
         result = candidate_result(payload)
@@ -345,16 +390,10 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(tied["winner"], "inconclusive")
 
     def test_local_integrity_failure_cannot_be_a_candidate_win(self):
-        source = '<p>Grow with <a href="https://blun.ai">BLUN</a>, {{name}}.</p>'
-        payload = PLANNER.plan_website_localization(
-            source_id="homepage.hero.html", source_revision="cms-html", source_text=source,
-            source_locale="en-IE", content_type="marketing", glossary_version="blun-glossary-3",
-            policy_version="native-web-2", provider_id="customer-llm", model_id="king",
-            model_version="2026-08-30", software_version="6.43.0-dev", target_locales=["mt-MT"],
-        ).jobs[0].as_payload()
-        broken = '<p>Kabbar ma’ <a href="https://evil.example">BLUN</a>.</p>'
+        payload = job("mt-MT", "2")
+        broken = '<section><h2>Kabbar</h2><p>Kabbar.</p><a href="https://evil.example">Route</a></section>'
         result = candidate_result(payload, broken)
-        base = baseline(payload, '<p>Kabbar ma’ <a href="https://blun.ai">BLUN</a>, {{name}}.</p>')
+        base = baseline(payload)
         reviewer = PreferenceReviewer(broken)
         outcome = BENCHMARK.run_blind_benchmark_case(
             payload, result, base, assets(), policy(), reviewer, blinding_key=self.key,
@@ -367,29 +406,52 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         serialized = json.dumps(outcome, ensure_ascii=False)
         self.assertNotIn("Kabbar", serialized)
         self.assertNotIn("Ibni", serialized)
-        self.assertNotIn("Grow your business", serialized)
+        self.assertNotIn(job()["source"]["text"], serialized)
         self.assertNotIn("excerpt", serialized)
         self.assertNotIn("reason", serialized)
 
     def test_report_requires_each_locale_to_win_with_significance(self):
         results = []
         for locale in ("mt-MT", "fi-FI"):
-            for index in range(6):
+            for index in range(len(SUITE.SOURCE_CASES)):
                 outcome, _ = self.run_case(locale, f"{locale}-{index}")
                 results.append(outcome)
         report = BENCHMARK.summarize_benchmark(policy(), results)
         self.assertTrue(report["superiority_claim_allowed"])
         self.assertEqual(report["status"], "PASS")
         for item in report["locales"]:
-            self.assertEqual(item["candidate_wins"], 6)
-            self.assertEqual(item["one_sided_sign_p"], 0.015625)
+            self.assertEqual(item["candidate_wins"], len(SUITE.SOURCE_CASES))
+            self.assertEqual(item["one_sided_sign_p"], 0.00390625)
+            self.assertTrue(item["suite_complete"])
+            self.assertEqual(set(item["content_types"]), set(PLANNER.CONTENT_TYPES))
+            self.assertEqual(item["long_form_cases"], 2)
+            self.assertGreaterEqual(len(item["domains"]), 6)
+            self.assertIn("marketing_calque", item["adversarial_tags"])
+
+    def test_non_suite_job_blocks_before_review(self):
+        payload = PLANNER.plan_website_localization(
+            source_id="benchmark.unregistered", source_revision=SUITE.VERSION,
+            source_text="A valid source that was never registered in the suite.",
+            source_locale="en-US", content_type="headline",
+            glossary_version="blun-glossary-3", policy_version="native-web-2",
+            provider_id="customer-llm", model_id="king", model_version="2026-08-30",
+            software_version="6.43.0-dev", target_locales=["mt-MT"],
+        ).jobs[0].as_payload()
+        reviewer = PreferenceReviewer(candidate_result(payload)["candidate"])
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.run_blind_benchmark_case(
+                payload, candidate_result(payload), baseline(payload), assets(), policy(), reviewer,
+                blinding_key=self.key,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.suite.case_mismatch")
+        self.assertEqual(reviewer.requests, [])
 
     def test_strong_maltese_average_cannot_hide_finnish_losses(self):
         results = []
-        for index in range(12):
+        for index in range(len(SUITE.SOURCE_CASES)):
             outcome, _ = self.run_case("mt-MT", f"mt-{index}")
             results.append(outcome)
-        for index in range(6):
+        for index in range(len(SUITE.SOURCE_CASES)):
             outcome, _ = self.run_case("fi-FI", f"fi-{index}", prefer="other")
             results.append(outcome)
         report = BENCHMARK.summarize_benchmark(policy(), results)
@@ -401,7 +463,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
     def test_small_or_inconclusive_sample_never_claims_superiority(self):
         results = []
         for locale in ("mt-MT", "fi-FI"):
-            for index in range(5):
+            for index in range(len(SUITE.SOURCE_CASES) - 1):
                 outcome, _ = self.run_case(locale, f"small-{locale}-{index}")
                 results.append(outcome)
         report = BENCHMARK.summarize_benchmark(policy(), results)
@@ -409,7 +471,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
 
         tied = []
         for locale in ("mt-MT", "fi-FI"):
-            for index in range(6):
+            for index in range(len(SUITE.SOURCE_CASES)):
                 outcome, _ = self.run_case(locale, f"tie-{locale}-{index}", prefer="tie")
                 tied.append(outcome)
         report = BENCHMARK.summarize_benchmark(policy(), tied)
@@ -419,11 +481,28 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         result, _ = self.run_case()
         with self.assertRaises(BENCHMARK.BenchmarkBlocked):
             BENCHMARK.summarize_benchmark(policy(), [result, result])
+        disguised_duplicate = copy.deepcopy(result)
+        disguised_duplicate["case_id"] = "benchmark-case-" + "0" * 64
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked):
+            BENCHMARK.summarize_benchmark(policy(), [result, disguised_duplicate])
         changed = copy.deepcopy(result)
         changed["benchmark_version"] = "other"
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
             BENCHMARK.summarize_benchmark(policy(), [changed])
         self.assertEqual(caught.exception.code, "benchmark.results.version_mismatch")
+
+    def test_complete_suite_is_required_even_with_a_lower_case_threshold(self):
+        results = []
+        for locale in ("mt-MT", "fi-FI"):
+            for index in range(len(SUITE.SOURCE_CASES) - 1):
+                outcome, _ = self.run_case(locale, f"partial-{locale}-{index}")
+                results.append(outcome)
+        report = BENCHMARK.summarize_benchmark(
+            policy(minimum_cases_per_locale=len(SUITE.SOURCE_CASES) - 1),
+            results,
+        )
+        self.assertFalse(report["superiority_claim_allowed"])
+        self.assertTrue(all(not item["suite_complete"] for item in report["locales"]))
 
     def test_report_rejects_tampered_winner_and_nested_shapes(self):
         result, _ = self.run_case()

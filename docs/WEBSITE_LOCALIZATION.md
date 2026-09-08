@@ -245,6 +245,17 @@ artifact binds the baseline identity and version, exact source hash, target
 locale, content type, target hash, and complete target text. Credentials,
 transport code, and undocumented scraping do not belong in this repository.
 
+Every benchmark policy must bind the exact version and SHA-256 digest of the
+output-free source manifest in
+`integrations/website_localization_benchmark_suite.py`. Its eight cases cover
+all supported content types across distinct domains, include two connected
+long-form pages, and exercise HTML, JSON, placeholders, links, negation,
+modality, commercial offers, amounts, currencies, discount basis, tax,
+billing interval, contract term, renewal, and cancellation. The suite contains
+no target, candidate, baseline, or supposed reference translation. Actual
+targets must still come from the attached candidate and lawfully acquired
+baseline so unreviewed prose cannot silently become a gold standard.
+
 Each case compares one fully validated worker result with one bound baseline
 artifact. A host-held blinding key assigns them reproducibly to anonymous `A`
 and `B` positions. Neither reviewer request contains candidate-provider or
@@ -260,18 +271,23 @@ unblinded preferences remain.
 `summarize_benchmark` applies a one-sided exact sign test and minimum case,
 decisive-rate, and win-rate thresholds separately to every required locale.
 One candidate blocking/major/integrity defect blocks that locale. Missing,
-small, tied, mixed-version, or duplicate samples block the superiority claim,
-and a strong result in one language can never average away a weak result in
-another. Maltesisch (`mt-MT`) and Finnisch (`fi-FI`) are the initial mandatory
-lanes; the same versioned contract extends to all 24 EU language profiles.
+small, tied, mixed-version, substituted-suite, or duplicate samples block the
+superiority claim, and a strong result in one language can never average away
+a weak result in another. Maltesisch (`mt-MT`) and Finnisch (`fi-FI`) are the
+initial mandatory lanes and cannot be removed from policy. A locale passes only after every
+canonical suite case is present exactly once; the report records observed
+content types, domains, long-form count, and adversarial tags. The same
+versioned contract extends to every eligible EU language profile, excluding
+the source language as required by the localization planner.
 
 Premortem: reviewers could learn which output came from which system, a large
 language could hide a weak low-resource language, or an old baseline could be
 quietly reused. Keyed A/B assignment and origin-free review payloads reduce
 identity bias; per-locale hard gates prevent averaging; exact baseline,
-reviewer, benchmark, source, locale, and content bindings reject stale or
-mixed evidence. The harness permits a claim only from measured blind evidence,
-never from a model grading its own prose.
+reviewer, benchmark, suite, suite case, source, locale, and content bindings
+reject stale, substituted, homogeneous, or mixed evidence. The harness permits
+a claim only from complete measured blind evidence, never from a model grading
+its own prose.
 
 ## Signed translation memory and website readiness
 
