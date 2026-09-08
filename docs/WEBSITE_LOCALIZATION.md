@@ -561,15 +561,23 @@ Operational status contains only deterministic work identity, counts, stable
 error codes, timestamps, and hashes. The database retains only the attested
 text-free case result after success—not source, candidate, baseline, reference,
 credentials, or reviewer prose. `summarize` remains fail-closed until every
-expected item succeeded, then passes the exact verified result set to the
-existing separately attested statistical report. A failed, omitted, duplicated,
-exchanged, or policy-stale work item therefore cannot disappear behind a
-partial aggregate.
+expected item succeeded. It then signs and verifies the exact result set outside
+the database transaction, rechecks that set atomically, and stores the first
+canonical report in the campaign database. The report is bound to the campaign
+policy and ordered result hashes. Later calls return that same verified report
+byte-for-byte without signing again. A failed, omitted, duplicated, exchanged,
+or policy-stale work item therefore cannot disappear behind a partial aggregate,
+and a crash cannot silently replace the report used for a claim. Existing v1
+campaign databases migrate transactionally to the v2 report schema.
 
 `BenchmarkCampaignStore.health` verifies the complete campaign binding, every
 row invariant, successful result hash, and case attestation in a consistent
 read-only snapshot. It reports only status counts, stable reason codes, the
-latest progress timestamp, and whether a fully verified report can be produced.
+latest progress timestamp, and whether the persisted final report verifies.
+Health never signs or stores a report. A fully completed campaign without its
+first report is degraded with `benchmark.campaign.report_missing` until an
+explicit `summarize` call creates it; altered or unverifiable report bytes block
+with `benchmark.campaign.report_invalid` and are never regenerated in place.
 Expired leases and overdue actionable work degrade health; any terminal work
 failure, altered row, invalid attestation, or invalid final report blocks it.
 Live backoff and recent incomplete work remain healthy and never imply that the

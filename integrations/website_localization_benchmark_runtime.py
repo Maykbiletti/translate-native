@@ -481,5 +481,8 @@ class WebsiteLocalizationBenchmarkRuntime:
 
     def summarize(self):
         return self.campaign_store.summarize(
-            self.policy, self.campaign_id, self.evidence_authority,
+            self.policy,
+            self.campaign_id,
+            self.evidence_authority,
+            now=self.clock(),
         )

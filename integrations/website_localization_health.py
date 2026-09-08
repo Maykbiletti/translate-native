@@ -1007,7 +1007,10 @@ class LocalizationHealthMonitor:
                 raise ValueError
             if payload["report_ready"] != (
                 counts["succeeded"] == work_count
-                and "benchmark.campaign.report_invalid" not in reasons
+                and not reasons & {
+                    "benchmark.campaign.report_invalid",
+                    "benchmark.campaign.report_missing",
+                }
             ):
                 raise ValueError
             counts["work_count"] = work_count

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HEALTH_SCHEMA = "blun.website-localization-benchmark-campaign-health.v1"
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
@@ -43,6 +43,10 @@ WORK_COLUMNS = (
     "lease_token", "lease_expires_at", "last_error_code",
     "last_error_detail_hash", "result_json", "result_sha256", "created_at",
     "updated_at",
+)
+REPORT_COLUMNS = (
+    "campaign_id", "policy_sha256", "results_sha256", "report_json",
+    "report_sha256", "created_at",
 )
 
 
@@ -202,6 +206,16 @@ def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _results_sha256(result_sha256s: Any) -> str:
+    if not isinstance(result_sha256s, (tuple, list)) or any(
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for value in result_sha256s
+    ):
+        raise BenchmarkCampaignBlocked("benchmark.campaign.state_invalid")
+    return _hash_json(list(result_sha256s))
+
+
 def _timestamp(value: Any = None) -> float:
     value = time.time() if value is None else value
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -307,10 +321,12 @@ class BenchmarkCampaignStore:
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, SCHEMA_VERSION}:
+        if version not in {0, 1, SCHEMA_VERSION}:
             raise BenchmarkCampaignBlocked("benchmark.campaign.schema_unsupported")
         if version == 0:
             self._create_schema()
+        elif version == 1:
+            self._migrate_v1()
         self._verify_schema()
 
     def _create_schema(self) -> None:
@@ -353,9 +369,36 @@ class BenchmarkCampaignStore:
                 ON benchmark_campaign_work
                 (campaign_id, status, next_attempt_at, target_locale, suite_case_key)
             """)
+            self.connection.execute("""
+                CREATE TABLE benchmark_campaign_reports (
+                    campaign_id TEXT PRIMARY KEY,
+                    policy_sha256 TEXT NOT NULL,
+                    results_sha256 TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    report_sha256 TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY (campaign_id) REFERENCES benchmark_campaigns (campaign_id)
+                )
+            """)
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def _verify_schema(self) -> None:
+    def _migrate_v1(self) -> None:
+        self._verify_legacy_schema()
+        with _transaction(self.connection):
+            self.connection.execute("""
+                CREATE TABLE benchmark_campaign_reports (
+                    campaign_id TEXT PRIMARY KEY,
+                    policy_sha256 TEXT NOT NULL,
+                    results_sha256 TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    report_sha256 TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY (campaign_id) REFERENCES benchmark_campaigns (campaign_id)
+                )
+            """)
+            self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _verify_legacy_schema(self) -> None:
         campaign = tuple(
             row["name"] for row in
             self.connection.execute("PRAGMA table_info(benchmark_campaigns)")
@@ -365,6 +408,15 @@ class BenchmarkCampaignStore:
             self.connection.execute("PRAGMA table_info(benchmark_campaign_work)")
         )
         if campaign != CAMPAIGN_COLUMNS or work != WORK_COLUMNS:
+            raise BenchmarkCampaignBlocked("benchmark.campaign.schema_invalid")
+
+    def _verify_schema(self) -> None:
+        self._verify_legacy_schema()
+        report = tuple(
+            row["name"] for row in
+            self.connection.execute("PRAGMA table_info(benchmark_campaign_reports)")
+        )
+        if report != REPORT_COLUMNS:
             raise BenchmarkCampaignBlocked("benchmark.campaign.schema_invalid")
 
     def create(self, policy: Any, *, max_attempts: int = 3, now: Any = None) -> str:
@@ -643,6 +695,77 @@ class BenchmarkCampaignStore:
             "blocked": counts["failed"] > 0,
         }
 
+    def _complete_results_locked(
+        self, policy: Any, campaign_id: str,
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        self._verify_binding_locked(policy, campaign_id)
+        rows = self.connection.execute("""
+            SELECT status, result_json, result_sha256
+            FROM benchmark_campaign_work WHERE campaign_id = ?
+            ORDER BY target_locale, suite_case_key
+        """, (campaign_id,)).fetchall()
+        if any(row["status"] != "succeeded" for row in rows):
+            raise BenchmarkCampaignBlocked("benchmark.campaign.incomplete")
+        results = []
+        result_sha256s = []
+        for row in rows:
+            if (
+                not isinstance(row["result_json"], str)
+                or row["result_sha256"] != _hash_text(row["result_json"])
+            ):
+                raise BenchmarkCampaignBlocked("benchmark.campaign.state_invalid")
+            try:
+                result = json.loads(row["result_json"])
+            except (TypeError, json.JSONDecodeError):
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.state_invalid",
+                ) from None
+            if _canonical_json(result) != row["result_json"]:
+                raise BenchmarkCampaignBlocked("benchmark.campaign.state_invalid")
+            results.append(result)
+            result_sha256s.append(row["result_sha256"])
+        return results, tuple(result_sha256s)
+
+    def _verified_report_row(
+        self,
+        row: Any,
+        policy: Any,
+        campaign_id: str,
+        results: list[dict[str, Any]],
+        result_sha256s: tuple[str, ...],
+        authority: Any,
+        *,
+        now: float,
+    ) -> dict[str, Any]:
+        try:
+            if row is None or tuple(row.keys()) != REPORT_COLUMNS:
+                raise ValueError
+            report_json = row["report_json"]
+            if (
+                row["campaign_id"] != campaign_id
+                or row["policy_sha256"] != _campaign_identity(policy)[1]
+                or row["results_sha256"] != _results_sha256(result_sha256s)
+                or not isinstance(report_json, str)
+                or not report_json
+                or len(report_json.encode("utf-8")) > MAX_RESULT_BYTES
+                or row["report_sha256"] != _hash_text(report_json)
+                or _timestamp(row["created_at"]) > now
+            ):
+                raise ValueError
+            report = json.loads(report_json)
+            if _canonical_json(report) != report_json:
+                raise ValueError
+            return _BENCHMARK.verify_benchmark_report(
+                policy,
+                report,
+                results,
+                evidence_authority=authority,
+            )
+        except Exception:
+            raise BenchmarkCampaignBlocked(
+                "benchmark.campaign.report_invalid",
+            ) from None
+
     def health(
         self,
         policy: Any,
@@ -661,6 +784,8 @@ class BenchmarkCampaignStore:
         work_count = 0
         last_progress_at: float | None = None
         results: list[dict[str, Any]] = []
+        result_sha256s: list[str] = []
+        report_row = None
         reasons: set[str] = set()
         try:
             policy = _BENCHMARK._validate_policy(policy)
@@ -768,10 +893,15 @@ class BenchmarkCampaignStore:
                         ):
                             raise ValueError
                         results.append(result)
+                        result_sha256s.append(result_sha256)
                     elif result_json is not None or result_sha256 is not None:
                         raise ValueError
                 if work_count != len(_expected_work(policy)):
                     raise ValueError
+                report_row = self.connection.execute("""
+                    SELECT * FROM benchmark_campaign_reports
+                    WHERE campaign_id = ?
+                """, (campaign_id,)).fetchone()
             finally:
                 self.connection.rollback()
         except Exception:
@@ -791,11 +921,12 @@ class BenchmarkCampaignStore:
                 last_progress_at=last_progress_at,
             )
 
-        report_ready = counts["succeeded"] == work_count
+        complete = counts["succeeded"] == work_count
+        report_ready = False
         if counts["failed"]:
             reasons.add("benchmark.campaign.failed")
         if (
-            not report_ready
+            not complete
             and not counts["failed"]
             and not live_lease
             and due
@@ -803,14 +934,24 @@ class BenchmarkCampaignStore:
             and now - last_progress_at > stale_after_seconds
         ):
             reasons.add("benchmark.campaign.stalled")
-        if report_ready:
+        if complete and report_row is None:
+            reasons.add("benchmark.campaign.report_missing")
+        elif complete:
             try:
-                _BENCHMARK.summarize_benchmark(
-                    policy, results, evidence_authority=authority,
+                self._verified_report_row(
+                    report_row,
+                    policy,
+                    campaign_id,
+                    results,
+                    tuple(result_sha256s),
+                    authority,
+                    now=now,
                 )
+                report_ready = True
             except Exception:
                 reasons.add("benchmark.campaign.report_invalid")
-                report_ready = False
+        elif report_row is not None:
+            reasons.add("benchmark.campaign.report_invalid")
         blocking = counts["failed"] > 0 or "benchmark.campaign.report_invalid" in reasons
         status = "blocked" if blocking else ("degraded" if reasons else "healthy")
         return BenchmarkCampaignHealth(
@@ -823,31 +964,69 @@ class BenchmarkCampaignStore:
             last_progress_at=last_progress_at,
         )
 
-    def summarize(self, policy: Any, campaign_id: str, authority: Any) -> dict[str, Any]:
+    def summarize(
+        self,
+        policy: Any,
+        campaign_id: str,
+        authority: Any,
+        *,
+        now: Any = None,
+    ) -> dict[str, Any]:
         policy = _BENCHMARK._validate_policy(policy)
+        now = _timestamp(now)
         with _transaction(self.connection):
-            self._verify_binding_locked(policy, campaign_id)
-            rows = self.connection.execute("""
-                SELECT status, result_json, result_sha256
-                FROM benchmark_campaign_work WHERE campaign_id = ?
-                ORDER BY target_locale, suite_case_key
-            """, (campaign_id,)).fetchall()
-            if any(row["status"] != "succeeded" for row in rows):
-                raise BenchmarkCampaignBlocked("benchmark.campaign.incomplete")
-            results = []
-            for row in rows:
-                if (
-                    not isinstance(row["result_json"], str)
-                    or row["result_sha256"] != _hash_text(row["result_json"])
-                ):
-                    raise BenchmarkCampaignBlocked("benchmark.campaign.state_invalid")
-                try:
-                    results.append(json.loads(row["result_json"]))
-                except (TypeError, json.JSONDecodeError):
-                    raise BenchmarkCampaignBlocked("benchmark.campaign.state_invalid") from None
-        return _BENCHMARK.summarize_benchmark(
+            results, result_sha256s = self._complete_results_locked(
+                policy, campaign_id,
+            )
+            stored = self.connection.execute("""
+                SELECT * FROM benchmark_campaign_reports
+                WHERE campaign_id = ?
+            """, (campaign_id,)).fetchone()
+        if stored is not None:
+            return self._verified_report_row(
+                stored, policy, campaign_id, results, result_sha256s,
+                authority, now=now,
+            )
+        report = _BENCHMARK.summarize_benchmark(
             policy, results, evidence_authority=authority,
         )
+        report = _BENCHMARK.verify_benchmark_report(
+            policy, report, results, evidence_authority=authority,
+        )
+        report_json = _canonical_json(report)
+        if len(report_json.encode("utf-8")) > MAX_RESULT_BYTES:
+            raise BenchmarkCampaignBlocked("benchmark.campaign.report_invalid")
+        results_sha256 = _results_sha256(result_sha256s)
+        with _transaction(self.connection):
+            current_results, current_sha256s = self._complete_results_locked(
+                policy, campaign_id,
+            )
+            if _results_sha256(current_sha256s) != results_sha256:
+                raise BenchmarkCampaignBlocked("benchmark.campaign.state_invalid")
+            stored = self.connection.execute("""
+                SELECT * FROM benchmark_campaign_reports
+                WHERE campaign_id = ?
+            """, (campaign_id,)).fetchone()
+            if stored is None:
+                self.connection.execute("""
+                    INSERT INTO benchmark_campaign_reports (
+                        campaign_id, policy_sha256, results_sha256,
+                        report_json, report_sha256, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    campaign_id,
+                    _campaign_identity(policy)[1],
+                    results_sha256,
+                    report_json,
+                    _hash_text(report_json),
+                    now,
+                ))
+        if stored is not None:
+            return self._verified_report_row(
+                stored, policy, campaign_id, current_results, current_sha256s,
+                authority, now=now,
+            )
+        return report
 
 
 def _retry_delay(attempt: int, base: float, maximum: float) -> float:

@@ -300,6 +300,21 @@ class CampaignAuthority(HmacBenchmarkAuthority):
         )
 
 
+class CountingCampaignAuthority(CampaignAuthority):
+    def __init__(self):
+        super().__init__()
+        self.sign_calls = 0
+        self.verify_calls = 0
+
+    def sign(self, payload):
+        self.sign_calls += 1
+        return super().sign(payload)
+
+    def verify(self, payload, signature):
+        self.verify_calls += 1
+        return super().verify(payload, signature)
+
+
 class CampaignNativeReferenceVerifier(HmacNativeReferenceVerifier):
     def receipt(self, request):
         payload = CAMPAIGN._BENCHMARK._canonical_json(request).encode("utf-8")
@@ -1430,6 +1445,67 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertEqual(len(set(map(tuple, rows))), 345)
             self.assertNotIn("en-IE", {row["target_locale"] for row in rows})
 
+    def test_campaign_schema_v1_migrates_to_durable_reports_transactionally(self):
+        with sqlite3.connect(":memory:") as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("""
+                CREATE TABLE benchmark_campaigns (
+                    campaign_id TEXT PRIMARY KEY,
+                    policy_sha256 TEXT NOT NULL,
+                    suite_sha256 TEXT NOT NULL,
+                    work_count INTEGER NOT NULL CHECK (work_count > 0),
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            connection.execute(f"""
+                CREATE TABLE benchmark_campaign_work (
+                    work_id TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL,
+                    target_locale TEXT NOT NULL,
+                    suite_case_key TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN {CAMPAIGN.STATUSES}),
+                    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                    max_attempts INTEGER NOT NULL CHECK (
+                        max_attempts BETWEEN 1 AND {CAMPAIGN.MAX_ATTEMPTS}
+                    ),
+                    next_attempt_at REAL NOT NULL,
+                    lease_owner TEXT,
+                    lease_token TEXT,
+                    lease_expires_at REAL,
+                    last_error_code TEXT,
+                    last_error_detail_hash TEXT,
+                    result_json TEXT,
+                    result_sha256 TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE (campaign_id, target_locale, suite_case_key),
+                    FOREIGN KEY (campaign_id)
+                        REFERENCES benchmark_campaigns (campaign_id)
+                )
+            """)
+            connection.execute("""
+                CREATE INDEX benchmark_campaign_ready
+                ON benchmark_campaign_work
+                (campaign_id, status, next_attempt_at, target_locale, suite_case_key)
+            """)
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0],
+                CAMPAIGN.SCHEMA_VERSION,
+            )
+            self.assertEqual(
+                tuple(row["name"] for row in connection.execute(
+                    "PRAGMA table_info(benchmark_campaign_reports)"
+                )),
+                CAMPAIGN.REPORT_COLUMNS,
+            )
+            store._verify_schema()
+
     def test_campaign_policy_change_creates_new_identity_and_tampering_blocks(self):
         first = campaign_policy()
         second = campaign_policy(candidate_model_version="2026-09-08")
@@ -2152,7 +2228,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
 
     def test_complete_early_campaign_produces_attested_partial_scope_report(self):
         benchmark_policy = campaign_policy()
-        authority = CampaignAuthority()
+        authority = CountingCampaignAuthority()
         verifier = CampaignNativeReferenceVerifier()
         reviewer = CampaignCandidateReviewer()
         with sqlite3.connect(":memory:") as connection:
@@ -2176,19 +2252,77 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 outcomes.append(outcome)
             self.assertEqual(len(outcomes), 30)
             self.assertTrue(store.status(benchmark_policy, campaign_id)["complete"])
-            report = store.summarize(benchmark_policy, campaign_id, authority)
+            sign_calls = authority.sign_calls
+            before = connection.total_changes
+            pending_report = store.health(
+                benchmark_policy, campaign_id, authority, now=100,
+            )
+            self.assertEqual(pending_report.status, "degraded")
+            self.assertEqual(
+                pending_report.reasons,
+                ("benchmark.campaign.report_missing",),
+            )
+            self.assertFalse(pending_report.report_ready)
+            self.assertEqual(authority.sign_calls, sign_calls)
+            self.assertEqual(connection.total_changes, before)
+
+            report = store.summarize(
+                benchmark_policy, campaign_id, authority, now=101,
+            )
+            self.assertEqual(authority.sign_calls, sign_calls + 1)
+            first_report_json = connection.execute("""
+                SELECT report_json FROM benchmark_campaign_reports
+                WHERE campaign_id = ?
+            """, (campaign_id,)).fetchone()[0]
+            repeated = store.summarize(
+                benchmark_policy, campaign_id, authority, now=102,
+            )
+            self.assertEqual(repeated, report)
+            self.assertEqual(authority.sign_calls, sign_calls + 1)
+            self.assertEqual(
+                connection.execute("""
+                    SELECT report_json FROM benchmark_campaign_reports
+                    WHERE campaign_id = ?
+                """, (campaign_id,)).fetchone()[0],
+                first_report_json,
+            )
             self.assertEqual(report["configured_lanes_status"], "PASS")
             self.assertEqual(report["status"], "BLOCK")
             self.assertFalse(report["superiority_claim_allowed"])
             health = store.health(
-                benchmark_policy, campaign_id, authority, now=100,
+                benchmark_policy, campaign_id, authority, now=102,
             )
             self.assertEqual(health.status, "healthy")
             self.assertTrue(health.report_ready)
+            self.assertEqual(authority.sign_calls, sign_calls + 1)
             self.assertEqual(
                 report["claim_block_reasons"],
                 ["eu_target_locale_coverage_incomplete"],
             )
+
+            connection.execute("""
+                UPDATE benchmark_campaign_reports SET report_sha256 = ?
+                WHERE campaign_id = ?
+            """, ("0" * 64, campaign_id))
+            connection.commit()
+            blocked = store.health(
+                benchmark_policy, campaign_id, authority, now=103,
+            )
+            self.assertEqual(blocked.status, "blocked")
+            self.assertEqual(
+                blocked.reasons,
+                ("benchmark.campaign.report_invalid",),
+            )
+            self.assertFalse(blocked.report_ready)
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.summarize(
+                    benchmark_policy, campaign_id, authority, now=103,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.report_invalid",
+            )
+            self.assertEqual(authority.sign_calls, sign_calls + 1)
 
 
 if __name__ == "__main__":
