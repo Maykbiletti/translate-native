@@ -350,6 +350,39 @@ and [usage limits](https://developers.deepl.com/docs/resources/usage-limits)
 documentation. No API credential or real baseline output is included in this
 repository.
 
+`integrations/website_localization_benchmark_candidate.py` gives the attached
+customer-model candidate the same crash-safe identity discipline as the
+baseline. `resolve_candidate_acquisition` first looks up a candidate under a
+stable, non-secret model-route ID plus the complete benchmark policy and
+canonical suite job. A verified hit returns the exact previous worker result
+without calling the model. A miss runs the ordinary three-phase localization
+worker—transcreation, target-only native review, then source-aware fidelity
+review—and persists the first complete result before blind comparison.
+
+The candidate artifact contains the complete worker result and is signed by
+the configured host-owned benchmark evidence authority. Every read checks the
+store digest, reconstructs every job, source, locale, model, version, quality
+profile, review-confidence, and target-hash binding, and reverifies that
+attestation. Recomputing the database digest after changing target text is
+therefore insufficient. Corrupt or differently signed content blocks before
+model access. Identical writers converge; a different valid result under the
+same route, policy, and job is a terminal conflict and cannot replace the first
+candidate. Deliberate reevaluation requires a changed bound model version,
+policy, suite, or route rather than deleting or overwriting evidence.
+
+Pass the campaign lease guard as `operation_guard`. A guarded adapter checks it
+immediately before each of the three model calls and before every authority
+sign or verify call, including verification of a cached result. Model,
+temporary authority, and lease failures retain stable retryability and flow
+into the campaign's bounded content-free retry policy. Invalid jobs, assets,
+responses, stored state, attestations, and conflicts remain fail-closed.
+
+This dedicated database necessarily retains candidate source-derived text and
+review metadata. Keep it owner-only and apply storage encryption, retention,
+backup, and deletion controls appropriate to the source. It contains no model
+credential or raw provider exception. The separate campaign database still
+stores only attested text-free case results.
+
 Every policy-required locale and source case also requires one versioned native
 reference artifact before the first blind review can run. The repository does
 not ship or invent reference translations. A host obtains the exact
