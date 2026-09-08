@@ -309,6 +309,15 @@ locale set exactly covers every EU target eligible for the bound source suite
 and every one of those locale reports passes on its own. One missing or blocked
 locale therefore blocks the overall report; no aggregate can conceal it.
 
+Each locale report also exposes separate statistics for `target_native` and
+`source_fidelity`: candidate wins, baseline wins, ties, decisive rate, candidate
+win rate, and the one-sided sign-test probability. Both axes must independently
+meet the policy's predeclared sample, decisiveness, win-rate, and significance
+thresholds. Those thresholds and fixed block reasons are included in the
+attested report. Joint case winners remain an additional conservative metric,
+but discarded cross-axis disagreements can no longer make a weak axis appear
+statistically convincing.
+
 The current suite source language is English, so its EU localization target
 scope contains the other 23 official-language locale profiles. `en-IE` is
 recorded explicitly as the source-language locale and is not sent through a

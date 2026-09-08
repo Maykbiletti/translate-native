@@ -31,7 +31,7 @@ NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-re
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
 CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v6"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v7"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v8"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v1"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -1071,6 +1071,46 @@ def _one_sided_sign_p(candidate_wins: int, decisive: int) -> float:
     return numerator / (2 ** decisive)
 
 
+def _axis_report(
+    phase: str,
+    cases: Sequence[Mapping[str, Any]],
+    policy: BenchmarkPolicy,
+) -> dict[str, Any]:
+    preferences = [
+        next(item for item in case["passes"] if item["phase"] == phase)[
+            "preference"
+        ]
+        for case in cases
+    ]
+    candidate_wins = preferences.count("candidate")
+    baseline_wins = preferences.count("baseline")
+    ties = preferences.count("tie")
+    decisive = candidate_wins + baseline_wins
+    decisive_rate = decisive / len(cases) if cases else 0.0
+    candidate_win_rate = candidate_wins / decisive if decisive else 0.0
+    one_sided_sign_p = _one_sided_sign_p(candidate_wins, decisive)
+    block_reasons: list[str] = []
+    if len(cases) < policy.minimum_cases_per_locale:
+        block_reasons.append("insufficient_sample")
+    if decisive_rate < policy.minimum_decisive_rate:
+        block_reasons.append("insufficient_decisive_rate")
+    if candidate_win_rate < policy.minimum_candidate_win_rate:
+        block_reasons.append("insufficient_candidate_win_rate")
+    if one_sided_sign_p > policy.maximum_one_sided_p:
+        block_reasons.append("not_statistically_significant")
+    return {
+        "phase": phase,
+        "status": "PASS" if not block_reasons else "BLOCK",
+        "block_reasons": block_reasons,
+        "candidate_wins": candidate_wins,
+        "baseline_wins": baseline_wins,
+        "ties": ties,
+        "decisive_rate": decisive_rate,
+        "candidate_win_rate": candidate_win_rate,
+        "one_sided_sign_p": one_sided_sign_p,
+    }
+
+
 def _validated_case_result(
     raw: Mapping[str, Any],
     policy: BenchmarkPolicy,
@@ -1275,6 +1315,8 @@ def _unsigned_benchmark_report(
         domains = sorted({item["domain"] for item in cases})
         long_form_cases = sum(item["long_form"] for item in cases)
         adversarial_tags = sorted({tag for item in cases for tag in item["adversarial_tags"]})
+        axes = [_axis_report(phase, cases, policy) for phase in PHASES]
+        axes_passed = all(axis["status"] == "PASS" for axis in axes)
         passed = (
             len(cases) >= policy.minimum_cases_per_locale
             and suite_complete
@@ -1282,6 +1324,7 @@ def _unsigned_benchmark_report(
             and win_rate >= policy.minimum_candidate_win_rate
             and p_value <= policy.maximum_one_sided_p
             and candidate_defect_cases == 0
+            and axes_passed
         )
         locale_reports.append({
             "locale": locale,
@@ -1294,6 +1337,7 @@ def _unsigned_benchmark_report(
             "candidate_win_rate": win_rate,
             "one_sided_sign_p": p_value,
             "candidate_defect_cases": candidate_defect_cases,
+            "axes": axes,
             "suite_complete": suite_complete,
             "content_types": content_types,
             "domains": domains,
@@ -1352,6 +1396,13 @@ def _unsigned_benchmark_report(
         "case_evidence_sha256": _hash_json(sorted(evidence_hashes)),
         "baseline_evidence_sha256": _hash_json(sorted(baseline_evidence_hashes)),
         "required_locales": list(policy.required_locales),
+        "decision_policy": {
+            "minimum_cases_per_locale": policy.minimum_cases_per_locale,
+            "minimum_decisive_rate": policy.minimum_decisive_rate,
+            "minimum_candidate_win_rate": policy.minimum_candidate_win_rate,
+            "maximum_one_sided_p": policy.maximum_one_sided_p,
+            "required_axes": list(PHASES),
+        },
         "claim_scope": {
             "schema": CLAIM_SCOPE_SCHEMA,
             "source_languages": list(_SUITE_SOURCE_LANGUAGES),
