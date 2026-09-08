@@ -225,7 +225,8 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "quality_profile", "human_review_required", "release_required",
+        "quality_profile", "human_review_required",
+        "independent_review_required", "release_required",
     }
     if not isinstance(result, dict) or set(result) != expected_keys:
         raise BenchmarkBlocked("benchmark.candidate.invalid")
@@ -256,8 +257,9 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         or any(value not in {"high", "low"} for value in review_confidence.values())
     ):
         raise BenchmarkBlocked("benchmark.candidate.invalid")
-    expected_human_review = (
-        job["content_type"] == "legal" or "low" in review_confidence.values()
+    expected_human_review = job["content_type"] == "legal"
+    expected_independent_review = (
+        job["content_type"] != "legal" and "low" in review_confidence.values()
     )
     expected_quality_profile = {
         "locale": job["target"]["locale"],
@@ -280,6 +282,8 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         result["quality_profile"] == expected_quality_profile,
         isinstance(result["human_review_required"], bool),
         result["human_review_required"] is expected_human_review,
+        isinstance(result["independent_review_required"], bool),
+        result["independent_review_required"] is expected_independent_review,
         result["release_required"] is True,
     )
     if not all(bindings):

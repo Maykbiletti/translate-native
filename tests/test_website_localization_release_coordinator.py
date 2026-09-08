@@ -96,11 +96,15 @@ class ReceiptVerifier:
 
 
 class EvidenceProvider:
-    def __init__(self, *, error=None, mutate=None, include_human=True, wrong_receipt=False):
+    def __init__(
+        self, *, error=None, mutate=None, include_human=True,
+        wrong_receipt=False, independent_provider=None,
+    ):
         self.error = error
         self.mutate = mutate
         self.include_human = include_human
         self.wrong_receipt = wrong_receipt
+        self.independent_provider = independent_provider
         self.requests = []
 
     def obtain(self, request):
@@ -116,17 +120,31 @@ class EvidenceProvider:
         if self.wrong_receipt:
             quality = "quality:" + "0" * 64
         human = None
-        if request.human_review_required and self.include_human:
+        if (
+            request.human_review_required and self.include_human
+            and self.independent_provider is None
+        ):
             human = receipt(
                 "human", request.source_text, request.target_text,
                 request.target_locale, request.request_id,
             )
+        independent = None
+        if self.independent_provider is not None:
+            independent = {
+                "schema": COORDINATOR.INDEPENDENT_MODEL_REVIEW_SCHEMA,
+                "provider": self.independent_provider,
+                "receipt": receipt(
+                    "independent", request.source_text, request.target_text,
+                    request.target_locale, request.request_id,
+                ),
+            }
         return {
             "schema": COORDINATOR.EVIDENCE_RESPONSE_SCHEMA,
             "request_id": request.request_id,
             "result_sha256": request.result_sha256,
             "quality_receipt": quality,
             "human_review_receipt": human,
+            "independent_model_review": independent,
         }
 
 
@@ -159,8 +177,11 @@ def change_event(*, targets=("de-AT", "sv-SE"), content_type="headline"):
     }
 
 
-def completed_result(job, target_text):
+def completed_result(job, target_text, *, review_confidence=None):
     payload = job.as_payload()
+    review_confidence = review_confidence or {
+        "target_native": "high", "source_fidelity": "high",
+    }
     return {
         "schema": WORKER.RESULT_SCHEMA,
         "worker_schema": WORKER.WORKER_SCHEMA,
@@ -185,13 +206,16 @@ def completed_result(job, target_text):
             for phase in WORKER.PHASES
         ],
         "integrity": {"status": "PASS", "guard": "translate-native-structure-and-token-gate"},
-        "review_confidence": {"target_native": "high", "source_fidelity": "high"},
+        "review_confidence": review_confidence,
         "quality_profile": {
             "locale": payload["target"]["locale"],
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
         },
         "human_review_required": payload["content_type"] == "legal",
+        "independent_review_required": (
+            payload["content_type"] != "legal" and "low" in review_confidence.values()
+        ),
         "release_required": True,
     }
 
@@ -226,7 +250,7 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.release_connection.close()
         self.queue_connection.close()
 
-    def complete_all(self, translations=None):
+    def complete_all(self, translations=None, *, review_confidence=None):
         translations = translations or {
             "de-AT": "Bring dein Unternehmen voran.",
             "sv-SE": "Ta ditt företag vidare.",
@@ -237,7 +261,10 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             self.assertIsNotNone(claim)
             self.queue.complete(
                 claim,
-                completed_result(jobs[claim.job_id], translations[claim.target_locale]),
+                completed_result(
+                    jobs[claim.job_id], translations[claim.target_locale],
+                    review_confidence=review_confidence,
+                ),
                 now=111 + index,
             )
 
@@ -266,6 +293,7 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         values.update(overrides)
         quality = ReceiptVerifier("quality", provider.requests)
         human = ReceiptVerifier("human", provider.requests)
+        independent = ReceiptVerifier("independent", provider.requests)
         outcome = COORDINATOR.run_next_release(
             self.bridge,
             self.event["event_id"],
@@ -276,6 +304,7 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             self.publication_authority,
             evidence_state=self.evidence_state,
             human_review_verifier=human,
+            independent_model_review_verifier=independent,
             evidence_worker_id="quality-worker",
             **values,
         )
@@ -726,6 +755,60 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertEqual(outcome.status, "delivery_ready")
         self.assertEqual(len(quality.calls), 1)
         self.assertEqual(len(human.calls), 1)
+
+    def test_low_confidence_routes_through_an_independent_model_adapter(self):
+        self.complete_all(review_confidence={
+            "target_native": "low", "source_fidelity": "high",
+        })
+        reviewer = {
+            "id": "independent-quality-provider",
+            "model_id": "native-reviewer",
+            "model_version": "2026-09-08",
+        }
+        provider = EvidenceProvider(independent_provider=reviewer)
+        outcome, _, human = self.run_release(provider)
+        stored = json.loads(self.release_connection.execute(
+            "SELECT approval_json FROM localization_approvals",
+        ).fetchone()[0])
+        self.assertEqual(outcome.status, "approved")
+        self.assertEqual(stored["independent_model_review"]["provider"], reviewer)
+        self.assertIsNone(stored["human_review_receipt_sha256"])
+        self.assertEqual(human.calls, [])
+
+    def test_low_confidence_rejects_the_primary_provider_as_reviewer(self):
+        self.complete_all(review_confidence={
+            "target_native": "high", "source_fidelity": "low",
+        })
+        provider = EvidenceProvider(independent_provider={
+            "id": "customer-llm",
+            "model_id": "configured-model-2",
+            "model_version": "2026-09-08",
+        })
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked) as caught:
+            self.run_release(provider)
+        self.assertEqual(
+            caught.exception.code,
+            "evidence.independent_model_review.not_independent",
+        )
+        self.assertEqual(self.release_connection.execute(
+            "SELECT COUNT(*) FROM localization_approvals",
+        ).fetchone()[0], 0)
+
+    def test_legal_locale_rejects_model_review_even_when_independent(self):
+        self.tearDown()
+        self.setUp_legal()
+        self.complete_all({"sv-SE": "Genom att fortsätta godkänner du villkoren."})
+        provider = EvidenceProvider(independent_provider={
+            "id": "independent-quality-provider",
+            "model_id": "legal-reviewer",
+            "model_version": "2026-09-08",
+        })
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked) as caught:
+            self.run_release(provider)
+        self.assertEqual(
+            caught.exception.code,
+            "evidence.independent_model_review.legal_forbidden",
+        )
 
     def setUp_legal(self):
         self.queue_connection = sqlite3.connect(":memory:")

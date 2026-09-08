@@ -96,6 +96,7 @@ class Evidence:
             "result_sha256": request.result_sha256,
             "quality_receipt": receipt(request),
             "human_review_receipt": None,
+            "independent_model_review": None,
         }
 
 

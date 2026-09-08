@@ -113,6 +113,7 @@ class EvidenceProvider:
                 request.request_id,
             ),
             "human_review_receipt": None,
+            "independent_model_review": None,
         }
 
 

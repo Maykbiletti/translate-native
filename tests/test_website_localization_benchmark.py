@@ -124,6 +124,7 @@ def candidate_result(payload, text=None):
             "sha256": payload["target"]["quality_profile_sha256"],
         },
         "human_review_required": payload["content_type"] == "legal",
+        "independent_review_required": False,
         "release_required": True,
     }
 

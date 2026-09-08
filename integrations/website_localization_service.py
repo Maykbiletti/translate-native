@@ -137,6 +137,7 @@ def run_service_tick(
     delivery_lease_seconds: float | int = 300,
     delivery_max_attempts: int = 5,
     human_review_verifier: Any | None = None,
+    independent_model_review_verifier: Any | None = None,
     result_cache: Any | None = None,
     operation_guard: Callable[[float], Any] | None = None,
 ) -> ServiceTickOutcome:
@@ -218,6 +219,7 @@ def run_service_tick(
                 approval_ttl_seconds=approval_ttl_seconds,
                 delivery_max_attempts=delivery_max_attempts,
                 human_review_verifier=human_review_verifier,
+                independent_model_review_verifier=independent_model_review_verifier,
                 operation_guard=operation_guard,
                 clock=clock,
             )

@@ -152,7 +152,7 @@ responses must use the exact phase, locale, and schema, contain no extra
 fields, and use NFC text. Each review must also report `confidence` as exactly
 `high` or `low`. Missing or unknown confidence is malformed and blocks; `high`
 does not replace either substantive review, while `low` adds a mandatory
-qualified-human-review requirement to the result. A wrong locale, malformed
+independent-review requirement to the result. A wrong locale, malformed
 response, failed review, provider exception, or changed job binding blocks
 without producing a queue result.
 
@@ -165,9 +165,11 @@ requests and responses. The explicit per-phase confidence decision is carried
 in the result and remains bound through quality evidence and the signed
 approval. Results retain no reviewer prose and still set
 `release_required: true`; queue success therefore remains neither a signed
-release nor publication permission. Legal content additionally sets
-`human_review_required: true`; low confidence in either review sets the same
-fail-closed requirement for every content type.
+release nor publication permission. Legal content sets
+`human_review_required: true`; low confidence in either review instead sets
+`independent_review_required: true` for non-legal content. The latter can be
+satisfied only by a separately verified qualified-human receipt or a verified
+second model adapter with a different provider identity.
 
 Premortem: a provider could answer in the wrong locale, merge creation and
 review, leak the source into the native-only judgment, return convincing but
@@ -361,24 +363,44 @@ The adapter must return exactly this shape:
 
 ```json
 {
-  "schema": "blun.localization-quality-evidence-response.v1",
+  "schema": "blun.localization-quality-evidence-response.v2",
   "request_id": "blun-l10n-evidence-…",
   "result_sha256": "…",
   "quality_receipt": "host-verifiable-purpose-bound-receipt",
-  "human_review_receipt": null
+  "human_review_receipt": null,
+  "independent_model_review": null
 }
 ```
 
 The response is rejected if the request object was mutated, a binding differs,
 the receipt is empty or malformed, or the trusted quality verifier rejects it.
 The evidence request binds the explicit native and fidelity confidence values.
-Legal content and every result escalated by low review confidence require a
-non-null human receipt and a separate human-review verifier. Without both, the
-locale remains blocked. A receipt is evidence for the existing two ordered
-reviews—first source-blind native quality, then source-aware fidelity—not
-permission to collapse them into one score. A major defect still blocks the
-worker result entirely; it cannot be outweighed or converted into a confidence
-decision.
+Legal content always requires a non-null human receipt and a separate
+human-review verifier. For non-legal content with low confidence, the adapter
+must return exactly one of that qualified-human receipt or an independent model
+review in this form:
+
+```json
+{
+  "schema": "blun.independent-model-review.v1",
+  "provider": {
+    "id": "independent-provider",
+    "model_id": "configured-review-model",
+    "model_version": "immutable-model-version"
+  },
+  "receipt": "host-verifiable-purpose-bound-receipt"
+}
+```
+
+The independent reviewer must use a different provider adapter identity from
+the primary translation provider. The host supplies a separate verifier; its
+verified receipt hash and exact provider/model identity are included in the
+signed approval. Missing, ambiguous, same-provider, malformed, or rejected
+evidence keeps the locale blocked. A receipt is evidence for the existing two
+ordered reviews—first source-blind native quality, then source-aware
+fidelity—not permission to collapse them into one score. A major defect still
+blocks the worker result entirely; it cannot be outweighed or converted into a
+confidence decision.
 
 Exact retries are safe: approved locales are reused, the outbox has a stable
 delivery identity, and a crash after signing an approval but before recording
@@ -756,10 +778,10 @@ The `dependencies` mapping must contain exactly the configured provider and
 asset resolvers, evidence provider, quality verifier, inbound event verifier,
 approval and publication authorities, CMS publisher, three worker IDs, and an
 evidence revision. Optional values are limited to the documented lease, retry,
-attempt, approval-expiry, and human-review settings accepted by the service
-tick. A host-supplied result cache is rejected before schema creation; the
-runtime inserts only its own signed local translation-memory adapter. Unknown
-and missing keys, invalid capabilities, identifiers,
+attempt, approval-expiry, human-review verifier, and independent-model-review
+verifier settings accepted by the service tick. A host-supplied result cache is
+rejected before schema creation; the runtime inserts only its own signed local
+translation-memory adapter. Unknown and missing keys, invalid capabilities, identifiers,
 retry ranges, duplicate connections, and already-active host transactions
 block before any store schema is created. The mapping is copied and frozen;
 runtime status and `repr` never include its objects or values.

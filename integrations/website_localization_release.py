@@ -21,7 +21,8 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v2"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v3"
+INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 MAX_TEXT_BYTES = 2_000_000
 MAX_RECEIPT_LENGTH = 16_384
 MAX_TTL_SECONDS = 31_536_000.0
@@ -85,6 +86,19 @@ class QualityReceiptVerifier(Protocol):
         target_text: str,
         target_locale: str,
         receipt: str,
+    ) -> bool: ...
+
+
+class IndependentModelReviewVerifier(Protocol):
+    def verify(
+        self,
+        *,
+        source_text: str,
+        target_text: str,
+        target_locale: str,
+        receipt: str,
+        provider: dict[str, str],
+        primary_provider: dict[str, str],
     ) -> bool: ...
 
 
@@ -162,6 +176,23 @@ def _receipt(value: Any, code: str) -> str:
     return _text(value, code, limit=MAX_RECEIPT_LENGTH)
 
 
+def _independent_model_review(value: Any, primary_provider: dict[str, Any]) -> tuple[dict[str, str], str]:
+    if not isinstance(value, dict) or set(value) != {"schema", "provider", "receipt"}:
+        raise LocalizationReleaseBlocked("independent_model_review.invalid")
+    provider = value.get("provider")
+    if not isinstance(provider, dict) or set(provider) != {"id", "model_id", "model_version"}:
+        raise LocalizationReleaseBlocked("independent_model_review.provider.invalid")
+    normalized = {
+        name: _text(provider.get(name), "independent_model_review.provider.invalid")
+        for name in ("id", "model_id", "model_version")
+    }
+    if value.get("schema") != INDEPENDENT_MODEL_REVIEW_SCHEMA:
+        raise LocalizationReleaseBlocked("independent_model_review.schema.invalid")
+    if normalized["id"] == primary_provider.get("id"):
+        raise LocalizationReleaseBlocked("independent_model_review.not_independent")
+    return normalized, _receipt(value.get("receipt"), "independent_model_review.receipt.required")
+
+
 def _signature(value: Any) -> ApprovalSignature:
     if not isinstance(value, ApprovalSignature):
         raise LocalizationReleaseBlocked("approval.signature.invalid")
@@ -214,7 +245,8 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "quality_profile", "human_review_required", "release_required",
+        "quality_profile", "human_review_required",
+        "independent_review_required", "release_required",
     }
     if set(result) != expected:
         raise LocalizationReleaseBlocked("result.invalid")
@@ -269,11 +301,18 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     ):
         raise LocalizationReleaseBlocked("result.review_confidence.invalid")
     human_review_required = result.get("human_review_required")
-    expected_human_review = (
-        job["content_type"] == "legal" or "low" in review_confidence.values()
-    )
+    expected_human_review = job["content_type"] == "legal"
     if not isinstance(human_review_required, bool) or human_review_required is not expected_human_review:
         raise LocalizationReleaseBlocked("result.human_review.invalid")
+    independent_review_required = result.get("independent_review_required")
+    expected_independent_review = (
+        job["content_type"] != "legal" and "low" in review_confidence.values()
+    )
+    if (
+        not isinstance(independent_review_required, bool)
+        or independent_review_required is not expected_independent_review
+    ):
+        raise LocalizationReleaseBlocked("result.independent_review.invalid")
     return result
 
 
@@ -338,6 +377,8 @@ class LocalizationReleaseStore:
         ttl_seconds: float | int = 2_592_000,
         human_review_receipt: str | None = None,
         human_review_verifier: QualityReceiptVerifier | None = None,
+        independent_model_review: dict[str, Any] | None = None,
+        independent_model_review_verifier: IndependentModelReviewVerifier | None = None,
     ) -> ApprovedLocalization:
         job_id = _text(job_id, "job.id.invalid")
         _, job = _plan_job(plan, job_id)
@@ -363,7 +404,10 @@ class LocalizationReleaseStore:
             raise LocalizationReleaseBlocked("quality.receipt.rejected")
 
         human_hash = None
+        independent_binding = None
         if result["human_review_required"]:
+            if independent_model_review is not None:
+                raise LocalizationReleaseBlocked("independent_model_review.legal_forbidden")
             human_review_receipt = _receipt(human_review_receipt, "human.receipt.required")
             human_verify = getattr(human_review_verifier, "verify", None)
             if not callable(human_verify):
@@ -380,8 +424,56 @@ class LocalizationReleaseStore:
             if not human_ok:
                 raise LocalizationReleaseBlocked("human.receipt.rejected")
             human_hash = _hash_text(human_review_receipt)
-        elif human_review_receipt is not None or human_review_verifier is not None:
-            raise LocalizationReleaseBlocked("human.receipt.unexpected")
+        elif result["independent_review_required"]:
+            if human_review_receipt is not None and independent_model_review is not None:
+                raise LocalizationReleaseBlocked("review.escalation.ambiguous")
+            if independent_model_review is not None:
+                provider, model_receipt = _independent_model_review(
+                    independent_model_review, result["provider"],
+                )
+                model_verify = getattr(independent_model_review_verifier, "verify", None)
+                if not callable(model_verify):
+                    raise LocalizationReleaseBlocked("independent_model_review.verifier.required")
+                try:
+                    model_ok = model_verify(
+                        source_text=job["source"]["text"],
+                        target_text=result["candidate"],
+                        target_locale=job["target"]["locale"],
+                        receipt=model_receipt,
+                        provider=provider,
+                        primary_provider=result["provider"],
+                    ) is True
+                except Exception:
+                    model_ok = False
+                if not model_ok:
+                    raise LocalizationReleaseBlocked("independent_model_review.receipt.rejected")
+                independent_binding = {
+                    "schema": INDEPENDENT_MODEL_REVIEW_SCHEMA,
+                    "provider": provider,
+                    "receipt_sha256": _hash_text(model_receipt),
+                }
+            else:
+                human_review_receipt = _receipt(human_review_receipt, "human.receipt.required")
+                human_verify = getattr(human_review_verifier, "verify", None)
+                if not callable(human_verify):
+                    raise LocalizationReleaseBlocked("human.verifier.required")
+                try:
+                    human_ok = human_verify(
+                        source_text=job["source"]["text"],
+                        target_text=result["candidate"],
+                        target_locale=job["target"]["locale"],
+                        receipt=human_review_receipt,
+                    ) is True
+                except Exception:
+                    human_ok = False
+                if not human_ok:
+                    raise LocalizationReleaseBlocked("human.receipt.rejected")
+                human_hash = _hash_text(human_review_receipt)
+        elif any(value is not None for value in (
+            human_review_receipt, human_review_verifier,
+            independent_model_review, independent_model_review_verifier,
+        )):
+            raise LocalizationReleaseBlocked("review.escalation.unexpected")
 
         result_json = _canonical_json(result)
         result_hash = _hash_text(result_json)
@@ -403,6 +495,7 @@ class LocalizationReleaseStore:
             "result_sha256": result_hash,
             "quality_receipt_sha256": _hash_text(quality_receipt),
             "human_review_receipt_sha256": human_hash,
+            "independent_model_review": independent_binding,
         }
         approval_id = "blun-l10n-approval-" + _hash_text(_canonical_json(immutable))
         payload = {
@@ -490,7 +583,8 @@ class LocalizationReleaseStore:
             "provider", "software_version", "worker_schema", "result_sha256",
             "review_confidence",
             "quality_profile",
-            "quality_receipt_sha256", "human_review_receipt_sha256", "approval_id",
+            "quality_receipt_sha256", "human_review_receipt_sha256",
+            "independent_model_review", "approval_id",
             "approved_at", "expires_at",
         }
         if set(payload) != expected_keys:
@@ -521,10 +615,35 @@ class LocalizationReleaseStore:
         if HEX64.fullmatch(str(payload.get("quality_receipt_sha256"))) is None:
             raise LocalizationReleaseBlocked("approval.binding_mismatch")
         human_hash = payload.get("human_review_receipt_sha256")
-        if (result["human_review_required"] and HEX64.fullmatch(str(human_hash)) is None) or (
-            not result["human_review_required"] and human_hash is not None
-        ):
+        independent = payload.get("independent_model_review")
+        if not (
+            result["human_review_required"] or result["independent_review_required"]
+        ) and (human_hash is not None or independent is not None):
             raise LocalizationReleaseBlocked("approval.binding_mismatch")
+        if result["human_review_required"]:
+            if HEX64.fullmatch(str(human_hash)) is None or independent is not None:
+                raise LocalizationReleaseBlocked("approval.binding_mismatch")
+        elif result["independent_review_required"]:
+            if (human_hash is None) == (independent is None):
+                raise LocalizationReleaseBlocked("approval.binding_mismatch")
+            elif human_hash is not None and HEX64.fullmatch(str(human_hash)) is None:
+                raise LocalizationReleaseBlocked("approval.binding_mismatch")
+            elif independent is not None:
+                if not isinstance(independent, dict) or set(independent) != {
+                    "schema", "provider", "receipt_sha256",
+                }:
+                    raise LocalizationReleaseBlocked("approval.binding_mismatch")
+                if independent.get("schema") != INDEPENDENT_MODEL_REVIEW_SCHEMA:
+                    raise LocalizationReleaseBlocked("approval.binding_mismatch")
+                provider = independent.get("provider")
+                if not isinstance(provider, dict) or set(provider) != {"id", "model_id", "model_version"}:
+                    raise LocalizationReleaseBlocked("approval.binding_mismatch")
+                if any(not isinstance(value, str) or not value for value in provider.values()):
+                    raise LocalizationReleaseBlocked("approval.binding_mismatch")
+                if provider["id"] == result["provider"]["id"]:
+                    raise LocalizationReleaseBlocked("approval.binding_mismatch")
+                if HEX64.fullmatch(str(independent.get("receipt_sha256"))) is None:
+                    raise LocalizationReleaseBlocked("approval.binding_mismatch")
         immutable = {
             key: value
             for key, value in payload.items()

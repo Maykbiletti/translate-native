@@ -19,8 +19,9 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 SCHEMA = "blun.website-localization-release-coordinator.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v2"
-EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v1"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v3"
+EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
+INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 EVIDENCE_STATE_SCHEMA = "blun.localization-quality-evidence-state.v1"
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -105,6 +106,7 @@ class QualityEvidenceRequest:
     review_confidence: dict[str, str]
     quality_profile: dict[str, str]
     human_review_required: bool
+    independent_review_required: bool
 
     def as_payload(self) -> dict[str, Any]:
         return json.loads(_canonical_json(asdict(self)))
@@ -638,6 +640,7 @@ def _request(
         "review_confidence": json.loads(_canonical_json(result["review_confidence"])),
         "quality_profile": json.loads(_canonical_json(result["quality_profile"])),
         "human_review_required": result["human_review_required"],
+        "independent_review_required": result["independent_review_required"],
     }
     request_id = "blun-l10n-evidence-" + _hash(_canonical_json(binding))
     return QualityEvidenceRequest(
@@ -648,7 +651,10 @@ def _request(
     )
 
 
-def _obtain_evidence(provider: Any, request: QualityEvidenceRequest) -> tuple[str, str | None]:
+def _obtain_evidence(
+    provider: Any,
+    request: QualityEvidenceRequest,
+) -> tuple[str, str | None, dict[str, Any] | None]:
     obtain = getattr(provider, "obtain", None)
     if not callable(obtain):
         raise LocalizationReleaseCoordinatorBlocked("evidence.provider.invalid")
@@ -665,7 +671,10 @@ def _obtain_evidence(provider: Any, request: QualityEvidenceRequest) -> tuple[st
         raise LocalizationReleaseCoordinatorBlocked("evidence.unavailable", retryable=True) from None
     if _hash(_canonical_json(request.as_payload())) != request_hash:
         raise LocalizationReleaseCoordinatorBlocked("evidence.request_mutated")
-    expected = {"schema", "request_id", "result_sha256", "quality_receipt", "human_review_receipt"}
+    expected = {
+        "schema", "request_id", "result_sha256", "quality_receipt",
+        "human_review_receipt", "independent_model_review",
+    }
     try:
         if not isinstance(response, Mapping) or set(response) != expected:
             raise ValueError
@@ -680,11 +689,43 @@ def _obtain_evidence(provider: Any, request: QualityEvidenceRequest) -> tuple[st
         raise LocalizationReleaseCoordinatorBlocked("evidence.response.binding_mismatch")
     quality_receipt = _receipt(response["quality_receipt"], "evidence.quality_receipt.invalid")
     human_receipt = response["human_review_receipt"]
+    independent = response["independent_model_review"]
+    if not (request.human_review_required or request.independent_review_required):
+        if human_receipt is not None or independent is not None:
+            raise LocalizationReleaseCoordinatorBlocked("evidence.review_escalation.unexpected")
+        return quality_receipt, None, None
     if request.human_review_required:
+        if independent is not None:
+            raise LocalizationReleaseCoordinatorBlocked("evidence.independent_model_review.legal_forbidden")
         human_receipt = _receipt(human_receipt, "evidence.human_receipt.required")
-    elif human_receipt is not None:
-        raise LocalizationReleaseCoordinatorBlocked("evidence.human_receipt.unexpected")
-    return quality_receipt, human_receipt
+        return quality_receipt, human_receipt, None
+    if (human_receipt is None) == (independent is None):
+        raise LocalizationReleaseCoordinatorBlocked("evidence.review_escalation.required")
+    if human_receipt is not None:
+        return quality_receipt, _receipt(
+            human_receipt, "evidence.human_receipt.required",
+        ), None
+    if not isinstance(independent, Mapping) or set(independent) != {"schema", "provider", "receipt"}:
+        raise LocalizationReleaseCoordinatorBlocked("evidence.independent_model_review.invalid")
+    independent = dict(independent)
+    if independent["schema"] != INDEPENDENT_MODEL_REVIEW_SCHEMA:
+        raise LocalizationReleaseCoordinatorBlocked("evidence.independent_model_review.invalid")
+    reviewer = independent["provider"]
+    if not isinstance(reviewer, Mapping) or set(reviewer) != {"id", "model_id", "model_version"}:
+        raise LocalizationReleaseCoordinatorBlocked("evidence.independent_model_review.provider.invalid")
+    reviewer = {
+        name: _token(reviewer[name], "evidence.independent_model_review.provider.invalid")
+        for name in ("id", "model_id", "model_version")
+    }
+    if reviewer["id"] == request.provider["id"]:
+        raise LocalizationReleaseCoordinatorBlocked("evidence.independent_model_review.not_independent")
+    return quality_receipt, None, {
+        "schema": INDEPENDENT_MODEL_REVIEW_SCHEMA,
+        "provider": reviewer,
+        "receipt": _receipt(
+            independent["receipt"], "evidence.independent_model_review.receipt.required",
+        ),
+    }
 
 
 def _outcome(status: str, event: dict[str, Any], plan: Any, **values) -> ReleaseCoordinatorOutcome:
@@ -740,6 +781,7 @@ def run_next_release(
     approval_ttl_seconds: float | int = 2_592_000,
     delivery_max_attempts: int = 5,
     human_review_verifier: Any | None = None,
+    independent_model_review_verifier: Any | None = None,
     operation_guard: Callable[[float], Any] | None = None,
     clock: Callable[[], float] = time.time,
 ) -> ReleaseCoordinatorOutcome:
@@ -845,7 +887,9 @@ def run_next_release(
                 "evidence.operation_guard.failed",
             ) from None
     try:
-        quality_receipt, human_receipt = _obtain_evidence(evidence_provider, request)
+        quality_receipt, human_receipt, independent_review = _obtain_evidence(
+            evidence_provider, request,
+        )
     except LocalizationReleaseCoordinatorBlocked as error:
         evidence_state.fail(claim, error, now=current_time())
         raise
@@ -860,7 +904,11 @@ def run_next_release(
             now=approval_now,
             ttl_seconds=approval_ttl_seconds,
             human_review_receipt=human_receipt,
-            human_review_verifier=human_review_verifier if request.human_review_required else None,
+            human_review_verifier=human_review_verifier if human_receipt is not None else None,
+            independent_model_review=independent_review,
+            independent_model_review_verifier=(
+                independent_model_review_verifier if independent_review is not None else None
+            ),
         )
     except Exception as error:
         code = _external_code(error, "release")

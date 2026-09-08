@@ -32,7 +32,7 @@ OPTIONAL_TICK_KEYS = frozenset({
     "translation_retry_max_seconds", "evidence_lease_seconds",
     "evidence_max_attempts", "approval_ttl_seconds",
     "delivery_lease_seconds", "delivery_max_attempts",
-    "human_review_verifier", "result_cache",
+    "human_review_verifier", "independent_model_review_verifier", "result_cache",
 })
 OPERATION_LEASE_DEFAULTS = {
     "translation_lease_seconds": 300.0,
@@ -140,6 +140,11 @@ def _validate_dependencies(values: Mapping[str, Any]) -> MappingProxyType:
     human = copied.get("human_review_verifier")
     if human is not None:
         _capability(human, "verify", "runtime.human_review_verifier.invalid")
+    independent = copied.get("independent_model_review_verifier")
+    if independent is not None:
+        _capability(
+            independent, "verify", "runtime.independent_model_review_verifier.invalid",
+        )
     bounds = {
         "translation_lease_seconds": (86_400.0, False),
         "translation_retry_base_seconds": (86_400.0, True),

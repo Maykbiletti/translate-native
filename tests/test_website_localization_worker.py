@@ -342,8 +342,9 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
         provider = self.successful_provider("Genom att fortsätta godkänner du villkoren.")
         result = WORKER.run_localization_job(job("By continuing, you accept the terms.", "legal"), assets(), provider)
         self.assertTrue(result["human_review_required"])
+        self.assertFalse(result["independent_review_required"])
 
-    def test_low_review_confidence_routes_any_content_to_human_review(self):
+    def test_low_review_confidence_requires_independent_review(self):
         for low_phase in ("target_native", "source_fidelity"):
             with self.subTest(phase=low_phase):
                 provider = ScriptedProvider([
@@ -362,7 +363,8 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
                     ),
                 ])
                 result = WORKER.run_localization_job(job(), assets(), provider)
-                self.assertTrue(result["human_review_required"])
+                self.assertFalse(result["human_review_required"])
+                self.assertTrue(result["independent_review_required"])
                 self.assertEqual(result["review_confidence"][low_phase], "low")
 
     def test_missing_or_unknown_review_confidence_blocks(self):
