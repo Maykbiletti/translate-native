@@ -7,6 +7,8 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -234,6 +236,50 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         }
         values.update(overrides)
         return RUNTIME.WebsiteLocalizationRuntime(**values)
+
+    def benchmark_configuration(self, **execution_overrides):
+        campaign = RUNTIME._HEALTH._CAMPAIGN
+        policy = self.benchmark_policy()
+        campaign_id = campaign._campaign_identity(
+            campaign._BENCHMARK._validate_policy(policy),
+        )[0]
+        authority = Authority(
+            campaign._BENCHMARK.BenchmarkSignature,
+            b"benchmark-key",
+            "benchmark-key",
+        )
+        benchmark_connections = [sqlite3.connect(":memory:") for _ in range(4)]
+        self.connections.extend(benchmark_connections)
+        reviewer = type("Reviewer", (), {"review": lambda self, request: None})()
+        verifier = type("Verifier", (), {"verify": lambda self, **values: True})()
+        execution = {
+            "candidate_connection": benchmark_connections[1],
+            "baseline_connection": benchmark_connections[2],
+            "native_reference_connection": benchmark_connections[3],
+            "candidate_route_id": "attached-model-primary",
+            "baseline_route_id": "official-baseline",
+            "native_reference_route_id": "qualified-native-vault",
+            "assets_resolver": lambda payload: None,
+            "candidate_provider_resolver": lambda payload: None,
+            "baseline_acquirer": lambda *values: None,
+            "native_reference_loader": lambda payload: None,
+            "reviewer": reviewer,
+            "native_reference_verifier": verifier,
+            "blinding_key": b"benchmark-blinding-key-material-1",
+            "worker_id": "benchmark-worker",
+            "max_attempts": 3,
+            "lease_seconds": 300,
+            "retry_base_seconds": 5,
+            "retry_max_seconds": 3600,
+        }
+        execution.update(execution_overrides)
+        return {
+            "benchmark_connection": benchmark_connections[0],
+            "benchmark_policy": policy,
+            "benchmark_campaign_id": campaign_id,
+            "benchmark_evidence_authority": authority,
+            "benchmark_execution": execution,
+        }
 
     def ingest(self, runtime, event=None):
         event = self.event() if event is None else event
@@ -477,6 +523,178 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertIsNone(benchmark_connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'",
         ).fetchone())
+
+    def test_runtime_runs_one_benchmark_case_only_after_customer_work_is_idle(self):
+        values = self.benchmark_configuration()
+        fake = mock.Mock()
+        fake.campaign_id = values["benchmark_campaign_id"]
+        fake.run_once.side_effect = lambda **kwargs: (
+            kwargs["operation_guard"](kwargs["lease_seconds"]),
+            SimpleNamespace(
+                status="succeeded",
+                work_id="benchmark-work-" + "a" * 64,
+                target_locale="mt-MT",
+                attempt=1,
+                error_code=None,
+            ),
+        )[1]
+        with mock.patch.object(
+            RUNTIME._BENCHMARK_RUNTIME,
+            "WebsiteLocalizationBenchmarkRuntime",
+            return_value=fake,
+        ):
+            runtime = self.runtime(**values)
+
+        outcome = runtime.run_once(now=100)
+
+        self.assertEqual(outcome.tick["phase"], "benchmark")
+        self.assertEqual(outcome.tick["status"], "succeeded")
+        self.assertEqual(outcome.tick["target_locale"], "mt-MT")
+        self.assertEqual(outcome.tick["attempt"], 1)
+        self.assertEqual(fake.run_once.call_count, 1)
+        self.assertEqual(
+            fake.run_once.call_args.kwargs["lease_seconds"],
+            300.0,
+        )
+
+    def test_runtime_constructs_exact_durable_benchmark_execution_root(self):
+        values = self.benchmark_configuration()
+
+        runtime = self.runtime(**values)
+
+        self.assertIsInstance(
+            runtime.benchmark_runtime,
+            RUNTIME._BENCHMARK_RUNTIME.WebsiteLocalizationBenchmarkRuntime,
+        )
+        self.assertEqual(
+            runtime.benchmark_runtime.campaign_id,
+            values["benchmark_campaign_id"],
+        )
+        self.assertIs(
+            runtime.benchmark_runtime.campaign_store.connection,
+            values["benchmark_connection"],
+        )
+        status = runtime.benchmark_runtime.status()
+        self.assertEqual(status["work_count"], 30)
+        self.assertEqual(status["counts"]["pending"], 30)
+
+    def test_runtime_prioritizes_all_customer_phases_over_benchmark(self):
+        values = self.benchmark_configuration()
+        fake = mock.Mock()
+        fake.campaign_id = values["benchmark_campaign_id"]
+        fake.run_once.return_value = SimpleNamespace(
+            status="succeeded",
+            work_id="benchmark-work-" + "b" * 64,
+            target_locale="fi-FI",
+            attempt=1,
+            error_code=None,
+        )
+        with mock.patch.object(
+            RUNTIME._BENCHMARK_RUNTIME,
+            "WebsiteLocalizationBenchmarkRuntime",
+            return_value=fake,
+        ):
+            runtime = self.runtime(**values)
+        self.ingest(runtime)
+
+        phases = []
+        for now in (100, 101, 102):
+            self.clock.value = now
+            phases.append(runtime.run_once(now=now).tick["phase"])
+            fake.run_once.assert_not_called()
+        self.clock.value = 103
+        benchmark = runtime.run_once(now=103)
+
+        self.assertEqual(phases, ["translation", "release", "delivery"])
+        self.assertEqual(benchmark.tick["phase"], "benchmark")
+        fake.run_once.assert_called_once()
+
+    def test_runtime_rejects_incomplete_benchmark_execution_without_schema_writes(self):
+        values = self.benchmark_configuration()
+        values["benchmark_execution"].pop("reviewer")
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.benchmark.execution.invalid",
+        ):
+            self.runtime(**values)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+        self.assertTrue(all(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchone() is None
+            for connection in self.connections
+        ))
+
+    def test_runtime_benchmark_lease_must_fit_outer_lease_before_schema_writes(self):
+        values = self.benchmark_configuration(lease_seconds=301)
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.lease_hierarchy.invalid",
+        ):
+            self.runtime(**values)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+        self.assertTrue(all(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchone() is None
+            for connection in self.connections
+        ))
+
+    def test_runtime_rejects_invalid_benchmark_clock_without_schema_writes(self):
+        values = self.benchmark_configuration()
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.clock.invalid",
+        ):
+            self.runtime(clock=lambda: True, **values)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+        self.assertTrue(all(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchone() is None
+            for connection in self.connections
+        ))
+
+    def test_runtime_rejects_benchmark_store_reuse_without_schema_writes(self):
+        values = self.benchmark_configuration(
+            candidate_connection=self.connections[0],
+        )
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.connections.not_distinct",
+        ):
+            self.runtime(**values)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+        self.assertTrue(all(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchone() is None
+            for connection in self.connections
+        ))
 
     def test_preflight_rejects_missing_capability_without_schema_writes(self):
         self.dependencies["publisher"] = object()

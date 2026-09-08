@@ -64,6 +64,10 @@ _HEALTH = _load_module(
     "blun_website_localization_runtime_health",
     _ROOT / "integrations" / "website_localization_health.py",
 )
+_BENCHMARK_RUNTIME = _load_module(
+    "blun_website_localization_runtime_benchmark_execution",
+    _ROOT / "integrations" / "website_localization_benchmark_runtime.py",
+)
 _CMS = _SERVICE._CMS
 _QUEUE = _CMS._QUEUE
 _RELEASE = _CMS._RELEASE
@@ -177,7 +181,7 @@ def _validate_dependencies(values: Mapping[str, Any]) -> MappingProxyType:
 
 
 def _validate_connections(connections: tuple[Any, ...]) -> None:
-    if len(connections) not in {5, 6} or any(
+    if len(connections) not in {5, 6, 9} or any(
         not isinstance(connection, sqlite3.Connection) for connection in connections
     ):
         raise LocalizationRuntimeBlocked("runtime.connections.invalid")
@@ -207,13 +211,109 @@ def _supervisor_policy(value: Any):
 def _validate_lease_hierarchy(
     dependencies: Mapping[str, Any],
     supervisor_policy: Any,
+    *,
+    benchmark_lease_seconds: float | None = None,
 ) -> None:
-    longest_operation_lease = max(
+    leases = [
         float(dependencies.get(name, default))
         for name, default in OPERATION_LEASE_DEFAULTS.items()
-    )
+    ]
+    if benchmark_lease_seconds is not None:
+        leases.append(benchmark_lease_seconds)
+    longest_operation_lease = max(leases)
     if float(supervisor_policy.lease_seconds) <= longest_operation_lease:
         raise LocalizationRuntimeBlocked("runtime.lease_hierarchy.invalid")
+
+
+BENCHMARK_EXECUTION_KEYS = frozenset({
+    "candidate_connection", "baseline_connection",
+    "native_reference_connection", "candidate_route_id",
+    "baseline_route_id", "native_reference_route_id", "assets_resolver",
+    "candidate_provider_resolver", "baseline_acquirer",
+    "native_reference_loader", "reviewer", "native_reference_verifier",
+    "blinding_key", "worker_id", "max_attempts", "lease_seconds",
+    "retry_base_seconds", "retry_max_seconds",
+})
+
+
+def _benchmark_execution(value: Any) -> MappingProxyType | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != BENCHMARK_EXECUTION_KEYS:
+        raise LocalizationRuntimeBlocked("runtime.benchmark.execution.invalid")
+    copied = dict(value)
+    try:
+        for name in (
+            "candidate_connection", "baseline_connection",
+            "native_reference_connection",
+        ):
+            _BENCHMARK_RUNTIME._connection(copied[name])
+        for name in (
+            "candidate_route_id", "baseline_route_id",
+            "native_reference_route_id",
+        ):
+            _BENCHMARK_RUNTIME._route(
+                copied[name], "benchmark.runtime.route_invalid",
+            )
+        for name in (
+            "assets_resolver", "candidate_provider_resolver",
+            "baseline_acquirer", "native_reference_loader",
+        ):
+            _BENCHMARK_RUNTIME._callable(
+                copied[name], "benchmark.runtime.resolver_invalid",
+            )
+        _BENCHMARK_RUNTIME._adapter(
+            copied["reviewer"], "review", "benchmark.runtime.reviewer_invalid",
+        )
+        _BENCHMARK_RUNTIME._adapter(
+            copied["native_reference_verifier"],
+            "verify",
+            "benchmark.runtime.reference_verifier_invalid",
+        )
+        if (
+            not isinstance(copied["blinding_key"], bytes)
+            or len(copied["blinding_key"]) < 32
+        ):
+            raise ValueError
+        _BENCHMARK_RUNTIME._CAMPAIGN._identifier(copied["worker_id"])
+        if (
+            isinstance(copied["max_attempts"], bool)
+            or not isinstance(copied["max_attempts"], int)
+            or not 1 <= copied["max_attempts"] <= (
+                _BENCHMARK_RUNTIME._CAMPAIGN.MAX_ATTEMPTS
+            )
+        ):
+            raise ValueError
+    except Exception as error:
+        code = getattr(error, "code", "runtime.benchmark.execution.invalid")
+        if not isinstance(code, str) or re.fullmatch(
+            r"[a-z][a-z0-9_.-]{0,127}", code,
+        ) is None:
+            code = "runtime.benchmark.execution.invalid"
+        raise LocalizationRuntimeBlocked(code) from None
+    try:
+        copied["lease_seconds"] = _BENCHMARK_RUNTIME._CAMPAIGN._duration(
+            copied["lease_seconds"],
+        )
+        copied["retry_base_seconds"] = (
+            _BENCHMARK_RUNTIME._CAMPAIGN._duration(
+                copied["retry_base_seconds"], allow_zero=True,
+            )
+        )
+        copied["retry_max_seconds"] = (
+            _BENCHMARK_RUNTIME._CAMPAIGN._duration(
+                copied["retry_max_seconds"], allow_zero=True,
+            )
+        )
+    except Exception:
+        raise LocalizationRuntimeBlocked(
+            "runtime.benchmark.execution.retry_policy.invalid",
+        ) from None
+    if copied["retry_base_seconds"] > copied["retry_max_seconds"]:
+        raise LocalizationRuntimeBlocked(
+            "runtime.benchmark.execution.retry_policy.invalid",
+        )
+    return MappingProxyType(copied)
 
 
 class WebsiteLocalizationRuntime:
@@ -236,6 +336,7 @@ class WebsiteLocalizationRuntime:
         benchmark_campaign_id: str | None = None,
         benchmark_evidence_authority: Any | None = None,
         benchmark_stale_after_seconds: float | int = 3600,
+        benchmark_execution: Mapping[str, Any] | None = None,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
     ):
@@ -246,6 +347,9 @@ class WebsiteLocalizationRuntime:
         benchmark_enabled = any(value is not None for value in benchmark_values)
         if benchmark_enabled and any(value is None for value in benchmark_values):
             raise LocalizationRuntimeBlocked("runtime.benchmark.incomplete")
+        if benchmark_execution is not None and not benchmark_enabled:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.incomplete")
+        benchmark_execution = _benchmark_execution(benchmark_execution)
         if benchmark_enabled:
             if not isinstance(benchmark_campaign_id, str) or re.fullmatch(
                 r"benchmark-campaign-[0-9a-f]{64}", benchmark_campaign_id,
@@ -267,6 +371,12 @@ class WebsiteLocalizationRuntime:
                 raise LocalizationRuntimeBlocked("runtime.benchmark.policy.invalid") from None
             if expected_campaign_id != benchmark_campaign_id:
                 raise LocalizationRuntimeBlocked("runtime.benchmark.binding.invalid")
+            if benchmark_execution is not None:
+                _capability(
+                    benchmark_evidence_authority,
+                    "sign",
+                    "runtime.benchmark.authority.invalid",
+                )
         _number(
             benchmark_stale_after_seconds,
             "runtime.benchmark.stale_after_seconds.invalid",
@@ -275,7 +385,13 @@ class WebsiteLocalizationRuntime:
         connections = (
             queue_connection, release_connection, cms_connection,
             evidence_connection, supervisor_connection,
-        ) + ((benchmark_connection,) if benchmark_enabled else ())
+        ) + ((benchmark_connection,) if benchmark_enabled else ()) + (
+            (
+                benchmark_execution["candidate_connection"],
+                benchmark_execution["baseline_connection"],
+                benchmark_execution["native_reference_connection"],
+            ) if benchmark_execution is not None else ()
+        )
         _validate_connections(connections)
         validated = _validate_dependencies(dependencies)
         supervisor_worker_id = _identifier(
@@ -283,10 +399,22 @@ class WebsiteLocalizationRuntime:
         )
         if not callable(clock):
             raise LocalizationRuntimeBlocked("runtime.clock.invalid")
+        if benchmark_execution is not None:
+            try:
+                _BENCHMARK_RUNTIME._CAMPAIGN._timestamp(clock())
+            except Exception:
+                raise LocalizationRuntimeBlocked("runtime.clock.invalid") from None
         if token_factory is not None and not callable(token_factory):
             raise LocalizationRuntimeBlocked("runtime.token_factory.invalid")
         supervisor_policy = _supervisor_policy(supervisor_policy)
-        _validate_lease_hierarchy(validated, supervisor_policy)
+        _validate_lease_hierarchy(
+            validated,
+            supervisor_policy,
+            benchmark_lease_seconds=(
+                benchmark_execution["lease_seconds"]
+                if benchmark_execution is not None else None
+            ),
+        )
         _number(
             supervisor_stale_after_seconds,
             "runtime.supervisor_stale_after_seconds.invalid",
@@ -310,18 +438,103 @@ class WebsiteLocalizationRuntime:
         self.evidence_state = _COORDINATOR.QualityEvidenceStateStore(
             evidence_connection,
         )
+        self.benchmark_runtime = None
+        self._benchmark_execution = benchmark_execution
+        if benchmark_execution is not None:
+            try:
+                self.benchmark_runtime = (
+                    _BENCHMARK_RUNTIME.WebsiteLocalizationBenchmarkRuntime(
+                        campaign_connection=benchmark_connection,
+                        candidate_connection=(
+                            benchmark_execution["candidate_connection"]
+                        ),
+                        baseline_connection=(
+                            benchmark_execution["baseline_connection"]
+                        ),
+                        native_reference_connection=(
+                            benchmark_execution["native_reference_connection"]
+                        ),
+                        policy=benchmark_policy,
+                        candidate_route_id=(
+                            benchmark_execution["candidate_route_id"]
+                        ),
+                        baseline_route_id=benchmark_execution["baseline_route_id"],
+                        native_reference_route_id=(
+                            benchmark_execution["native_reference_route_id"]
+                        ),
+                        assets_resolver=benchmark_execution["assets_resolver"],
+                        candidate_provider_resolver=(
+                            benchmark_execution["candidate_provider_resolver"]
+                        ),
+                        baseline_acquirer=(
+                            benchmark_execution["baseline_acquirer"]
+                        ),
+                        native_reference_loader=(
+                            benchmark_execution["native_reference_loader"]
+                        ),
+                        reviewer=benchmark_execution["reviewer"],
+                        native_reference_verifier=(
+                            benchmark_execution["native_reference_verifier"]
+                        ),
+                        evidence_authority=benchmark_evidence_authority,
+                        blinding_key=benchmark_execution["blinding_key"],
+                        worker_id=benchmark_execution["worker_id"],
+                        max_attempts=benchmark_execution["max_attempts"],
+                        clock=self._clock,
+                    )
+                )
+            except Exception as error:
+                code = getattr(error, "code", None)
+                if not isinstance(code, str) or re.fullmatch(
+                    r"[a-z][a-z0-9_.-]{0,127}", code,
+                ) is None:
+                    code = "runtime.benchmark.execution.invalid"
+                raise LocalizationRuntimeBlocked(code) from None
+            if self.benchmark_runtime.campaign_id != benchmark_campaign_id:
+                raise LocalizationRuntimeBlocked(
+                    "runtime.benchmark.execution.binding.invalid",
+                )
         self.benchmark_store = (
             _HEALTH._CAMPAIGN.BenchmarkCampaignStore(benchmark_connection)
             if benchmark_enabled else None
         )
 
         def tick():
-            return _SERVICE.run_service_tick(
+            service_tick = _SERVICE.run_service_tick(
                 self.bridge,
                 self.evidence_state,
                 clock=self._clock,
                 operation_guard=self.supervisor.renew_active_lease,
                 **self._dependencies,
+            )
+            if (
+                service_tick.phase != "idle"
+                or service_tick.status != "idle"
+                or self.benchmark_runtime is None
+            ):
+                return service_tick
+            try:
+                benchmark_tick = self.benchmark_runtime.run_once(
+                    operation_guard=self.supervisor.renew_active_lease,
+                    lease_seconds=self._benchmark_execution["lease_seconds"],
+                    retry_base_seconds=(
+                        self._benchmark_execution["retry_base_seconds"]
+                    ),
+                    retry_max_seconds=(
+                        self._benchmark_execution["retry_max_seconds"]
+                    ),
+                )
+            except Exception as error:
+                return _SERVICE._runtime_error("benchmark", error)
+            if benchmark_tick is None:
+                return service_tick
+            return _SERVICE._outcome(
+                "benchmark",
+                benchmark_tick.status,
+                job_id=benchmark_tick.work_id,
+                target_locale=benchmark_tick.target_locale,
+                attempt=benchmark_tick.attempt,
+                error_code=benchmark_tick.error_code,
             )
 
         self.supervisor = _SUPERVISOR.LocalizationServiceSupervisor(

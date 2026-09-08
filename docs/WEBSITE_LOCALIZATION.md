@@ -1111,28 +1111,53 @@ structural contracts.
 The host supplies five distinct `sqlite3.Connection` objects: queue, release,
 CMS, evidence, and supervisor. An optional monitored benchmark campaign adds a
 sixth connection plus its exact policy, campaign ID, evidence verifier, and
-staleness threshold. The runtime rejects partial benchmark configuration and
-connection reuse before constructing any store. These connections may point to
-host-chosen durable files but must not be the same connection because the stores
-have independent schemas, transactions, and migration rules. The runtime
-neither opens nor closes those connections. It also never reads a configuration
-file, environment variable, credential, signing key, or network endpoint.
+staleness threshold. Monitor-only configuration remains supported and performs
+no benchmark work.
+
+To execute the same campaign, supply the exact `benchmark_execution` mapping.
+It adds separate `candidate_connection`, `baseline_connection`, and
+`native_reference_connection` stores, making nine distinct connections in
+total. The remaining required fields are `candidate_route_id`,
+`baseline_route_id`, `native_reference_route_id`, `assets_resolver`,
+`candidate_provider_resolver`, `baseline_acquirer`,
+`native_reference_loader`, `reviewer`, `native_reference_verifier`,
+`blinding_key`, `worker_id`, `max_attempts`, `lease_seconds`,
+`retry_base_seconds`, and `retry_max_seconds`. Extra, missing, malformed, reused,
+or transaction-active values block before schema construction. The benchmark
+evidence authority must both sign and verify, and the supervisor lease must
+strictly exceed the configured benchmark lease.
+
+The composition root constructs the canonical
+`WebsiteLocalizationBenchmarkRuntime`; callers cannot replace its durable input
+assembly with an unrestricted callback. All connections may point to
+host-chosen durable files but must be distinct because the stores have
+independent schemas, transactions, and migration rules. The runtime neither
+opens nor closes them. It also never reads a configuration file, environment
+variable, credential, signing key, or network endpoint.
 
 When configured, the existing content-free health report gains a
 `benchmark_campaign` component. Its overall status becomes degraded for an
 expired lease or a stalled actionable campaign and blocked for failed or
 unverifiable work. The localization service supervisor does not execute
-benchmark cases: campaign workers retain separate leases and adapters, while
-operators obtain one fail-closed operational view of both publication and
-benchmark readiness.
+benchmark cases for monitor-only configurations. With `benchmark_execution`,
+each supervised tick still runs the customer publication pipeline first. A
+delivery, release, evidence, or translation transition returns immediately and
+the benchmark executor is not called. Only an exact `idle` customer result may
+advance at most one benchmark case. The same token-bound outer lease guard is
+passed through the campaign and its durable candidate, baseline, reference,
+and review operations; losing that lease blocks before the next external
+boundary. A campaign with no currently actionable case preserves the ordinary
+idle result. Benchmark success, bounded retry, terminal failure, and stable
+error code use the existing content-free supervisor tick schema.
 
 Premortem: a mirrored database could yield inconsistent status, a dead worker
 could leave a lease that looks active, terminal cases could hide behind overall
-progress, status could leak reviewer prose, or an incomplete campaign could be
-mistaken for a passed comparison. Distinct connection validation, snapshot
-verification, lease and staleness reasons, per-row attestation checks,
-code-and-count-only output, and a separate `report_ready` flag close those
-paths.
+progress, status could leak reviewer prose, an incomplete campaign could be
+mistaken for a passed comparison, or background evaluation could delay a real
+publication. Nine-store validation, customer-first scheduling, strict lease
+hierarchy, snapshot verification, lease and staleness reasons, per-row
+attestation checks, code-and-count-only output, and a separate `report_ready`
+flag close those paths.
 
 The supervisor lease must be strictly longer than every effective translation,
 quality-evidence, and CMS-delivery lease. The runtime checks this hierarchy
