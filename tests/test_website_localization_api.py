@@ -99,7 +99,11 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         )
         self.authority = Authority()
         self.api = API.WebsiteLocalizationAPI(
-            self.bridge, self.authority, clock=lambda: 100,
+            self.bridge,
+            self.authority,
+            clock=lambda: 100,
+            approval_authority=self.authority,
+            publication_authority=self.authority,
         )
 
     def tearDown(self):
@@ -158,6 +162,30 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             value,
             signature=authority.sign(value, key_id=key_id),
             PATH_INFO=API.STATUS_PATH,
+        )
+
+    def lifecycle_request(
+        self,
+        event_id="event-1",
+        *,
+        site_id="site-1",
+        request_id="lifecycle-1",
+        requested_at=100,
+        authority=None,
+        key_id="event-key-1",
+    ):
+        value = {
+            "schema": API.LIFECYCLE_REQUEST_SCHEMA,
+            "request_id": request_id,
+            "event_id": event_id,
+            "site_id": site_id,
+            "requested_at": requested_at,
+        }
+        authority = authority or self.authority
+        return self.request(
+            value,
+            signature=authority.sign(value, key_id=key_id),
+            PATH_INFO=API.LIFECYCLE_PATH,
         )
 
     def test_signed_v2_change_enqueues_each_locale_and_replays_idempotently(self):
@@ -279,6 +307,95 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertNotIn("source_text", json.dumps(payload))
         self.assertNotIn("Save up", json.dumps(payload))
         self.assertEqual(headers["Cache-Control"], "no-store")
+
+    def test_signed_lifecycle_reports_processing_without_mutating_state(self):
+        self.request()
+        changes_before = (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        )
+
+        status, headers, payload = self.lifecycle_request()
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(payload["schema"], API.LIFECYCLE_RESPONSE_SCHEMA)
+        self.assertEqual(payload["status"], "processing")
+        self.assertEqual(payload["required_locales"], ["fi-FI", "mt-MT"])
+        self.assertEqual(payload["approved_locales"], [])
+        self.assertEqual(
+            payload["blocked_locales"],
+            [["fi-FI", "approval.missing"], ["mt-MT", "approval.missing"]],
+        )
+        self.assertEqual(payload["queue_counts"]["pending"], 2)
+        self.assertIsNone(payload["delivery"])
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertNotIn("source_text", json.dumps(payload))
+        self.assertNotIn("Save up", json.dumps(payload))
+        self.assertEqual(changes_before, (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        ))
+
+    def test_lifecycle_is_purpose_bound_fresh_and_tenant_scoped(self):
+        self.request()
+        wrong_schema = {
+            "schema": API.STATUS_REQUEST_SCHEMA,
+            "request_id": "lifecycle-purpose",
+            "event_id": "event-1",
+            "site_id": "site-1",
+            "requested_at": 100,
+        }
+        status, _, payload = self.request(
+            wrong_schema,
+            PATH_INFO=API.LIFECYCLE_PATH,
+        )
+        self.assertEqual(
+            (status, payload["error"]),
+            ("400 Bad Request", "cms.lifecycle.request_invalid"),
+        )
+        status, _, payload = self.lifecycle_request(site_id="site-2")
+        self.assertEqual(
+            (status, payload["error"]),
+            ("401 Unauthorized", "cms.lifecycle.scope_rejected"),
+        )
+        status, _, payload = self.lifecycle_request(requested_at=1000)
+        self.assertEqual(
+            (status, payload["error"]),
+            ("401 Unauthorized", "cms.lifecycle.request_expired"),
+        )
+
+    def test_lifecycle_requires_release_authorities(self):
+        self.request()
+        self.api = API.WebsiteLocalizationAPI(
+            self.bridge, self.authority, clock=lambda: 100,
+        )
+        status, _, payload = self.lifecycle_request()
+        self.assertEqual(
+            (status, payload["error"]),
+            ("503 Service Unavailable", "cms.lifecycle.unavailable"),
+        )
+
+    def test_lifecycle_exposes_terminal_locale_failure_without_detail_prose(self):
+        self.request()
+        claim = self.queue.claim("worker", now=101, lease_seconds=10)
+        self.queue.fail(
+            claim,
+            "provider.locale_unsupported",
+            error_detail="private provider diagnostic",
+            now=102,
+        )
+        self.api.clock = lambda: 102
+
+        status, _, payload = self.lifecycle_request(
+            request_id="lifecycle-failed", requested_at=102,
+        )
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(payload["status"], "localization_failed")
+        self.assertEqual(payload["queue_counts"]["failed"], 1)
+        self.assertNotIn("private provider diagnostic", json.dumps(payload))
 
     def test_status_is_bound_to_exact_site_and_original_credential(self):
         self.request()

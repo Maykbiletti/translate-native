@@ -33,6 +33,7 @@ MAX_LEASE_SECONDS = 86_400.0
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 SIGNATURE_VALUE = re.compile(r"^[A-Za-z0-9_.:/+=-]{1,4096}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _EVENT_COLUMNS = (
     "event_id", "event_sha256", "event_json", "signature_algorithm", "key_id",
     "signature", "plan_id", "status", "created_at", "updated_at",
@@ -215,6 +216,21 @@ class ChangeProgress:
     job_count: int
     counts: dict[str, int]
     locales: tuple[LocaleProgress, ...]
+
+
+@dataclass(frozen=True)
+class ChangeLifecycle:
+    event_id: str
+    site_id: str
+    plan_id: str
+    website_version: str
+    source_sequence: int
+    status: str
+    required_locales: tuple[str, ...]
+    approved_locales: tuple[str, ...]
+    blocked_locales: tuple[tuple[str, str], ...]
+    queue_counts: dict[str, int]
+    delivery: dict[str, Any] | None
 
 
 def _canonical_json(value: Any) -> str:
@@ -771,6 +787,197 @@ class WebsiteLocalizationCMSBridge:
             locales=tuple(sorted(locales, key=lambda item: item.target_locale)),
         )
 
+    def change_lifecycle(
+        self,
+        event_id: Any,
+        event_verifier: CMSMessageAuthority,
+        approval_authority: Any,
+        publication_authority: CMSMessageAuthority,
+        *,
+        site_id: Any,
+        requester_key_id: Any,
+        now: float | int,
+    ) -> ChangeLifecycle:
+        """Return the verified end-to-end state for one tenant-scoped event."""
+        now = _timestamp(now, "cms.time.invalid")
+        progress = self.change_progress(
+            event_id,
+            event_verifier,
+            site_id=site_id,
+            requester_key_id=requester_key_id,
+            now=now,
+        )
+        event, plan = self._load_event(progress.event_id, event_verifier)
+        try:
+            readiness = self.release_store.readiness(
+                plan, approval_authority, now=now,
+            )
+        except _RELEASE.LocalizationReleaseBlocked:
+            raise CMSBridgeBlocked("cms.release.integrity_failed") from None
+        expected_release_blocks = {"approval.missing", "approval.expired"}
+        if any(
+            code not in expected_release_blocks
+            for _, code in readiness.blocked
+        ):
+            raise CMSBridgeBlocked("cms.release.integrity_failed")
+
+        row = self.connection.execute(
+            "SELECT * FROM cms_publication_deliveries WHERE event_id = ?",
+            (progress.event_id,),
+        ).fetchone()
+        delivery = None
+        if row is not None:
+            request = self._request_from_row(
+                row, publication_authority, now, require_current_approvals=False,
+            )
+            payload = request.payload
+            expected_payload_keys = {
+                "schema", "delivery_id", "event_id", "site_id",
+                "website_version", "plan_id", "source_id", "source_revision",
+                "source_sequence", "source_sha256", "localizations",
+            }
+            expected_localization_keys = {
+                "locale", "target_text", "target_sha256", "approval_id",
+                "approval_expires_at",
+            }
+            localizations = payload.get("localizations")
+            if (
+                set(payload) != expected_payload_keys
+                or payload.get("schema") != PUBLICATION_SCHEMA
+                or payload.get("delivery_id") != row["delivery_id"]
+                or payload.get("event_id") != event["event_id"]
+                or payload.get("site_id") != event["site_id"]
+                or payload.get("website_version") != event["website_version"]
+                or payload.get("plan_id") != plan.plan_id
+                or payload.get("source_id") != event["localization"]["source_id"]
+                or payload.get("source_revision")
+                != event["localization"]["source_revision"]
+                or payload.get("source_sequence") != progress.source_sequence
+                or payload.get("source_sha256") != plan.source_hash
+                or not isinstance(localizations, list)
+                or any(
+                    not isinstance(item, dict)
+                    or set(item) != expected_localization_keys
+                    for item in localizations
+                )
+                or tuple(sorted(item["locale"] for item in localizations))
+                != readiness.required_locales
+                or any(
+                    _token(item["locale"], "cms.delivery.tampered")
+                    != item["locale"]
+                    or not isinstance(item["target_text"], str)
+                    or not item["target_text"]
+                    or not unicodedata.is_normalized("NFC", item["target_text"])
+                    or SHA256.fullmatch(str(item["target_sha256"])) is None
+                    or _token(item["approval_id"], "cms.delivery.tampered")
+                    != item["approval_id"]
+                    or _timestamp(
+                        item["approval_expires_at"], "cms.delivery.tampered",
+                    ) <= 0
+                    for item in localizations
+                )
+            ):
+                raise CMSBridgeBlocked("cms.delivery.tampered")
+            delivery_status = self.delivery_status(request.delivery_id)
+            try:
+                next_attempt_at = _timestamp(
+                    delivery_status.next_attempt_at, "cms.delivery.tampered",
+                )
+                lease_expires_at = (
+                    None
+                    if delivery_status.lease_expires_at is None
+                    else _timestamp(
+                        delivery_status.lease_expires_at,
+                        "cms.delivery.tampered",
+                    )
+                )
+            except CMSBridgeBlocked:
+                raise
+            if (
+                delivery_status.event_id != progress.event_id
+                or delivery_status.plan_id != progress.plan_id
+                or delivery_status.payload_sha256 != request.payload_sha256
+                or delivery_status.status
+                not in {"pending", "leased", "retry_wait", "failed", "succeeded"}
+                or isinstance(delivery_status.attempts, bool)
+                or not isinstance(delivery_status.attempts, int)
+                or isinstance(delivery_status.max_attempts, bool)
+                or not isinstance(delivery_status.max_attempts, int)
+                or not 0 <= delivery_status.attempts <= delivery_status.max_attempts
+                or not 1 <= delivery_status.max_attempts <= MAX_ATTEMPTS
+                or (
+                    delivery_status.last_error_code is not None
+                    and (
+                        not isinstance(delivery_status.last_error_code, str)
+                        or ERROR_CODE.fullmatch(delivery_status.last_error_code) is None
+                    )
+                )
+                or (
+                    delivery_status.last_error_detail_hash is not None
+                    and SHA256.fullmatch(
+                        str(delivery_status.last_error_detail_hash),
+                    ) is None
+                )
+                or (delivery_status.status == "leased") != (lease_expires_at is not None)
+                or (
+                    delivery_status.status in {"pending", "leased", "succeeded"}
+                    and delivery_status.last_error_code is not None
+                )
+                or (
+                    delivery_status.status in {"retry_wait", "failed"}
+                    and delivery_status.last_error_code is None
+                )
+            ):
+                raise CMSBridgeBlocked("cms.delivery.tampered")
+            delivery = {
+                "delivery_id": delivery_status.delivery_id,
+                "status": delivery_status.status,
+                "attempts": delivery_status.attempts,
+                "max_attempts": delivery_status.max_attempts,
+                "next_attempt_at": next_attempt_at,
+                "lease_expires_at": lease_expires_at,
+                "lease_expired": (
+                    delivery_status.status == "leased"
+                    and lease_expires_at is not None
+                    and lease_expires_at <= now
+                ),
+                "last_error_code": delivery_status.last_error_code,
+                "last_error_detail_hash": delivery_status.last_error_detail_hash,
+            }
+
+        if delivery is not None and delivery["status"] == "succeeded":
+            status = "published"
+        elif delivery is not None and delivery["status"] == "failed":
+            status = "publication_failed"
+        elif delivery is not None and any(
+            code == "approval.expired" for _, code in readiness.blocked
+        ):
+            status = "publication_blocked"
+        elif delivery is not None:
+            status = "publishing"
+        elif readiness.ready:
+            status = "ready"
+        elif progress.counts["failed"]:
+            status = "localization_failed"
+        elif progress.counts["succeeded"] == progress.job_count:
+            status = "awaiting_approval"
+        else:
+            status = "processing"
+
+        return ChangeLifecycle(
+            event_id=progress.event_id,
+            site_id=progress.site_id,
+            plan_id=progress.plan_id,
+            website_version=progress.website_version,
+            source_sequence=progress.source_sequence,
+            status=status,
+            required_locales=readiness.required_locales,
+            approved_locales=readiness.approved_locales,
+            blocked_locales=readiness.blocked,
+            queue_counts=progress.counts,
+            delivery=delivery,
+        )
+
     def _load_event(
         self,
         event_id: Any,
@@ -956,7 +1163,11 @@ class WebsiteLocalizationCMSBridge:
         row: sqlite3.Row,
         authority: CMSMessageAuthority,
         now: float,
+        *,
+        require_current_approvals: bool = True,
     ) -> CMSPublicationRequest:
+        if not isinstance(require_current_approvals, bool):
+            raise CMSBridgeBlocked("cms.delivery.validation_mode_invalid")
         if _hash(row["payload_json"]) != row["payload_sha256"]:
             raise CMSBridgeBlocked("cms.delivery.tampered")
         try:
@@ -971,7 +1182,12 @@ class WebsiteLocalizationCMSBridge:
         expiries = [item.get("approval_expires_at") for item in localizations if isinstance(item, dict)]
         if len(expiries) != len(localizations):
             raise CMSBridgeBlocked("cms.delivery.tampered")
-        if any(_timestamp(expiry, "cms.delivery.tampered") <= now for expiry in expiries):
+        validated_expiries = tuple(
+            _timestamp(expiry, "cms.delivery.tampered") for expiry in expiries
+        )
+        if require_current_approvals and any(
+            expiry <= now for expiry in validated_expiries
+        ):
             raise CMSBridgeBlocked("cms.delivery.approval_expired")
         signature = _signature(CMSMessageSignature(
             row["signature_algorithm"], row["key_id"], row["signature"],

@@ -424,6 +424,157 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertNotIn("source_text", json.dumps(progress))
         self.assertIs(runtime.cms_api.bridge, runtime.bridge)
 
+    def test_runtime_exposes_read_only_tenant_lifecycle_through_publication(self):
+        runtime = self.runtime()
+        event = self.event()
+
+        def request(path, value):
+            raw = json.dumps(value, ensure_ascii=False).encode("utf-8")
+            signature = self.event_authority.sign(
+                RUNTIME._API._canonical_json(value).encode("utf-8"),
+            )
+            environ = {
+                "PATH_INFO": path,
+                "QUERY_STRING": "",
+                "REQUEST_METHOD": "POST",
+                "wsgi.url_scheme": "https",
+                "CONTENT_TYPE": "application/json; charset=utf-8",
+                "CONTENT_LENGTH": str(len(raw)),
+                "wsgi.input": io.BytesIO(raw),
+                "HTTP_X_LOCALIZATION_SIGNATURE_ALGORITHM": signature.algorithm,
+                "HTTP_X_LOCALIZATION_KEY_ID": signature.key_id,
+                "HTTP_X_LOCALIZATION_SIGNATURE": signature.signature,
+            }
+            captured = {}
+            body = b"".join(runtime.cms_api(
+                environ,
+                lambda status, headers: captured.update(status=status),
+            ))
+            return captured["status"], json.loads(body)
+
+        def lifecycle(request_id):
+            value = {
+                "schema": RUNTIME._API.LIFECYCLE_REQUEST_SCHEMA,
+                "request_id": request_id,
+                "event_id": event["event_id"],
+                "site_id": event["site_id"],
+                "requested_at": self.clock(),
+            }
+            changes_before = tuple(
+                connection.total_changes for connection in self.connections
+            )
+            response = request(RUNTIME._API.LIFECYCLE_PATH, value)
+            self.assertEqual(
+                changes_before,
+                tuple(connection.total_changes for connection in self.connections),
+            )
+            self.assertNotIn("Grow your business", json.dumps(response[1]))
+            self.assertNotIn("Kasvata", json.dumps(response[1]))
+            return response
+
+        status, accepted = request(RUNTIME._API.CHANGE_PATH, event)
+        self.assertEqual(status, "202 Accepted")
+        self.assertEqual(lifecycle("lifecycle-processing")[1]["status"], "processing")
+
+        self.clock.value = 101
+        self.assertEqual(runtime.run_once(now=101).tick["phase"], "translation")
+        awaiting = lifecycle("lifecycle-awaiting")[1]
+        self.assertEqual(awaiting["status"], "awaiting_approval")
+        self.assertEqual(awaiting["approved_locales"], [])
+
+        self.clock.value = 102
+        self.assertEqual(runtime.run_once(now=102).tick["phase"], "release")
+        publishing = lifecycle("lifecycle-publishing")[1]
+        self.assertEqual(publishing["status"], "publishing")
+        self.assertEqual(publishing["approved_locales"], ["fi-FI"])
+        self.assertEqual(publishing["delivery"]["status"], "pending")
+
+        self.clock.value = 103
+        self.assertEqual(runtime.run_once(now=103).tick["phase"], "delivery")
+        published = lifecycle("lifecycle-published")[1]
+        self.assertEqual(published["status"], "published")
+        self.assertEqual(published["delivery"]["status"], "succeeded")
+
+    def test_tenant_lifecycle_fails_closed_for_expired_pending_approvals(self):
+        self.dependencies["approval_ttl_seconds"] = 1
+        runtime = self.runtime()
+        self.ingest(runtime)
+        self.clock.value = 101
+        runtime.run_once(now=101)
+        self.clock.value = 102
+        runtime.run_once(now=102)
+        self.clock.value = 103
+        value = {
+            "schema": RUNTIME._API.LIFECYCLE_REQUEST_SCHEMA,
+            "request_id": "lifecycle-expired",
+            "event_id": "event-1",
+            "site_id": "public-site",
+            "requested_at": 103,
+        }
+        raw = json.dumps(value).encode("utf-8")
+        signature = self.event_authority.sign(
+            RUNTIME._API._canonical_json(value).encode("utf-8"),
+        )
+        captured = {}
+        body = b"".join(runtime.cms_api({
+            "PATH_INFO": RUNTIME._API.LIFECYCLE_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json",
+            "CONTENT_LENGTH": str(len(raw)),
+            "wsgi.input": io.BytesIO(raw),
+            "HTTP_X_LOCALIZATION_SIGNATURE_ALGORITHM": signature.algorithm,
+            "HTTP_X_LOCALIZATION_KEY_ID": signature.key_id,
+            "HTTP_X_LOCALIZATION_SIGNATURE": signature.signature,
+        }, lambda status, headers: captured.update(status=status)))
+        payload = json.loads(body)
+
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertEqual(payload["status"], "publication_blocked")
+        self.assertEqual(payload["blocked_locales"], [["fi-FI", "approval.expired"]])
+        self.assertEqual(payload["delivery"]["status"], "pending")
+
+    def test_tenant_lifecycle_rejects_tampered_signed_delivery_state(self):
+        runtime = self.runtime()
+        self.ingest(runtime)
+        self.clock.value = 101
+        runtime.run_once(now=101)
+        self.clock.value = 102
+        runtime.run_once(now=102)
+        runtime.bridge.connection.execute(
+            "UPDATE cms_publication_deliveries SET payload_json = '{}'",
+        )
+        value = {
+            "schema": RUNTIME._API.LIFECYCLE_REQUEST_SCHEMA,
+            "request_id": "lifecycle-tampered",
+            "event_id": "event-1",
+            "site_id": "public-site",
+            "requested_at": 102,
+        }
+        raw = json.dumps(value).encode("utf-8")
+        signature = self.event_authority.sign(
+            RUNTIME._API._canonical_json(value).encode("utf-8"),
+        )
+        captured = {}
+        body = b"".join(runtime.cms_api({
+            "PATH_INFO": RUNTIME._API.LIFECYCLE_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json",
+            "CONTENT_LENGTH": str(len(raw)),
+            "wsgi.input": io.BytesIO(raw),
+            "HTTP_X_LOCALIZATION_SIGNATURE_ALGORITHM": signature.algorithm,
+            "HTTP_X_LOCALIZATION_KEY_ID": signature.key_id,
+            "HTTP_X_LOCALIZATION_SIGNATURE": signature.signature,
+        }, lambda status, headers: captured.update(status=status)))
+        payload = json.loads(body)
+
+        self.assertEqual(captured["status"], "503 Service Unavailable")
+        self.assertEqual(payload["error"], "cms.delivery.tampered")
+        self.assertNotIn("localizations", payload)
+
     def test_runtime_exposes_health_only_with_explicit_operator_authentication(self):
         authentication_requests = []
 

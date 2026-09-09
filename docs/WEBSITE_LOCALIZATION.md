@@ -1558,6 +1558,16 @@ independent schemas, transactions, and migration rules. The runtime neither
 opens nor closes them. It also never reads a configuration file, environment
 variable, credential, signing key, or network endpoint.
 
+The same composition root binds its approval and publication authorities into
+the tenant-facing `runtime.cms_api`. In addition to durable change intake and
+per-locale queue progress, the API exposes a purpose-bound lifecycle read that
+revalidates release readiness and the signed CMS outbox. A tenant can therefore
+distinguish processing, missing approvals, readiness, publication retry,
+blocked publication, terminal failure, and acknowledged publication without
+receiving source text, target text, receipts, signatures, or service-wide site
+data. The read performs no state transition; the complete public contract is in
+[`WEBSITE_LOCALIZATION_API.md`](WEBSITE_LOCALIZATION_API.md).
+
 Service-wide HTTP health is disabled unless the host supplies an explicit
 `health_http_authenticator`. With that capability, the same composition root
 exposes `runtime.health_http`; an optional `health_provider_probe` is bound to

@@ -477,6 +477,8 @@ class WebsiteLocalizationRuntime:
             validated["event_verifier"],
             clock=self._clock,
             max_attempts=cms_api_max_attempts,
+            approval_authority=validated["approval_authority"],
+            publication_authority=validated["publication_authority"],
         )
         self.evidence_state = _COORDINATOR.QualityEvidenceStateStore(
             evidence_connection,

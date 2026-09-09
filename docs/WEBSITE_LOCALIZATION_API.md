@@ -2,9 +2,9 @@
 
 `WebsiteLocalizationAPI` is the provider-neutral WSGI ingress exposed by the
 composed website-localization runtime. It accepts a signed current CMS change,
-durably enqueues one job per required locale, and returns content-free progress.
-It never calls a model, approves a translation, prepares a publication, or
-returns source or target prose.
+durably enqueues one job per required locale, and returns content-free queue or
+end-to-end lifecycle status. It never calls a model, approves a translation,
+prepares a publication, or returns source or target prose.
 
 ## Host setup
 
@@ -102,6 +102,62 @@ Superseded events, wrong site or credential scope, missing work, altered queue
 identity, or a corrupt result return a complete fail-closed error rather than a
 partial optimistic status.
 
+## Read verified end-to-end lifecycle
+
+The tenant can separately ask whether the same event is still translating,
+awaiting signed approvals, ready, publishing, blocked, failed, or confirmed as
+published. This operation has its own schema so a valid queue-progress request
+cannot be replayed for a broader lifecycle read:
+
+```http
+POST /v2/localization/lifecycle HTTP/1.1
+Content-Type: application/json; charset=utf-8
+Content-Length: <exact UTF-8 byte count>
+X-Localization-Signature-Algorithm: <configured algorithm>
+X-Localization-Key-Id: <same credential that created the event>
+X-Localization-Signature: <signature>
+```
+
+```json
+{"event_id":"cms-event-184","request_id":"lifecycle-8","requested_at":1788955200,"schema":"blun.cms-localization-lifecycle-request.v1","site_id":"public-site"}
+```
+
+The signature, five-minute freshness window, site scope, and original key scope
+are identical to the progress route. The distinct schema binds the signature to
+this purpose. The composed runtime always supplies the approval and publication
+verification authorities. A standalone `WebsiteLocalizationAPI` must supply
+both authorities together; otherwise this route returns a fail-closed `503`.
+
+A successful response uses
+`blun.cms-localization-lifecycle.v1`. It contains the event, site, website
+version, plan and source-sequence identifiers; aggregate queue counts; required,
+approved and blocked locales; and an optional content-free delivery summary.
+The lifecycle `status` is exactly one of:
+
+- `processing`: at least one required locale still has queue work;
+- `localization_failed`: at least one required locale failed terminally;
+- `awaiting_approval`: all locale results exist, but signed release evidence is
+  missing;
+- `ready`: every required locale has a current verified approval, but no signed
+  CMS delivery exists yet;
+- `publishing`: a valid signed delivery is pending, leased, or waiting for retry;
+- `publication_blocked`: the prepared delivery can no longer be published, for
+  example because an approval expired before acknowledgement;
+- `publication_failed`: bounded delivery attempts ended terminally;
+- `published`: the CMS returned the exact signed acknowledgement for the
+  delivery.
+
+The read path revalidates every successful queue result and signed approval,
+then checks the complete stored publication envelope, signature, event, plan,
+source revision and locale set. It does not prepare, claim, renew, retry, sign,
+repair, or publish anything. A published acknowledgement stays published after
+its former approval validity window ends; expiration before acknowledgement is
+reported as `publication_blocked`.
+
+```json
+{"approved_locales":["fi-FI"],"blocked_locales":[],"delivery":{"attempts":0,"delivery_id":"blun-cms-delivery-…","last_error_code":null,"last_error_detail_hash":null,"lease_expired":false,"lease_expires_at":null,"max_attempts":5,"next_attempt_at":1788955201.0,"status":"pending"},"event_id":"cms-event-184","plan_id":"blun-l10n-plan-…","queue_counts":{"failed":0,"leased":0,"pending":0,"retry_wait":0,"succeeded":1},"request_id":"lifecycle-8","required_locales":["fi-FI"],"schema":"blun.cms-localization-lifecycle.v1","site_id":"public-site","source_sequence":42,"status":"publishing","website_version":"release-42"}
+```
+
 ## Failure contract
 
 Every failure has `Cache-Control: no-store` and contains no customer or provider
@@ -114,7 +170,8 @@ prose:
 `401` covers invalid, expired, or wrong-scope signed status requests; `409`
 covers identity, source-sequence, supersession, and legacy-ingress conflicts;
 `413` and `415` cover body size and media type; `503` covers inconsistent or
-unavailable durable state. Other invalid input returns `400`, and unexpected
+unavailable durable state, including missing lifecycle authorities and invalid
+release or delivery evidence. Other invalid input returns `400`, and unexpected
 failures reduce to `api.internal` with `500`. Clients may retry a transport
 failure or the exact signed change; they must never modify a request under the
 same event identity.
@@ -125,3 +182,10 @@ corrupt queue could look complete, or a status response could leak customer
 text. The v2-only endpoint, exact event/sequence idempotency, signed site and
 original-key scoping, durable planner identities, full result revalidation, and
 content-free responses keep those paths fail-closed.
+
+Lifecycle premortem: a tenant could probe another site's release, queue success
+could be mistaken for approval, an expired signature could remain apparently
+ready, a corrupt outbox row could be skipped, or a status read could mutate a
+lease. Purpose-bound signed requests, original-credential scope, verified
+release readiness, complete signed-delivery revalidation, explicit blocked
+states, and read-only regression checks keep those paths fail-closed.
