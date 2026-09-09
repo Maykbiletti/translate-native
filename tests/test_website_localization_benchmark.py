@@ -2144,6 +2144,55 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 [],
             )
 
+    def test_benchmark_runtime_accepts_bound_native_reference_intake(self):
+        runtime, connections, _, calls, _ = self._benchmark_runtime_fixture()
+        payload = job("mt-MT", "0")
+        target = _target_fixture(payload, "reference")
+        order = runtime.create_native_reference_work_order(payload)
+        request = runtime.native_reference_verification_request(
+            order,
+            payload,
+            target,
+            reviewer_id="qualified-native-reviewer-17",
+            reviewer_version="credential-2026-08-30",
+        )
+        submission = {
+            "schema": BENCHMARK_RUNTIME._REFERENCE_INTAKE.SUBMISSION_SCHEMA,
+            "work_order_id": order["work_order_id"],
+            "work_order_sha256": hashlib.sha256(
+                BENCHMARK_RUNTIME._REFERENCE_INTAKE._canonical_json(
+                    order,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "verification_request": request,
+            "qualification_receipt": (
+                runtime.native_reference_verifier.receipt(request)
+            ),
+        }
+        guards = []
+
+        artifact = runtime.accept_native_reference_submission(
+            order,
+            submission,
+            payload,
+            operation_guard=lambda: guards.append("guard"),
+        )
+        loaded = runtime.input_resolver.reference_store.load(
+            payload,
+            runtime.policy,
+            runtime.input_resolver.native_reference_route_id,
+            native_reference_verifier=runtime.native_reference_verifier,
+            evidence_authority=runtime.evidence_authority,
+        )
+
+        self.assertEqual(loaded, artifact)
+        self.assertEqual(artifact["request"]["target_text"], target)
+        self.assertGreaterEqual(len(guards), 6)
+        self.assertEqual(calls["reference"], 0)
+        self.assertEqual(connections[3].execute(
+            "SELECT COUNT(*) FROM benchmark_native_references"
+        ).fetchone()[0], 1)
+
     def test_benchmark_runtime_retries_with_exact_durable_inputs(self):
         reviewer = RetryOnceCampaignReviewer()
         runtime, connections, provider, calls, current_time = (

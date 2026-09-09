@@ -47,6 +47,10 @@ _REFERENCE = _load_module(
     "blun_website_localization_runtime_reference",
     _ROOT / "integrations" / "website_localization_native_reference_store.py",
 )
+_REFERENCE_INTAKE = _load_module(
+    "blun_website_localization_runtime_reference_intake",
+    _ROOT / "integrations" / "website_localization_native_reference_intake.py",
+)
 _REVIEW = _load_module(
     "blun_website_localization_runtime_review_store",
     _ROOT / "integrations" / "website_localization_benchmark_review_store.py",
@@ -494,6 +498,56 @@ class WebsiteLocalizationBenchmarkRuntime:
 
     def status(self):
         return self.campaign_store.status(self.policy, self.campaign_id)
+
+    def create_native_reference_work_order(self, job_payload: Any):
+        """Export one current target-free order for qualified native review."""
+        return _REFERENCE_INTAKE.create_native_reference_work_order(
+            job_payload,
+            self.policy,
+            self.input_resolver.native_reference_route_id,
+        )
+
+    def native_reference_verification_request(
+        self,
+        work_order: Any,
+        job_payload: Any,
+        target_text: Any,
+        *,
+        reviewer_id: Any,
+        reviewer_version: Any,
+    ):
+        """Return the exact request that the qualification receipt must bind."""
+        return _REFERENCE_INTAKE.native_reference_verification_request_for_work_order(
+            work_order,
+            job_payload,
+            self.policy,
+            self.input_resolver.native_reference_route_id,
+            target_text,
+            reviewer_id=reviewer_id,
+            reviewer_version=reviewer_version,
+        )
+
+    def accept_native_reference_submission(
+        self,
+        work_order: Any,
+        submission: Any,
+        job_payload: Any,
+        *,
+        operation_guard: Callable[[], Any] | None = None,
+    ):
+        """Verify and persist one current qualified-native submission."""
+        return _REFERENCE_INTAKE.accept_native_reference_submission(
+            self.input_resolver.reference_store,
+            work_order,
+            submission,
+            job_payload,
+            self.policy,
+            self.input_resolver.native_reference_route_id,
+            native_reference_verifier=self.native_reference_verifier,
+            evidence_authority=self.evidence_authority,
+            operation_guard=operation_guard,
+            now=self.clock(),
+        )
 
     def health(self, *, now: Any, stale_after_seconds: Any = 3600):
         return self.campaign_store.health(

@@ -439,6 +439,78 @@ content-free campaign dependency failures. Invalid artifacts, altered state,
 binding mismatches, and conflicts remain terminal; no missing reference is
 generated locally.
 
+`integrations/website_localization_native_reference_intake.py` completes the
+editorial hand-off without defining a vendor or inventing a translation. A
+host creates one `blun.website-localization-native-reference-work-order.v1`
+object per exact suite job. It contains the complete source, target locale,
+content type, locale-quality profile, policy and suite bindings, but no target
+text, reviewer credential, receipt, candidate, or baseline. Its stable identity
+binds the current route, complete policy, and complete canonical job.
+
+After a separately qualified native editor supplies a target, use
+`native_reference_verification_request_for_work_order` to construct the exact
+request that the configured verification authority must authorize. Submit that
+request and opaque receipt as
+`blun.website-localization-native-reference-submission.v1`, including the exact
+work-order ID and SHA-256 digest. `accept_native_reference_submission`
+regenerates the work order from current trusted state, reconstructs the receipt
+payload, verifies the qualified-human receipt, obtains and verifies the host
+attestation, then saves through `NativeReferenceArtifactStore`. A stale order,
+changed source, locale, profile, suite, policy, route, reviewer, target, or
+receipt therefore blocks before storage. Pass the campaign lease guard as
+`operation_guard`; it is checked immediately before every verifier and
+attestation-authority operation. Temporary guard, verifier, signer, or
+attestation-verifier outages are retryable and content-free. Identical
+submissions converge, while a different valid submission cannot replace the
+first accepted reference.
+
+The work order and accepted artifact contain source-derived prose and the
+accepted artifact contains the native target and receipt. Transport them only
+over a host-authenticated channel and retain them in owner-only storage under
+the host's encryption, access, backup, retention, and deletion policy. Public
+status must expose only stable IDs, hashes, codes, and counts. The intake
+module performs no network call, reads no credential or environment variable,
+and deliberately leaves authentication and qualified-review operations to the
+host adapters.
+
+The transport-neutral submission envelope has exactly these top-level fields:
+
+```json
+{
+  "schema": "blun.website-localization-native-reference-submission.v1",
+  "work_order_id": "native-reference-work-order:<sha256>",
+  "work_order_sha256": "<sha256 of the complete canonical work order>",
+  "verification_request": {
+    "schema": "blun.website-localization-native-reference-request.v1",
+    "reference_revision": "<policy-bound revision>",
+    "suite": "<exact suite object from the work order>",
+    "source": "<exact source object from the work order>",
+    "target_locale": "<exact BCP-47 locale from the work order>",
+    "content_type": "<exact content type from the work order>",
+    "quality_profile": "<exact locale profile from the work order>",
+    "localization_policy": "<exact version bindings from the work order>",
+    "qualification": {
+      "method": "qualified_native_human",
+      "reviewer_id": "<independent reviewer ID>",
+      "reviewer_version": "<credential version>",
+      "verifier_id": "<exact verifier ID from the work order>",
+      "verifier_version": "<exact verifier version from the work order>"
+    },
+    "target_text": "<NFC native reference>",
+    "target_sha256": "<sha256 of the exact UTF-8 target>"
+  },
+  "qualification_receipt": "<opaque verifier receipt>"
+}
+```
+
+Fields shown as objects must be JSON objects, not strings; the notation above
+keeps the contract compact. Implementations must transmit the complete
+canonical objects returned by the two intake helpers and must reject extra,
+missing, duplicate, non-finite, oversized, or altered data at their transport
+boundary. The host may wrap this envelope in its own authenticated HTTP,
+message-queue, or editorial-system protocol, but that wrapper is not evidence
+and cannot weaken the receipt, attestation, or immutable-store checks.
+
 Every benchmark policy must bind the exact version and SHA-256 digest of the
 output-free source manifest in
 `integrations/website_localization_benchmark_suite.py`. Suite v3 contains 64
