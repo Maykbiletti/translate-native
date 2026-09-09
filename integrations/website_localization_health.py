@@ -434,11 +434,16 @@ class LocalizationHealthMonitor:
                     "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
                     (state.event_id,),
                 ).fetchone() is not None
+                cancelled = self.bridge.connection.execute(
+                    "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+                    (state.event_id,),
+                ).fetchone() is not None
                 if state.event_id not in event_cache:
                     event_cache[state.event_id] = self.bridge._load_event(
                         state.event_id,
                         event_verifier,
                         allow_superseded=superseded,
+                        allow_cancelled=cancelled,
                     )
                 event, plan = event_cache[state.event_id]
                 if plan.plan_id != state.plan_id:
@@ -567,6 +572,7 @@ class LocalizationHealthMonitor:
             DELIVERY_STATUSES,
         )
         counts["superseded"] = 0
+        counts["cancelled"] = 0
         reasons: set[str] = set()
         verify = getattr(authority, "verify", None)
         rows = self.bridge.connection.execute(
@@ -578,8 +584,16 @@ class LocalizationHealthMonitor:
                     "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
                     (row["event_id"],),
                 ).fetchone() is not None
-                if superseded and (
+                cancelled = self.bridge.connection.execute(
+                    "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+                    (row["event_id"],),
+                ).fetchone() is not None
+                if superseded and not cancelled and (
                     row["status"] != "failed" or row["last_error_code"] != "event_superseded"
+                ):
+                    raise ValueError
+                if cancelled and (
+                    row["status"] != "failed" or row["last_error_code"] != "event_cancelled"
                 ):
                     raise ValueError
                 if _hash(row["payload_json"]) != row["payload_sha256"]:
@@ -643,9 +657,12 @@ class LocalizationHealthMonitor:
                     code = row["last_error_code"]
                     if not isinstance(code, str) or _CMS.ERROR_CODE.fullmatch(code) is None:
                         raise ValueError
-                    if superseded and code == "event_superseded":
+                    if superseded and not cancelled and code == "event_superseded":
                         counts["failed"] -= 1
                         counts["superseded"] += 1
+                    elif cancelled and code == "event_cancelled":
+                        counts["failed"] -= 1
+                        counts["cancelled"] += 1
                     else:
                         reasons.add("cms.delivery.error." + code)
             except Exception:
@@ -671,6 +688,7 @@ class LocalizationHealthMonitor:
                     row["event_id"],
                     event_verifier,
                     allow_superseded=True,
+                    allow_cancelled=True,
                     allow_accepted=True,
                 )
                 if (
@@ -758,14 +776,35 @@ class LocalizationHealthMonitor:
                     raise ValueError
                 self.bridge._load_event(
                     row["event_id"], event_verifier, allow_superseded=True,
+                    allow_cancelled=True,
                 )
                 self.bridge._load_event(
                     row["superseded_by_event_id"],
                     event_verifier,
                     allow_superseded=True,
+                    allow_cancelled=True,
                 )
             except Exception:
                 reasons.add("cms.supersession.invalid")
+        cancellation_rows = self.bridge.connection.execute("""
+            SELECT cancellation.*, delivery.status AS delivery_status
+            FROM cms_event_cancellations AS cancellation
+            LEFT JOIN cms_publication_deliveries AS delivery
+                ON delivery.event_id = cancellation.event_id
+            ORDER BY cancellation.cancellation_id
+        """).fetchall()
+        for row in cancellation_rows:
+            try:
+                if row["delivery_status"] == "succeeded":
+                    raise ValueError
+                self.bridge._load_event(
+                    row["event_id"],
+                    event_verifier,
+                    allow_superseded=True,
+                    allow_cancelled=True,
+                )
+            except Exception:
+                reasons.add("cms.cancellation.invalid")
         return reasons
 
     def _versions(
@@ -789,11 +828,17 @@ class LocalizationHealthMonitor:
                     "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
                     (row["event_id"],),
                 ).fetchone() is not None
+                cancelled = self.bridge.connection.execute(
+                    "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+                    (row["event_id"],),
+                ).fetchone() is not None
                 event, plan = self.bridge._load_event(
-                    row["event_id"], event_verifier, allow_superseded=superseded,
+                    row["event_id"], event_verifier,
+                    allow_superseded=superseded,
+                    allow_cancelled=cancelled,
                 )
                 localization = event["localization"]
-                if not superseded:
+                if not superseded and not cancelled:
                     providers.add((
                         localization["provider_id"],
                         localization["model_id"],
@@ -811,7 +856,9 @@ class LocalizationHealthMonitor:
                 (event["event_id"],),
             ).fetchone()
             delivery_status = delivery["status"] if delivery is not None else None
-            if superseded:
+            if cancelled:
+                status = "cancelled"
+            elif superseded:
                 status = "superseded"
             elif delivery_status == "succeeded":
                 status = "published"

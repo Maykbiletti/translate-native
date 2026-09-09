@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CHANGE_SCHEMA = "blun.cms-content-change.v2"
+CANCELLATION_SCHEMA = "blun.cms-content-cancellation.v1"
 PUBLICATION_SCHEMA = "blun.cms-localization-publication.v2"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v1"
@@ -51,6 +52,10 @@ _EVENT_TOPIC_COLUMNS = (
 )
 _SUPERSESSION_COLUMNS = (
     "event_id", "superseded_by_event_id", "created_at",
+)
+_CANCELLATION_COLUMNS = (
+    "cancellation_id", "event_id", "cancellation_sha256", "cancellation_json",
+    "signature_algorithm", "key_id", "signature", "created_at",
 )
 _LOCALE_PROFILE_FIELDS = (
     "locale", "eu_code", "language", "native_name", "script",
@@ -161,6 +166,14 @@ class IngestedChange:
 
 
 @dataclass(frozen=True)
+class CancelledChange:
+    cancellation_id: str
+    event_id: str
+    status: str
+    newly_cancelled: bool
+
+
+@dataclass(frozen=True)
 class CMSPublicationRequest:
     delivery_id: str
     payload: dict[str, Any]
@@ -226,6 +239,7 @@ class ChangeProgress:
     job_count: int
     counts: dict[str, int]
     locales: tuple[LocaleProgress, ...]
+    cancelled: bool
 
 
 @dataclass(frozen=True)
@@ -370,12 +384,14 @@ class WebsiteLocalizationCMSBridge:
         self.queue = queue
         self.release_store = release_store
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, 1, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, SCHEMA_VERSION}:
             raise CMSBridgeBlocked("cms.schema.unsupported")
         if version == 0:
             self._create_schema()
         elif version == 1:
             self._migrate_v1()
+        elif version == 2:
+            self._migrate_v2()
         self._verify_schema()
 
     def localization_capabilities(self) -> dict[str, Any]:
@@ -461,6 +477,7 @@ class WebsiteLocalizationCMSBridge:
             body = {
                 "schema": CAPABILITIES_SCHEMA,
                 "change_schema": CHANGE_SCHEMA,
+                "cancellation_schema": CANCELLATION_SCHEMA,
                 "publication_schema": PUBLICATION_SCHEMA,
                 "plan_schema": _token(
                     _PLANNER.SCHEMA, "cms.capabilities.registry_invalid",
@@ -509,6 +526,22 @@ class WebsiteLocalizationCMSBridge:
                 CHECK (event_id <> superseded_by_event_id),
                 FOREIGN KEY (event_id) REFERENCES cms_change_events (event_id),
                 FOREIGN KEY (superseded_by_event_id) REFERENCES cms_change_events (event_id)
+            )
+        """)
+        self._create_cancellation_schema()
+
+    def _create_cancellation_schema(self) -> None:
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS cms_event_cancellations (
+                cancellation_id TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL UNIQUE,
+                cancellation_sha256 TEXT NOT NULL,
+                cancellation_json TEXT NOT NULL,
+                signature_algorithm TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (event_id) REFERENCES cms_change_events (event_id)
             )
         """)
 
@@ -655,6 +688,41 @@ class WebsiteLocalizationCMSBridge:
         except Exception:
             raise CMSBridgeBlocked("cms.migration.failed") from None
 
+    def _migrate_v2(self) -> None:
+        try:
+            with _transaction(self.connection):
+                event_columns = tuple(
+                    row["name"]
+                    for row in self.connection.execute("PRAGMA table_info(cms_change_events)")
+                )
+                delivery_columns = tuple(
+                    row["name"] for row in self.connection.execute(
+                        "PRAGMA table_info(cms_publication_deliveries)"
+                    )
+                )
+                topic_columns = tuple(
+                    row["name"]
+                    for row in self.connection.execute("PRAGMA table_info(cms_event_topics)")
+                )
+                supersession_columns = tuple(
+                    row["name"] for row in self.connection.execute(
+                        "PRAGMA table_info(cms_event_supersessions)"
+                    )
+                )
+                if (
+                    event_columns != _EVENT_COLUMNS
+                    or delivery_columns != _DELIVERY_COLUMNS
+                    or topic_columns != _EVENT_TOPIC_COLUMNS
+                    or supersession_columns != _SUPERSESSION_COLUMNS
+                ):
+                    raise CMSBridgeBlocked("cms.schema.altered")
+                self._create_cancellation_schema()
+                self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        except CMSBridgeBlocked:
+            raise
+        except Exception:
+            raise CMSBridgeBlocked("cms.migration.failed") from None
+
     def _verify_schema(self) -> None:
         event_columns = tuple(
             row["name"] for row in self.connection.execute("PRAGMA table_info(cms_change_events)")
@@ -670,6 +738,10 @@ class WebsiteLocalizationCMSBridge:
             row["name"]
             for row in self.connection.execute("PRAGMA table_info(cms_event_supersessions)")
         )
+        cancellation_columns = tuple(
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(cms_event_cancellations)")
+        )
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
         if (
             version != SCHEMA_VERSION
@@ -677,6 +749,7 @@ class WebsiteLocalizationCMSBridge:
             or delivery_columns != _DELIVERY_COLUMNS
             or topic_columns != _EVENT_TOPIC_COLUMNS
             or supersession_columns != _SUPERSESSION_COLUMNS
+            or cancellation_columns != _CANCELLATION_COLUMNS
         ):
             raise CMSBridgeBlocked("cms.schema.altered")
 
@@ -713,6 +786,160 @@ class WebsiteLocalizationCMSBridge:
         except _PLANNER.LocalizationPlanBlocked:
             raise CMSBridgeBlocked("cms.localization.invalid") from None
         return event, plan
+
+    def _validated_cancellation(self, cancellation: Any) -> dict[str, Any]:
+        expected = {
+            "schema", "cancellation_id", "event_id", "site_id",
+            "website_version", "source_id", "source_sequence",
+        }
+        if (
+            not isinstance(cancellation, dict)
+            or set(cancellation) != expected
+            or cancellation.get("schema") != CANCELLATION_SCHEMA
+        ):
+            raise CMSBridgeBlocked("cms.cancellation.invalid")
+        for field in (
+            "cancellation_id", "event_id", "site_id", "website_version", "source_id",
+        ):
+            _token(cancellation.get(field), f"cms.cancellation.{field}_invalid")
+        _positive_integer(
+            cancellation.get("source_sequence"),
+            "cms.cancellation.source_sequence_invalid",
+        )
+        return cancellation
+
+    def _verify_stored_cancellation(
+        self,
+        row: sqlite3.Row,
+        event: dict[str, Any],
+        topic: sqlite3.Row,
+        event_key_id: str,
+        verifier: CMSMessageAuthority,
+    ) -> dict[str, Any]:
+        if _hash(row["cancellation_json"]) != row["cancellation_sha256"]:
+            raise CMSBridgeBlocked("cms.cancellation.tampered")
+        try:
+            cancellation = json.loads(row["cancellation_json"])
+        except json.JSONDecodeError:
+            raise CMSBridgeBlocked("cms.cancellation.tampered") from None
+        if _canonical_json(cancellation) != row["cancellation_json"]:
+            raise CMSBridgeBlocked("cms.cancellation.tampered")
+        cancellation = self._validated_cancellation(cancellation)
+        signature = _signature(CMSMessageSignature(
+            row["signature_algorithm"], row["key_id"], row["signature"],
+        ))
+        _verify(
+            verifier,
+            row["cancellation_json"].encode("utf-8"),
+            signature,
+            "cms.cancellation.signature_rejected",
+        )
+        if (
+            cancellation["cancellation_id"] != row["cancellation_id"]
+            or cancellation["event_id"] != row["event_id"]
+            or cancellation["event_id"] != event["event_id"]
+            or cancellation["site_id"] != event["site_id"]
+            or cancellation["website_version"] != event["website_version"]
+            or cancellation["source_id"] != event["localization"]["source_id"]
+            or cancellation["source_sequence"] != int(topic["generation"])
+            or row["key_id"] != event_key_id
+        ):
+            raise CMSBridgeBlocked("cms.cancellation.binding_invalid")
+        return cancellation
+
+    def cancel_change(
+        self,
+        cancellation: Any,
+        signature: CMSMessageSignature,
+        verifier: CMSMessageAuthority,
+        *,
+        now: float | int,
+    ) -> CancelledChange:
+        cancellation = self._validated_cancellation(cancellation)
+        signature = _signature(signature)
+        now = _timestamp(now, "cms.time.invalid")
+        cancellation_json = _canonical_json(cancellation)
+        cancellation_hash = _hash(cancellation_json)
+        _verify(
+            verifier,
+            cancellation_json.encode("utf-8"),
+            signature,
+            "cms.cancellation.signature_rejected",
+        )
+        event, _ = self._load_event(
+            cancellation["event_id"],
+            verifier,
+            allow_superseded=True,
+            allow_cancelled=True,
+        )
+        topic = self.connection.execute(
+            "SELECT * FROM cms_event_topics WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()
+        event_row = self.connection.execute(
+            "SELECT key_id FROM cms_change_events WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()
+        if topic is None or event_row is None:
+            raise CMSBridgeBlocked("cms.event.topic_invalid")
+        if signature.key_id != event_row["key_id"]:
+            raise CMSBridgeBlocked("cms.cancellation.scope_rejected")
+        expected = {
+            "event_id": event["event_id"],
+            "site_id": event["site_id"],
+            "website_version": event["website_version"],
+            "source_id": event["localization"]["source_id"],
+            "source_sequence": int(topic["generation"]),
+        }
+        if any(cancellation[field] != value for field, value in expected.items()):
+            raise CMSBridgeBlocked("cms.cancellation.binding_invalid")
+
+        with _transaction(self.connection):
+            delivery = self.connection.execute("""
+                SELECT status FROM cms_publication_deliveries WHERE event_id = ?
+            """, (event["event_id"],)).fetchone()
+            if delivery is not None and delivery["status"] == "succeeded":
+                raise CMSBridgeBlocked("cms.cancellation.already_published")
+            if delivery is not None and delivery["status"] == "leased":
+                raise CMSBridgeBlocked("cms.cancellation.delivery_in_flight")
+            by_id = self.connection.execute("""
+                SELECT event_id, cancellation_sha256
+                FROM cms_event_cancellations WHERE cancellation_id = ?
+            """, (cancellation["cancellation_id"],)).fetchone()
+            by_event = self.connection.execute("""
+                SELECT cancellation_id, cancellation_sha256
+                FROM cms_event_cancellations WHERE event_id = ?
+            """, (event["event_id"],)).fetchone()
+            if by_id is not None and (
+                by_id["event_id"] != event["event_id"]
+                or by_id["cancellation_sha256"] != cancellation_hash
+            ):
+                raise CMSBridgeBlocked("cms.cancellation.idempotency_collision")
+            if by_event is not None and (
+                by_event["cancellation_id"] != cancellation["cancellation_id"]
+                or by_event["cancellation_sha256"] != cancellation_hash
+            ):
+                raise CMSBridgeBlocked("cms.cancellation.idempotency_collision")
+            newly_cancelled = by_id is None and by_event is None
+            if newly_cancelled:
+                self.connection.execute("""
+                    INSERT INTO cms_event_cancellations VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    cancellation["cancellation_id"], event["event_id"],
+                    cancellation_hash, cancellation_json, signature.algorithm,
+                    signature.key_id, signature.signature, now,
+                ))
+            self.connection.execute("""
+                UPDATE cms_publication_deliveries
+                SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, last_error_code = 'event_cancelled',
+                    last_error_detail_hash = NULL, updated_at = ?
+                WHERE event_id = ? AND status <> 'succeeded'
+            """, (now, event["event_id"]))
+        return CancelledChange(
+            cancellation["cancellation_id"], event["event_id"], "cancelled",
+            newly_cancelled,
+        )
 
     def ingest_change(
         self,
@@ -857,7 +1084,13 @@ class WebsiteLocalizationCMSBridge:
         ):
             raise CMSBridgeBlocked("cms.status.scope_rejected")
 
-        event, plan = self._load_event(event_id, event_verifier)
+        cancelled = self.connection.execute(
+            "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+            (event_id,),
+        ).fetchone() is not None
+        event, plan = self._load_event(
+            event_id, event_verifier, allow_cancelled=cancelled,
+        )
         if event["site_id"] != site_id:
             raise CMSBridgeBlocked("cms.status.scope_rejected")
         locales = []
@@ -902,6 +1135,7 @@ class WebsiteLocalizationCMSBridge:
             job_count=len(plan.jobs),
             counts=counts,
             locales=tuple(sorted(locales, key=lambda item: item.target_locale)),
+            cancelled=cancelled,
         )
 
     def change_lifecycle(
@@ -924,7 +1158,11 @@ class WebsiteLocalizationCMSBridge:
             requester_key_id=requester_key_id,
             now=now,
         )
-        event, plan = self._load_event(progress.event_id, event_verifier)
+        event, plan = self._load_event(
+            progress.event_id,
+            event_verifier,
+            allow_cancelled=progress.cancelled,
+        )
         try:
             readiness = self.release_store.readiness(
                 plan, approval_authority, now=now,
@@ -1062,7 +1300,9 @@ class WebsiteLocalizationCMSBridge:
                 "last_error_detail_hash": delivery_status.last_error_detail_hash,
             }
 
-        if delivery is not None and delivery["status"] == "succeeded":
+        if progress.cancelled:
+            status = "cancelled"
+        elif delivery is not None and delivery["status"] == "succeeded":
             status = "published"
         elif delivery is not None and delivery["status"] == "failed":
             status = "publication_failed"
@@ -1101,11 +1341,14 @@ class WebsiteLocalizationCMSBridge:
         verifier: CMSMessageAuthority,
         *,
         allow_superseded: bool = False,
+        allow_cancelled: bool = False,
         allow_accepted: bool = False,
     ) -> tuple[dict[str, Any], Any]:
         event_id = _token(event_id, "cms.event_id.invalid")
         if not isinstance(allow_superseded, bool):
             raise CMSBridgeBlocked("cms.event.supersession_mode_invalid")
+        if not isinstance(allow_cancelled, bool):
+            raise CMSBridgeBlocked("cms.event.cancellation_mode_invalid")
         if not isinstance(allow_accepted, bool):
             raise CMSBridgeBlocked("cms.event.status_mode_invalid")
         row = self.connection.execute(
@@ -1146,6 +1389,16 @@ class WebsiteLocalizationCMSBridge:
             topic["site_id"], topic["source_id"]
         ) != (event["site_id"], event["localization"]["source_id"]):
             raise CMSBridgeBlocked("cms.event.topic_invalid")
+        cancellation = self.connection.execute(
+            "SELECT * FROM cms_event_cancellations WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if cancellation is not None:
+            self._verify_stored_cancellation(
+                cancellation, event, topic, row["key_id"], verifier,
+            )
+            if not allow_cancelled:
+                raise CMSBridgeBlocked("cms.event.cancelled")
         newer = self.connection.execute("""
             SELECT 1
             FROM cms_event_topics AS candidate
@@ -1166,6 +1419,7 @@ class WebsiteLocalizationCMSBridge:
             JOIN cms_change_events AS event ON event.event_id = topic.event_id
             WHERE topic.event_id = ? AND event.status = 'enqueued'
               AND topic.event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
+              AND topic.event_id NOT IN (SELECT event_id FROM cms_event_cancellations)
         """, (event_id,)).fetchone()
         if row is None:
             return False
@@ -1254,6 +1508,11 @@ class WebsiteLocalizationCMSBridge:
             "cms.publication.signature_rejected",
         )
         with _transaction(self.connection):
+            if self.connection.execute(
+                "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+                (event["event_id"],),
+            ).fetchone() is not None:
+                raise CMSBridgeBlocked("cms.event.cancelled")
             prior = self.connection.execute(
                 "SELECT delivery_id, payload_sha256 FROM cms_publication_deliveries WHERE event_id = ?",
                 (event["event_id"],),
@@ -1347,6 +1606,7 @@ class WebsiteLocalizationCMSBridge:
                 WHERE status IN ('pending', 'retry_wait') AND next_attempt_at <= ?
                   AND attempts < max_attempts
                   AND event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
+                  AND event_id NOT IN (SELECT event_id FROM cms_event_cancellations)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM cms_event_topics AS current
@@ -1390,6 +1650,12 @@ class WebsiteLocalizationCMSBridge:
         if row is None:
             raise CMSBridgeBlocked("cms.delivery.lease_lost")
         if not self._event_is_current(row["event_id"]):
+            cancelled = self.connection.execute(
+                "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+                (row["event_id"],),
+            ).fetchone() is not None
+            if cancelled:
+                raise CMSBridgeBlocked("cms.delivery.event_cancelled")
             raise CMSBridgeBlocked("cms.delivery.event_superseded")
         if row["status"] != "leased":
             raise CMSBridgeBlocked("cms.delivery.lease_lost")
@@ -1447,7 +1713,9 @@ class WebsiteLocalizationCMSBridge:
         try:
             self._live_delivery(claim, _timestamp(clock(), "cms.time.invalid"))
         except CMSBridgeBlocked as error:
-            if error.code == "cms.delivery.event_superseded":
+            if error.code in {
+                "cms.delivery.event_superseded", "cms.delivery.event_cancelled",
+            }:
                 return DeliveryOutcome(
                     "failed", claim.request.delivery_id, claim.attempt, error.code,
                 )

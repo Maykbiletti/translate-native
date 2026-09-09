@@ -31,7 +31,7 @@ HEALTH_STATUSES = {"healthy", "degraded", "blocked"}
 PROVIDER_STATUSES = {"healthy", "blocked"}
 WEBSITE_STATUSES = {
     "processing", "localization_failed", "awaiting_approval", "ready",
-    "publishing", "publication_failed", "published",
+    "publishing", "publication_failed", "published", "cancelled",
 }
 
 

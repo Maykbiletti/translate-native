@@ -224,6 +224,23 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
             event, signature, self.event_authority, now=self.clock(),
         )
 
+    def cancel(self, event_id="event-1", version="site-version-1"):
+        value = {
+            "schema": CMS.CANCELLATION_SCHEMA,
+            "cancellation_id": "cancel-event-1",
+            "event_id": event_id,
+            "site_id": "public-site",
+            "website_version": version,
+            "source_id": "homepage.hero",
+            "source_sequence": 1,
+        }
+        self.bridge.cancel_change(
+            value,
+            self.event_authority.sign(CMS._canonical_json(value).encode("utf-8")),
+            self.event_authority,
+            now=self.clock(),
+        )
+
     def assets(self, payload):
         return WORKER.LocalizationAssets(
             glossary_version=payload["glossary_version"],
@@ -278,6 +295,16 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
         self.assertEqual(len(self.publisher.requests), 1)
         idle = self.tick()
         self.assertEqual((idle.phase, idle.status), ("idle", "idle"))
+
+    def test_cancelled_event_never_reaches_model_or_release(self):
+        self.cancel()
+
+        outcome = self.tick()
+
+        self.assertEqual((outcome.phase, outcome.status), ("idle", "idle"))
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.evidence.requests, [])
+        self.assertEqual(self.publisher.requests, [])
 
     def test_due_delivery_has_priority_over_a_new_translation(self):
         self.tick()

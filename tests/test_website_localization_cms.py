@@ -137,6 +137,21 @@ def change_event(**overrides):
     return event
 
 
+def cancellation_event(event=None, **overrides):
+    event = event or change_event()
+    cancellation = {
+        "schema": CMS.CANCELLATION_SCHEMA,
+        "cancellation_id": "cms-cancellation-184",
+        "event_id": event["event_id"],
+        "site_id": event["site_id"],
+        "website_version": event["website_version"],
+        "source_id": event["localization"]["source_id"],
+        "source_sequence": event["source_sequence"],
+    }
+    cancellation.update(overrides)
+    return cancellation
+
+
 def completed_result(job, candidate):
     payload = job.as_payload()
     return {
@@ -206,6 +221,16 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
     def signed_event(self, event):
         payload = CMS._canonical_json(event).encode("utf-8")
         return self.event_authority.sign(payload)
+
+    def cancel(self, event=None, cancellation=None, *, now=200):
+        event = event or change_event()
+        cancellation = cancellation or cancellation_event(event)
+        signature = self.event_authority.sign(
+            CMS._canonical_json(cancellation).encode("utf-8")
+        )
+        return self.bridge.cancel_change(
+            cancellation, signature, self.event_authority, now=now,
+        )
 
     def ingest(self, event=None, **values):
         event = event or change_event()
@@ -631,6 +656,137 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         ).status, "idle")
         self.assertEqual(publisher.requests, [])
 
+    def test_signed_cancellation_is_idempotent_and_blocks_release(self):
+        event = change_event()
+        self.ingest(event)
+
+        first = self.cancel(event)
+        replay = self.cancel(event, now=300)
+
+        self.assertTrue(first.newly_cancelled)
+        self.assertFalse(replay.newly_cancelled)
+        self.assertEqual(first.status, "cancelled")
+        self.assertEqual(
+            self.cms_connection.execute(
+                "SELECT COUNT(*) FROM cms_event_cancellations"
+            ).fetchone()[0],
+            1,
+        )
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge.prepare_delivery(
+                event["event_id"], self.event_authority,
+                self.approval_authority, self.publication_authority, now=301,
+            )
+        self.assertEqual(caught.exception.code, "cms.event.cancelled")
+
+    def test_cancellation_revokes_pending_delivery_and_never_calls_publisher(self):
+        event = change_event()
+        self.ingest(event)
+        self.release_all(event)
+        request = self.prepare(event)
+
+        self.cancel(event, now=250)
+
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual((status.status, status.last_error_code), (
+            "failed", "event_cancelled",
+        ))
+        publisher = Publisher()
+        outcome = self.bridge.run_delivery(
+            publisher, self.publication_authority,
+            worker_id="cms-worker", clock=Clock(251),
+        )
+        self.assertEqual(outcome.status, "idle")
+        self.assertEqual(publisher.requests, [])
+
+    def test_cancellation_race_blocks_delivery_after_publication_signing(self):
+        event = change_event()
+        self.ingest(event)
+        self.release_all(event)
+        authority = CMSAuthority(b"publication-race-key")
+        original_sign = authority.sign
+
+        def sign_after_cancellation(payload):
+            self.cancel(event, now=250)
+            return original_sign(payload)
+
+        authority.sign = sign_after_cancellation
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge.prepare_delivery(
+                event["event_id"], self.event_authority,
+                self.approval_authority, authority, now=249,
+            )
+
+        self.assertEqual(caught.exception.code, "cms.event.cancelled")
+        self.assertEqual(
+            self.cms_connection.execute(
+                "SELECT COUNT(*) FROM cms_publication_deliveries"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_cancellation_is_exactly_bound_and_cannot_retract_publication(self):
+        event = change_event()
+        self.ingest(event)
+        wrong = cancellation_event(event, website_version="website-other")
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.cancel(event, wrong)
+        self.assertEqual(caught.exception.code, "cms.cancellation.binding_invalid")
+
+        self.release_all(event)
+        self.prepare(event)
+        self.bridge.run_delivery(
+            Publisher(), self.publication_authority,
+            worker_id="cms-worker", clock=Clock(260),
+        )
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.cancel(event, now=300)
+        self.assertEqual(caught.exception.code, "cms.cancellation.already_published")
+        self.assertEqual(
+            self.cms_connection.execute(
+                "SELECT COUNT(*) FROM cms_event_cancellations"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_cancellation_cannot_claim_to_retract_in_flight_delivery(self):
+        event = change_event()
+        self.ingest(event)
+        self.release_all(event)
+        self.prepare(event)
+        self.bridge.claim_delivery(
+            "cms-worker", self.publication_authority, now=260, lease_seconds=30,
+        )
+
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.cancel(event, now=261)
+
+        self.assertEqual(
+            caught.exception.code, "cms.cancellation.delivery_in_flight",
+        )
+        self.assertEqual(
+            self.cms_connection.execute(
+                "SELECT COUNT(*) FROM cms_event_cancellations"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_cancellation_tampering_blocks_future_reads(self):
+        event = change_event()
+        self.ingest(event)
+        self.cancel(event)
+        self.cms_connection.execute("""
+            UPDATE cms_event_cancellations SET cancellation_json = '{}'
+        """)
+        self.cms_connection.commit()
+
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge.change_progress(
+                event["event_id"], self.event_authority,
+                site_id=event["site_id"], requester_key_id="cms-key-1", now=201,
+            )
+        self.assertEqual(caught.exception.code, "cms.cancellation.tampered")
+
     def test_exact_replay_of_old_event_cannot_supersede_new_generation(self):
         old = change_event()
         new = change_event(
@@ -776,6 +932,29 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             now=200,
         )
         self.assertEqual(replay.status, "enqueued")
+
+    def test_v2_database_adds_empty_cancellation_ledger_transactionally(self):
+        self.cms_connection.execute("DROP TABLE cms_event_cancellations")
+        self.cms_connection.execute("PRAGMA user_version = 2")
+        self.cms_connection.commit()
+
+        migrated = CMS.WebsiteLocalizationCMSBridge(
+            self.cms_connection, self.queue, self.release_store,
+        )
+
+        self.assertEqual(
+            self.cms_connection.execute("PRAGMA user_version").fetchone()[0],
+            CMS.SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            tuple(
+                row["name"] for row in self.cms_connection.execute(
+                    "PRAGMA table_info(cms_event_cancellations)"
+                )
+            ),
+            CMS._CANCELLATION_COLUMNS,
+        )
+        migrated._verify_schema()
 
     def test_v1_migration_reconstructs_supersession_and_blocks_old_outbox(self):
         old = change_event()

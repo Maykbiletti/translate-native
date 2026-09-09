@@ -257,6 +257,26 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
     def ingest(self):
         return self.ingest_event(event())
 
+    def cancel(self, current=None):
+        current = current or event()
+        cancellation = {
+            "schema": CMS.CANCELLATION_SCHEMA,
+            "cancellation_id": "cancel-184",
+            "event_id": current["event_id"],
+            "site_id": current["site_id"],
+            "website_version": current["website_version"],
+            "source_id": current["localization"]["source_id"],
+            "source_sequence": current["source_sequence"],
+        }
+        self.bridge.cancel_change(
+            cancellation,
+            self.event_authority.sign(
+                CMS._canonical_json(cancellation).encode("utf-8")
+            ),
+            self.event_authority,
+            now=200,
+        )
+
     def complete_jobs(self, plan):
         translations = {
             "de-AT": "Bring dein Unternehmen mit BLUN voran.",
@@ -911,6 +931,27 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         self.assertEqual(statuses[newer["event_id"]], "processing")
         self.assertEqual(report.status, "healthy")
         self.assertEqual(len(self.probe.calls), 1)
+
+    def test_cancelled_revision_is_healthy_visible_and_reverified(self):
+        current = event()
+        self.ingest_event(current)
+        self.cancel(current)
+
+        report = self.report()
+
+        self.assertEqual(report.status, "healthy")
+        self.assertEqual(report.website_versions[0].status, "cancelled")
+        self.assertEqual(self.probe.calls, [])
+        self.cms_connection.execute("""
+            UPDATE cms_event_cancellations SET cancellation_json = '{}'
+        """)
+        self.cms_connection.commit()
+        tampered = self.report()
+        self.assertEqual(tampered.status, "blocked")
+        self.assertIn(
+            "cms.cancellation.invalid",
+            self.component(tampered, "cms").reasons,
+        )
 
     def test_tampered_source_generation_blocks_health(self):
         self.ingest()

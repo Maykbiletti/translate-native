@@ -86,6 +86,21 @@ def event(**overrides):
     return value
 
 
+def cancellation(value=None, **overrides):
+    value = value or event()
+    request = {
+        "schema": CMS.CANCELLATION_SCHEMA,
+        "cancellation_id": "cancel-1",
+        "event_id": value["event_id"],
+        "site_id": value["site_id"],
+        "website_version": value["website_version"],
+        "source_id": value["localization"]["source_id"],
+        "source_sequence": value["source_sequence"],
+    }
+    request.update(overrides)
+    return request
+
+
 class WebsiteLocalizationAPITests(unittest.TestCase):
     def setUp(self):
         self.queue_connection = sqlite3.connect(":memory:")
@@ -209,6 +224,15 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             PATH_INFO=API.CAPABILITIES_PATH,
         )
 
+    def cancellation_request(self, value=None, *, authority=None, key_id="event-key-1"):
+        value = value or cancellation()
+        authority = authority or self.authority
+        return self.request(
+            value,
+            signature=authority.sign(value, key_id=key_id),
+            PATH_INFO=API.CANCELLATION_PATH,
+        )
+
     def test_signed_v2_change_enqueues_each_locale_and_replays_idempotently(self):
         first = self.request()
         second = self.request()
@@ -220,6 +244,43 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(self.queue.plan_counts(first[2]["plan_id"])["pending"], 2)
         self.assertNotIn("source_text", json.dumps(first[2]))
         self.assertEqual(first[1]["Cache-Control"], "no-store")
+
+    def test_signed_cancellation_is_idempotent_visible_and_stops_lifecycle(self):
+        self.request()
+
+        first = self.cancellation_request()
+        replay = self.cancellation_request()
+        progress = self.status_request(request_id="status-cancelled")
+        lifecycle = self.lifecycle_request(request_id="lifecycle-cancelled")
+
+        self.assertEqual(first[0], "202 Accepted")
+        self.assertEqual(replay[0], "200 OK")
+        self.assertTrue(first[2]["newly_cancelled"])
+        self.assertFalse(replay[2]["newly_cancelled"])
+        self.assertTrue(progress[2]["cancelled"])
+        self.assertEqual(lifecycle[2]["status"], "cancelled")
+        for payload in (first[2], replay[2], progress[2], lifecycle[2]):
+            self.assertNotIn("source_text", json.dumps(payload))
+
+    def test_cancellation_rejects_wrong_binding_and_other_accepted_key(self):
+        self.request()
+        wrong = cancellation(website_version="web-other")
+        status, _, payload = self.cancellation_request(wrong)
+        self.assertEqual((status, payload["error"]), (
+            "400 Bad Request", "cms.cancellation.binding_invalid",
+        ))
+
+        self.authority.accepted_key_ids = ("event-key-1", "event-key-2")
+        status, _, payload = self.cancellation_request(key_id="event-key-2")
+        self.assertEqual((status, payload["error"]), (
+            "401 Unauthorized", "cms.cancellation.scope_rejected",
+        ))
+        self.assertEqual(
+            self.cms_connection.execute(
+                "SELECT COUNT(*) FROM cms_event_cancellations"
+            ).fetchone()[0],
+            0,
+        )
 
     def test_default_policy_routes_all_remaining_eu_locales(self):
         value = event()
@@ -242,6 +303,9 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(payload["status"], "CAPABILITIES")
         capabilities = payload["capabilities"]
         self.assertEqual(capabilities["schema"], CMS.CAPABILITIES_SCHEMA)
+        self.assertEqual(
+            capabilities["cancellation_schema"], CMS.CANCELLATION_SCHEMA,
+        )
         self.assertEqual(len(capabilities["locales"]), 24)
         self.assertEqual(
             [item["locale"] for item in capabilities["locales"]],

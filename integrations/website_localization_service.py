@@ -99,6 +99,7 @@ def _event_rows(bridge: Any) -> tuple[Any, ...]:
                   WHERE status = 'succeeded'
               )
               AND event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
+              AND event_id NOT IN (SELECT event_id FROM cms_event_cancellations)
             ORDER BY created_at, event_id
         """).fetchall())
         return tuple(

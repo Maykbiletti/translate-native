@@ -1197,6 +1197,23 @@ An inbound `blun.cms-content-change.v2` event has exactly these fields:
 }
 ```
 
+Before publication starts, the CMS may withdraw that exact event with a signed
+`blun.cms-content-cancellation.v1` message. Its immutable binding contains a
+unique cancellation ID plus the event, site, website version, source ID, and
+source sequence. The signer key must match the credential that created the
+event. Exact replay is idempotent; altered bindings, another accepted tenant
+key, corrupt stored bytes, and cancellation-ID reuse fail closed. An accepted
+cancellation removes the event from service scheduling, blocks release and
+delivery preparation, and closes a pending or retrying outbox entry without
+calling the model, reviewer, or publisher. Health and tenant lifecycle reads
+reverify the cancellation and expose only the stable `cancelled` state.
+
+Cancellation never rewrites an acknowledged publication. It also refuses a
+currently leased publication because the external CMS may already have
+accepted the request. The caller must observe the lease outcome before retrying.
+Deleting content already published requires an independently signed CMS
+tombstone operation; cancellation is deliberately limited to unpublished work.
+
 The CMS signs the canonical UTF-8 JSON bytes outside the envelope. The bridge
 verifies the signature before its first write, derives the deterministic plan,
 and persists the event before enqueuing it. If the process stops between those
@@ -1559,7 +1576,8 @@ opens nor closes them. It also never reads a configuration file, environment
 variable, credential, signing key, or network endpoint.
 
 The same composition root binds its approval and publication authorities into
-the tenant-facing `runtime.cms_api`. Before submitting content, a CMS can use a
+the tenant-facing `runtime.cms_api`. It accepts both signed change events and
+exact signed cancellations of unpublished work. Before submitting content, a CMS can use a
 separately signed read to discover the exact current 24-locale registry,
 content types, quality phases, schema versions, and locale-profile hashes as
 one canonical capability object. In addition to durable change intake and
@@ -1705,7 +1723,7 @@ as an expired evidence or worker lease, failed evidence review, failed locale,
 retrying delivery, or an expired current approval is `degraded`. A live
 evidence lease and ordinary pending work remain healthy.
 
-Each website version reports one lifecycle state: `processing`,
+Each website version reports one lifecycle state: `cancelled`, `processing`,
 `localization_failed`, `awaiting_approval`, `ready`, `publishing`,
 `publication_failed`, or `published`. The report includes only site, version,
 plan and event identifiers, counts, locale names, and stable failure codes.

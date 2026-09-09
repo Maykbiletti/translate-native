@@ -1,11 +1,11 @@
 # CMS localization webhook API v2
 
 `WebsiteLocalizationAPI` is the provider-neutral WSGI ingress exposed by the
-composed website-localization runtime. It accepts a signed current CMS change,
-durably enqueues one job per required locale, and returns content-free
-capabilities, queue progress, or end-to-end lifecycle status. It never calls a
-model, approves a translation, prepares a publication, or returns source or
-target prose.
+composed website-localization runtime. It accepts a signed current CMS change
+or cancellation, durably enqueues one job per required locale, and returns
+content-free capabilities, queue progress, or end-to-end lifecycle status. It
+never calls a model, approves a translation, prepares a publication, or returns
+source or target prose.
 
 ## Host setup
 
@@ -65,6 +65,45 @@ A delayed event below an already accepted source generation is recorded as
 The response contains identifiers and counts only. Acceptance is not quality
 approval or publication readiness.
 
+## Cancel unpublished localization work
+
+A CMS can withdraw one exact accepted event without submitting replacement
+text:
+
+```http
+POST /v2/localization/cancellations HTTP/1.1
+Content-Type: application/json; charset=utf-8
+Content-Length: <exact UTF-8 byte count>
+X-Localization-Signature-Algorithm: <configured algorithm>
+X-Localization-Key-Id: <same site credential that created the event>
+X-Localization-Signature: <signature>
+```
+
+```json
+{"cancellation_id":"cms-cancellation-184","event_id":"cms-event-184","schema":"blun.cms-content-cancellation.v1","site_id":"public-site","source_id":"homepage.hero","source_sequence":184,"website_version":"website-2026-08-29.1"}
+```
+
+Sign the complete canonical cancellation object. The service requires every
+event, site, source, signed source sequence, website-version, and credential
+binding to match the stored event. The first accepted cancellation returns
+`202 Accepted`; exact replay returns `200 OK`. Reusing either the cancellation
+ID or event binding for different bytes returns `409 Conflict`.
+
+Acceptance permanently removes that event from production scheduling, blocks
+new approvals and publication preparation, and terminally closes any pending or
+retrying outbox entry with `event_cancelled`. The cancellation ledger is
+immutable and reverified on reads and health checks. It does not delete shared
+queue artifacts or translation memory because another current plan may validly
+reference the same deterministic job.
+
+A confirmed publication cannot be cancelled through this endpoint. A currently
+leased delivery also returns `409 Conflict`: after an external request starts,
+the service cannot truthfully retract bytes that the CMS may already have
+accepted. The caller must wait for the lease outcome; an accepted publication
+remains immutable, while a failed or retryable delivery can then be cancelled.
+Removing content that was already published requires a separately signed CMS
+deletion/tombstone contract and is outside this cancellation operation.
+
 ## Discover the active localization contract
 
 A CMS can discover the exact runtime contract before creating work. This avoids
@@ -106,6 +145,7 @@ without a partial locale list.
 {
   "capabilities": {
     "change_schema": "blun.cms-content-change.v2",
+    "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": "translate-native.commercial.v2",
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
     "default_target_policy": "all-eu-official-locales-except-source-language",
@@ -165,7 +205,8 @@ The read-only response echoes `request_id` and reports the bound site, website
 version, source sequence, plan and job counts, plus one item per target locale.
 Each item contains job/locale identity, state, attempts, retry timing, lease
 expiry, stable error code, optional private-detail hash, and optional result
-hash. `lease_expired: true` makes recoverable crashes visible. A succeeded queue
+hash. The top-level `cancelled` flag records an accepted withdrawal.
+`lease_expired: true` makes recoverable crashes visible. A succeeded queue
 row is reloaded and hash-checked before it can appear successful.
 
 Status is not readiness. Valid independent evidence, signed per-locale
@@ -176,10 +217,10 @@ partial optimistic status.
 
 ## Read verified end-to-end lifecycle
 
-The tenant can separately ask whether the same event is still translating,
-awaiting signed approvals, ready, publishing, blocked, failed, or confirmed as
-published. This operation has its own schema so a valid queue-progress request
-cannot be replayed for a broader lifecycle read:
+The tenant can separately ask whether the same event is cancelled, still
+translating, awaiting signed approvals, ready, publishing, blocked, failed, or
+confirmed as published. This operation has its own schema so a valid
+queue-progress request cannot be replayed for a broader lifecycle read:
 
 ```http
 POST /v2/localization/lifecycle HTTP/1.1
@@ -206,6 +247,7 @@ version, plan and source-sequence identifiers; aggregate queue counts; required,
 approved and blocked locales; and an optional content-free delivery summary.
 The lifecycle `status` is exactly one of:
 
+- `cancelled`: the exact unpublished event has an accepted signed cancellation;
 - `processing`: at least one required locale still has queue work;
 - `localization_failed`: at least one required locale failed terminally;
 - `awaiting_approval`: all locale results exist, but signed release evidence is
@@ -239,8 +281,9 @@ prose:
 {"error":"cms.status.scope_rejected","schema":"blun.website-localization-api.v2","status":"BLOCK"}
 ```
 
-`401` covers invalid, expired, or wrong-scope signed status requests; `409`
-covers identity, source-sequence, supersession, and legacy-ingress conflicts;
+`401` covers invalid, expired, or wrong-scope signed requests; `409` covers
+identity, source-sequence, supersession, cancellation, in-flight publication,
+and legacy-ingress conflicts;
 `413` and `415` cover body size and media type; `503` covers inconsistent or
 unavailable durable state, including missing lifecycle authorities and invalid
 release or delivery evidence, or an inconsistent capability registry. Other
@@ -268,3 +311,10 @@ old digest, a duplicate language could displace another EU language, or a
 partial response could look authoritative. A separate fresh signed request,
 canonical whole-object digest, exact 24-language registry validation, unique
 locale/language/EU-code checks, and all-or-nothing response close those paths.
+
+Cancellation premortem: a signed request could target another source revision,
+another accepted key could withdraw a tenant's event, a crash could leave a
+pending outbox active, or the endpoint could claim to retract a request already
+in flight. Exact immutable bindings, original-key scope, one transactional
+ledger/outbox transition, service eligibility filtering, and explicit leased
+and published conflicts keep those paths fail-closed.

@@ -148,6 +148,18 @@ class WebsiteLocalizationHealthHTTPTests(unittest.TestCase):
         )
         self.assertNotIn("source_text", json.dumps(payload))
 
+    def test_cancelled_website_state_is_valid_content_free_health(self):
+        current = report()
+        current["providers"] = []
+        current["website_versions"][0]["status"] = "cancelled"
+
+        status, _, payload, _ = self.call(self.app(Report(current)))
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(
+            payload["report"]["website_versions"][0]["status"], "cancelled",
+        )
+
     def test_valid_blocked_report_uses_service_unavailable_without_hiding_report(self):
         status, _, payload, _ = self.call(self.app(Report(report(status="blocked"))))
 

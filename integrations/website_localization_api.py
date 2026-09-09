@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Authenticated WSGI ingress for the provider-neutral localization runtime.
 
-The API accepts signed CMS change events and exposes content-free capabilities,
-per-locale progress, and verified lifecycle state. It never runs a model,
-approves text, or returns source/target prose.
+The API accepts signed CMS change and cancellation events and exposes
+content-free capabilities, per-locale progress, and verified lifecycle state.
+It never runs a model, approves text, or returns source/target prose.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping
 
 API_SCHEMA = "blun.website-localization-api.v2"
 CHANGE_PATH = "/v2/localization/changes"
+CANCELLATION_PATH = "/v2/localization/cancellations"
 STATUS_PATH = "/v2/localization/status"
 LIFECYCLE_PATH = "/v2/localization/lifecycle"
 CAPABILITIES_PATH = "/v2/localization/capabilities"
@@ -102,7 +103,8 @@ class WebsiteLocalizationAPI:
         publication_authority: Any | None = None,
     ):
         if not all(callable(getattr(bridge, name, None)) for name in (
-            "ingest_change", "change_progress", "localization_capabilities",
+            "ingest_change", "cancel_change", "change_progress",
+            "localization_capabilities",
         )):
             raise TypeError("bridge must provide CMS ingress, capabilities, and progress")
         if not callable(getattr(event_verifier, "verify", None)):
@@ -183,6 +185,8 @@ class WebsiteLocalizationAPI:
     def _status_for(code: str) -> str:
         if code in {
             "cms.signature.invalid", "cms.event.signature_rejected",
+            "cms.cancellation.signature_rejected",
+            "cms.cancellation.scope_rejected",
             "cms.status.signature_rejected", "cms.status.request_expired",
             "cms.status.scope_rejected", "cms.lifecycle.signature_rejected",
             "cms.lifecycle.request_expired", "cms.lifecycle.scope_rejected",
@@ -193,6 +197,9 @@ class WebsiteLocalizationAPI:
         if code in {
             "cms.event.idempotency_collision", "cms.event.sequence_collision",
             "cms.event.superseded", "cms.event.legacy_replay_only",
+            "cms.event.cancelled", "cms.cancellation.idempotency_collision",
+            "cms.cancellation.already_published",
+            "cms.cancellation.delivery_in_flight",
         }:
             return "409 Conflict"
         if code == "cms.event.not_enqueued":
@@ -215,7 +222,8 @@ class WebsiteLocalizationAPI:
             )
         path = environ.get("PATH_INFO")
         if path not in {
-            CHANGE_PATH, STATUS_PATH, LIFECYCLE_PATH, CAPABILITIES_PATH,
+            CHANGE_PATH, CANCELLATION_PATH, STATUS_PATH, LIFECYCLE_PATH,
+            CAPABILITIES_PATH,
         }:
             return self._blocked("404 Not Found", "api.path.not_found", start_response)
         if environ.get("REQUEST_METHOD") != "POST":
@@ -276,6 +284,18 @@ class WebsiteLocalizationAPI:
                 return self._lifecycle(request, signature, now, start_response)
             if path == CAPABILITIES_PATH:
                 return self._capabilities(request, signature, now, start_response)
+            if path == CANCELLATION_PATH:
+                cancelled = self.bridge.cancel_change(
+                    request,
+                    signature,
+                    self.event_verifier,
+                    now=now,
+                )
+                return self._json(
+                    "202 Accepted" if cancelled.newly_cancelled else "200 OK",
+                    {"schema": API_SCHEMA, **asdict(cancelled)},
+                    start_response,
+                )
             ingested = self.bridge.ingest_change(
                 request,
                 signature,
