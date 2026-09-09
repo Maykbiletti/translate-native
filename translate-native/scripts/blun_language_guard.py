@@ -196,7 +196,15 @@ def validate_text(
     base_language = language.casefold().replace("_", "-").split("-", 1)[0]
     profile = LANGUAGE_CHARACTER_PROFILES.get(base_language)
     profile_prose = DIACRITICS.mask_technical_text(text)
-    if profile and len(profile_prose) >= 200 and not any(character in profile for character in profile_prose):
+    # 31.08. QA-Fix (Angel, Dieters sv-Befund): Die Laengenschwelle zaehlte
+    # maskierte Ersatz-Leerzeichen mit - ein Text aus URLs/Codebloecken mit
+    # kurzer Prosa galt als "langer Text". Schwelle jetzt auf echte
+    # Prosa-Zeichen. Und: Der Check jagt KOMPLETT-Faltung - traegt der
+    # Gesamttext irgendwo native Zeichen, ist wholesale folding widerlegt.
+    profile_prose_solid = sum(1 for character in profile_prose if not character.isspace())
+    if (profile and profile_prose_solid >= 200
+            and not any(character in profile for character in profile_prose)
+            and not any(character in profile for character in text)):
         findings.append(Finding(
             "missing-language-character-profile",
             f"Long {base_language} text contains none of the language's characteristic native characters; possible wholesale ASCII folding.",
