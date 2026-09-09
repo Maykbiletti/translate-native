@@ -38,6 +38,10 @@ HTTP = load(
     "blun_test_website_localization_evidence_http",
     ROOT / "integrations" / "website_localization_evidence_http.py",
 )
+RECEIPT_HTTP = load(
+    "blun_test_website_localization_receipt_verifier_http_integration",
+    ROOT / "integrations" / "website_localization_receipt_verifier_http.py",
+)
 
 
 class FakeTransport:
@@ -131,6 +135,30 @@ def adapter(transport, authentication_headers=None, **overrides):
         authentication_headers or (lambda: {"Authorization": "Bearer private-token"}),
         transport=transport,
         **overrides,
+    )
+
+
+def receipt_response_for(body: bytes):
+    request = json.loads(body.decode("utf-8"))
+    payload = {
+        "schema": RECEIPT_HTTP.RESPONSE_SCHEMA,
+        "request_id": request["request_id"],
+        "request_sha256": hashlib.sha256(body).hexdigest(),
+        "binding_sha256": request["binding_sha256"],
+        "receipt_sha256": request["receipt_sha256"],
+        "verified": True,
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return RECEIPT_HTTP.HTTPResult(
+        200,
+        (("Content-Type", "application/json"), ("Content-Length", str(len(raw)))),
+        raw,
     )
 
 
@@ -306,11 +334,17 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
 
             failure_transport = FakeTransport(lambda _body: HTTP.HTTPResult(503, (), b""))
             failure_provider = adapter(failure_transport)
+            receipt_transport = FakeTransport(receipt_response_for)
+            receipt_verifier = RECEIPT_HTTP.HTTPReceiptVerifierAdapter(
+                "https://quality.example.test/v1/receipts/verify",
+                lambda: {"Authorization": "Bearer verifier-token"},
+                transport=receipt_transport,
+            )
             arguments = dict(
                 evidence_revision="native-evidence-http-1",
                 approval_ttl_seconds=1000,
                 evidence_state=evidence_state,
-                quality_verifier=AcceptingVerifier(),
+                quality_verifier=receipt_verifier,
                 approval_authority=approval_authority,
                 publication_authority=publication_authority,
                 evidence_worker_id="quality-http-worker",
@@ -322,6 +356,7 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
                 )
             self.assertEqual((caught.exception.code, caught.exception.retryable), ("evidence.http_status", True))
             self.assertEqual(len(failure_transport.calls), 1)
+            self.assertEqual(receipt_transport.calls, [])
             state = evidence_state.statuses(event["event_id"])[0]
             self.assertEqual((state.status, state.attempts, state.next_attempt_at), ("retry_wait", 1, 205.0))
 
@@ -339,6 +374,10 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             )
             self.assertEqual((outcome.status, outcome.target_locale), ("delivery_ready", "fi-FI"))
             self.assertEqual(len(success_transport.calls), 1)
+            self.assertEqual(len(receipt_transport.calls), 1)
+            receipt_request = json.loads(receipt_transport.calls[0][2])
+            self.assertEqual(receipt_request["binding"]["target_locale"], "fi-FI")
+            self.assertEqual(receipt_request["binding"]["review_kind"], "quality")
             state = evidence_state.statuses(event["event_id"])[0]
             self.assertEqual((state.status, state.attempts, state.last_error_code), ("succeeded", 2, None))
         finally:

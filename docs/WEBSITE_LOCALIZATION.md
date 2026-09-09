@@ -1007,6 +1007,17 @@ bind every field. It must reject a receipt issued for another result, policy,
 model, profile, software version, locale, or review purpose. In particular, a
 quality receipt cannot satisfy a qualified-human or independent-model review.
 
+For deployments that keep verification behind a network trust boundary,
+`integrations/website_localization_receipt_verifier_http.py` provides one
+fixed-endpoint provider-neutral HTTPS attempt. It validates the complete
+binding before authentication, derives deterministic request identity from
+the binding and receipt hashes, disables redirects, strictly checks the bound
+boolean response, and contains no credential or retry loop. Declared temporary
+network and service failures retain retryability through the durable evidence
+queue; an explicit negative verdict or invalid binding remains terminal. The
+public protocol is documented in
+[`WEBSITE_LOCALIZATION_RECEIPT_VERIFIER_HTTP.md`](WEBSITE_LOCALIZATION_RECEIPT_VERIFIER_HTTP.md).
+
 Every approval binds the exact source and target hashes, source and target
 locales, content type, glossary and policy versions, provider/model identity,
 worker schema, software version, queue-result hash, quality-receipt hash,

@@ -155,6 +155,15 @@ class BoundReceiptVerifier:
         )
 
 
+class ReceiptVerifierUnavailable(RuntimeError):
+    localization_receipt_verification_failure = True
+
+    def __init__(self, code="network", *, retryable=True):
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+
+
 class WebsiteLocalizationReleaseTests(unittest.TestCase):
     def setUp(self):
         self.queue_connection = sqlite3.connect(":memory:")
@@ -428,6 +437,27 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             self.release_connection.execute("SELECT COUNT(*) FROM localization_approvals").fetchone()[0],
             0,
         )
+
+    def test_declared_verifier_unavailability_preserves_retryability(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan)
+
+        class UnavailableVerifier:
+            def verify(self, **values):
+                raise ReceiptVerifierUnavailable()
+
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.store.approve(
+                plan,
+                plan.jobs[0].job_id,
+                "quality-receipt",
+                UnavailableVerifier(),
+                self.authority,
+                now=200,
+            )
+        self.assertEqual(caught.exception.code, "quality.verifier.network")
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(self.authority.sign_calls, 0)
 
     def test_legal_result_requires_separate_human_review_receipt(self):
         plan = make_plan(

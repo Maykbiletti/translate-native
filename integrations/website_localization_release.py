@@ -60,11 +60,14 @@ _WORKER = _load_module(
 class LocalizationReleaseBlocked(RuntimeError):
     """Stable, content-free release failure."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, retryable: bool = False):
         if not isinstance(code, str) or TOKEN.fullmatch(code) is None:
             raise ValueError("release failure code is invalid")
+        if not isinstance(retryable, bool):
+            raise ValueError("release failure retryability must be boolean")
         super().__init__(code)
         self.code = code
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -227,6 +230,21 @@ def _receipt_binding(
         "independent_review_required": result["independent_review_required"],
     }
     return json.loads(_canonical_json(binding))
+
+
+def _verification_failure(error: Exception, verifier_kind: str) -> None:
+    if getattr(type(error), "localization_receipt_verification_failure", None) is not True:
+        return
+    code = getattr(error, "code", None)
+    retryable = getattr(error, "retryable", None)
+    combined = f"{verifier_kind}.verifier.{code}"
+    if (
+        isinstance(code, str)
+        and TOKEN.fullmatch(code) is not None
+        and isinstance(retryable, bool)
+        and len(combined) <= 256
+    ):
+        raise LocalizationReleaseBlocked(combined, retryable=retryable) from None
 
 
 def _signature(value: Any) -> ApprovalSignature:
@@ -440,7 +458,8 @@ class LocalizationReleaseStore:
                 ),
                 receipt=quality_receipt,
             ) is True
-        except Exception:
+        except Exception as error:
+            _verification_failure(error, "quality")
             quality_ok = False
         if not quality_ok:
             raise LocalizationReleaseBlocked("quality.receipt.rejected")
@@ -465,7 +484,8 @@ class LocalizationReleaseStore:
                     ),
                     receipt=human_review_receipt,
                 ) is True
-            except Exception:
+            except Exception as error:
+                _verification_failure(error, "human")
                 human_ok = False
             if not human_ok:
                 raise LocalizationReleaseBlocked("human.receipt.rejected")
@@ -492,7 +512,8 @@ class LocalizationReleaseStore:
                         ),
                         receipt=model_receipt,
                     ) is True
-                except Exception:
+                except Exception as error:
+                    _verification_failure(error, "independent_model_review")
                     model_ok = False
                 if not model_ok:
                     raise LocalizationReleaseBlocked("independent_model_review.receipt.rejected")
@@ -517,7 +538,8 @@ class LocalizationReleaseStore:
                         ),
                         receipt=human_review_receipt,
                     ) is True
-                except Exception:
+                except Exception as error:
+                    _verification_failure(error, "human")
                     human_ok = False
                 if not human_ok:
                     raise LocalizationReleaseBlocked("human.receipt.rejected")

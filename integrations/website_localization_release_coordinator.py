@@ -83,6 +83,39 @@ class QualityEvidenceUnavailable(RuntimeError):
         self.retryable = retryable
 
 
+class _ReceiptVerificationGuardUnavailable(RuntimeError):
+    localization_receipt_verification_failure = True
+
+    def __init__(self):
+        super().__init__("operation_guard")
+        self.code = "operation_guard"
+        self.retryable = True
+
+
+class _GuardedReceiptVerifier:
+    def __init__(self, verifier: Any, guard: Callable[[float], Any], lease_seconds: float):
+        self.verifier = verifier
+        self.guard = guard
+        self.lease_seconds = lease_seconds
+
+    def verify(self, **values):
+        try:
+            self.guard(self.lease_seconds)
+        except Exception:
+            raise _ReceiptVerificationGuardUnavailable() from None
+        return self.verifier.verify(**values)
+
+
+def _guarded_verifier(
+    verifier: Any | None,
+    operation_guard: Callable[[float], Any] | None,
+    lease_seconds: float,
+) -> Any | None:
+    if verifier is None or operation_guard is None:
+        return verifier
+    return _GuardedReceiptVerifier(verifier, operation_guard, lease_seconds)
+
+
 @dataclass(frozen=True)
 class QualityEvidenceRequest:
     schema: str
@@ -896,27 +929,43 @@ def run_next_release(
         evidence_state.fail(claim, error, now=current_time())
         raise
     approval_now = current_time()
+    guarded_quality_verifier = _guarded_verifier(
+        quality_verifier, operation_guard, float(evidence_lease_seconds),
+    )
+    guarded_human_verifier = _guarded_verifier(
+        human_review_verifier, operation_guard, float(evidence_lease_seconds),
+    )
+    guarded_independent_verifier = _guarded_verifier(
+        independent_model_review_verifier,
+        operation_guard,
+        float(evidence_lease_seconds),
+    )
     try:
         approved = store.approve(
             plan,
             selected.job_id,
             quality_receipt,
-            quality_verifier,
+            guarded_quality_verifier,
             approval_authority,
             now=approval_now,
             ttl_seconds=approval_ttl_seconds,
             human_review_receipt=human_receipt,
-            human_review_verifier=human_review_verifier if human_receipt is not None else None,
+            human_review_verifier=(
+                guarded_human_verifier if human_receipt is not None else None
+            ),
             independent_model_review=independent_review,
             independent_model_review_verifier=(
-                independent_model_review_verifier if independent_review is not None else None
+                guarded_independent_verifier if independent_review is not None else None
             ),
         )
     except Exception as error:
         code = _external_code(error, "release")
         blocked = LocalizationReleaseCoordinatorBlocked(
             code,
-            retryable=code == "release.approval.signing.failed",
+            retryable=(
+                code == "release.approval.signing.failed"
+                or getattr(error, "retryable", False) is True
+            ),
         )
         evidence_state.fail(claim, blocked, now=current_time())
         raise blocked from None

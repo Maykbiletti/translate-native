@@ -96,6 +96,15 @@ class ReceiptVerifier:
         )
 
 
+class ReceiptVerifierUnavailable(RuntimeError):
+    localization_receipt_verification_failure = True
+
+    def __init__(self, code="network", *, retryable=True):
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+
+
 class EvidenceProvider:
     def __init__(
         self, *, error=None, mutate=None, include_human=True,
@@ -286,13 +295,16 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         )
 
     def run_release(self, provider, **overrides):
+        quality = overrides.pop(
+            "quality_verifier",
+            ReceiptVerifier("quality", provider.requests),
+        )
         values = {
             "evidence_revision": "native-evidence-1",
             "now": 200,
             "approval_ttl_seconds": 1000,
         }
         values.update(overrides)
-        quality = ReceiptVerifier("quality", provider.requests)
         human = ReceiptVerifier("human", provider.requests)
         independent = ReceiptVerifier("independent", provider.requests)
         outcome = COORDINATOR.run_next_release(
@@ -399,6 +411,52 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         states = self.evidence_state.statuses(self.event["event_id"])
         self.assertEqual(len(states), 1)
         self.assertEqual(states[0].status, "leased")
+
+    def test_outer_operation_guard_renews_before_provider_and_receipt_verifier(self):
+        self.complete_all()
+        steps = []
+
+        class OrderedProvider(EvidenceProvider):
+            def obtain(self, request):
+                steps.append("provider")
+                return super().obtain(request)
+
+        class OrderedVerifier(ReceiptVerifier):
+            def verify(self, **values):
+                steps.append("verifier")
+                return super().verify(**values)
+
+        provider = OrderedProvider()
+        verifier = OrderedVerifier("quality", provider.requests)
+        self.run_release(
+            provider,
+            quality_verifier=verifier,
+            operation_guard=lambda _: steps.append("guard"),
+        )
+        self.assertEqual(steps, ["guard", "provider", "guard", "verifier"])
+
+    def test_lost_outer_lease_before_receipt_verification_retries_without_signing(self):
+        self.complete_all()
+        provider = EvidenceProvider()
+        guard_calls = []
+
+        def guard(_):
+            guard_calls.append(True)
+            if len(guard_calls) == 2:
+                raise RuntimeError("lost outer lease")
+
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked) as caught:
+            self.run_release(provider, operation_guard=guard)
+        self.assertEqual(
+            caught.exception.code,
+            "release.quality.verifier.operation_guard",
+        )
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(self.approval_authority.sign_calls, 0)
+        status = self.evidence_state.statuses(self.event["event_id"])[0]
+        self.assertEqual(status.status, "retry_wait")
+        self.assertEqual(status.last_error_code, caught.exception.code)
 
     def test_active_evidence_lease_prevents_a_second_provider_call(self):
         self.complete_all()
@@ -767,6 +825,27 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.release_connection.execute(
             "SELECT COUNT(*) FROM localization_approvals"
         ).fetchone()[0], 0)
+        self.assertEqual(self.cms_connection.execute(
+            "SELECT COUNT(*) FROM cms_publication_deliveries"
+        ).fetchone()[0], 0)
+
+    def test_retryable_receipt_verifier_failure_uses_durable_backoff(self):
+        self.complete_all()
+        provider = EvidenceProvider()
+
+        class UnavailableVerifier:
+            def verify(self, **values):
+                raise ReceiptVerifierUnavailable()
+
+        with self.assertRaises(COORDINATOR.LocalizationReleaseCoordinatorBlocked) as caught:
+            self.run_release(provider, quality_verifier=UnavailableVerifier())
+        self.assertEqual(caught.exception.code, "release.quality.verifier.network")
+        self.assertTrue(caught.exception.retryable)
+        status = self.evidence_state.statuses(self.event["event_id"])[0]
+        self.assertEqual(status.status, "retry_wait")
+        self.assertEqual(status.attempts, 1)
+        self.assertEqual(status.last_error_code, "release.quality.verifier.network")
+        self.assertEqual(self.approval_authority.sign_calls, 0)
         self.assertEqual(self.cms_connection.execute(
             "SELECT COUNT(*) FROM cms_publication_deliveries"
         ).fetchone()[0], 0)
