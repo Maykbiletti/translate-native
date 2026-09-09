@@ -452,6 +452,16 @@ contains no target, candidate, baseline, or supposed reference translation.
 Actual targets must still come from the attached candidate and lawfully
 acquired baseline so unreviewed prose cannot silently become a gold standard.
 
+The policy also requires `valid_until`, an absolute positive integer Unix
+timestamp chosen by the trusted host for that exact candidate, baseline,
+reviewer, reference, suite, and decision configuration. It is included in the
+policy hash, every signed case result, and the signed final report. Extending
+the date therefore creates a new campaign and cannot relabel old case evidence
+as current. The contract enforces expiry; it does not prove that a host-chosen
+date is appropriate. Hosts must derive it from their lawful baseline update
+process and deliberately shorten it when a provider, model, glossary, quality
+profile, or evaluation policy changes.
+
 ### Durable benchmark campaigns
 
 `integrations/website_localization_benchmark_campaign.py` turns the bound suite
@@ -570,6 +580,7 @@ byte-for-byte without signing again. A failed, omitted, duplicated, exchanged,
 or policy-stale work item therefore cannot disappear behind a partial aggregate,
 and a crash cannot silently replace the report used for a claim. Existing v1
 and v2 campaign databases migrate transactionally to the v3 report schema.
+Case-result schema v7 and report schema v10 bind the same `valid_until` value.
 
 After finalization, `BenchmarkCampaignStore.load_report` is the read-only
 consumer boundary. It opens a consistent snapshot, requires the exact complete
@@ -599,6 +610,14 @@ Expired leases and overdue actionable work degrade health; any terminal work
 failure, altered row, invalid attestation, or invalid final report blocks it.
 Live backoff and recent incomplete work remain healthy and never imply that the
 candidate won.
+
+At the first clock value after `valid_until`, the campaign blocks new claims,
+rechecks the boundary before every dependency or reviewer operation, refuses
+case completion and report signing, and rejects stored-report loads with
+`benchmark.campaign.validity_expired`. An expiry discovered during a live case
+or report attempt is recorded as terminal, content-free state; no remaining
+external adapter is called. Health is blocked and `report_ready` is false even
+when every historical score and signature remains otherwise valid.
 
 Early locale lanes may be run and reported independently, but passing them no
 longer authorizes an EU-wide superiority statement. The attested report exposes
@@ -1188,6 +1207,10 @@ distinct connections in total. The remaining required fields are
 or transaction-active values block before schema construction. The benchmark
 evidence authority must both sign and verify, and the supervisor lease must
 strictly exceed the configured benchmark lease.
+An executing composition also rejects an already expired policy before any of
+the ten stores creates or migrates a schema. Monitor-only composition may load
+an expired campaign so health can expose its blocked state, but it cannot load
+that campaign's report as current evidence.
 
 The composition root constructs the canonical
 `WebsiteLocalizationBenchmarkRuntime`; callers cannot replace its durable input

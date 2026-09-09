@@ -252,6 +252,13 @@ def _timestamp(value: Any = None) -> float:
     return value
 
 
+def _assert_policy_current(policy: Any, now: float) -> None:
+    if now > policy.valid_until:
+        raise BenchmarkCampaignBlocked(
+            "benchmark.campaign.validity_expired",
+        )
+
+
 def _duration(value: Any, *, allow_zero: bool = False) -> float:
     value = _timestamp(value)
     if (value < 0 if allow_zero else value <= 0) or value > MAX_LEASE_SECONDS:
@@ -514,6 +521,7 @@ class BenchmarkCampaignStore:
         if not 1 <= max_attempts <= MAX_ATTEMPTS:
             raise BenchmarkCampaignBlocked("benchmark.campaign.attempts_invalid")
         now = _timestamp(now)
+        _assert_policy_current(policy, now)
         campaign_id, policy_sha256 = _campaign_identity(policy)
         expected = _expected_work(policy)
         with _transaction(self.connection):
@@ -592,6 +600,7 @@ class BenchmarkCampaignStore:
         policy = _BENCHMARK._validate_policy(policy)
         worker_id = _identifier(worker_id)
         now = _timestamp(now)
+        _assert_policy_current(policy, now)
         lease_seconds = _duration(lease_seconds)
         with _transaction(self.connection):
             self._verify_binding_locked(policy, campaign_id)
@@ -698,6 +707,7 @@ class BenchmarkCampaignStore:
         if len(encoded.encode("utf-8")) > MAX_RESULT_BYTES:
             raise BenchmarkCampaignBlocked("benchmark.campaign.result_invalid")
         now = _timestamp(now)
+        _assert_policy_current(policy, now)
         with _transaction(self.connection):
             self._verify_binding_locked(policy, claim.campaign_id)
             self._assert_live_locked(claim, now)
@@ -781,6 +791,7 @@ class BenchmarkCampaignStore:
             "campaign_id": campaign_id,
             "policy_sha256": _campaign_identity(policy)[1],
             "suite_sha256": policy.suite_sha256,
+            "valid_until": policy.valid_until,
             "work_count": len(_expected_work(policy)),
             "counts": counts,
             "error_counts": {
@@ -932,6 +943,7 @@ class BenchmarkCampaignStore:
         policy = _BENCHMARK._validate_policy(policy)
         worker_id = _identifier(worker_id)
         now = _timestamp(now)
+        _assert_policy_current(policy, now)
         lease_seconds = _duration(lease_seconds)
         with _transaction(self.connection):
             self._verify_binding_locked(policy, campaign_id)
@@ -1016,6 +1028,7 @@ class BenchmarkCampaignStore:
     ) -> BenchmarkReportFinalizationOutcome:
         policy = _BENCHMARK._validate_policy(policy)
         now = _timestamp(now)
+        _assert_policy_current(policy, now)
         with _transaction(self.connection):
             self._verify_binding_locked(policy, claim.campaign_id)
             self._assert_report_claim_locked(claim, now)
@@ -1162,6 +1175,7 @@ class BenchmarkCampaignStore:
         """Load one already finalized report without signing or writing state."""
         policy = _BENCHMARK._validate_policy(policy)
         now = _timestamp(now)
+        _assert_policy_current(policy, now)
         if self.connection.in_transaction:
             raise BenchmarkCampaignBlocked(
                 "benchmark.campaign.external_transaction",
@@ -1221,9 +1235,11 @@ class BenchmarkCampaignStore:
         result_sha256s: list[str] = []
         report_row = None
         report_state = None
+        policy_expired = False
         reasons: set[str] = set()
         try:
             policy = _BENCHMARK._validate_policy(policy)
+            policy_expired = now > policy.valid_until
             if self.connection.in_transaction:
                 raise BenchmarkCampaignBlocked(
                     "benchmark.campaign.external_transaction",
@@ -1368,6 +1384,8 @@ class BenchmarkCampaignStore:
 
         complete = counts["succeeded"] == work_count
         report_ready = False
+        if policy_expired:
+            reasons.add("benchmark.campaign.validity_expired")
         if counts["failed"]:
             reasons.add("benchmark.campaign.failed")
         if (
@@ -1406,7 +1424,7 @@ class BenchmarkCampaignStore:
                     authority,
                     now=now,
                 )
-                report_ready = True
+                report_ready = not policy_expired
             except Exception:
                 reasons.add("benchmark.campaign.report_invalid")
         elif report_row is not None:
@@ -1415,6 +1433,7 @@ class BenchmarkCampaignStore:
             "benchmark.campaign.report_failed",
             "benchmark.campaign.report_invalid",
             "benchmark.campaign.report_state_invalid",
+            "benchmark.campaign.validity_expired",
         } & reasons)
         status = "blocked" if blocking else ("degraded" if reasons else "healthy")
         return BenchmarkCampaignHealth(
@@ -1438,6 +1457,7 @@ class BenchmarkCampaignStore:
     ) -> dict[str, Any]:
         policy = _BENCHMARK._validate_policy(policy)
         now = _timestamp(now)
+        _assert_policy_current(policy, now)
         if operation_guard is not None and not callable(operation_guard):
             raise TypeError("operation_guard must be callable")
 
@@ -1446,6 +1466,12 @@ class BenchmarkCampaignStore:
                 return
             try:
                 operation_guard()
+            except BenchmarkCampaignBlocked as error:
+                if error.code == "benchmark.campaign.validity_expired":
+                    raise
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.operation_guard_failed",
+                ) from None
             except Exception:
                 raise BenchmarkCampaignBlocked(
                     "benchmark.campaign.operation_guard_failed",
@@ -1557,6 +1583,8 @@ def run_benchmark_report_finalization(
 
     def renew() -> None:
         nonlocal active_claim
+        current_now = _timestamp(clock())
+        _assert_policy_current(policy, current_now)
         if operation_guard is not None:
             try:
                 operation_guard(lease_seconds)
@@ -1565,7 +1593,7 @@ def run_benchmark_report_finalization(
                     "benchmark.campaign.operation_guard_failed",
                 ) from None
         active_claim = store.renew_report_finalization(
-            active_claim, now=_timestamp(clock()), lease_seconds=lease_seconds,
+            active_claim, now=current_now, lease_seconds=lease_seconds,
         )
 
     try:
@@ -1591,6 +1619,7 @@ def run_benchmark_report_finalization(
             "benchmark.campaign.report_invalid",
             "benchmark.campaign.report_state_invalid",
             "benchmark.campaign.state_invalid",
+            "benchmark.campaign.validity_expired",
         }
         retryable = code not in terminal
         delay = _retry_delay(
@@ -1646,13 +1675,15 @@ def run_next_benchmark_case(
 
     def renew(_: str) -> None:
         nonlocal active
+        current_now = _timestamp(clock())
+        _assert_policy_current(policy, current_now)
         if operation_guard is not None:
             try:
                 operation_guard(lease_seconds)
             except Exception:
                 raise BenchmarkCampaignBlocked("benchmark.campaign.operation_guard_failed") from None
         active = store.renew(
-            active, now=_timestamp(clock()), lease_seconds=lease_seconds,
+            active, now=current_now, lease_seconds=lease_seconds,
         )
 
     try:
@@ -1697,8 +1728,11 @@ def run_next_benchmark_case(
                 "benchmark.attestation.verify_failed",
             }
         )
-    except BenchmarkCampaignBlocked:
-        raise
+    except BenchmarkCampaignBlocked as error:
+        if error.code != "benchmark.campaign.validity_expired":
+            raise
+        code = error.code
+        retryable = False
     except Exception as error:
         if getattr(error, "benchmark_campaign_dependency_failure", None) is True:
             dependency_code = getattr(error, "code", None)
@@ -1719,9 +1753,16 @@ def run_next_benchmark_case(
             code = "benchmark.campaign.unexpected"
             retryable = True
     else:
-        return store.complete(
-            policy, active, result, evidence_authority, now=_timestamp(clock()),
-        )
+        try:
+            return store.complete(
+                policy, active, result, evidence_authority,
+                now=_timestamp(clock()),
+            )
+        except BenchmarkCampaignBlocked as error:
+            if error.code != "benchmark.campaign.validity_expired":
+                raise
+            code = error.code
+            retryable = False
     return store.transition_failure(
         policy, active, code, retryable=retryable,
         delay_seconds=_retry_delay(

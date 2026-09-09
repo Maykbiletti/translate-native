@@ -31,8 +31,8 @@ NATIVE_REFERENCE_SCHEMA = "blun.website-localization-native-reference.v1"
 NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-request.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v6"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v9"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v7"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v10"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v1"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -148,6 +148,7 @@ class BenchmarkPolicy:
     native_reference_revision: str
     native_reference_verifier_id: str
     native_reference_verifier_version: str
+    valid_until: int
     required_locales: tuple[str, ...]
     required_content_types: tuple[str, ...] = ("commercial",)
     minimum_cases_per_locale: int = 8
@@ -299,6 +300,12 @@ def _validate_policy(policy: Any) -> BenchmarkPolicy:
     if locales != policy.required_locales:
         raise BenchmarkBlocked("benchmark.policy.invalid")
     if not EARLY_REQUIRED_LOCALES.issubset(locales):
+        raise BenchmarkBlocked("benchmark.policy.invalid")
+    if (
+        isinstance(policy.valid_until, bool)
+        or not isinstance(policy.valid_until, int)
+        or not 0 < policy.valid_until <= 9_007_199_254_740_991
+    ):
         raise BenchmarkBlocked("benchmark.policy.invalid")
     if not isinstance(policy.required_content_types, tuple) or not policy.required_content_types:
         raise BenchmarkBlocked("benchmark.policy.invalid")
@@ -1098,6 +1105,7 @@ def run_blind_benchmark_case(
     result = {
         "schema": CASE_RESULT_SCHEMA,
         "benchmark_version": policy.benchmark_version,
+        "valid_until": policy.valid_until,
         "suite": {
             "version": policy.suite_version,
             "sha256": policy.suite_sha256,
@@ -1243,7 +1251,7 @@ def _validated_case_result(
     attestation = result.pop("attestation", None)
     _verify_attestation(result, attestation, policy, authority)
     required = {
-        "schema", "benchmark_version", "suite", "case_id", "job_id", "target_locale",
+        "schema", "benchmark_version", "valid_until", "suite", "case_id", "job_id", "target_locale",
         "content_type", "source_sha256", "domain", "long_form", "adversarial_tags",
         "candidate", "candidate_sha256", "quality_profile", "native_reference",
         "baseline", "reviewer", "blind_commitment_sha256", "passes", "integrity",
@@ -1252,6 +1260,8 @@ def _validated_case_result(
     if set(result) != required or result["schema"] != CASE_RESULT_SCHEMA:
         raise BenchmarkBlocked("benchmark.results.invalid")
     if result["benchmark_version"] != policy.benchmark_version:
+        raise BenchmarkBlocked("benchmark.results.version_mismatch")
+    if result["valid_until"] != policy.valid_until:
         raise BenchmarkBlocked("benchmark.results.version_mismatch")
     suite = result["suite"]
     if (
@@ -1477,6 +1487,7 @@ def _unsigned_benchmark_report(
     return {
         "schema": REPORT_SCHEMA,
         "benchmark_version": policy.benchmark_version,
+        "valid_until": policy.valid_until,
         "suite": {"version": policy.suite_version, "sha256": policy.suite_sha256},
         "candidate": _candidate_binding(policy),
         "quality_profiles": [

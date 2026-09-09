@@ -77,6 +77,7 @@ def policy(**overrides):
         "native_reference_revision": "qualified-native-reference-1",
         "native_reference_verifier_id": "qualified-review-registry",
         "native_reference_verifier_version": "2026-08-30",
+        "valid_until": 1_800_000_000,
         "required_locales": ("mt-MT", "fi-FI"),
         "required_content_types": ("commercial",),
         "minimum_cases_per_locale": len(SUITE.SOURCE_CASES),
@@ -848,6 +849,9 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             {"required_content_types": ("commercial", 7)},
             {"required_content_types": ("commercial", "commercial")},
             {"minimum_cases_per_content_type": 9},
+            {"valid_until": True},
+            {"valid_until": 0},
+            {"valid_until": 9_007_199_254_740_992},
         ):
             with self.subTest(overrides=overrides), self.assertRaises(
                 BENCHMARK.BenchmarkBlocked,
@@ -1388,6 +1392,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(verified, report)
         self.assertEqual(report["attestation"]["schema"], BENCHMARK.ATTESTATION_SCHEMA)
         self.assertRegex(report["case_evidence_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(report["valid_until"], policy().valid_until)
 
         changed_report = copy.deepcopy(report)
         changed_report["superiority_claim_allowed"] = True
@@ -1402,6 +1407,16 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 policy(), report, [], evidence_authority=self.authority,
             )
         self.assertEqual(caught.exception.code, "benchmark.report.binding_mismatch")
+
+        extended = policy(valid_until=policy().valid_until + 1)
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            BENCHMARK.verify_benchmark_report(
+                extended, report, [result], evidence_authority=self.authority,
+            )
+        self.assertIn(caught.exception.code, {
+            "benchmark.attestation.payload_mismatch",
+            "benchmark.results.version_mismatch",
+        })
 
     def test_progress_callback_runs_before_each_external_review(self):
         payload = job()
@@ -1499,6 +1514,87 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 connection.execute("PRAGMA user_version").fetchone()[0],
                 CAMPAIGN.SCHEMA_VERSION,
             )
+
+    def test_campaign_validity_blocks_before_external_work_and_in_health(self):
+        benchmark_policy = campaign_policy(valid_until=101)
+        calls = []
+        clock_values = iter((100, 102, 102))
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+            outcome = CAMPAIGN.run_next_benchmark_case(
+                store,
+                benchmark_policy,
+                campaign_id,
+                "worker",
+                lambda payload: calls.append(payload),
+                CampaignCandidateReviewer(),
+                blinding_key=self.key,
+                native_reference_verifier=CampaignNativeReferenceVerifier(),
+                evidence_authority=CampaignAuthority(),
+                clock=lambda: next(clock_values),
+            )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(outcome.status, "failed")
+            self.assertEqual(
+                outcome.error_code,
+                "benchmark.campaign.validity_expired",
+            )
+            health = store.health(
+                benchmark_policy, campaign_id, CampaignAuthority(), now=102,
+            )
+            self.assertEqual(health.status, "blocked")
+            self.assertIn(
+                "benchmark.campaign.validity_expired", health.reasons,
+            )
+            self.assertFalse(health.report_ready)
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.claim(
+                    benchmark_policy, campaign_id, "worker", now=102,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.validity_expired",
+            )
+
+    def test_case_expiry_before_completion_is_terminal_and_discards_result(self):
+        benchmark_policy = campaign_policy(valid_until=101)
+        authority = CampaignAuthority()
+        verifier = CampaignNativeReferenceVerifier()
+        reviewer = CampaignCandidateReviewer()
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+
+            outcome = CAMPAIGN.run_next_benchmark_case(
+                store,
+                benchmark_policy,
+                campaign_id,
+                "worker",
+                lambda payload: campaign_inputs(
+                    payload, benchmark_policy, verifier, authority,
+                ),
+                reviewer,
+                blinding_key=self.key,
+                native_reference_verifier=verifier,
+                evidence_authority=authority,
+                clock=lambda: 102 if len(reviewer.requests) == 2 else 100,
+            )
+
+            self.assertEqual(outcome.status, "failed")
+            self.assertEqual(
+                outcome.error_code,
+                "benchmark.campaign.validity_expired",
+            )
+            row = connection.execute(
+                """SELECT status, result_json, result_sha256
+                   FROM benchmark_campaign_work WHERE work_id = ?""",
+                (outcome.work_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "failed")
+            self.assertIsNone(row["result_json"])
+            self.assertIsNone(row["result_sha256"])
             self.assertEqual(
                 tuple(row["name"] for row in connection.execute(
                     "PRAGMA table_info(benchmark_campaign_reports)"
@@ -1894,6 +1990,44 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "benchmark.runtime.clock_invalid")
         for connection in late_connections:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall(),
+                [],
+            )
+
+        expired_connections = [sqlite3.connect(":memory:") for _ in range(5)]
+        for connection in expired_connections:
+            self.addCleanup(connection.close)
+        with self.assertRaises(BENCHMARK_RUNTIME.BenchmarkRuntimeFailed) as caught:
+            BENCHMARK_RUNTIME.WebsiteLocalizationBenchmarkRuntime(
+                campaign_connection=expired_connections[0],
+                candidate_connection=expired_connections[1],
+                baseline_connection=expired_connections[2],
+                native_reference_connection=expired_connections[3],
+                review_connection=expired_connections[4],
+                policy=campaign_policy(valid_until=99),
+                candidate_route_id="candidate",
+                baseline_route_id="baseline",
+                native_reference_route_id="reference",
+                reviewer_route_id="reviewer",
+                assets_resolver=lambda _: None,
+                candidate_provider_resolver=lambda _: None,
+                baseline_acquirer=lambda *_: None,
+                native_reference_loader=lambda _: None,
+                reviewer=CampaignCandidateReviewer(),
+                native_reference_verifier=CampaignNativeReferenceVerifier(),
+                evidence_authority=CampaignAuthority(),
+                blinding_key=self.key,
+                worker_id="worker",
+                clock=lambda: 100,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "benchmark.runtime.validity_expired",
+        )
+        for connection in expired_connections:
             self.assertEqual(
                 connection.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -2578,6 +2712,27 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 ["eu_target_locale_coverage_incomplete"],
             )
 
+            expired_at = benchmark_policy.valid_until + 1
+            before_expired_load = connection.total_changes
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.load_report(
+                    benchmark_policy, campaign_id, authority, now=expired_at,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.validity_expired",
+            )
+            self.assertEqual(connection.total_changes, before_expired_load)
+            expired_health = store.health(
+                benchmark_policy, campaign_id, authority, now=expired_at,
+            )
+            self.assertEqual(expired_health.status, "blocked")
+            self.assertEqual(
+                expired_health.reasons,
+                ("benchmark.campaign.validity_expired",),
+            )
+            self.assertFalse(expired_health.report_ready)
+
             connection.execute("""
                 UPDATE benchmark_campaign_reports SET report_sha256 = ?
                 WHERE campaign_id = ?
@@ -2719,6 +2874,60 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 "benchmark.campaign.report_unexpected",
                 health.reasons,
             )
+
+    def test_report_expiry_during_finalization_blocks_before_signing(self):
+        benchmark_policy = campaign_policy(valid_until=101)
+        authority = CountingCampaignAuthority()
+        verifier = CampaignNativeReferenceVerifier()
+        reviewer = CampaignCandidateReviewer()
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(benchmark_policy, now=100)
+            while CAMPAIGN.run_next_benchmark_case(
+                store,
+                benchmark_policy,
+                campaign_id,
+                "case-worker",
+                lambda payload: campaign_inputs(
+                    payload, benchmark_policy, verifier, authority,
+                ),
+                reviewer,
+                blinding_key=self.key,
+                native_reference_verifier=verifier,
+                evidence_authority=authority,
+                clock=lambda: 100,
+            ) is not None:
+                pass
+            sign_calls = authority.sign_calls
+            clock_values = iter((100, 100, 102, 102))
+
+            outcome = CAMPAIGN.run_benchmark_report_finalization(
+                store,
+                benchmark_policy,
+                campaign_id,
+                "report-worker",
+                authority,
+                clock=lambda: next(clock_values),
+            )
+
+            self.assertEqual(outcome.status, "failed")
+            self.assertEqual(
+                outcome.error_code,
+                "benchmark.campaign.validity_expired",
+            )
+            self.assertEqual(authority.sign_calls, sign_calls)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM benchmark_campaign_reports"
+            ).fetchone()[0], 0)
+            health = store.health(
+                benchmark_policy, campaign_id, authority, now=102,
+            )
+            self.assertEqual(health.status, "blocked")
+            self.assertIn("benchmark.campaign.report_failed", health.reasons)
+            self.assertIn(
+                "benchmark.campaign.validity_expired", health.reasons,
+            )
+            self.assertFalse(health.report_ready)
 
 
 if __name__ == "__main__":

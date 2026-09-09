@@ -81,6 +81,7 @@ def policy(**overrides):
         "native_reference_revision": "qualified-native-reference-1",
         "native_reference_verifier_id": "qualified-review-registry",
         "native_reference_verifier_version": "2026-09-08",
+        "valid_until": 1_800_000_000,
         "required_locales": ("mt-MT", "fi-FI"),
         "required_content_types": ("commercial",),
         "minimum_cases_per_locale": len(manifest["cases"]),

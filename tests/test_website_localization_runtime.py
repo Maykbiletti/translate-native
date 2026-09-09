@@ -6,6 +6,7 @@ import importlib.util
 import sqlite3
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -208,6 +209,7 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             native_reference_revision="qualified-native-reference-1",
             native_reference_verifier_id="qualified-review-registry",
             native_reference_verifier_version="2026-09-08",
+            valid_until=1_800_000_000,
             required_locales=("mt-MT", "fi-FI"),
             required_content_types=("commercial",),
             minimum_cases_per_locale=len(manifest["cases"]),
@@ -754,6 +756,34 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             "runtime.clock.invalid",
         ):
             self.runtime(clock=lambda: True, **values)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+        self.assertTrue(all(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchone() is None
+            for connection in self.connections
+        ))
+
+    def test_runtime_rejects_expired_benchmark_before_schema_writes(self):
+        values = self.benchmark_configuration()
+        values["benchmark_policy"] = replace(
+            values["benchmark_policy"], valid_until=99,
+        )
+        campaign = RUNTIME._HEALTH._CAMPAIGN
+        values["benchmark_campaign_id"] = campaign._campaign_identity(
+            values["benchmark_policy"],
+        )[0]
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.benchmark.validity_expired",
+        ):
+            self.runtime(**values)
 
         self.assertEqual(
             before,

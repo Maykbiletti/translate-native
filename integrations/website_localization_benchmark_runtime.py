@@ -394,6 +394,12 @@ class WebsiteLocalizationBenchmarkRuntime:
             initial_now = _CAMPAIGN._timestamp(clock())
         except Exception:
             raise BenchmarkRuntimeFailed("benchmark.runtime.clock_invalid") from None
+        try:
+            _CAMPAIGN._assert_policy_current(policy, initial_now)
+        except Exception:
+            raise BenchmarkRuntimeFailed(
+                "benchmark.runtime.validity_expired",
+            ) from None
 
         self.policy = policy
         self.reviewer = reviewer

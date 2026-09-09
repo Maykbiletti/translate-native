@@ -403,9 +403,13 @@ class WebsiteLocalizationRuntime:
             raise LocalizationRuntimeBlocked("runtime.clock.invalid")
         if benchmark_execution is not None:
             try:
-                _BENCHMARK_RUNTIME._CAMPAIGN._timestamp(clock())
+                benchmark_now = _BENCHMARK_RUNTIME._CAMPAIGN._timestamp(clock())
             except Exception:
                 raise LocalizationRuntimeBlocked("runtime.clock.invalid") from None
+            if benchmark_now > benchmark_policy.valid_until:
+                raise LocalizationRuntimeBlocked(
+                    "runtime.benchmark.validity_expired",
+                )
         if token_factory is not None and not callable(token_factory):
             raise LocalizationRuntimeBlocked("runtime.token_factory.invalid")
         supervisor_policy = _supervisor_policy(supervisor_policy)
