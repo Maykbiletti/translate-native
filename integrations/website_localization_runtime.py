@@ -468,6 +468,7 @@ class WebsiteLocalizationRuntime:
                 validated["approval_authority"],
             )
         )
+        runtime_dependencies["ingress_max_attempts"] = cms_api_max_attempts
         self._dependencies = MappingProxyType(runtime_dependencies)
         self.bridge = _CMS.WebsiteLocalizationCMSBridge(
             cms_connection, self.queue, self.release_store,

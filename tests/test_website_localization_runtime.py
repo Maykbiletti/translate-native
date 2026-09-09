@@ -440,6 +440,40 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertNotIn("source_text", json.dumps(progress))
         self.assertIs(runtime.cms_api.bridge, runtime.bridge)
 
+    def test_runtime_recovers_prequeue_crash_with_the_api_retry_limit(self):
+        runtime = self.runtime(cms_api_max_attempts=6)
+        event = self.event()
+        signature = self.event_authority.sign(
+            CMS._canonical_json(event).encode("utf-8"),
+        )
+        enqueue = runtime.queue.enqueue_plan
+
+        def fail_before_queue(*_args, **_kwargs):
+            raise RUNTIME._QUEUE.LocalizationQueueBlocked("queue unavailable")
+
+        runtime.queue.enqueue_plan = fail_before_queue
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+                runtime.bridge.ingest_change(
+                    event, signature, self.event_authority, now=100,
+                )
+        finally:
+            runtime.queue.enqueue_plan = enqueue
+        self.assertEqual(caught.exception.code, "cms.queue.rejected")
+
+        self.clock.value = 101
+        recovered = runtime.run_once(now=101)
+
+        self.assertEqual(
+            (recovered.tick["phase"], recovered.tick["status"]),
+            ("ingress", "enqueued"),
+        )
+        job_id = runtime.queue.connection.execute(
+            "SELECT job_id FROM localization_jobs",
+        ).fetchone()[0]
+        self.assertEqual(runtime.queue.status(job_id).max_attempts, 6)
+        self.assertEqual(self.publisher.requests, [])
+
     def test_runtime_exposes_read_only_tenant_lifecycle_through_publication(self):
         runtime = self.runtime()
         event = self.event()

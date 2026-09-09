@@ -59,6 +59,15 @@ an event ID or source sequence for different content returns `409 Conflict`.
 A delayed event below an already accepted source generation is recorded as
 `superseded` and returns `200 OK`; it can never become publication work.
 
+If the process stops after persisting the signed event but before the separate
+queue transaction, the service supervisor revalidates the stored signature and
+automatically resumes exactly one such event per tick. It uses the same queue
+attempt limit configured for this API. The deterministic plan and job IDs make
+that recovery idempotent; an accepted cancellation remains terminal and is
+never resumed. A missing or invalid signature, changed stored bytes, or queue
+failure blocks before a model call and stays visible through health as
+`cms.event.awaiting_queue_resume` until a valid recovery succeeds.
+
 ```json
 {"event_id":"cms-event-184","inserted_jobs":23,"job_count":23,"plan_id":"blun-l10n-plan-…","schema":"blun.website-localization-api.v2","status":"enqueued"}
 ```

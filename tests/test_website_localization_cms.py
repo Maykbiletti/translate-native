@@ -774,6 +774,39 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "cms.event.cancelled")
 
+    def test_signed_prequeue_event_can_be_recovered_from_durable_state(self):
+        event = change_event()
+        enqueue_plan = self.queue.enqueue_plan
+
+        def fail_before_queue(*_args, **_kwargs):
+            raise QUEUE.LocalizationQueueBlocked("simulated queue outage")
+
+        self.queue.enqueue_plan = fail_before_queue
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked):
+                self.ingest(event)
+        finally:
+            self.queue.enqueue_plan = enqueue_plan
+
+        resumed = self.bridge.resume_accepted_change(
+            event["event_id"], self.event_authority,
+            max_attempts=8, now=200,
+        )
+
+        self.assertEqual((resumed.status, resumed.inserted_jobs), ("enqueued", 2))
+        self.assertIsNone(self.bridge.resume_accepted_change(
+            event["event_id"], self.event_authority,
+            max_attempts=8, now=201,
+        ))
+        statuses = tuple(
+            self.queue.status(row[0]).max_attempts
+            for row in self.queue_connection.execute(
+                "SELECT job_id FROM localization_plan_jobs WHERE plan_id = ?",
+                (resumed.plan_id,),
+            ).fetchall()
+        )
+        self.assertEqual(statuses, (8, 8))
+
     def test_cancellation_during_queue_enqueue_remains_terminal(self):
         event = change_event()
         enqueue_plan = self.queue.enqueue_plan

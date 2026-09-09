@@ -260,6 +260,29 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
             now=self.clock(),
         )
 
+    def persist_before_queue(self, event_id="event-crashed", *, source_id="homepage.footer"):
+        event = self.event(
+            event_id, "site-version-crashed", source_id=source_id,
+        )
+        signature = self.event_authority.sign(
+            CMS._canonical_json(event).encode("utf-8"),
+        )
+        enqueue = self.queue.enqueue_plan
+
+        def fail_before_queue(*_args, **_kwargs):
+            raise QUEUE.LocalizationQueueBlocked("simulated queue outage")
+
+        self.queue.enqueue_plan = fail_before_queue
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+                self.bridge.ingest_change(
+                    event, signature, self.event_authority, now=self.clock(),
+                )
+        finally:
+            self.queue.enqueue_plan = enqueue
+        self.assertEqual(caught.exception.code, "cms.queue.rejected")
+        return event
+
     def assets(self, payload):
         return WORKER.LocalizationAssets(
             glossary_version=payload["glossary_version"],
@@ -330,6 +353,70 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
         self.assertEqual(self.publisher.requests[-1].payload["schema"], (
             CMS.TOMBSTONE_DELIVERY_SCHEMA
         ))
+
+    def test_persisted_ingress_recovers_without_cms_replay_or_model_call(self):
+        event = self.persist_before_queue()
+
+        recovered = self.tick(ingress_max_attempts=7)
+
+        self.assertEqual((recovered.phase, recovered.status), ("ingress", "enqueued"))
+        self.assertEqual(recovered.event_id, event["event_id"])
+        self.assertEqual(self.provider.calls, [])
+        plan_id = self.cms_connection.execute(
+            "SELECT plan_id FROM cms_change_events WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()[0]
+        job_id = self.queue_connection.execute(
+            "SELECT job_id FROM localization_plan_jobs WHERE plan_id = ?",
+            (plan_id,),
+        ).fetchone()[0]
+        self.assertEqual(self.queue.status(job_id).max_attempts, 7)
+
+    def test_persisted_ingress_tamper_blocks_before_any_other_work(self):
+        event = self.persist_before_queue()
+        self.cms_connection.execute(
+            "UPDATE cms_change_events SET event_sha256 = ? WHERE event_id = ?",
+            ("0" * 64, event["event_id"]),
+        )
+        self.cms_connection.commit()
+
+        blocked = self.tick()
+
+        self.assertEqual((blocked.phase, blocked.status), ("ingress", "blocked"))
+        self.assertEqual(blocked.error_code, "cms.event.tampered")
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.evidence.requests, [])
+
+    def test_cancelled_prequeue_event_is_never_recovered(self):
+        event = self.persist_before_queue()
+        value = {
+            "schema": CMS.CANCELLATION_SCHEMA,
+            "cancellation_id": "cancel-crashed",
+            "event_id": event["event_id"],
+            "site_id": event["site_id"],
+            "website_version": event["website_version"],
+            "source_id": event["localization"]["source_id"],
+            "source_sequence": event["source_sequence"],
+        }
+        self.bridge.cancel_change(
+            value,
+            self.event_authority.sign(CMS._canonical_json(value).encode("utf-8")),
+            self.event_authority,
+            now=self.clock(),
+        )
+
+        outcome = self.tick()
+
+        self.assertEqual((outcome.phase, outcome.status), ("translation", "succeeded"))
+        plan_id = self.cms_connection.execute(
+            "SELECT plan_id FROM cms_change_events WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()[0]
+        self.assertEqual(sum(self.queue.plan_counts(plan_id).values()), 0)
+        self.assertEqual(self.queue_connection.execute(
+            "SELECT COUNT(*) FROM localization_plan_jobs WHERE plan_id = ?",
+            (plan_id,),
+        ).fetchone()[0], 0)
 
     def test_cancelled_event_never_reaches_model_or_release(self):
         self.cancel()

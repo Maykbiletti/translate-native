@@ -1232,8 +1232,12 @@ probe is made for that event.
 The CMS signs the canonical UTF-8 JSON bytes outside the envelope. The bridge
 verifies the signature before its first write, derives the deterministic plan,
 and persists the event before enqueuing it. If the process stops between those
-two transactions, replaying the exact event resumes queue insertion safely
-unless the CMS has meanwhile submitted its exact signed cancellation.
+two transactions, the service supervisor reloads and verifies the stored event,
+then resumes exactly one intake per tick with the same attempt ceiling as the
+public API. An exact CMS replay remains safe but is no longer required for
+progress. Deterministic plan and job identities make concurrent replay and
+automatic recovery idempotent, while the cancellation ledger is checked again
+before and after queue insertion and therefore cannot be revived.
 The same `event_id` with different canonical bytes is an idempotency collision
 and cannot add work.
 
@@ -1492,14 +1496,15 @@ database. The host remains trusted and the queue itself still validates every
 payload, lease, hash, and transition transactionally.
 
 Premortem: a scheduler could publish before all locales are signed, call a
-translation provider after an evidence failure, starve a ready outbox behind a
-large queue, leak prose in operational status, or duplicate work after a
-restart. Delivery-first ordering, one active transition per tick, immediate
-fail-closed return, content-free outcomes, and reuse of the existing durable
-leases and idempotency keys address those failures. End-to-end tests count the
-provider, evidence, and publisher calls across translation, approval, and
-delivery ticks; they also cover delivery priority, provider/evidence/publisher
-failure, event tampering, and an idle completed service.
+translation provider after an evidence failure, leave a signed intake stranded
+before queue insertion, starve a ready outbox behind a large queue, leak prose
+in operational status, or duplicate work after a restart. Tombstone and
+delivery priority, one verified intake recovery per tick, immediate fail-closed
+return, content-free outcomes, and reuse of the existing durable leases and
+idempotency keys address those failures. End-to-end tests count the provider,
+evidence, and publisher calls across recovery, translation, approval, and
+delivery ticks; they also cover the API retry ceiling, cancellation exclusion,
+stored-event tampering, adapter failures, and an idle completed service.
 
 ## Durable service supervisor
 

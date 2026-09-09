@@ -1383,6 +1383,42 @@ class WebsiteLocalizationCMSBridge:
             "superseded" if superseded else "enqueued",
         )
 
+    def resume_accepted_change(
+        self,
+        event_id: Any,
+        verifier: CMSMessageAuthority,
+        *,
+        max_attempts: int = 3,
+        now: float | int,
+    ) -> IngestedChange | None:
+        """Resume one signed event persisted before its queue transaction."""
+        event_id = _token(event_id, "cms.event_id.invalid")
+        row = self.connection.execute(
+            "SELECT * FROM cms_change_events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            raise CMSBridgeBlocked("cms.event.not_enqueued")
+        if row["status"] != "accepted":
+            return None
+
+        event, _ = self._load_event(
+            event_id,
+            verifier,
+            allow_cancelled=True,
+            allow_accepted=True,
+        )
+        signature = _signature(CMSMessageSignature(
+            row["signature_algorithm"], row["key_id"], row["signature"],
+        ))
+        return self.ingest_change(
+            event,
+            signature,
+            verifier,
+            max_attempts=max_attempts,
+            now=now,
+        )
+
     def change_progress(
         self,
         event_id: Any,

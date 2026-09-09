@@ -23,11 +23,12 @@ TICK_SCHEMA = "blun.website-localization-service-tick.v1"
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 PHASES = {
-    "tombstone", "delivery", "release", "translation", "benchmark", "idle", "supervisor",
+    "tombstone", "delivery", "ingress", "release", "translation", "benchmark",
+    "idle", "supervisor",
 }
 STATUSES = {
     "idle", "succeeded", "retry_wait", "failed", "blocked", "approved",
-    "delivery_ready", "delivered",
+    "delivery_ready", "delivered", "enqueued", "superseded", "cancelled",
 }
 BLOCKED_STATUSES = {"retry_wait", "failed", "blocked"}
 _COLUMNS = (

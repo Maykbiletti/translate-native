@@ -112,6 +112,26 @@ def _event_rows(bridge: Any) -> tuple[Any, ...]:
         raise LocalizationServiceBlocked("service.state.unavailable") from None
 
 
+def _accepted_event_rows(bridge: Any) -> tuple[tuple[str, str], ...]:
+    try:
+        rows = tuple(bridge.connection.execute("""
+            SELECT event.event_id, event.plan_id
+            FROM cms_change_events AS event
+            LEFT JOIN cms_event_cancellations AS cancellation
+              ON cancellation.event_id = event.event_id
+            WHERE event.status = 'accepted' AND cancellation.event_id IS NULL
+            ORDER BY event.created_at, event.event_id
+        """).fetchall())
+        return tuple(
+            (_identifier(row["event_id"]), _identifier(row["plan_id"]))
+            for row in rows
+        )
+    except LocalizationServiceBlocked:
+        raise
+    except Exception:
+        raise LocalizationServiceBlocked("service.state.unavailable") from None
+
+
 def run_service_tick(
     bridge: Any,
     evidence_state: Any,
@@ -137,6 +157,7 @@ def run_service_tick(
     approval_ttl_seconds: float | int = 2_592_000,
     delivery_lease_seconds: float | int = 300,
     delivery_max_attempts: int = 5,
+    ingress_max_attempts: int = 3,
     human_review_verifier: Any | None = None,
     independent_model_review_verifier: Any | None = None,
     result_cache: Any | None = None,
@@ -144,9 +165,9 @@ def run_service_tick(
 ) -> ServiceTickOutcome:
     """Advance the durable pipeline by at most one externally active step.
 
-    Priority is due CMS tombstone, due publication delivery, one
-    release/evidence transition, then one locale translation. Backoff or an
-    active lease in one event does not prevent
+    Priority is due CMS tombstone, due publication delivery, one persisted
+    ingress recovery, one release/evidence transition, then one locale
+    translation. Backoff or an active lease in one event does not prevent
     another event from becoming releasable in the same read-only scan.
     """
     if not isinstance(bridge, _CMS.WebsiteLocalizationCMSBridge):
@@ -222,6 +243,31 @@ def run_service_tick(
             attempt=delivery.attempt,
             error_code=delivery.error_code,
         )
+
+    try:
+        accepted_events = _accepted_event_rows(bridge)
+    except Exception as error:
+        return _runtime_error("ingress", error)
+    if accepted_events:
+        event_id, plan_id = accepted_events[0]
+        try:
+            resumed = bridge.resume_accepted_change(
+                event_id,
+                event_verifier,
+                max_attempts=ingress_max_attempts,
+                now=clock(),
+            )
+        except Exception as error:
+            return _runtime_error(
+                "ingress", error, event_id=event_id, plan_id=plan_id,
+            )
+        if resumed is not None:
+            return _outcome(
+                "ingress",
+                resumed.status,
+                event_id=resumed.event_id,
+                plan_id=resumed.plan_id,
+            )
 
     try:
         events = _event_rows(bridge)
