@@ -1151,6 +1151,55 @@ class BenchmarkCampaignStore:
                 WHERE campaign_id = ?
             """, (now, now, campaign_id))
 
+    def load_report(
+        self,
+        policy: Any,
+        campaign_id: str,
+        authority: Any,
+        *,
+        now: Any,
+    ) -> dict[str, Any]:
+        """Load one already finalized report without signing or writing state."""
+        policy = _BENCHMARK._validate_policy(policy)
+        now = _timestamp(now)
+        if self.connection.in_transaction:
+            raise BenchmarkCampaignBlocked(
+                "benchmark.campaign.external_transaction",
+            )
+        self.connection.execute("BEGIN")
+        try:
+            results, result_sha256s = self._complete_results_locked(
+                policy, campaign_id,
+            )
+            state = self._report_state_locked(campaign_id)
+            stored = self.connection.execute("""
+                SELECT * FROM benchmark_campaign_reports
+                WHERE campaign_id = ?
+            """, (campaign_id,)).fetchone()
+            if _timestamp(state["updated_at"]) > now:
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.report_state_invalid",
+                )
+            if state["status"] != "succeeded" or stored is None:
+                if state["status"] == "succeeded" or stored is not None:
+                    raise BenchmarkCampaignBlocked(
+                        "benchmark.campaign.report_state_invalid",
+                    )
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.report_missing",
+                )
+        finally:
+            self.connection.rollback()
+        return self._verified_report_row(
+            stored,
+            policy,
+            campaign_id,
+            results,
+            result_sha256s,
+            authority,
+            now=now,
+        )
+
     def health(
         self,
         policy: Any,

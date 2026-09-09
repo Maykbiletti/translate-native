@@ -504,6 +504,9 @@ class WebsiteLocalizationRuntime:
             _HEALTH._CAMPAIGN.BenchmarkCampaignStore(benchmark_connection)
             if benchmark_enabled else None
         )
+        self._benchmark_policy = benchmark_policy
+        self._benchmark_campaign_id = benchmark_campaign_id
+        self._benchmark_evidence_authority = benchmark_evidence_authority
 
         def tick():
             service_tick = _SERVICE.run_service_tick(
@@ -600,3 +603,25 @@ class WebsiteLocalizationRuntime:
             provider_probe=provider_probe,
             now=checked_at,
         )
+
+    def load_benchmark_report(
+        self, *, now: float | int | None = None,
+    ) -> dict[str, Any]:
+        """Return the stored, verified benchmark report without mutating it."""
+        if self.benchmark_store is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        checked_at = self._clock() if now is None else now
+        try:
+            return self.benchmark_store.load_report(
+                self._benchmark_policy,
+                self._benchmark_campaign_id,
+                self._benchmark_evidence_authority,
+                now=checked_at,
+            )
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.report.invalid"
+            raise LocalizationRuntimeBlocked(code) from None

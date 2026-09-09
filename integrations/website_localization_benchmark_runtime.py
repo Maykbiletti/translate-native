@@ -498,6 +498,15 @@ class WebsiteLocalizationBenchmarkRuntime:
             stale_after_seconds=stale_after_seconds,
         )
 
+    def load_report(self):
+        """Return the stored, reverified report without signing or writes."""
+        return self.campaign_store.load_report(
+            self.policy,
+            self.campaign_id,
+            self.evidence_authority,
+            now=self.clock(),
+        )
+
     def summarize(
         self, *, operation_guard: Callable[[float], Any] | None = None,
         lease_seconds: Any = 300,

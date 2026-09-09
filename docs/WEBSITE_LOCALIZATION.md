@@ -481,8 +481,9 @@ status, candidate text, baseline text and evidence, and qualified-native
 reference text and receipts, plus signed anonymous-review evidence, so one
 store cannot silently share transaction or schema state with another.
 Construction creates the exact idempotent campaign;
-`run_once` processes at most one item, while `status`, `health`, and `summarize`
-retain the campaign's existing text-free and all-locales-complete contracts.
+`run_once` processes at most one item, while `status`, `health`, `summarize`,
+and `load_report` retain the campaign's existing text-free and
+all-locales-complete contracts.
 
 The runtime owns the only `BenchmarkCaseInputs` construction. It resolves
 locale assets, then uses the durable candidate, baseline, and native-reference
@@ -568,7 +569,16 @@ policy and ordered result hashes. Later calls return that same verified report
 byte-for-byte without signing again. A failed, omitted, duplicated, exchanged,
 or policy-stale work item therefore cannot disappear behind a partial aggregate,
 and a crash cannot silently replace the report used for a claim. Existing v1
-campaign databases migrate transactionally to the v2 report schema.
+and v2 campaign databases migrate transactionally to the v3 report schema.
+
+After finalization, `BenchmarkCampaignStore.load_report` is the read-only
+consumer boundary. It opens a consistent snapshot, requires the exact complete
+result matrix and a succeeded report-finalization state, reloads the single
+stored report, then rolls the transaction back before reverifying its policy,
+ordered-result digest, canonical JSON, content hash, timestamp, and signature.
+It never calls the signing capability and never repairs, replaces, or creates
+state. Missing, incomplete, stale, future-dated, state-inconsistent, or altered
+evidence therefore returns a stable failure instead of a report.
 
 `BenchmarkCampaignStore.health` verifies the complete campaign binding, every
 row invariant, successful result hash, and case attestation in a consistent
@@ -1159,7 +1169,11 @@ The host supplies five distinct `sqlite3.Connection` objects: queue, release,
 CMS, evidence, and supervisor. An optional monitored benchmark campaign adds a
 sixth connection plus its exact policy, campaign ID, evidence verifier, and
 staleness threshold. Monitor-only configuration remains supported and performs
-no benchmark work.
+no benchmark work. Both monitor-only and executing configurations may call
+`load_benchmark_report`; it delegates only to the store's read-only verified
+load path. A runtime without benchmark configuration returns
+`runtime.benchmark.unavailable`, and unexpected adapter failures are reduced to
+the content-free `runtime.benchmark.report.invalid` boundary code.
 
 To execute the same campaign, supply the exact `benchmark_execution` mapping.
 It adds separate `candidate_connection`, `baseline_connection`,

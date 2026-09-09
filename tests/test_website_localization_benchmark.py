@@ -2154,6 +2154,25 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertIsNone(runtime.run_once())
         finalize.assert_not_called()
 
+    def test_benchmark_runtime_loads_only_the_existing_verified_report(self):
+        runtime, _, _, _, current_time = self._benchmark_runtime_fixture()
+        current_time[0] = 123
+        expected = {"schema": "verified-report", "status": "BLOCK"}
+        with mock.patch.object(
+            runtime.campaign_store,
+            "load_report",
+            return_value=expected,
+        ) as load_report:
+            observed = runtime.load_report()
+
+        self.assertIs(observed, expected)
+        load_report.assert_called_once_with(
+            runtime.policy,
+            runtime.campaign_id,
+            runtime.evidence_authority,
+            now=123,
+        )
+
     def test_cross_loaded_deepl_adapter_store_and_inputs_complete_campaign_case(self):
         benchmark_policy = campaign_policy()
         authority = CampaignAuthority()
@@ -2470,6 +2489,16 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertTrue(store.report_finalization_required(
                 benchmark_policy, campaign_id,
             ))
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.load_report(
+                    benchmark_policy, campaign_id, authority, now=100,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.report_missing",
+            )
+            self.assertEqual(authority.sign_calls, sign_calls)
+            self.assertEqual(connection.total_changes, before)
 
             lost_guard_calls = []
 
@@ -2519,6 +2548,22 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 """, (campaign_id,)).fetchone()[0],
                 first_report_json,
             )
+            before_load = connection.total_changes
+            verify_calls = authority.verify_calls
+            loaded = store.load_report(
+                benchmark_policy, campaign_id, authority, now=103,
+            )
+            self.assertEqual(loaded, report)
+            self.assertEqual(authority.sign_calls, sign_calls + 2)
+            self.assertGreater(authority.verify_calls, verify_calls)
+            self.assertEqual(connection.total_changes, before_load)
+            self.assertEqual(
+                connection.execute("""
+                    SELECT report_json FROM benchmark_campaign_reports
+                    WHERE campaign_id = ?
+                """, (campaign_id,)).fetchone()[0],
+                first_report_json,
+            )
             self.assertEqual(report["configured_lanes_status"], "PASS")
             self.assertEqual(report["status"], "BLOCK")
             self.assertFalse(report["superiority_claim_allowed"])
@@ -2552,6 +2597,15 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertFalse(blocked.report_ready)
             with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
                 store.summarize(
+                    benchmark_policy, campaign_id, authority, now=104,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.report_invalid",
+            )
+            self.assertEqual(authority.sign_calls, sign_calls + 2)
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.load_report(
                     benchmark_policy, campaign_id, authority, now=104,
                 )
             self.assertEqual(

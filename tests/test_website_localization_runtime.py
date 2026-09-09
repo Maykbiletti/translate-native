@@ -625,6 +625,48 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertEqual(dict(review_health.counts)["scoped"], 0)
         self.assertEqual(dict(review_health.counts)["required"], 0)
 
+    def test_runtime_exposes_only_a_stored_reverified_benchmark_report(self):
+        values = self.benchmark_configuration()
+        values.pop("benchmark_execution")
+        expected = {"schema": "verified-report", "status": "BLOCK"}
+        with mock.patch.object(
+            RUNTIME._HEALTH._CAMPAIGN.BenchmarkCampaignStore,
+            "load_report",
+            return_value=expected,
+        ) as load_report:
+            runtime = self.runtime(**values)
+            observed = runtime.load_benchmark_report(now=123)
+
+        self.assertIs(observed, expected)
+        load_report.assert_called_once_with(
+            values["benchmark_policy"],
+            values["benchmark_campaign_id"],
+            values["benchmark_evidence_authority"],
+            now=123,
+        )
+
+    def test_runtime_benchmark_report_boundary_is_content_free(self):
+        runtime = self.runtime()
+        with self.assertRaises(RUNTIME.LocalizationRuntimeBlocked) as caught:
+            runtime.load_benchmark_report(now=100)
+        self.assertEqual(caught.exception.code, "runtime.benchmark.unavailable")
+
+        values = self.benchmark_configuration()
+        values.pop("benchmark_execution")
+        with mock.patch.object(
+            RUNTIME._HEALTH._CAMPAIGN.BenchmarkCampaignStore,
+            "load_report",
+            side_effect=RuntimeError("private report failure"),
+        ):
+            runtime = self.runtime(**values)
+            with self.assertRaises(RUNTIME.LocalizationRuntimeBlocked) as caught:
+                runtime.load_benchmark_report(now=100)
+        self.assertEqual(
+            caught.exception.code,
+            "runtime.benchmark.report.invalid",
+        )
+        self.assertNotIn("private report failure", str(caught.exception))
+
     def test_runtime_prioritizes_all_customer_phases_over_benchmark(self):
         values = self.benchmark_configuration()
         fake = mock.Mock()
