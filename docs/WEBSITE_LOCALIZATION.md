@@ -1045,6 +1045,19 @@ and the exact validated queue-result hash. The adapter may call an independent
 model, a qualified native reviewer, or a host-owned review service; no
 provider transport or credential is built into the coordinator.
 
+For deployments that need a concrete network boundary,
+`integrations/website_localization_evidence_http.py` implements that interface
+as one request-bound HTTPS attempt. It validates the exact v4 evidence request,
+canonicalizes native Unicode without ASCII folding, binds the inner digest and
+deterministic evidence ID in both headers and body, disables redirects, and
+strictly validates the response envelope before the coordinator verifies its
+receipts. Authentication remains a host callback and the adapter contains no
+provider-specific model, endpoint, credential, brand, product, or price. The
+public protocol and retry classification are documented in
+[`WEBSITE_LOCALIZATION_EVIDENCE_HTTP.md`](WEBSITE_LOCALIZATION_EVIDENCE_HTTP.md).
+The adapter never retries internally; the durable evidence state below remains
+the single retry authority.
+
 The host must also supply a `QualityEvidenceStateStore` backed by its own
 trusted SQLite connection and a stable `evidence_worker_id`. Before source or
 target text reaches the evidence adapter, the store atomically claims the
@@ -1116,11 +1129,13 @@ Premortem: two schedulers could request the same review, stale evidence could
 approve changed output, or the last successful locale could trigger a partial
 publication. Transactional leases prevent concurrent provider calls;
 deterministic evidence IDs cover the remaining external crash window; exact
-result and policy bindings reject stale evidence; signed release readiness and
+result and policy bindings reject stale evidence; the HTTP envelope makes the
+external idempotency and digest contract explicit; signed release readiness and
 the all-locale CMS transaction block partial publication. Tests cover
-exclusive claims, bounded retries, one-locale progression, replay, crash
-recovery, expiry, legal review, tampering, provider failure, wrong bindings,
-and failed receipt verification.
+exclusive claims, bounded retries, one-attempt HTTP failures, one-locale
+progression, replay, crash recovery, expiry, legal review, authentication and
+endpoint safety, Unicode transport, parsing, tampering, wrong bindings, and
+failed receipt verification.
 They prove the orchestration boundary, not native linguistic quality or
 superiority over an external translation service.
 
