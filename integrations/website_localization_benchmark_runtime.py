@@ -13,6 +13,7 @@ import re
 import sqlite3
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -67,6 +68,18 @@ class BenchmarkRuntimeFailed(RuntimeError):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+
+
+@dataclass(frozen=True)
+class BenchmarkReportFinalizationOutcome:
+    """Content-free signal that a missing final report was persisted."""
+
+    campaign_id: str
+    status: str = "succeeded"
+    work_id: None = None
+    target_locale: None = None
+    attempt: None = None
+    error_code: None = None
 
 
 def _callable(value: Any, code: str) -> Any:
@@ -466,6 +479,7 @@ class WebsiteLocalizationBenchmarkRuntime:
             retry_base_seconds=retry_base_seconds,
             retry_max_seconds=retry_max_seconds,
         )
+        report_finalized = False
         if (
             outcome is None or outcome.status == "succeeded"
         ) and self.campaign_store.report_finalization_required(
@@ -483,6 +497,9 @@ class WebsiteLocalizationBenchmarkRuntime:
                 now=self.clock(),
                 operation_guard=report_guard,
             )
+            report_finalized = True
+        if outcome is None and report_finalized:
+            return BenchmarkReportFinalizationOutcome(self.campaign_id)
         return outcome
 
     def status(self):

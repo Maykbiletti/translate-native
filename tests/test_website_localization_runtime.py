@@ -563,6 +563,39 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             300.0,
         )
 
+    def test_runtime_reports_crash_gap_finalization_as_benchmark_work(self):
+        values = self.benchmark_configuration()
+        fake = mock.Mock()
+        fake.campaign_id = values["benchmark_campaign_id"]
+        fake.review_store = RUNTIME._HEALTH._BENCHMARK_REVIEW.BenchmarkReviewEvidenceStore(
+            values["benchmark_execution"]["review_connection"]
+        )
+        fake.reviewer_route_id = values["benchmark_execution"]["reviewer_route_id"]
+        fake.run_once.return_value = SimpleNamespace(
+            status="succeeded",
+            work_id=None,
+            target_locale=None,
+            attempt=None,
+            error_code=None,
+        )
+        with mock.patch.object(
+            RUNTIME._BENCHMARK_RUNTIME,
+            "WebsiteLocalizationBenchmarkRuntime",
+            return_value=fake,
+        ):
+            runtime = self.runtime(**values)
+
+        outcome = runtime.run_once(now=100)
+
+        self.assertEqual(outcome.tick["phase"], "benchmark")
+        self.assertEqual(outcome.tick["status"], "succeeded")
+        self.assertIsNone(outcome.tick["job_id"])
+        self.assertIsNone(outcome.tick["target_locale"])
+        self.assertIsNone(outcome.tick["attempt"])
+        status = runtime.supervisor.status(now=100)
+        self.assertEqual(status.last_phase, "benchmark")
+        self.assertEqual(status.last_status, "succeeded")
+
     def test_runtime_constructs_exact_durable_benchmark_execution_root(self):
         values = self.benchmark_configuration()
 

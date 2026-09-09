@@ -1995,7 +1995,19 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                         lease_seconds=240,
                     )
 
-                self.assertIs(observed, outcome)
+                if completed_case:
+                    self.assertIs(observed, outcome)
+                else:
+                    self.assertIsInstance(
+                        observed,
+                        BENCHMARK_RUNTIME.BenchmarkReportFinalizationOutcome,
+                    )
+                    self.assertEqual(observed.campaign_id, runtime.campaign_id)
+                    self.assertEqual(observed.status, "succeeded")
+                    self.assertIsNone(observed.work_id)
+                    self.assertIsNone(observed.target_locale)
+                    self.assertIsNone(observed.attempt)
+                    self.assertIsNone(observed.error_code)
                 required.assert_called_once_with(
                     runtime.policy, runtime.campaign_id,
                 )
@@ -2009,6 +2021,23 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 self.assertEqual(arguments.kwargs["now"], 100)
                 arguments.kwargs["operation_guard"]()
                 self.assertEqual(guard_calls, [240.0])
+
+        runtime, _, _, _, _ = self._benchmark_runtime_fixture()
+        with (
+            mock.patch.object(
+                BENCHMARK_RUNTIME._CAMPAIGN,
+                "run_next_benchmark_case",
+                return_value=None,
+            ),
+            mock.patch.object(
+                runtime.campaign_store,
+                "report_finalization_required",
+                return_value=False,
+            ),
+            mock.patch.object(runtime.campaign_store, "summarize") as summarize,
+        ):
+            self.assertIsNone(runtime.run_once())
+        summarize.assert_not_called()
 
     def test_cross_loaded_deepl_adapter_store_and_inputs_complete_campaign_case(self):
         benchmark_policy = campaign_policy()
