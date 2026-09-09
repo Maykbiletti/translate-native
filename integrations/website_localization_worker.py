@@ -80,6 +80,8 @@ class LocalizationWorkerBlocked(RuntimeError):
 class ProviderCallFailed(RuntimeError):
     """Adapter-declared provider failure without customer content."""
 
+    localization_provider_failure = True
+
     def __init__(self, code: str, *, retryable: bool):
         if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
             raise ValueError("provider failure code is invalid")
@@ -326,7 +328,17 @@ def _invoke(provider: Any, request: ProviderRequest) -> tuple[dict[str, Any], st
             provider_code,
             retryable=error.retryable,
         ) from None
-    except Exception:
+    except Exception as error:
+        # External provider adapters can implement the public structural error
+        # contract without importing this dynamically loaded worker module.
+        if getattr(type(error), "localization_provider_failure", None) is True:
+            code = getattr(error, "code", None)
+            retryable = getattr(error, "retryable", None)
+            if isinstance(code, str) and ERROR_CODE.fullmatch(code) and isinstance(retryable, bool):
+                provider_code = "provider." + code
+                if len(provider_code) > 128:
+                    provider_code = "provider.failure"
+                raise LocalizationWorkerBlocked(provider_code, retryable=retryable) from None
         raise LocalizationWorkerBlocked("provider.unexpected", retryable=True) from None
     if _hash_json(request.as_payload()) != request_hash:
         raise LocalizationWorkerBlocked("provider.adapter.mutated_request", retryable=False)
