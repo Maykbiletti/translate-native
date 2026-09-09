@@ -13,7 +13,6 @@ import re
 import sqlite3
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -68,18 +67,6 @@ class BenchmarkRuntimeFailed(RuntimeError):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
-
-
-@dataclass(frozen=True)
-class BenchmarkReportFinalizationOutcome:
-    """Content-free signal that a missing final report was persisted."""
-
-    campaign_id: str
-    status: str = "succeeded"
-    work_id: None = None
-    target_locale: None = None
-    attempt: None = None
-    error_code: None = None
 
 
 def _callable(value: Any, code: str) -> Any:
@@ -479,28 +466,25 @@ class WebsiteLocalizationBenchmarkRuntime:
             retry_base_seconds=retry_base_seconds,
             retry_max_seconds=retry_max_seconds,
         )
-        report_finalized = False
+        report_outcome = None
         if (
             outcome is None or outcome.status == "succeeded"
         ) and self.campaign_store.report_finalization_required(
             self.policy, self.campaign_id,
         ):
-            report_guard = (
-                None
-                if operation_guard is None
-                else lambda: operation_guard(lease_seconds)
-            )
-            self.campaign_store.summarize(
+            report_outcome = _CAMPAIGN.run_benchmark_report_finalization(
+                self.campaign_store,
                 self.policy,
                 self.campaign_id,
+                self.worker_id,
                 self.evidence_authority,
-                now=self.clock(),
-                operation_guard=report_guard,
+                clock=self.clock,
+                operation_guard=operation_guard,
+                lease_seconds=lease_seconds,
+                retry_base_seconds=retry_base_seconds,
+                retry_max_seconds=retry_max_seconds,
             )
-            report_finalized = True
-        if outcome is None and report_finalized:
-            return BenchmarkReportFinalizationOutcome(self.campaign_id)
-        return outcome
+        return outcome if outcome is not None else report_outcome
 
     def status(self):
         return self.campaign_store.status(self.policy, self.campaign_id)

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 HEALTH_SCHEMA = "blun.website-localization-benchmark-campaign-health.v1"
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
@@ -47,6 +47,11 @@ WORK_COLUMNS = (
 REPORT_COLUMNS = (
     "campaign_id", "policy_sha256", "results_sha256", "report_json",
     "report_sha256", "created_at",
+)
+REPORT_STATE_COLUMNS = (
+    "campaign_id", "status", "attempts", "max_attempts", "next_attempt_at",
+    "lease_owner", "lease_token", "lease_expires_at", "last_error_code",
+    "last_error_detail_hash", "created_at", "updated_at",
 )
 
 
@@ -126,6 +131,27 @@ class BenchmarkCampaignOutcome:
     error_code: str | None
     error_detail_hash: str | None
     result_sha256: str | None
+
+
+@dataclass(frozen=True)
+class ClaimedBenchmarkReport:
+    campaign_id: str
+    attempt: int
+    max_attempts: int
+    lease_owner: str
+    lease_token: str
+    lease_expires_at: float
+
+
+@dataclass(frozen=True)
+class BenchmarkReportFinalizationOutcome:
+    campaign_id: str
+    status: str
+    attempt: int
+    max_attempts: int
+    next_attempt_at: float
+    error_code: str | None
+    error_detail_hash: str | None
 
 
 @dataclass(frozen=True)
@@ -321,12 +347,14 @@ class BenchmarkCampaignStore:
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, 1, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, SCHEMA_VERSION}:
             raise BenchmarkCampaignBlocked("benchmark.campaign.schema_unsupported")
         if version == 0:
             self._create_schema()
         elif version == 1:
             self._migrate_v1()
+        elif version == 2:
+            self._migrate_v2()
         self._verify_schema()
 
     def _create_schema(self) -> None:
@@ -380,6 +408,8 @@ class BenchmarkCampaignStore:
                     FOREIGN KEY (campaign_id) REFERENCES benchmark_campaigns (campaign_id)
                 )
             """)
+            self._create_report_state_table()
+            self._populate_report_state()
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_v1(self) -> None:
@@ -396,7 +426,54 @@ class BenchmarkCampaignStore:
                     FOREIGN KEY (campaign_id) REFERENCES benchmark_campaigns (campaign_id)
                 )
             """)
+            self._create_report_state_table()
+            self._populate_report_state()
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_v2(self) -> None:
+        self._verify_v2_schema()
+        with _transaction(self.connection):
+            self._create_report_state_table()
+            self._populate_report_state()
+            self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _create_report_state_table(self) -> None:
+        self.connection.execute(f"""
+            CREATE TABLE benchmark_campaign_report_state (
+                campaign_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK (status IN {STATUSES}),
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                max_attempts INTEGER NOT NULL CHECK (
+                    max_attempts BETWEEN 1 AND {MAX_ATTEMPTS}
+                ),
+                next_attempt_at REAL NOT NULL,
+                lease_owner TEXT,
+                lease_token TEXT,
+                lease_expires_at REAL,
+                last_error_code TEXT,
+                last_error_detail_hash TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (campaign_id) REFERENCES benchmark_campaigns (campaign_id)
+            )
+        """)
+
+    def _populate_report_state(self) -> None:
+        self.connection.execute("""
+            INSERT INTO benchmark_campaign_report_state (
+                campaign_id, status, attempts, max_attempts, next_attempt_at,
+                created_at, updated_at
+            )
+            SELECT c.campaign_id,
+                   CASE WHEN r.campaign_id IS NULL THEN 'pending' ELSE 'succeeded' END,
+                   CASE WHEN r.campaign_id IS NULL THEN 0 ELSE 1 END,
+                   MIN(w.max_attempts), c.updated_at, c.created_at, c.updated_at
+            FROM benchmark_campaigns AS c
+            JOIN benchmark_campaign_work AS w ON w.campaign_id = c.campaign_id
+            LEFT JOIN benchmark_campaign_reports AS r
+              ON r.campaign_id = c.campaign_id
+            GROUP BY c.campaign_id
+        """)
 
     def _verify_legacy_schema(self) -> None:
         campaign = tuple(
@@ -410,13 +487,24 @@ class BenchmarkCampaignStore:
         if campaign != CAMPAIGN_COLUMNS or work != WORK_COLUMNS:
             raise BenchmarkCampaignBlocked("benchmark.campaign.schema_invalid")
 
-    def _verify_schema(self) -> None:
+    def _verify_v2_schema(self) -> None:
         self._verify_legacy_schema()
         report = tuple(
             row["name"] for row in
             self.connection.execute("PRAGMA table_info(benchmark_campaign_reports)")
         )
         if report != REPORT_COLUMNS:
+            raise BenchmarkCampaignBlocked("benchmark.campaign.schema_invalid")
+
+    def _verify_schema(self) -> None:
+        self._verify_legacy_schema()
+        self._verify_v2_schema()
+        report_state = tuple(
+            row["name"] for row in self.connection.execute(
+                "PRAGMA table_info(benchmark_campaign_report_state)"
+            )
+        )
+        if report_state != REPORT_STATE_COLUMNS:
             raise BenchmarkCampaignBlocked("benchmark.campaign.schema_invalid")
 
     def create(self, policy: Any, *, max_attempts: int = 3, now: Any = None) -> str:
@@ -453,6 +541,12 @@ class BenchmarkCampaignStore:
                     (work_id, campaign_id, locale, case_key, max_attempts, now, now, now)
                     for work_id, locale, case_key in expected
                 ))
+                self.connection.execute("""
+                    INSERT INTO benchmark_campaign_report_state (
+                        campaign_id, status, attempts, max_attempts,
+                        next_attempt_at, created_at, updated_at
+                    ) VALUES (?, 'pending', 0, ?, ?, ?, ?)
+                """, (campaign_id, max_attempts, now, now, now))
             self._verify_binding_locked(policy, campaign_id)
             configured = self.connection.execute("""
                 SELECT MIN(max_attempts) AS minimum, MAX(max_attempts) AS maximum
@@ -680,6 +774,7 @@ class BenchmarkCampaignStore:
                 WHERE campaign_id = ? AND last_error_code IS NOT NULL
                 GROUP BY last_error_code ORDER BY last_error_code
             """, (campaign_id,)).fetchall()
+            report_state = self._report_state_locked(campaign_id)
         counts = {name: 0 for name in STATUSES}
         counts.update({row["status"]: row["count"] for row in rows})
         return {
@@ -692,7 +787,16 @@ class BenchmarkCampaignStore:
                 row["last_error_code"]: row["count"] for row in errors
             },
             "complete": counts["succeeded"] == len(_expected_work(policy)),
-            "blocked": counts["failed"] > 0,
+            "blocked": (
+                counts["failed"] > 0 or report_state["status"] == "failed"
+            ),
+            "report_finalization": {
+                "status": report_state["status"],
+                "attempt": report_state["attempts"],
+                "max_attempts": report_state["max_attempts"],
+                "next_attempt_at": report_state["next_attempt_at"],
+                "error_code": report_state["last_error_code"],
+            },
         }
 
     def _complete_results_locked(
@@ -738,11 +842,252 @@ class BenchmarkCampaignStore:
             if incomplete is not None:
                 return False
             self._complete_results_locked(policy, campaign_id)
+            state = self._report_state_locked(campaign_id)
             report = self.connection.execute("""
-                SELECT 1 FROM benchmark_campaign_reports
-                WHERE campaign_id = ?
+                SELECT 1 FROM benchmark_campaign_reports WHERE campaign_id = ?
             """, (campaign_id,)).fetchone()
-            return report is None
+            if state["status"] == "succeeded":
+                if report is None:
+                    raise BenchmarkCampaignBlocked(
+                        "benchmark.campaign.report_state_invalid",
+                    )
+                return False
+            return state["status"] != "failed"
+
+    def _report_state_locked(self, campaign_id: str) -> sqlite3.Row:
+        row = self.connection.execute("""
+            SELECT * FROM benchmark_campaign_report_state WHERE campaign_id = ?
+        """, (campaign_id,)).fetchone()
+        try:
+            if row is None or tuple(row.keys()) != REPORT_STATE_COLUMNS:
+                raise ValueError
+            if row["status"] not in STATUSES or row["status"] == "leased" and (
+                row["lease_owner"] is None
+                or row["lease_token"] is None
+                or row["lease_expires_at"] is None
+            ):
+                raise ValueError
+            if row["status"] != "leased" and any(
+                row[name] is not None
+                for name in ("lease_owner", "lease_token", "lease_expires_at")
+            ):
+                raise ValueError
+            attempts = row["attempts"]
+            maximum = row["max_attempts"]
+            configured = self.connection.execute("""
+                SELECT MIN(max_attempts) AS minimum,
+                       MAX(max_attempts) AS maximum
+                FROM benchmark_campaign_work WHERE campaign_id = ?
+            """, (campaign_id,)).fetchone()
+            if (
+                isinstance(attempts, bool)
+                or isinstance(maximum, bool)
+                or not isinstance(attempts, int)
+                or not isinstance(maximum, int)
+                or not 0 <= attempts <= maximum <= MAX_ATTEMPTS
+                or configured["minimum"] != configured["maximum"]
+                or maximum != configured["minimum"]
+            ):
+                raise ValueError
+            if row["status"] == "pending" and (
+                attempts != 0 or row["last_error_code"] is not None
+            ):
+                raise ValueError
+            if row["status"] in {"leased", "retry_wait", "failed", "succeeded"}:
+                if attempts < 1:
+                    raise ValueError
+            if row["status"] in {"retry_wait", "failed"}:
+                if row["last_error_code"] is None:
+                    raise ValueError
+            elif row["last_error_code"] is not None:
+                raise ValueError
+            code = row["last_error_code"]
+            if code is not None and ERROR_CODE.fullmatch(code) is None:
+                raise ValueError
+            detail = row["last_error_detail_hash"]
+            if detail is not None and re.fullmatch(r"[0-9a-f]{64}", detail) is None:
+                raise ValueError
+            if row["status"] in {"pending", "leased", "succeeded"} and detail is not None:
+                raise ValueError
+            created = _timestamp(row["created_at"])
+            updated = _timestamp(row["updated_at"])
+            _timestamp(row["next_attempt_at"])
+            if created > updated:
+                raise ValueError
+            if row["status"] == "leased":
+                _identifier(row["lease_owner"])
+                _identifier(row["lease_token"])
+                _timestamp(row["lease_expires_at"])
+        except Exception:
+            raise BenchmarkCampaignBlocked(
+                "benchmark.campaign.report_state_invalid",
+            ) from None
+        return row
+
+    def claim_report_finalization(
+        self, policy: Any, campaign_id: str, worker_id: Any, *,
+        now: Any, lease_seconds: Any = 300,
+    ) -> ClaimedBenchmarkReport | None:
+        """Claim one due report-finalization attempt after all cases succeed."""
+        policy = _BENCHMARK._validate_policy(policy)
+        worker_id = _identifier(worker_id)
+        now = _timestamp(now)
+        lease_seconds = _duration(lease_seconds)
+        with _transaction(self.connection):
+            self._verify_binding_locked(policy, campaign_id)
+            self._complete_results_locked(policy, campaign_id)
+            row = self._report_state_locked(campaign_id)
+            if row["status"] == "leased" and row["lease_expires_at"] <= now:
+                terminal = row["attempts"] >= row["max_attempts"]
+                self.connection.execute("""
+                    UPDATE benchmark_campaign_report_state
+                    SET status = ?, next_attempt_at = ?, lease_owner = NULL,
+                        lease_token = NULL, lease_expires_at = NULL,
+                        last_error_code = 'benchmark.campaign.report_lease_expired',
+                        last_error_detail_hash = NULL, updated_at = ?
+                    WHERE campaign_id = ?
+                """, (
+                    "failed" if terminal else "retry_wait", now, now, campaign_id,
+                ))
+                row = self._report_state_locked(campaign_id)
+            if row["status"] in {"succeeded", "failed", "leased"}:
+                return None
+            if row["next_attempt_at"] > now:
+                return None
+            attempt = row["attempts"] + 1
+            token = secrets.token_urlsafe(32)
+            expires = now + lease_seconds
+            changed = self.connection.execute("""
+                UPDATE benchmark_campaign_report_state
+                SET status = 'leased', attempts = ?, lease_owner = ?,
+                    lease_token = ?, lease_expires_at = ?,
+                    last_error_code = NULL, last_error_detail_hash = NULL,
+                    updated_at = ?
+                WHERE campaign_id = ? AND status IN ('pending', 'retry_wait')
+            """, (attempt, worker_id, token, expires, now, campaign_id)).rowcount
+            if changed != 1:
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.report_claim_lost",
+                )
+        return ClaimedBenchmarkReport(
+            campaign_id, attempt, row["max_attempts"], worker_id, token, expires,
+        )
+
+    def _assert_report_claim_locked(
+        self, claim: Any, now: float,
+    ) -> sqlite3.Row:
+        if not isinstance(claim, ClaimedBenchmarkReport):
+            raise BenchmarkCampaignBlocked(
+                "benchmark.campaign.report_claim_invalid",
+            )
+        row = self._report_state_locked(claim.campaign_id)
+        if (
+            row["status"] != "leased"
+            or row["attempts"] != claim.attempt
+            or row["max_attempts"] != claim.max_attempts
+            or row["lease_owner"] != claim.lease_owner
+            or row["lease_token"] != claim.lease_token
+            or row["lease_expires_at"] != claim.lease_expires_at
+            or row["lease_expires_at"] <= now
+        ):
+            raise BenchmarkCampaignBlocked(
+                "benchmark.campaign.report_lease_lost",
+            )
+        return row
+
+    def renew_report_finalization(
+        self, claim: ClaimedBenchmarkReport, *, now: Any, lease_seconds: Any,
+    ) -> ClaimedBenchmarkReport:
+        now = _timestamp(now)
+        lease_seconds = _duration(lease_seconds)
+        expires = now + lease_seconds
+        with _transaction(self.connection):
+            self._assert_report_claim_locked(claim, now)
+            self.connection.execute("""
+                UPDATE benchmark_campaign_report_state
+                SET lease_expires_at = ?, updated_at = ? WHERE campaign_id = ?
+            """, (expires, now, claim.campaign_id))
+        return ClaimedBenchmarkReport(**{
+            **asdict(claim), "lease_expires_at": expires,
+        })
+
+    def complete_report_finalization(
+        self, policy: Any, claim: ClaimedBenchmarkReport, *, now: Any,
+    ) -> BenchmarkReportFinalizationOutcome:
+        policy = _BENCHMARK._validate_policy(policy)
+        now = _timestamp(now)
+        with _transaction(self.connection):
+            self._verify_binding_locked(policy, claim.campaign_id)
+            self._assert_report_claim_locked(claim, now)
+            if self.connection.execute("""
+                SELECT 1 FROM benchmark_campaign_reports WHERE campaign_id = ?
+            """, (claim.campaign_id,)).fetchone() is None:
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.report_missing",
+                )
+            self.connection.execute("""
+                UPDATE benchmark_campaign_report_state
+                SET status = 'succeeded', next_attempt_at = ?,
+                    lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, last_error_code = NULL,
+                    last_error_detail_hash = NULL, updated_at = ?
+                WHERE campaign_id = ?
+            """, (now, now, claim.campaign_id))
+        return self._report_outcome(claim.campaign_id)
+
+    def transition_report_failure(
+        self, policy: Any, claim: ClaimedBenchmarkReport, code: Any, *,
+        retryable: bool, delay_seconds: Any = 0, detail: str | None = None,
+        now: Any,
+    ) -> BenchmarkReportFinalizationOutcome:
+        policy = _BENCHMARK._validate_policy(policy)
+        code = _identifier(code)
+        if ERROR_CODE.fullmatch(code) is None or not isinstance(retryable, bool):
+            raise BenchmarkCampaignBlocked(
+                "benchmark.campaign.report_failure_invalid",
+            )
+        delay = _duration(delay_seconds, allow_zero=True)
+        now = _timestamp(now)
+        if detail is not None and (
+            not isinstance(detail, str) or "\x00" in detail
+            or not unicodedata.is_normalized("NFC", detail)
+        ):
+            raise BenchmarkCampaignBlocked(
+                "benchmark.campaign.report_failure_invalid",
+            )
+        with _transaction(self.connection):
+            self._verify_binding_locked(policy, claim.campaign_id)
+            row = self._assert_report_claim_locked(claim, now)
+            will_retry = retryable and row["attempts"] < row["max_attempts"]
+            self.connection.execute("""
+                UPDATE benchmark_campaign_report_state
+                SET status = ?, next_attempt_at = ?, lease_owner = NULL,
+                    lease_token = NULL, lease_expires_at = NULL,
+                    last_error_code = ?, last_error_detail_hash = ?, updated_at = ?
+                WHERE campaign_id = ?
+            """, (
+                "retry_wait" if will_retry else "failed",
+                now + delay if will_retry else now,
+                code, None if detail is None else _hash_text(detail), now,
+                claim.campaign_id,
+            ))
+        return self._report_outcome(claim.campaign_id)
+
+    def _report_outcome(
+        self, campaign_id: str,
+    ) -> BenchmarkReportFinalizationOutcome:
+        row = self.connection.execute("""
+            SELECT * FROM benchmark_campaign_report_state WHERE campaign_id = ?
+        """, (campaign_id,)).fetchone()
+        return BenchmarkReportFinalizationOutcome(
+            campaign_id=campaign_id,
+            status=row["status"],
+            attempt=row["attempts"],
+            max_attempts=row["max_attempts"],
+            next_attempt_at=row["next_attempt_at"],
+            error_code=row["last_error_code"],
+            error_detail_hash=row["last_error_detail_hash"],
+        )
 
     def _verified_report_row(
         self,
@@ -784,6 +1129,28 @@ class BenchmarkCampaignStore:
                 "benchmark.campaign.report_invalid",
             ) from None
 
+    def _mark_unclaimed_report_succeeded(
+        self, campaign_id: str, *, now: float,
+    ) -> None:
+        with _transaction(self.connection):
+            state = self._report_state_locked(campaign_id)
+            if state["status"] == "leased":
+                return
+            if self.connection.execute("""
+                SELECT 1 FROM benchmark_campaign_reports WHERE campaign_id = ?
+            """, (campaign_id,)).fetchone() is None:
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.report_missing",
+                )
+            self.connection.execute("""
+                UPDATE benchmark_campaign_report_state
+                SET status = 'succeeded', attempts = MAX(attempts, 1),
+                    next_attempt_at = ?, lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, last_error_code = NULL,
+                    last_error_detail_hash = NULL, updated_at = ?
+                WHERE campaign_id = ?
+            """, (now, now, campaign_id))
+
     def health(
         self,
         policy: Any,
@@ -804,6 +1171,7 @@ class BenchmarkCampaignStore:
         results: list[dict[str, Any]] = []
         result_sha256s: list[str] = []
         report_row = None
+        report_state = None
         reasons: set[str] = set()
         try:
             policy = _BENCHMARK._validate_policy(policy)
@@ -920,6 +1288,16 @@ class BenchmarkCampaignStore:
                     SELECT * FROM benchmark_campaign_reports
                     WHERE campaign_id = ?
                 """, (campaign_id,)).fetchone()
+                report_state = self._report_state_locked(campaign_id)
+                report_updated_at = _timestamp(report_state["updated_at"])
+                if report_updated_at > now:
+                    raise ValueError
+                last_progress_at = max(
+                    report_updated_at,
+                    last_progress_at
+                    if last_progress_at is not None
+                    else report_updated_at,
+                )
             finally:
                 self.connection.rollback()
         except Exception:
@@ -952,7 +1330,21 @@ class BenchmarkCampaignStore:
             and now - last_progress_at > stale_after_seconds
         ):
             reasons.add("benchmark.campaign.stalled")
-        if complete and report_row is None:
+        report_status = report_state["status"]
+        report_error = report_state["last_error_code"]
+        if report_error is not None:
+            reasons.add("benchmark.campaign.report_error." + report_error)
+        if report_status == "leased" and report_state["lease_expires_at"] <= now:
+            reasons.add("benchmark.campaign.report_lease_expired")
+        if report_status == "failed":
+            reasons.add("benchmark.campaign.report_failed")
+        if not complete and (
+            report_status != "pending" or report_row is not None
+        ):
+            reasons.add("benchmark.campaign.report_state_invalid")
+        elif complete and report_status == "succeeded" and report_row is None:
+            reasons.add("benchmark.campaign.report_state_invalid")
+        elif complete and report_status != "succeeded":
             reasons.add("benchmark.campaign.report_missing")
         elif complete:
             try:
@@ -970,7 +1362,11 @@ class BenchmarkCampaignStore:
                 reasons.add("benchmark.campaign.report_invalid")
         elif report_row is not None:
             reasons.add("benchmark.campaign.report_invalid")
-        blocking = counts["failed"] > 0 or "benchmark.campaign.report_invalid" in reasons
+        blocking = counts["failed"] > 0 or bool({
+            "benchmark.campaign.report_failed",
+            "benchmark.campaign.report_invalid",
+            "benchmark.campaign.report_state_invalid",
+        } & reasons)
         status = "blocked" if blocking else ("degraded" if reasons else "healthy")
         return BenchmarkCampaignHealth(
             campaign_id=campaign_id,
@@ -1016,10 +1412,12 @@ class BenchmarkCampaignStore:
             """, (campaign_id,)).fetchone()
         if stored is not None:
             guard()
-            return self._verified_report_row(
+            report = self._verified_report_row(
                 stored, policy, campaign_id, results, result_sha256s,
                 authority, now=now,
             )
+            self._mark_unclaimed_report_succeeded(campaign_id, now=now)
+            return report
         guard()
         report = _BENCHMARK.summarize_benchmark(
             policy, results, evidence_authority=authority,
@@ -1057,15 +1455,107 @@ class BenchmarkCampaignStore:
                     now,
                 ))
         if stored is not None:
-            return self._verified_report_row(
+            report = self._verified_report_row(
                 stored, policy, campaign_id, current_results, current_sha256s,
                 authority, now=now,
             )
+            self._mark_unclaimed_report_succeeded(campaign_id, now=now)
+            return report
+        self._mark_unclaimed_report_succeeded(campaign_id, now=now)
         return report
 
 
 def _retry_delay(attempt: int, base: float, maximum: float) -> float:
     return min(maximum, base * (2 ** min(attempt - 1, 30)))
+
+
+def run_benchmark_report_finalization(
+    store: BenchmarkCampaignStore,
+    policy: Any,
+    campaign_id: str,
+    worker_id: Any,
+    authority: Any,
+    *,
+    clock: Callable[[], float] = time.time,
+    operation_guard: Callable[[float], Any] | None = None,
+    lease_seconds: Any = 300,
+    retry_base_seconds: Any = 5,
+    retry_max_seconds: Any = 3600,
+) -> BenchmarkReportFinalizationOutcome | None:
+    """Finalize at most one report attempt with durable bounded recovery."""
+    if not isinstance(store, BenchmarkCampaignStore) or not callable(clock):
+        raise BenchmarkCampaignBlocked(
+            "benchmark.campaign.report_dependency_invalid",
+        )
+    if operation_guard is not None and not callable(operation_guard):
+        raise BenchmarkCampaignBlocked(
+            "benchmark.campaign.report_dependency_invalid",
+        )
+    lease_seconds = _duration(lease_seconds)
+    retry_base_seconds = _duration(retry_base_seconds, allow_zero=True)
+    retry_max_seconds = _duration(retry_max_seconds, allow_zero=True)
+    if retry_base_seconds > retry_max_seconds:
+        raise BenchmarkCampaignBlocked(
+            "benchmark.campaign.report_retry_invalid",
+        )
+    now = _timestamp(clock())
+    claim = store.claim_report_finalization(
+        policy, campaign_id, worker_id, now=now, lease_seconds=lease_seconds,
+    )
+    if claim is None:
+        return None
+    active_claim = claim
+
+    def renew() -> None:
+        nonlocal active_claim
+        if operation_guard is not None:
+            try:
+                operation_guard(lease_seconds)
+            except Exception:
+                raise BenchmarkCampaignBlocked(
+                    "benchmark.campaign.operation_guard_failed",
+                ) from None
+        active_claim = store.renew_report_finalization(
+            active_claim, now=_timestamp(clock()), lease_seconds=lease_seconds,
+        )
+
+    try:
+        store.summarize(
+            policy,
+            campaign_id,
+            authority,
+            now=_timestamp(clock()),
+            operation_guard=renew,
+        )
+        renew()
+        return store.complete_report_finalization(
+            policy, active_claim, now=_timestamp(clock()),
+        )
+    except Exception as error:
+        code = getattr(error, "code", None)
+        if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
+            code = "benchmark.campaign.report_unexpected"
+        if code == "benchmark.campaign.operation_guard_failed":
+            raise
+        terminal = {
+            "benchmark.campaign.policy_mismatch",
+            "benchmark.campaign.report_invalid",
+            "benchmark.campaign.report_state_invalid",
+            "benchmark.campaign.state_invalid",
+        }
+        retryable = code not in terminal
+        delay = _retry_delay(
+            active_claim.attempt, retry_base_seconds, retry_max_seconds,
+        ) if retryable else 0
+        return store.transition_report_failure(
+            policy,
+            active_claim,
+            code,
+            retryable=retryable,
+            delay_seconds=delay,
+            detail=type(error).__name__,
+            now=_timestamp(clock()),
+        )
 
 
 def run_next_benchmark_case(

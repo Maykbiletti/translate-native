@@ -1505,7 +1505,109 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 )),
                 CAMPAIGN.REPORT_COLUMNS,
             )
+            self.assertEqual(
+                tuple(row["name"] for row in connection.execute(
+                    "PRAGMA table_info(benchmark_campaign_report_state)"
+                )),
+                CAMPAIGN.REPORT_STATE_COLUMNS,
+            )
             store._verify_schema()
+
+    def test_campaign_schema_v2_migrates_report_attempt_state(self):
+        benchmark_policy = campaign_policy()
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(
+                benchmark_policy, max_attempts=4, now=100,
+            )
+            connection.execute("DROP TABLE benchmark_campaign_report_state")
+            connection.execute("PRAGMA user_version = 2")
+            connection.commit()
+
+            migrated = CAMPAIGN.BenchmarkCampaignStore(connection)
+
+            status = migrated.status(benchmark_policy, campaign_id)
+            self.assertEqual(status["report_finalization"], {
+                "status": "pending",
+                "attempt": 0,
+                "max_attempts": 4,
+                "next_attempt_at": 100.0,
+                "error_code": None,
+            })
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0],
+                CAMPAIGN.SCHEMA_VERSION,
+            )
+
+    def test_report_finalization_crash_lease_recovers_and_rejects_stale_token(self):
+        benchmark_policy = campaign_policy()
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(
+                benchmark_policy, max_attempts=2, now=100,
+            )
+            encoded = "{}"
+            connection.execute("""
+                UPDATE benchmark_campaign_work
+                SET status = 'succeeded', attempts = 1,
+                    result_json = ?, result_sha256 = ?, updated_at = 100
+                WHERE campaign_id = ?
+            """, (encoded, CAMPAIGN._hash_text(encoded), campaign_id))
+            connection.commit()
+            stale = store.claim_report_finalization(
+                benchmark_policy,
+                campaign_id,
+                "report-worker-a",
+                now=100,
+                lease_seconds=5,
+            )
+            recovered = store.claim_report_finalization(
+                benchmark_policy,
+                campaign_id,
+                "report-worker-b",
+                now=106,
+                lease_seconds=5,
+            )
+            self.assertEqual(recovered.attempt, 2)
+            self.assertNotEqual(recovered.lease_token, stale.lease_token)
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.transition_report_failure(
+                    benchmark_policy,
+                    stale,
+                    "benchmark.campaign.report_unexpected",
+                    retryable=True,
+                    now=106,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.report_lease_lost",
+            )
+            self.assertIsNone(store.claim_report_finalization(
+                benchmark_policy,
+                campaign_id,
+                "report-worker-c",
+                now=112,
+                lease_seconds=5,
+            ))
+            state = store.status(
+                benchmark_policy, campaign_id,
+            )["report_finalization"]
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(
+                state["error_code"],
+                "benchmark.campaign.report_lease_expired",
+            )
+            connection.execute("""
+                UPDATE benchmark_campaign_report_state
+                SET max_attempts = 20 WHERE campaign_id = ?
+            """, (campaign_id,))
+            connection.commit()
+            with self.assertRaises(CAMPAIGN.BenchmarkCampaignBlocked) as caught:
+                store.status(benchmark_policy, campaign_id)
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.campaign.report_state_invalid",
+            )
 
     def test_campaign_policy_change_creates_new_identity_and_tampering_blocks(self):
         first = campaign_policy()
@@ -1973,6 +2075,17 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                     if completed_case else None
                 )
                 guard_calls = []
+                report_outcome = (
+                    BENCHMARK_RUNTIME._CAMPAIGN.BenchmarkReportFinalizationOutcome(
+                        campaign_id=runtime.campaign_id,
+                        status="succeeded",
+                        attempt=1,
+                        max_attempts=3,
+                        next_attempt_at=100,
+                        error_code=None,
+                        error_detail_hash=None,
+                    )
+                )
                 with (
                     mock.patch.object(
                         BENCHMARK_RUNTIME._CAMPAIGN,
@@ -1985,10 +2098,10 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                         return_value=True,
                     ) as required,
                     mock.patch.object(
-                        runtime.campaign_store,
-                        "summarize",
-                        return_value={"status": "BLOCK"},
-                    ) as summarize,
+                        BENCHMARK_RUNTIME._CAMPAIGN,
+                        "run_benchmark_report_finalization",
+                        return_value=report_outcome,
+                    ) as finalize,
                 ):
                     observed = runtime.run_once(
                         operation_guard=guard_calls.append,
@@ -1998,29 +2111,28 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 if completed_case:
                     self.assertIs(observed, outcome)
                 else:
-                    self.assertIsInstance(
-                        observed,
-                        BENCHMARK_RUNTIME.BenchmarkReportFinalizationOutcome,
-                    )
+                    self.assertIs(observed, report_outcome)
                     self.assertEqual(observed.campaign_id, runtime.campaign_id)
                     self.assertEqual(observed.status, "succeeded")
-                    self.assertIsNone(observed.work_id)
-                    self.assertIsNone(observed.target_locale)
-                    self.assertIsNone(observed.attempt)
+                    self.assertEqual(observed.attempt, 1)
                     self.assertIsNone(observed.error_code)
                 required.assert_called_once_with(
                     runtime.policy, runtime.campaign_id,
                 )
-                summarize.assert_called_once()
-                arguments = summarize.call_args
-                self.assertEqual(arguments.args[:3], (
+                finalize.assert_called_once()
+                arguments = finalize.call_args
+                self.assertEqual(arguments.args[:5], (
+                    runtime.campaign_store,
                     runtime.policy,
                     runtime.campaign_id,
+                    runtime.worker_id,
                     runtime.evidence_authority,
                 ))
-                self.assertEqual(arguments.kwargs["now"], 100)
-                arguments.kwargs["operation_guard"]()
-                self.assertEqual(guard_calls, [240.0])
+                self.assertIs(arguments.kwargs["clock"], runtime.clock)
+                self.assertEqual(
+                    arguments.kwargs["operation_guard"], guard_calls.append,
+                )
+                self.assertEqual(arguments.kwargs["lease_seconds"], 240.0)
 
         runtime, _, _, _, _ = self._benchmark_runtime_fixture()
         with (
@@ -2034,10 +2146,13 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 "report_finalization_required",
                 return_value=False,
             ),
-            mock.patch.object(runtime.campaign_store, "summarize") as summarize,
+            mock.patch.object(
+                BENCHMARK_RUNTIME._CAMPAIGN,
+                "run_benchmark_report_finalization",
+            ) as finalize,
         ):
             self.assertIsNone(runtime.run_once())
-        summarize.assert_not_called()
+        finalize.assert_not_called()
 
     def test_cross_loaded_deepl_adapter_store_and_inputs_complete_campaign_case(self):
         benchmark_policy = campaign_policy()
@@ -2444,6 +2559,112 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 "benchmark.campaign.report_invalid",
             )
             self.assertEqual(authority.sign_calls, sign_calls + 2)
+
+    def test_report_finalization_retries_durably_and_stops_at_attempt_limit(self):
+        benchmark_policy = campaign_policy()
+        authority = CountingCampaignAuthority()
+        verifier = CampaignNativeReferenceVerifier()
+        reviewer = CampaignCandidateReviewer()
+        current_time = [100.0]
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(
+                benchmark_policy, max_attempts=2, now=current_time[0],
+            )
+            while CAMPAIGN.run_next_benchmark_case(
+                store,
+                benchmark_policy,
+                campaign_id,
+                "case-worker",
+                lambda payload: campaign_inputs(
+                    payload, benchmark_policy, verifier, authority,
+                ),
+                reviewer,
+                blinding_key=self.key,
+                native_reference_verifier=verifier,
+                evidence_authority=authority,
+                clock=lambda: current_time[0],
+            ) is not None:
+                pass
+
+            with mock.patch.object(
+                store,
+                "summarize",
+                side_effect=RuntimeError("private signing failure"),
+            ) as summarize:
+                first = CAMPAIGN.run_benchmark_report_finalization(
+                    store,
+                    benchmark_policy,
+                    campaign_id,
+                    "report-worker",
+                    authority,
+                    clock=lambda: current_time[0],
+                    retry_base_seconds=5,
+                    retry_max_seconds=20,
+                )
+                self.assertEqual(first.status, "retry_wait")
+                self.assertEqual(first.attempt, 1)
+                self.assertEqual(first.next_attempt_at, 105)
+                self.assertEqual(
+                    first.error_code,
+                    "benchmark.campaign.report_unexpected",
+                )
+
+                current_time[0] = 104
+                self.assertIsNone(CAMPAIGN.run_benchmark_report_finalization(
+                    store,
+                    benchmark_policy,
+                    campaign_id,
+                    "report-worker",
+                    authority,
+                    clock=lambda: current_time[0],
+                    retry_base_seconds=5,
+                    retry_max_seconds=20,
+                ))
+
+                current_time[0] = 105
+                second = CAMPAIGN.run_benchmark_report_finalization(
+                    store,
+                    benchmark_policy,
+                    campaign_id,
+                    "report-worker",
+                    authority,
+                    clock=lambda: current_time[0],
+                    retry_base_seconds=5,
+                    retry_max_seconds=20,
+                )
+                self.assertEqual(second.status, "failed")
+                self.assertEqual(second.attempt, 2)
+                self.assertEqual(summarize.call_count, 2)
+
+                current_time[0] = 200
+                self.assertIsNone(CAMPAIGN.run_benchmark_report_finalization(
+                    store,
+                    benchmark_policy,
+                    campaign_id,
+                    "report-worker",
+                    authority,
+                    clock=lambda: current_time[0],
+                    retry_base_seconds=5,
+                    retry_max_seconds=20,
+                ))
+                self.assertEqual(summarize.call_count, 2)
+
+            state_json = json.dumps(dict(connection.execute("""
+                SELECT * FROM benchmark_campaign_report_state
+                WHERE campaign_id = ?
+            """, (campaign_id,)).fetchone()))
+            self.assertNotIn("private signing failure", state_json)
+            health = store.health(
+                benchmark_policy, campaign_id, authority, now=200,
+            )
+            self.assertEqual(health.status, "blocked")
+            self.assertIn("benchmark.campaign.report_failed", health.reasons)
+            self.assertIn(
+                "benchmark.campaign.report_error."
+                "benchmark.campaign.report_unexpected",
+                health.reasons,
+            )
 
 
 if __name__ == "__main__":

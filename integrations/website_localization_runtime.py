@@ -537,10 +537,10 @@ class WebsiteLocalizationRuntime:
             return _SERVICE._outcome(
                 "benchmark",
                 benchmark_tick.status,
-                job_id=benchmark_tick.work_id,
-                target_locale=benchmark_tick.target_locale,
-                attempt=benchmark_tick.attempt,
-                error_code=benchmark_tick.error_code,
+                job_id=getattr(benchmark_tick, "work_id", None),
+                target_locale=getattr(benchmark_tick, "target_locale", None),
+                attempt=getattr(benchmark_tick, "attempt", None),
+                error_code=getattr(benchmark_tick, "error_code", None),
             )
 
         self.supervisor = _SUPERVISOR.LocalizationServiceSupervisor(
