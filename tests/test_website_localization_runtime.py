@@ -399,6 +399,22 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             ))
             return captured["status"], json.loads(body)
 
+        capabilities_request = {
+            "schema": RUNTIME._API.CAPABILITIES_REQUEST_SCHEMA,
+            "request_id": "runtime-capabilities-1",
+            "requested_at": self.clock(),
+        }
+        status, capabilities = request(
+            RUNTIME._API.CAPABILITIES_PATH, capabilities_request,
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(capabilities["status"], "CAPABILITIES")
+        self.assertEqual(len(capabilities["capabilities"]["locales"]), 24)
+        self.assertEqual(
+            capabilities["capabilities"]["quality_passes"],
+            ["target_native", "source_fidelity"],
+        )
+
         status, accepted = request(RUNTIME._API.CHANGE_PATH, event)
         self.assertEqual(status, "202 Accepted")
         self.assertEqual(accepted["job_count"], 1)

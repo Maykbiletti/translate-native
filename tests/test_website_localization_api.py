@@ -7,6 +7,7 @@ import io
 import json
 import sqlite3
 import sys
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -188,6 +189,26 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             PATH_INFO=API.LIFECYCLE_PATH,
         )
 
+    def capabilities_request(
+        self,
+        *,
+        request_id="capabilities-1",
+        requested_at=100,
+        authority=None,
+        key_id="event-key-1",
+    ):
+        value = {
+            "schema": API.CAPABILITIES_REQUEST_SCHEMA,
+            "request_id": request_id,
+            "requested_at": requested_at,
+        }
+        authority = authority or self.authority
+        return self.request(
+            value,
+            signature=authority.sign(value, key_id=key_id),
+            PATH_INFO=API.CAPABILITIES_PATH,
+        )
+
     def test_signed_v2_change_enqueues_each_locale_and_replays_idempotently(self):
         first = self.request()
         second = self.request()
@@ -207,6 +228,101 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(status, "202 Accepted")
         self.assertEqual(payload["job_count"], 23)
         self.assertEqual(payload["inserted_jobs"], 23)
+
+    def test_signed_capabilities_expose_exact_current_locales_and_profile_bindings(self):
+        changes_before = (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        )
+
+        status, headers, payload = self.capabilities_request()
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(payload["status"], "CAPABILITIES")
+        capabilities = payload["capabilities"]
+        self.assertEqual(capabilities["schema"], CMS.CAPABILITIES_SCHEMA)
+        self.assertEqual(len(capabilities["locales"]), 24)
+        self.assertEqual(
+            [item["locale"] for item in capabilities["locales"]],
+            [profile.locale for profile in CMS._PLANNER.EU_OFFICIAL_LOCALES],
+        )
+        native_names = {
+            item["locale"]: item["native_name"]
+            for item in capabilities["locales"]
+        }
+        self.assertEqual(native_names["cs-CZ"], "čeština")
+        self.assertEqual(native_names["el-GR"], "ελληνικά")
+        self.assertEqual(native_names["lv-LV"], "latviešu")
+        self.assertTrue(all(
+            unicodedata.is_normalized("NFC", name)
+            for name in native_names.values()
+        ))
+        maltese = next(
+            item for item in capabilities["locales"] if item["locale"] == "mt-MT"
+        )
+        self.assertEqual(maltese["native_name"], "Malti")
+        self.assertEqual(
+            maltese["quality_profile_sha256"],
+            CMS._PLANNER.quality_profile_for("mt-MT")["sha256"],
+        )
+        claimed = capabilities.pop("sha256")
+        self.assertEqual(claimed, CMS._hash(CMS._canonical_json(capabilities)))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertNotIn("native_review_focus", json.dumps(payload))
+        self.assertEqual(changes_before, (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        ))
+
+    def test_capabilities_are_purpose_bound_fresh_and_authenticated(self):
+        status_request = {
+            "schema": API.STATUS_REQUEST_SCHEMA,
+            "request_id": "wrong-purpose",
+            "event_id": "event-1",
+            "site_id": "site-1",
+            "requested_at": 100,
+        }
+        status, _, payload = self.request(
+            status_request, PATH_INFO=API.CAPABILITIES_PATH,
+        )
+        self.assertEqual(
+            (status, payload["error"]),
+            ("400 Bad Request", "cms.capabilities.request_invalid"),
+        )
+        status, _, payload = self.capabilities_request(requested_at=1000)
+        self.assertEqual(
+            (status, payload["error"]),
+            ("401 Unauthorized", "cms.capabilities.request_expired"),
+        )
+        value = {
+            "schema": API.CAPABILITIES_REQUEST_SCHEMA,
+            "request_id": "forged",
+            "requested_at": 100,
+        }
+        forged = self.authority.sign(value)
+        forged = CMS.CMSMessageSignature(forged.algorithm, forged.key_id, "0" * 64)
+        status, _, payload = self.request(
+            value, signature=forged, PATH_INFO=API.CAPABILITIES_PATH,
+        )
+        self.assertEqual(
+            (status, payload["error"]),
+            ("401 Unauthorized", "cms.capabilities.signature_rejected"),
+        )
+
+    def test_capabilities_block_an_inconsistent_locale_registry(self):
+        original = CMS._PLANNER.EU_OFFICIAL_LOCALES
+        CMS._PLANNER.EU_OFFICIAL_LOCALES = original[:-1] + (original[0],)
+        try:
+            status, _, payload = self.capabilities_request()
+        finally:
+            CMS._PLANNER.EU_OFFICIAL_LOCALES = original
+        self.assertEqual(
+            (status, payload["error"]),
+            ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+        )
+        self.assertNotIn("locales", payload)
 
     def test_signature_idempotency_and_source_sequence_collisions_fail_closed(self):
         value = event()

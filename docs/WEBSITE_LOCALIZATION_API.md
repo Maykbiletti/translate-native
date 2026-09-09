@@ -2,9 +2,10 @@
 
 `WebsiteLocalizationAPI` is the provider-neutral WSGI ingress exposed by the
 composed website-localization runtime. It accepts a signed current CMS change,
-durably enqueues one job per required locale, and returns content-free queue or
-end-to-end lifecycle status. It never calls a model, approves a translation,
-prepares a publication, or returns source or target prose.
+durably enqueues one job per required locale, and returns content-free
+capabilities, queue progress, or end-to-end lifecycle status. It never calls a
+model, approves a translation, prepares a publication, or returns source or
+target prose.
 
 ## Host setup
 
@@ -63,6 +64,77 @@ A delayed event below an already accepted source generation is recorded as
 
 The response contains identifiers and counts only. Acceptance is not quality
 approval or publication readiness.
+
+## Discover the active localization contract
+
+A CMS can discover the exact runtime contract before creating work. This avoids
+copying a locale list or quality-profile version into an integration where it
+can silently become stale. The read uses its own signed purpose and does not
+require an existing event:
+
+```http
+POST /v2/localization/capabilities HTTP/1.1
+Content-Type: application/json; charset=utf-8
+Content-Length: <exact UTF-8 byte count>
+X-Localization-Signature-Algorithm: <configured algorithm>
+X-Localization-Key-Id: <credential identifier>
+X-Localization-Signature: <signature>
+```
+
+```json
+{"request_id":"capabilities-9","requested_at":1788955200,"schema":"blun.cms-localization-capabilities-request.v1"}
+```
+
+The request signature and five-minute freshness window prevent an old or
+different API request from being replayed for discovery. The response contains
+the active change, plan, job, publication, and commercial-profile versions;
+the ordered quality phases; accepted content types; the official EU language
+source; the default target-selection rule; and all 24 exact BCP-47 locale
+profiles. Every locale entry includes its EU code, language code, native name,
+script, direction, quality-profile version, and quality-profile SHA-256 digest.
+It does not expose the full profile instructions, credentials, customer text,
+provider data, or mutable service state.
+
+The nested `blun.website-localization-capabilities.v1` object carries a
+`sha256` value over all its other canonical fields. Consumers can pin that
+digest for a deployment and deliberately reconfigure when it changes. The
+runtime rebuilds and validates the complete registry on every read; duplicate,
+missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
+without a partial locale list.
+
+```json
+{
+  "capabilities": {
+    "change_schema": "blun.cms-content-change.v2",
+    "commercial_profile": "translate-native.commercial.v2",
+    "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
+    "default_target_policy": "all-eu-official-locales-except-source-language",
+    "eu_language_source": "https://european-union.europa.eu/principles-countries-history/languages_en",
+    "job_schema": "blun.website-localization-job.v2",
+    "locales": [{
+      "direction": "ltr",
+      "eu_code": "MT",
+      "language": "mt",
+      "locale": "mt-MT",
+      "native_name": "Malti",
+      "quality_profile_sha256": "<sha256>",
+      "quality_profile_version": "eu-mt-MT-2026-09-1",
+      "script": "Latn"
+    }],
+    "plan_schema": "blun.website-localization-plan.v2",
+    "publication_schema": "blun.cms-localization-publication.v2",
+    "quality_passes": ["target_native", "source_fidelity"],
+    "schema": "blun.website-localization-capabilities.v1",
+    "sha256": "<sha256>"
+  },
+  "request_id": "capabilities-9",
+  "schema": "blun.website-localization-api.v2",
+  "status": "CAPABILITIES"
+}
+```
+
+The abbreviated example shows one locale only; a successful real response
+always contains all 24 entries and otherwise blocks.
 
 ## Read per-locale progress
 
@@ -171,10 +243,10 @@ prose:
 covers identity, source-sequence, supersession, and legacy-ingress conflicts;
 `413` and `415` cover body size and media type; `503` covers inconsistent or
 unavailable durable state, including missing lifecycle authorities and invalid
-release or delivery evidence. Other invalid input returns `400`, and unexpected
-failures reduce to `api.internal` with `500`. Clients may retry a transport
-failure or the exact signed change; they must never modify a request under the
-same event identity.
+release or delivery evidence, or an inconsistent capability registry. Other
+invalid input returns `400`, and unexpected failures reduce to `api.internal`
+with `500`. Clients may retry a transport failure or the exact signed change;
+they must never modify a request under the same event identity.
 
 Premortem: schema-v1 ingress could bypass source ordering, a valid credential
 could enumerate another site's event, a timeout could duplicate locale work, a
@@ -189,3 +261,10 @@ ready, a corrupt outbox row could be skipped, or a status read could mutate a
 lease. Purpose-bound signed requests, original-credential scope, verified
 release readiness, complete signed-delivery revalidation, explicit blocked
 states, and read-only regression checks keep those paths fail-closed.
+
+Capability premortem: an integration could pin a stale locale list, a valid
+signature could be replayed across purposes, a changed profile could retain an
+old digest, a duplicate language could displace another EU language, or a
+partial response could look authoritative. A separate fresh signed request,
+canonical whole-object digest, exact 24-language registry validation, unique
+locale/language/EU-code checks, and all-or-nothing response close those paths.

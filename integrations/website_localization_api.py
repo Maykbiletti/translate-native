@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Authenticated WSGI ingress for the provider-neutral localization runtime.
 
-The API accepts signed CMS change events and exposes content-free per-locale
-progress. It never runs a model, approves text, or returns source/target prose.
+The API accepts signed CMS change events and exposes content-free capabilities,
+per-locale progress, and verified lifecycle state. It never runs a model,
+approves text, or returns source/target prose.
 """
 
 from __future__ import annotations
@@ -20,9 +21,11 @@ API_SCHEMA = "blun.website-localization-api.v2"
 CHANGE_PATH = "/v2/localization/changes"
 STATUS_PATH = "/v2/localization/status"
 LIFECYCLE_PATH = "/v2/localization/lifecycle"
+CAPABILITIES_PATH = "/v2/localization/capabilities"
 STATUS_REQUEST_SCHEMA = "blun.cms-localization-status-request.v2"
 LIFECYCLE_REQUEST_SCHEMA = "blun.cms-localization-lifecycle-request.v1"
 LIFECYCLE_RESPONSE_SCHEMA = "blun.cms-localization-lifecycle.v1"
+CAPABILITIES_REQUEST_SCHEMA = "blun.cms-localization-capabilities-request.v1"
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_STATUS_CLOCK_SKEW = 300.0
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
@@ -99,9 +102,9 @@ class WebsiteLocalizationAPI:
         publication_authority: Any | None = None,
     ):
         if not all(callable(getattr(bridge, name, None)) for name in (
-            "ingest_change", "change_progress",
+            "ingest_change", "change_progress", "localization_capabilities",
         )):
-            raise TypeError("bridge must provide CMS ingress and progress")
+            raise TypeError("bridge must provide CMS ingress, capabilities, and progress")
         if not callable(getattr(event_verifier, "verify", None)):
             raise TypeError("event_verifier must provide verify")
         if not callable(clock):
@@ -183,6 +186,8 @@ class WebsiteLocalizationAPI:
             "cms.status.signature_rejected", "cms.status.request_expired",
             "cms.status.scope_rejected", "cms.lifecycle.signature_rejected",
             "cms.lifecycle.request_expired", "cms.lifecycle.scope_rejected",
+            "cms.capabilities.signature_rejected",
+            "cms.capabilities.request_expired",
         }:
             return "401 Unauthorized"
         if code in {
@@ -198,6 +203,7 @@ class WebsiteLocalizationAPI:
             "cms.event.tampered", "cms.event.topic_invalid",
             "cms.lifecycle.unavailable", "cms.release.integrity_failed",
             "cms.delivery.tampered", "cms.delivery.signature_invalid",
+            "cms.capabilities.registry_invalid",
         }:
             return "503 Service Unavailable"
         return "400 Bad Request"
@@ -208,7 +214,9 @@ class WebsiteLocalizationAPI:
                 "500 Internal Server Error", "api.environment.invalid", start_response,
             )
         path = environ.get("PATH_INFO")
-        if path not in {CHANGE_PATH, STATUS_PATH, LIFECYCLE_PATH}:
+        if path not in {
+            CHANGE_PATH, STATUS_PATH, LIFECYCLE_PATH, CAPABILITIES_PATH,
+        }:
             return self._blocked("404 Not Found", "api.path.not_found", start_response)
         if environ.get("REQUEST_METHOD") != "POST":
             return self._blocked(
@@ -266,6 +274,8 @@ class WebsiteLocalizationAPI:
                 return self._status(request, signature, now, start_response)
             if path == LIFECYCLE_PATH:
                 return self._lifecycle(request, signature, now, start_response)
+            if path == CAPABILITIES_PATH:
+                return self._capabilities(request, signature, now, start_response)
             ingested = self.bridge.ingest_change(
                 request,
                 signature,
@@ -394,6 +404,49 @@ class WebsiteLocalizationAPI:
             "schema": LIFECYCLE_RESPONSE_SCHEMA,
             "request_id": request_id,
             **asdict(lifecycle),
+        }, start_response)
+
+    def _capabilities(self, request, signature, now, start_response):
+        expected = {"schema", "request_id", "requested_at"}
+        if (
+            not isinstance(request, dict)
+            or set(request) != expected
+            or request.get("schema") != CAPABILITIES_REQUEST_SCHEMA
+        ):
+            raise _APIRequestBlocked("cms.capabilities.request_invalid")
+        try:
+            request_id = _token(request.get("request_id"))
+            requested_at = _timestamp(request.get("requested_at"))
+        except ValueError:
+            raise _APIRequestBlocked("cms.capabilities.request_invalid") from None
+        try:
+            _token(signature.algorithm)
+            _token(signature.key_id)
+            if (
+                not isinstance(signature.signature, str)
+                or SIGNATURE_VALUE.fullmatch(signature.signature) is None
+            ):
+                raise ValueError("invalid signature")
+        except ValueError:
+            raise _APIRequestBlocked("cms.capabilities.signature_rejected") from None
+        try:
+            accepted = self.event_verifier.verify(
+                _canonical_json(request).encode("utf-8"), signature,
+            ) is True
+        except Exception:
+            accepted = False
+        if not accepted:
+            raise _APIRequestBlocked("cms.capabilities.signature_rejected")
+        if abs(now - requested_at) > MAX_STATUS_CLOCK_SKEW:
+            raise _APIRequestBlocked("cms.capabilities.request_expired")
+        capabilities = self.bridge.localization_capabilities()
+        if not isinstance(capabilities, dict):
+            raise _APIRequestBlocked("cms.capabilities.registry_invalid")
+        return self._json("200 OK", {
+            "schema": API_SCHEMA,
+            "status": "CAPABILITIES",
+            "request_id": request_id,
+            "capabilities": capabilities,
         }, start_response)
 
 

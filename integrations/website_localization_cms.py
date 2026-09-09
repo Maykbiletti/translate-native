@@ -27,6 +27,7 @@ SCHEMA_VERSION = 2
 CHANGE_SCHEMA = "blun.cms-content-change.v2"
 PUBLICATION_SCHEMA = "blun.cms-localization-publication.v2"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v1"
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
@@ -51,6 +52,15 @@ _EVENT_TOPIC_COLUMNS = (
 _SUPERSESSION_COLUMNS = (
     "event_id", "superseded_by_event_id", "created_at",
 )
+_LOCALE_PROFILE_FIELDS = (
+    "locale", "eu_code", "language", "native_name", "script",
+    "quality_profile_version", "quality_profile_sha256", "direction",
+)
+_EXPECTED_CONTENT_TYPES = frozenset({
+    "headline", "cta", "marketing", "ui", "documentation", "seo", "legal",
+    "commercial",
+})
+_DEFAULT_TARGET_POLICY = "all-eu-official-locales-except-source-language"
 
 
 def _load_module(name: str, path: Path):
@@ -367,6 +377,113 @@ class WebsiteLocalizationCMSBridge:
         elif version == 1:
             self._migrate_v1()
         self._verify_schema()
+
+    def localization_capabilities(self) -> dict[str, Any]:
+        """Return the canonical, content-free planner contract without mutation."""
+        try:
+            profiles = _PLANNER.EU_OFFICIAL_LOCALES
+            content_types = _PLANNER.CONTENT_TYPES
+            quality_passes = _PLANNER.QUALITY_PASSES
+            if (
+                not isinstance(profiles, tuple)
+                or len(profiles) != 24
+                or not isinstance(content_types, frozenset)
+                or content_types != _EXPECTED_CONTENT_TYPES
+                or quality_passes != ("target_native", "source_fidelity")
+                or _PLANNER.EU_LANGUAGE_SOURCE
+                != "https://european-union.europa.eu/principles-countries-history/languages_en"
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+
+            locales = []
+            seen_locales: set[str] = set()
+            seen_languages: set[str] = set()
+            seen_eu_codes: set[str] = set()
+            for profile in profiles:
+                if (
+                    not is_dataclass(profile)
+                    or isinstance(profile, type)
+                    or type(profile).__name__ != "LocaleProfile"
+                    or type(profile).__dataclass_params__.frozen is not True
+                    or tuple(field.name for field in fields(profile))
+                    != _LOCALE_PROFILE_FIELDS
+                ):
+                    raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+                item = {
+                    field: getattr(profile, field) for field in _LOCALE_PROFILE_FIELDS
+                }
+                locale = _token(item["locale"], "cms.capabilities.registry_invalid")
+                eu_code = _token(item["eu_code"], "cms.capabilities.registry_invalid")
+                language = _token(item["language"], "cms.capabilities.registry_invalid")
+                native_name = _text(
+                    item["native_name"], "cms.capabilities.registry_invalid",
+                )
+                script = _token(item["script"], "cms.capabilities.registry_invalid")
+                version = _token(
+                    item["quality_profile_version"],
+                    "cms.capabilities.registry_invalid",
+                )
+                digest = item["quality_profile_sha256"]
+                direction = item["direction"]
+                if (
+                    _PLANNER.canonicalize_locale(locale) != locale
+                    or locale.split("-", 1)[0] != language
+                    or not isinstance(digest, str)
+                    or SHA256.fullmatch(digest) is None
+                    or direction not in {"ltr", "rtl"}
+                    or locale in seen_locales
+                    or language in seen_languages
+                    or eu_code in seen_eu_codes
+                ):
+                    raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+                quality = _PLANNER.quality_profile_for(locale)
+                if (
+                    not isinstance(quality, dict)
+                    or quality.get("locale") != locale
+                    or quality.get("version") != version
+                    or quality.get("sha256") != digest
+                ):
+                    raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+                seen_locales.add(locale)
+                seen_languages.add(language)
+                seen_eu_codes.add(eu_code)
+                locales.append({
+                    "locale": locale,
+                    "eu_code": eu_code,
+                    "language": language,
+                    "native_name": native_name,
+                    "script": script,
+                    "direction": direction,
+                    "quality_profile_version": version,
+                    "quality_profile_sha256": digest,
+                })
+
+            body = {
+                "schema": CAPABILITIES_SCHEMA,
+                "change_schema": CHANGE_SCHEMA,
+                "publication_schema": PUBLICATION_SCHEMA,
+                "plan_schema": _token(
+                    _PLANNER.SCHEMA, "cms.capabilities.registry_invalid",
+                ),
+                "job_schema": _token(
+                    _PLANNER.JOB_SCHEMA, "cms.capabilities.registry_invalid",
+                ),
+                "eu_language_source": _PLANNER.EU_LANGUAGE_SOURCE,
+                "default_target_policy": _DEFAULT_TARGET_POLICY,
+                "content_types": sorted(content_types),
+                "quality_passes": list(quality_passes),
+                "commercial_profile": _token(
+                    _PLANNER.COMMERCIAL_PROFILE,
+                    "cms.capabilities.registry_invalid",
+                ),
+                "locales": locales,
+            }
+            canonical = _canonical_json(body)
+            return {**body, "sha256": _hash(canonical)}
+        except CMSBridgeBlocked:
+            raise
+        except Exception:
+            raise CMSBridgeBlocked("cms.capabilities.registry_invalid") from None
 
     def _create_revision_schema(self) -> None:
         self.connection.execute("""
