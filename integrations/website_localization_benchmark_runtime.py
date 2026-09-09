@@ -770,6 +770,8 @@ class WebsiteLocalizationBenchmarkRuntime:
         lease: Any,
         *,
         lease_seconds: Any = 3600,
+        request_id: Any = None,
+        request_sha256: Any = None,
     ) -> LeasedNativeReferenceWorkOrder:
         """Renew only the exact live editorial lease token."""
         if not isinstance(lease, LeasedNativeReferenceWorkOrder):
@@ -781,6 +783,11 @@ class WebsiteLocalizationBenchmarkRuntime:
                 lease.claim,
                 now=self.clock(),
                 lease_seconds=lease_seconds,
+                policy=self.policy if (
+                    request_id is not None or request_sha256 is not None
+                ) else None,
+                request_id=request_id,
+                request_sha256=request_sha256,
             )
         except Exception as error:
             code = getattr(
@@ -791,6 +798,37 @@ class WebsiteLocalizationBenchmarkRuntime:
             claim=claim, work_order=lease.work_order,
         )
 
+    def native_reference_http_request_replay(
+        self,
+        *,
+        editor_id: Any,
+        target_locale: Any,
+        operation: Any,
+        request_id: Any,
+        request_sha256: Any,
+    ) -> dict[str, Any] | None:
+        """Load one exact completed HTTP mutation without touching prose."""
+        try:
+            return self.native_reference_queue.replay_http_request(
+                self.policy,
+                self.campaign_id,
+                editor_id,
+                target_locale,
+                operation,
+                request_id,
+                request_sha256,
+                now=self.clock(),
+            )
+        except Exception as error:
+            code = getattr(
+                error,
+                "code",
+                "benchmark.runtime.reference_queue.state_invalid",
+            )
+            if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
+                code = "benchmark.runtime.reference_queue.state_invalid"
+            raise BenchmarkRuntimeFailed(code) from None
+
     def accept_leased_native_reference_submission(
         self,
         lease: Any,
@@ -800,6 +838,8 @@ class WebsiteLocalizationBenchmarkRuntime:
         lease_seconds: Any = 3600,
         retry_base_seconds: Any = 30,
         retry_max_seconds: Any = 3600,
+        request_id: Any = None,
+        request_sha256: Any = None,
     ):
         """Verify, store, and complete one exact leased editorial result."""
         if not isinstance(lease, LeasedNativeReferenceWorkOrder):
@@ -811,6 +851,27 @@ class WebsiteLocalizationBenchmarkRuntime:
                 "benchmark.runtime.reference_queue.guard_invalid",
             )
         lease_seconds = _REFERENCE_QUEUE._duration(lease_seconds)
+        http_request = request_id is not None or request_sha256 is not None
+        if http_request:
+            try:
+                replay = self.native_reference_queue.begin_http_submission_request(
+                    self.policy,
+                    lease.claim,
+                    request_id,
+                    request_sha256,
+                    now=self.clock(),
+                )
+                if replay is not None:
+                    return self.native_reference_queue.outcome_from_payload(replay)
+            except Exception as error:
+                code = getattr(
+                    error,
+                    "code",
+                    "benchmark.runtime.reference_queue.state_invalid",
+                )
+                if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
+                    code = "benchmark.runtime.reference_queue.state_invalid"
+                raise BenchmarkRuntimeFailed(code) from None
 
         def guard() -> None:
             try:
@@ -858,6 +919,8 @@ class WebsiteLocalizationBenchmarkRuntime:
                 lease.claim,
                 _REFERENCE_INTAKE._hash_json(artifact),
                 now=self.clock(),
+                request_id=request_id,
+                request_sha256=request_sha256,
             )
         except Exception as error:
             code = getattr(
@@ -880,6 +943,8 @@ class WebsiteLocalizationBenchmarkRuntime:
                         retry_max_seconds,
                     ),
                     now=self.clock(),
+                    request_id=request_id,
+                    request_sha256=request_sha256,
                 )
             except Exception as transition_error:
                 transition_code = getattr(

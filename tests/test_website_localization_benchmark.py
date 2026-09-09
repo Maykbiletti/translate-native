@@ -2351,7 +2351,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                     )
 
     def test_native_reference_http_completes_authenticated_editor_flow(self):
-        runtime, _, _, calls, _ = self._benchmark_runtime_fixture()
+        runtime, connections, _, calls, _ = self._benchmark_runtime_fixture()
         authenticated = []
         principal_payload = {
             "schema": NATIVE_REFERENCE_HTTP.PRINCIPAL_SCHEMA,
@@ -2368,15 +2368,18 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             native_reference_lease_from_payload = (
                 runtime.native_reference_lease_from_payload
             )
+            native_reference_http_request_replay = (
+                runtime.native_reference_http_request_replay
+            )
             renew_native_reference_work_order = (
                 runtime.renew_native_reference_work_order
             )
             native_reference_queue_status = runtime.native_reference_queue_status
 
             @staticmethod
-            def accept_native_reference_submission(lease, submission):
+            def accept_native_reference_submission(lease, submission, **options):
                 return runtime.accept_leased_native_reference_submission(
-                    lease, submission,
+                    lease, submission, **options,
                 )
 
         def authenticate(request):
@@ -2413,21 +2416,56 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         )
         self.assertTrue(replay_status.startswith("200 "))
         self.assertEqual(replay_response["lease"], lease_payload)
+        reused_claim_id_status, _, reused_claim_id_response = (
+            self._reference_http_call(
+                app,
+                NATIVE_REFERENCE_HTTP.RENEW_PATH,
+                body={
+                    "schema": NATIVE_REFERENCE_HTTP.RENEW_REQUEST_SCHEMA,
+                    "request_id": "http-claim-mt-0001",
+                    "lease": lease_payload,
+                    "lease_seconds": 1200,
+                },
+            )
+        )
+        self.assertTrue(reused_claim_id_status.startswith("409 "))
+        self.assertEqual(
+            reused_claim_id_response["error_code"],
+            "native_reference.queue.http_request_conflict",
+        )
+        renew_request = {
+            "schema": NATIVE_REFERENCE_HTTP.RENEW_REQUEST_SCHEMA,
+            "request_id": "http-renew-mt-0001",
+            "lease": lease_payload,
+            "lease_seconds": 1200,
+        }
         renew_status, _, renew_response = self._reference_http_call(
             app,
             NATIVE_REFERENCE_HTTP.RENEW_PATH,
-            body={
-                "schema": NATIVE_REFERENCE_HTTP.RENEW_REQUEST_SCHEMA,
-                "request_id": "http-renew-mt-0001",
-                "lease": lease_payload,
-                "lease_seconds": 1200,
-            },
+            body=renew_request,
         )
         self.assertTrue(renew_status.startswith("200 "))
         renewed_payload = renew_response["lease"]
         self.assertGreater(
             renewed_payload["lease_expires_at"],
             lease_payload["lease_expires_at"],
+        )
+        replay_renew_status, _, replay_renew_response = (
+            self._reference_http_call(
+                app, NATIVE_REFERENCE_HTTP.RENEW_PATH, body=renew_request,
+            )
+        )
+        self.assertTrue(replay_renew_status.startswith("200 "))
+        self.assertEqual(replay_renew_response, renew_response)
+        conflicting_renew = dict(renew_request)
+        conflicting_renew["lease_seconds"] = 1201
+        conflict_status, _, conflict_response = self._reference_http_call(
+            app, NATIVE_REFERENCE_HTTP.RENEW_PATH, body=conflicting_renew,
+        )
+        self.assertTrue(conflict_status.startswith("409 "))
+        self.assertEqual(
+            conflict_response["error_code"],
+            "native_reference.queue.http_request_conflict",
         )
         post_renew_status, _, post_renew_response = self._reference_http_call(
             app,
@@ -2446,23 +2484,41 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             target_locale="mt-MT",
         )
         submission = self._leased_reference_submission(runtime, lease)
+        submit_request = {
+            "schema": NATIVE_REFERENCE_HTTP.SUBMIT_REQUEST_SCHEMA,
+            "request_id": "http-submit-mt-0001",
+            "lease": renewed_payload,
+            "submission": submission,
+        }
         submit_status, _, submit_response = self._reference_http_call(
             app,
             NATIVE_REFERENCE_HTTP.SUBMIT_PATH,
-            body={
-                "schema": NATIVE_REFERENCE_HTTP.SUBMIT_REQUEST_SCHEMA,
-                "request_id": "http-submit-mt-0001",
-                "lease": renewed_payload,
-                "submission": submission,
-            },
+            body=submit_request,
         )
-        self.assertTrue(submit_status.startswith("200 "))
+        self.assertTrue(
+            submit_status.startswith("200 "), submit_response,
+        )
         self.assertEqual(submit_response["outcome"]["status"], "succeeded")
+        replay_submit_status, _, replay_submit_response = (
+            self._reference_http_call(
+                app, NATIVE_REFERENCE_HTTP.SUBMIT_PATH, body=submit_request,
+            )
+        )
+        self.assertTrue(replay_submit_status.startswith("200 "))
+        self.assertEqual(replay_submit_response, submit_response)
+        self.assertEqual(connections[3].execute(
+            "SELECT COUNT(*) FROM benchmark_native_references"
+        ).fetchone()[0], 1)
         status_code, _, status_response = self._reference_http_call(
             app, NATIVE_REFERENCE_HTTP.STATUS_PATH, method="GET",
         )
         self.assertTrue(status_code.startswith("200 "))
         self.assertEqual(status_response["editor_locale"], "mt-MT")
+        self.assertEqual(status_response["queue"]["http_request_counts"], {
+            "processing": 0,
+            "completed": 2,
+            "abandoned": 0,
+        })
         self.assertNotIn(
             submission["verification_request"]["target_text"],
             json.dumps(status_response, ensure_ascii=False),
@@ -2470,7 +2526,7 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(calls["candidate_provider"], 0)
         self.assertEqual(calls["baseline"], 0)
         self.assertEqual(calls["reference"], 0)
-        self.assertEqual(len(authenticated), 6)
+        self.assertEqual(len(authenticated), 10)
         self.assertRegex(authenticated[0]["body_sha256"], r"^[0-9a-f]{64}$")
 
     def test_native_reference_http_blocks_transport_and_identity_bypasses(self):
@@ -2593,6 +2649,94 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(
             health.reasons,
             ("native_reference.queue.state_invalid",),
+        )
+
+    def test_native_reference_http_journal_tamper_blocks_health_and_replay(self):
+        runtime, connections, _, _, _ = self._benchmark_runtime_fixture()
+        lease = runtime.claim_native_reference_work_order(
+            "qualified-finnish-editor",
+            target_locale="fi-FI",
+            request_id="claim-fi-journal-0001",
+        )
+        runtime.renew_native_reference_work_order(
+            lease,
+            lease_seconds=7200,
+            request_id="renew-fi-journal-0001",
+            request_sha256="1" * 64,
+        )
+        connections[0].execute("""
+            UPDATE benchmark_native_reference_http_requests
+            SET result_sha256 = ? WHERE request_id = ?
+        """, ("0" * 64, "renew-fi-journal-0001"))
+        connections[0].commit()
+
+        health = runtime.native_reference_queue_health(now=100)
+        self.assertEqual(health.status, "blocked")
+        with self.assertRaises(BENCHMARK_RUNTIME.BenchmarkRuntimeFailed):
+            runtime.native_reference_http_request_replay(
+                editor_id="qualified-finnish-editor",
+                target_locale="fi-FI",
+                operation="renew",
+                request_id="renew-fi-journal-0001",
+                request_sha256="1" * 64,
+            )
+
+    def test_native_reference_http_journal_serializes_submission_attempt(self):
+        runtime, _, _, _, current_time = self._benchmark_runtime_fixture()
+        lease = runtime.claim_native_reference_work_order(
+            "qualified-maltese-editor",
+            target_locale="mt-MT",
+            lease_seconds=10,
+        )
+        prepared = runtime.native_reference_queue.begin_http_submission_request(
+            runtime.policy,
+            lease.claim,
+            "submit-mt-processing-0001",
+            "2" * 64,
+            now=100,
+        )
+        self.assertIsNone(prepared)
+        for request_id, code in (
+            (
+                "submit-mt-processing-0001",
+                "native_reference.queue.http_request_in_progress",
+            ),
+            (
+                "submit-mt-processing-0002",
+                "native_reference.queue.http_request_conflict",
+            ),
+        ):
+            with self.subTest(request_id=request_id):
+                with self.assertRaises(
+                    BENCHMARK_RUNTIME._REFERENCE_QUEUE.NativeReferenceQueueBlocked,
+                ) as caught:
+                    runtime.native_reference_queue.begin_http_submission_request(
+                        runtime.policy,
+                        lease.claim,
+                        request_id,
+                        "2" * 64,
+                        now=100,
+                    )
+                self.assertEqual(caught.exception.code, code)
+        current_time[0] = 111
+        recovered = runtime.claim_native_reference_work_order(
+            "replacement-maltese-editor",
+            target_locale="mt-MT",
+            lease_seconds=10,
+        )
+        self.assertEqual(recovered.claim.work_id, lease.claim.work_id)
+        self.assertEqual(recovered.claim.attempt, 2)
+        with self.assertRaises(BENCHMARK_RUNTIME.BenchmarkRuntimeFailed) as caught:
+            runtime.native_reference_http_request_replay(
+                editor_id="qualified-maltese-editor",
+                target_locale="mt-MT",
+                operation="submit",
+                request_id="submit-mt-processing-0001",
+                request_sha256="2" * 64,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "native_reference.queue.http_request_replay_stale",
         )
 
     def test_native_reference_queue_accepts_exact_submission_and_completes(self):

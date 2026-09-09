@@ -160,6 +160,7 @@ class NativeReferenceHTTPApplication:
         methods = (
             "claim_native_reference_work_order",
             "native_reference_lease_from_payload",
+            "native_reference_http_request_replay",
             "renew_native_reference_work_order",
             "accept_native_reference_submission",
             "native_reference_queue_status",
@@ -284,9 +285,14 @@ class NativeReferenceHTTPApplication:
             code = "native_reference.http.runtime_unavailable"
         retryable = getattr(error, "retryable", False)
         retryable = retryable if isinstance(retryable, bool) else False
+        if code.endswith("http_request_in_progress"):
+            retryable = True
         if code.endswith("locale_not_allowed"):
             status = 403
-        elif code.endswith(("lease_lost", "claim_replay_stale")):
+        elif code.endswith((
+            "lease_lost", "claim_replay_stale", "http_request_conflict",
+            "http_request_in_progress", "http_request_replay_stale",
+        )):
             status = 409
         elif ".submission_" in code or code.endswith("submission_invalid"):
             status = 422
@@ -362,6 +368,7 @@ class NativeReferenceHTTPApplication:
                 })
             request = self._decode_body(body, environ)
             request_id = _identifier(request.get("request_id"))
+            request_sha256 = hashlib.sha256(body).hexdigest()
             if path == CLAIM_PATH:
                 if set(request) != {"schema", "request_id", "lease_seconds"} or (
                     request.get("schema") != CLAIM_REQUEST_SCHEMA
@@ -389,13 +396,33 @@ class NativeReferenceHTTPApplication:
                     raise NativeReferenceHTTPFailed(
                         "native_reference.http.request_invalid", status=400,
                     )
+                replay = self.runtime.native_reference_http_request_replay(
+                    editor_id=principal.lease_owner,
+                    target_locale=principal.target_locale,
+                    operation="renew",
+                    request_id=request_id,
+                    request_sha256=request_sha256,
+                )
+                if replay is not None:
+                    lease_payload = dict(request["lease"])
+                    lease_payload["lease_expires_at"] = replay[
+                        "lease_expires_at"
+                    ]
+                    return self._send(start_response, 200, {
+                        "schema": CLAIM_RESPONSE_SCHEMA,
+                        "request_id": request_id,
+                        "lease": lease_payload,
+                    })
                 lease = self.runtime.native_reference_lease_from_payload(
                     request["lease"],
                     editor_id=principal.lease_owner,
                     target_locale=principal.target_locale,
                 )
                 renewed = self.runtime.renew_native_reference_work_order(
-                    lease, lease_seconds=_lease_seconds(request["lease_seconds"]),
+                    lease,
+                    lease_seconds=_lease_seconds(request["lease_seconds"]),
+                    request_id=request_id,
+                    request_sha256=request_sha256,
                 )
                 return self._send(start_response, 200, {
                     "schema": CLAIM_RESPONSE_SCHEMA,
@@ -408,13 +435,29 @@ class NativeReferenceHTTPApplication:
                 raise NativeReferenceHTTPFailed(
                     "native_reference.http.request_invalid", status=400,
                 )
+            replay = self.runtime.native_reference_http_request_replay(
+                editor_id=principal.lease_owner,
+                target_locale=principal.target_locale,
+                operation="submit",
+                request_id=request_id,
+                request_sha256=request_sha256,
+            )
+            if replay is not None:
+                return self._send(start_response, 200, {
+                    "schema": OUTCOME_RESPONSE_SCHEMA,
+                    "request_id": request_id,
+                    "outcome": replay,
+                })
             lease = self.runtime.native_reference_lease_from_payload(
                 request["lease"],
                 editor_id=principal.lease_owner,
                 target_locale=principal.target_locale,
             )
             outcome = self.runtime.accept_native_reference_submission(
-                lease, request["submission"],
+                lease,
+                request["submission"],
+                request_id=request_id,
+                request_sha256=request_sha256,
             )
             return self._send(start_response, 200, {
                 "schema": OUTCOME_RESPONSE_SCHEMA,

@@ -525,14 +525,20 @@ The private endpoints are:
 - `POST /v1/native-references/renew` with the exact private lease envelope and
   a new duration. The runtime reconstructs the canonical job from policy and
   suite state, then requires the authenticated editor, locale, work ID,
-  attempt, token, expiry, and complete work order to match the live row.
+  attempt, token, expiry, and complete work order to match the live row. Lease
+  renewal and its content-free response journal commit in one transaction, so
+  a retry after a lost response returns the byte-equivalent lease envelope.
 - `POST /v1/native-references/submit` with that lease and the complete
   transport-neutral submission envelope below. Receipt verification,
   attestation, immutable artifact storage, and queue completion remain inside
-  the runtime. A repeated or stale request cannot store a second result.
+  the runtime. The request is reserved before external verification, and its
+  content-free outcome is committed atomically with the queue transition. An
+  exact retry returns that outcome without invoking the verifier or storage
+  again; a repeated or stale request cannot store a second result.
 - `GET /v1/native-references/status`, which returns only the authenticated
   locale plus the existing content-free counts, timestamps, hashes, and stable
-  codes. It never returns a source, target, receipt, credential, or lease
+  codes, including processing, completed, and abandoned HTTP-request counts.
+  It never returns a source, target, receipt, credential, request ID, or lease
   token.
 
 Every response sets `Cache-Control: no-store` and
@@ -542,6 +548,17 @@ capture and apply owner-only retention to request bodies. When TLS terminates
 before WSGI, only a trusted proxy may set the effective HTTPS scheme;
 forwarding an untrusted client header is not sufficient. Request IDs are
 idempotency keys, not evidence and not authorization.
+
+Renewal and submission journals bind the request ID to the exact body digest,
+campaign, credential-derived editor identity, locale, work item, attempt,
+lease token, and original expiry. Reusing an ID with another operation, body,
+credential, or locale is a conflict. Journals retain only renewal expiry or
+the existing content-free queue outcome—never source text, target text,
+receipts, work orders, or credentials. Concurrent submission retries receive
+a retryable in-progress conflict. If the worker crashes before a queue
+transition, the processing entry expires with its work lease; normal bounded
+queue recovery issues a new attempt and the abandoned request ID remains
+unusable.
 
 The three write requests use these exact outer shapes; `lease` is the complete
 claim response value and `submission` is the complete envelope in the next

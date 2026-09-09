@@ -649,6 +649,13 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             target_locale=lease.claim.target_locale,
         )
         self.assertEqual(restored.as_payload(), lease.as_payload())
+        self.assertIsNone(runtime.native_reference_http_request_replay(
+            editor_id="native-editor-1",
+            target_locale=lease.claim.target_locale,
+            operation="renew",
+            request_id="runtime-renew-missing-0001",
+            request_sha256="1" * 64,
+        ))
         self.assertEqual(reference_status["counts"]["leased"], 1)
         self.assertEqual(reference_health.status, "healthy")
         self.clock.value = 101
@@ -666,6 +673,13 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             lambda: runtime.claim_native_reference_work_order("native-editor-1"),
             lambda: runtime.native_reference_lease_from_payload(
                 {}, editor_id="native-editor-1", target_locale="mt-MT",
+            ),
+            lambda: runtime.native_reference_http_request_replay(
+                editor_id="native-editor-1",
+                target_locale="mt-MT",
+                operation="renew",
+                request_id="runtime-renew-missing-0001",
+                request_sha256="1" * 64,
             ),
             runtime.native_reference_queue_status,
             lambda: runtime.native_reference_queue_health(now=100),

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import math
 import re
 import secrets
@@ -39,6 +40,19 @@ TABLE_COLUMNS = (
 CLAIM_REQUEST_COLUMNS = (
     "request_id", "campaign_id", "editor_id", "target_locale", "work_id",
     "attempt", "lease_token", "lease_expires_at", "created_at",
+)
+HTTP_REQUEST_COLUMNS = (
+    "request_id", "campaign_id", "editor_id", "target_locale", "operation",
+    "request_sha256", "work_id", "attempt", "lease_token",
+    "lease_expires_at", "status", "result_json", "result_sha256",
+    "created_at", "updated_at",
+)
+HTTP_OPERATIONS = ("renew", "submit")
+HTTP_REQUEST_STATUSES = ("processing", "completed", "abandoned")
+OUTCOME_FIELDS = (
+    "work_id", "target_locale", "suite_case_key", "status", "attempt",
+    "max_attempts", "next_attempt_at", "error_code", "error_detail_hash",
+    "artifact_sha256",
 )
 
 
@@ -221,6 +235,32 @@ class NativeReferenceWorkQueue:
                     FOREIGN KEY (campaign_id) REFERENCES benchmark_campaigns(campaign_id)
                 )
             """)
+            self.connection.execute(f"""
+                CREATE TABLE IF NOT EXISTS benchmark_native_reference_http_requests (
+                    request_id TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL,
+                    editor_id TEXT NOT NULL,
+                    target_locale TEXT NOT NULL,
+                    operation TEXT NOT NULL CHECK (operation IN {HTTP_OPERATIONS}),
+                    request_sha256 TEXT NOT NULL,
+                    work_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL CHECK (attempt > 0),
+                    lease_token TEXT NOT NULL,
+                    lease_expires_at REAL NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN {HTTP_REQUEST_STATUSES}),
+                    result_json TEXT,
+                    result_sha256 TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY (work_id) REFERENCES benchmark_native_reference_queue(work_id),
+                    FOREIGN KEY (campaign_id) REFERENCES benchmark_campaigns(campaign_id)
+                )
+            """)
+            self.connection.execute("""
+                CREATE INDEX IF NOT EXISTS benchmark_native_reference_http_work
+                ON benchmark_native_reference_http_requests
+                (campaign_id, work_id, attempt, operation)
+            """)
         self._verify_schema()
 
     def _verify_schema(self) -> None:
@@ -239,6 +279,15 @@ class NativeReferenceWorkQueue:
             )
         )
         if request_columns != CLAIM_REQUEST_COLUMNS:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.schema_unsupported",
+            )
+        http_columns = tuple(
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(benchmark_native_reference_http_requests)"
+            )
+        )
+        if http_columns != HTTP_REQUEST_COLUMNS:
             raise NativeReferenceQueueBlocked(
                 "native_reference.queue.schema_unsupported",
             )
@@ -355,6 +404,157 @@ class NativeReferenceWorkQueue:
                 raise NativeReferenceQueueBlocked(
                     "native_reference.queue.state_invalid",
                 ) from None
+        http_requests = self.connection.execute("""
+            SELECT * FROM benchmark_native_reference_http_requests
+            WHERE campaign_id = ?
+        """, (campaign_id,)).fetchall()
+        for request in http_requests:
+            queued = by_work_id.get(request["work_id"])
+            self._validate_http_request_row(request, queued, policy)
+
+    @staticmethod
+    def _canonical_json(value: Any) -> str:
+        try:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_invalid",
+            ) from None
+
+    @staticmethod
+    def _validate_http_result(operation: str, value: Any) -> dict[str, Any]:
+        try:
+            if not isinstance(value, dict):
+                raise ValueError
+            if operation == "renew":
+                if set(value) != {"lease_expires_at"}:
+                    raise ValueError
+                _timestamp(value["lease_expires_at"])
+            elif operation == "submit":
+                if set(value) != set(OUTCOME_FIELDS):
+                    raise ValueError
+                _identifier(value["work_id"])
+                _identifier(value["target_locale"])
+                _identifier(value["suite_case_key"])
+                if value["status"] not in {"retry_wait", "succeeded", "failed"}:
+                    raise ValueError
+                attempt = value["attempt"]
+                maximum = value["max_attempts"]
+                if (
+                    isinstance(attempt, bool) or not isinstance(attempt, int)
+                    or isinstance(maximum, bool) or not isinstance(maximum, int)
+                    or not 1 <= attempt <= maximum <= MAX_ATTEMPTS
+                ):
+                    raise ValueError
+                _timestamp(value["next_attempt_at"])
+                for field in ("error_code", "error_detail_hash", "artifact_sha256"):
+                    item = value[field]
+                    if item is not None and not isinstance(item, str):
+                        raise ValueError
+                if value["error_code"] is not None and ERROR_CODE.fullmatch(
+                    value["error_code"],
+                ) is None:
+                    raise ValueError
+                for field in ("error_detail_hash", "artifact_sha256"):
+                    if value[field] is not None and SHA256.fullmatch(value[field]) is None:
+                        raise ValueError
+                if value["status"] == "succeeded":
+                    if (
+                        value["error_code"] is not None
+                        or value["error_detail_hash"] is not None
+                        or value["artifact_sha256"] is None
+                    ):
+                        raise ValueError
+                elif (
+                    value["error_code"] is None
+                    or value["artifact_sha256"] is not None
+                ):
+                    raise ValueError
+            else:
+                raise ValueError
+        except NativeReferenceQueueBlocked:
+            raise
+        except Exception:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_invalid",
+            ) from None
+        return value
+
+    @classmethod
+    def _validate_http_request_row(
+        cls, request: sqlite3.Row, queued: sqlite3.Row | None, policy: Any,
+    ) -> None:
+        try:
+            if (
+                tuple(request.keys()) != HTTP_REQUEST_COLUMNS
+                or queued is None
+                or request["campaign_id"] != queued["campaign_id"]
+                or request["target_locale"] != queued["target_locale"]
+                or request["target_locale"] not in policy.required_locales
+                or request["operation"] not in HTTP_OPERATIONS
+                or request["status"] not in HTTP_REQUEST_STATUSES
+                or not isinstance(request["attempt"], int)
+                or isinstance(request["attempt"], bool)
+                or not 1 <= request["attempt"] <= queued["max_attempts"]
+            ):
+                raise ValueError
+            for field in ("request_id", "editor_id", "lease_token"):
+                _identifier(request[field])
+            if SHA256.fullmatch(request["request_sha256"]) is None:
+                raise ValueError
+            expires = _timestamp(request["lease_expires_at"])
+            created = _timestamp(request["created_at"])
+            updated = _timestamp(request["updated_at"])
+            if expires <= created or not created <= updated:
+                raise ValueError
+            result_json = request["result_json"]
+            result_sha256 = request["result_sha256"]
+            if request["status"] == "processing":
+                if result_json is not None or result_sha256 is not None:
+                    raise ValueError
+                if (
+                    queued["status"] != "leased"
+                    or queued["attempts"] != request["attempt"]
+                    or queued["lease_owner"] != request["editor_id"]
+                    or queued["lease_token"] != request["lease_token"]
+                    or queued["lease_expires_at"] != expires
+                ):
+                    raise ValueError
+            elif request["status"] == "completed":
+                if (
+                    not isinstance(result_json, str)
+                    or not isinstance(result_sha256, str)
+                    or SHA256.fullmatch(result_sha256) is None
+                    or hashlib.sha256(result_json.encode("utf-8")).hexdigest()
+                    != result_sha256
+                ):
+                    raise ValueError
+                result = json.loads(result_json)
+                if cls._canonical_json(result) != result_json:
+                    raise ValueError
+                cls._validate_http_result(request["operation"], result)
+                if request["operation"] == "submit" and (
+                    result["work_id"] != request["work_id"]
+                    or result["target_locale"] != request["target_locale"]
+                    or result["suite_case_key"] != queued["suite_case_key"]
+                    or result["attempt"] != request["attempt"]
+                    or result["max_attempts"] != queued["max_attempts"]
+                ):
+                    raise ValueError
+            elif result_json is not None or result_sha256 is not None:
+                raise ValueError
+        except NativeReferenceQueueBlocked:
+            raise
+        except Exception:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.state_invalid",
+            ) from None
 
     @staticmethod
     def _validate_row(row: sqlite3.Row, *, now: float | None = None) -> None:
@@ -451,6 +651,15 @@ class NativeReferenceWorkQueue:
                     "native_reference.queue.locale_not_allowed",
                 )
             if request_id is not None:
+                mutation = self.connection.execute("""
+                    SELECT request_id
+                    FROM benchmark_native_reference_http_requests
+                    WHERE request_id = ?
+                """, (request_id,)).fetchone()
+                if mutation is not None:
+                    raise NativeReferenceQueueBlocked(
+                        "native_reference.queue.http_request_conflict",
+                    )
                 replay = self.connection.execute("""
                     SELECT * FROM benchmark_native_reference_claim_requests
                     WHERE request_id = ?
@@ -515,6 +724,12 @@ class NativeReferenceWorkQueue:
             """, (campaign_id, now)).fetchall()
             for row in expired:
                 terminal = row["attempts"] >= row["max_attempts"]
+                self.connection.execute("""
+                    UPDATE benchmark_native_reference_http_requests
+                    SET status = 'abandoned', updated_at = ?
+                    WHERE work_id = ? AND attempt = ?
+                      AND status = 'processing'
+                """, (now, row["work_id"], row["attempts"]))
                 self.connection.execute("""
                     UPDATE benchmark_native_reference_queue
                     SET status = ?, next_attempt_at = ?, lease_owner = NULL,
@@ -612,12 +827,295 @@ class NativeReferenceWorkQueue:
         with _transaction(self.connection):
             self._assert_live_locked(claim, now)
 
+    @staticmethod
+    def _http_request_values(
+        claim: Any, operation: Any, request_id: Any, request_sha256: Any,
+    ) -> tuple[str, str, str, str]:
+        if not isinstance(claim, ClaimedNativeReference):
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.claim_invalid",
+            )
+        operation = _identifier(operation)
+        request_id = _identifier(request_id)
+        if operation not in HTTP_OPERATIONS:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_invalid",
+            )
+        if (
+            not isinstance(request_sha256, str)
+            or SHA256.fullmatch(request_sha256) is None
+        ):
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_invalid",
+            )
+        return operation, request_id, request_sha256, claim.target_locale
+
+    @classmethod
+    def _http_result_from_row(cls, row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            result = json.loads(row["result_json"])
+            cls._validate_http_result(row["operation"], result)
+            if cls._canonical_json(result) != row["result_json"]:
+                raise ValueError
+            return result
+        except NativeReferenceQueueBlocked:
+            raise
+        except Exception:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.state_invalid",
+            ) from None
+
+    @staticmethod
+    def _assert_http_request_binding(
+        row: sqlite3.Row,
+        *,
+        campaign_id: str,
+        editor_id: str,
+        target_locale: str,
+        operation: str,
+        request_id: str,
+        request_sha256: str,
+    ) -> None:
+        if (
+            tuple(row.keys()) != HTTP_REQUEST_COLUMNS
+            or row["request_id"] != request_id
+            or row["campaign_id"] != campaign_id
+            or row["editor_id"] != editor_id
+            or row["target_locale"] != target_locale
+            or row["operation"] != operation
+            or row["request_sha256"] != request_sha256
+        ):
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_conflict",
+            )
+
+    def replay_http_request(
+        self,
+        policy: Any,
+        campaign_id: Any,
+        editor_id: Any,
+        target_locale: Any,
+        operation: Any,
+        request_id: Any,
+        request_sha256: Any,
+        *,
+        now: Any,
+    ) -> dict[str, Any] | None:
+        campaign_id = _identifier(campaign_id)
+        editor_id = _identifier(editor_id)
+        target_locale = _identifier(target_locale)
+        operation = _identifier(operation)
+        request_id = _identifier(request_id)
+        now = _timestamp(now)
+        if (
+            operation not in HTTP_OPERATIONS
+            or not isinstance(request_sha256, str)
+            or SHA256.fullmatch(request_sha256) is None
+        ):
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_invalid",
+            )
+        try:
+            policy = _CAMPAIGN._BENCHMARK._validate_policy(policy)
+            _CAMPAIGN._assert_policy_current(policy, now)
+        except Exception:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.policy_invalid",
+            ) from None
+        with _transaction(self.connection):
+            self._verify_binding_locked(policy, campaign_id)
+            row = self.connection.execute("""
+                SELECT * FROM benchmark_native_reference_http_requests
+                WHERE request_id = ?
+            """, (request_id,)).fetchone()
+            if row is None:
+                return None
+            self._assert_http_request_binding(
+                row,
+                campaign_id=campaign_id,
+                editor_id=editor_id,
+                target_locale=target_locale,
+                operation=operation,
+                request_id=request_id,
+                request_sha256=request_sha256,
+            )
+            if row["status"] == "abandoned":
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.http_request_replay_stale",
+                )
+            if row["status"] != "completed":
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.http_request_in_progress",
+                )
+            return self._http_result_from_row(row)
+
+    def _begin_http_request_locked(
+        self,
+        claim: ClaimedNativeReference,
+        operation: str,
+        request_id: str,
+        request_sha256: str,
+        now: float,
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute("""
+            SELECT * FROM benchmark_native_reference_http_requests
+            WHERE request_id = ?
+        """, (request_id,)).fetchone()
+        if row is not None:
+            self._assert_http_request_binding(
+                row,
+                campaign_id=claim.campaign_id,
+                editor_id=claim.lease_owner,
+                target_locale=claim.target_locale,
+                operation=operation,
+                request_id=request_id,
+                request_sha256=request_sha256,
+            )
+            if row["status"] == "abandoned":
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.http_request_replay_stale",
+                )
+            if row["status"] != "completed":
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.http_request_in_progress",
+                )
+            return self._http_result_from_row(row)
+        claim_request = self.connection.execute("""
+            SELECT request_id FROM benchmark_native_reference_claim_requests
+            WHERE request_id = ?
+        """, (request_id,)).fetchone()
+        if claim_request is not None:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_conflict",
+            )
+        if operation == "submit":
+            prior = self.connection.execute("""
+                SELECT request_id
+                FROM benchmark_native_reference_http_requests
+                WHERE campaign_id = ? AND work_id = ? AND attempt = ?
+                  AND operation = 'submit'
+            """, (claim.campaign_id, claim.work_id, claim.attempt)).fetchone()
+            if prior is not None:
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.http_request_conflict",
+                )
+        self.connection.execute("""
+            INSERT INTO benchmark_native_reference_http_requests (
+                request_id, campaign_id, editor_id, target_locale, operation,
+                request_sha256, work_id, attempt, lease_token,
+                lease_expires_at, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?)
+        """, (
+            request_id, claim.campaign_id, claim.lease_owner,
+            claim.target_locale, operation, request_sha256, claim.work_id,
+            claim.attempt, claim.lease_token, claim.lease_expires_at, now, now,
+        ))
+        return None
+
+    def begin_http_submission_request(
+        self,
+        policy: Any,
+        claim: Any,
+        request_id: Any,
+        request_sha256: Any,
+        *,
+        now: Any,
+    ) -> dict[str, Any] | None:
+        operation, request_id, request_sha256, _ = self._http_request_values(
+            claim, "submit", request_id, request_sha256,
+        )
+        now = _timestamp(now)
+        try:
+            policy = _CAMPAIGN._BENCHMARK._validate_policy(policy)
+            _CAMPAIGN._assert_policy_current(policy, now)
+        except Exception:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.policy_invalid",
+            ) from None
+        with _transaction(self.connection):
+            self._verify_binding_locked(policy, claim.campaign_id)
+            self._assert_live_locked(claim, now)
+            return self._begin_http_request_locked(
+                claim, operation, request_id, request_sha256, now,
+            )
+
+    def _finish_http_request_locked(
+        self,
+        claim: ClaimedNativeReference,
+        operation: str,
+        request_id: str,
+        request_sha256: str,
+        result: dict[str, Any],
+        now: float,
+    ) -> None:
+        row = self.connection.execute("""
+            SELECT * FROM benchmark_native_reference_http_requests
+            WHERE request_id = ?
+        """, (request_id,)).fetchone()
+        if row is None:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_invalid",
+            )
+        self._assert_http_request_binding(
+            row,
+            campaign_id=claim.campaign_id,
+            editor_id=claim.lease_owner,
+            target_locale=claim.target_locale,
+            operation=operation,
+            request_id=request_id,
+            request_sha256=request_sha256,
+        )
+        if row["status"] != "processing":
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.http_request_conflict",
+            )
+        result = self._validate_http_result(operation, result)
+        encoded = self._canonical_json(result)
+        self.connection.execute("""
+            UPDATE benchmark_native_reference_http_requests
+            SET status = 'completed', result_json = ?, result_sha256 = ?,
+                updated_at = ?
+            WHERE request_id = ? AND status = 'processing'
+        """, (
+            encoded,
+            hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+            now,
+            request_id,
+        ))
+
     def renew(
-        self, claim: Any, *, now: Any, lease_seconds: Any,
+        self, claim: Any, *, now: Any, lease_seconds: Any, policy: Any = None,
+        request_id: Any = None, request_sha256: Any = None,
     ) -> ClaimedNativeReference:
         now = _timestamp(now)
         expires = now + _duration(lease_seconds)
+        http_values = None
+        if request_id is not None or request_sha256 is not None:
+            if policy is None:
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.http_request_invalid",
+                )
+            http_values = self._http_request_values(
+                claim, "renew", request_id, request_sha256,
+            )
+            try:
+                policy = _CAMPAIGN._BENCHMARK._validate_policy(policy)
+                _CAMPAIGN._assert_policy_current(policy, now)
+            except Exception:
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.policy_invalid",
+                ) from None
         with _transaction(self.connection):
+            if http_values is not None:
+                self._verify_binding_locked(policy, claim.campaign_id)
+                replay = self._begin_http_request_locked(
+                    claim, *http_values[:3], now,
+                )
+                if replay is not None:
+                    return ClaimedNativeReference(**{
+                        **asdict(claim),
+                        "lease_expires_at": replay["lease_expires_at"],
+                    })
             self._assert_live_locked(claim, now)
             self.connection.execute("""
                 UPDATE benchmark_native_reference_queue
@@ -632,12 +1130,20 @@ class NativeReferenceWorkQueue:
                 expires, claim.work_id, claim.attempt,
                 claim.lease_owner, claim.lease_token,
             ))
+            if http_values is not None:
+                self._finish_http_request_locked(
+                    claim,
+                    *http_values[:3],
+                    {"lease_expires_at": expires},
+                    now,
+                )
         return ClaimedNativeReference(**{
             **asdict(claim), "lease_expires_at": expires,
         })
 
     def complete(
         self, policy: Any, claim: Any, artifact_sha256: Any, *, now: Any,
+        request_id: Any = None, request_sha256: Any = None,
     ) -> NativeReferenceQueueOutcome:
         if not isinstance(claim, ClaimedNativeReference):
             raise NativeReferenceQueueBlocked(
@@ -650,6 +1156,11 @@ class NativeReferenceWorkQueue:
                 "native_reference.queue.artifact_invalid",
             )
         now = _timestamp(now)
+        http_values = None
+        if request_id is not None or request_sha256 is not None:
+            http_values = self._http_request_values(
+                claim, "submit", request_id, request_sha256,
+            )
         try:
             policy = _CAMPAIGN._BENCHMARK._validate_policy(policy)
             _CAMPAIGN._assert_policy_current(policy, now)
@@ -667,11 +1178,20 @@ class NativeReferenceWorkQueue:
                     last_error_code = NULL, last_error_detail_hash = NULL,
                     artifact_sha256 = ?, updated_at = ? WHERE work_id = ?
             """, (artifact_sha256, now, claim.work_id))
-        return self._outcome(claim.work_id)
+            outcome = self._outcome(claim.work_id)
+            if http_values is not None:
+                self._finish_http_request_locked(
+                    claim,
+                    *http_values[:3],
+                    self._outcome_payload(outcome),
+                    now,
+                )
+        return outcome
 
     def transition_failure(
         self, policy: Any, claim: Any, code: Any, *, retryable: bool,
         delay_seconds: Any = 0, detail: str | None = None, now: Any,
+        request_id: Any = None, request_sha256: Any = None,
     ) -> NativeReferenceQueueOutcome:
         if not isinstance(claim, ClaimedNativeReference):
             raise NativeReferenceQueueBlocked(
@@ -684,6 +1204,11 @@ class NativeReferenceWorkQueue:
             )
         delay = _duration(delay_seconds, allow_zero=True)
         now = _timestamp(now)
+        http_values = None
+        if request_id is not None or request_sha256 is not None:
+            http_values = self._http_request_values(
+                claim, "submit", request_id, request_sha256,
+            )
         if detail is not None and (
             not isinstance(detail, str) or "\x00" in detail
             or not unicodedata.is_normalized("NFC", detail)
@@ -716,7 +1241,28 @@ class NativeReferenceWorkQueue:
                 now if terminal else now + delay, code, detail_hash, now,
                 claim.work_id,
             ))
-        return self._outcome(claim.work_id)
+            outcome = self._outcome(claim.work_id)
+            if http_values is not None:
+                self._finish_http_request_locked(
+                    claim,
+                    *http_values[:3],
+                    self._outcome_payload(outcome),
+                    now,
+                )
+        return outcome
+
+    @staticmethod
+    def _outcome_payload(
+        outcome: NativeReferenceQueueOutcome,
+    ) -> dict[str, Any]:
+        return {field: getattr(outcome, field) for field in OUTCOME_FIELDS}
+
+    @staticmethod
+    def outcome_from_payload(payload: Any) -> NativeReferenceQueueOutcome:
+        payload = NativeReferenceWorkQueue._validate_http_result(
+            "submit", payload,
+        )
+        return NativeReferenceQueueOutcome(**payload)
 
     def _outcome(self, work_id: str) -> NativeReferenceQueueOutcome:
         row = self.connection.execute("""
@@ -752,6 +1298,11 @@ class NativeReferenceWorkQueue:
                     WHERE campaign_id = ? AND last_error_code IS NOT NULL
                     GROUP BY last_error_code ORDER BY last_error_code
                 """, (campaign_id,)).fetchall()
+                http_requests = self.connection.execute("""
+                    SELECT status, COUNT(*) AS count
+                    FROM benchmark_native_reference_http_requests
+                    WHERE campaign_id = ? GROUP BY status
+                """, (campaign_id,)).fetchall()
         except NativeReferenceQueueBlocked:
             raise
         except Exception:
@@ -760,6 +1311,8 @@ class NativeReferenceWorkQueue:
             ) from None
         counts = {name: 0 for name in STATUSES}
         counts.update({row["status"]: row["count"] for row in rows})
+        http_counts = {name: 0 for name in HTTP_REQUEST_STATUSES}
+        http_counts.update({row["status"]: row["count"] for row in http_requests})
         return {
             "schema": SCHEMA,
             "campaign_id": campaign_id,
@@ -768,6 +1321,7 @@ class NativeReferenceWorkQueue:
             "error_counts": {
                 row["last_error_code"]: row["count"] for row in errors
             },
+            "http_request_counts": http_counts,
             "complete": counts["succeeded"] == len(
                 _CAMPAIGN._expected_work(policy)
             ),

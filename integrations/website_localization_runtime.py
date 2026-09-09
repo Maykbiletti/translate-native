@@ -694,6 +694,22 @@ class WebsiteLocalizationRuntime:
                 code = "runtime.benchmark.reference_queue.invalid"
             raise LocalizationRuntimeBlocked(code) from None
 
+    def native_reference_http_request_replay(self, **options: Any):
+        """Return one exact completed private mutation for safe HTTP retry."""
+        if self.benchmark_runtime is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        try:
+            return self.benchmark_runtime.native_reference_http_request_replay(
+                **options,
+            )
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.reference_queue.invalid"
+            raise LocalizationRuntimeBlocked(code) from None
+
     def accept_native_reference_submission(
         self,
         lease: Any,
