@@ -97,12 +97,39 @@ def publication_request(authority=None):
     )
 
 
+def tombstone_request(authority=None):
+    authority = authority or Authority(b"publication-key")
+    payload = {
+        "schema": CMS.TOMBSTONE_DELIVERY_SCHEMA,
+        "delivery_id": "blun-cms-tombstone-" + "a" * 64,
+        "tombstone_id": "cms-tombstone-185",
+        "event_id": "cms-event-185",
+        "site_id": "public-site",
+        "website_version": "website-185",
+        "plan_id": "blun-l10n-plan-" + "b" * 64,
+        "source_id": "homepage.pricing",
+        "source_sequence": 185,
+        "publication_delivery_id": "blun-cms-delivery-" + "d" * 64,
+        "publication_payload_sha256": "e" * 64,
+        "locales": ["fi-FI", "mt-MT"],
+    }
+    payload_bytes = HTTP._canonical_json(
+        payload, code="request_invalid", maximum=HTTP.MAX_REQUEST_BYTES,
+    )
+    return SimpleNamespace(
+        delivery_id=payload["delivery_id"], payload=payload,
+        payload_sha256=hashlib.sha256(payload_bytes).hexdigest(),
+        signature=authority.sign(payload_bytes),
+    )
+
+
 def response_for(request, authority, **overrides):
+    tombstone = request.payload["schema"] == CMS.TOMBSTONE_DELIVERY_SCHEMA
     acknowledgement = {
-        "schema": CMS.ACK_SCHEMA,
+        "schema": CMS.TOMBSTONE_ACK_SCHEMA if tombstone else CMS.ACK_SCHEMA,
         "delivery_id": request.delivery_id,
         "payload_sha256": request.payload_sha256,
-        "status": "accepted",
+        "status": "deleted" if tombstone else "accepted",
     }
     acknowledgement.update(overrides)
     raw = HTTP._canonical_json(
@@ -112,7 +139,7 @@ def response_for(request, authority, **overrides):
     )
     signature = authority.sign(raw)
     envelope = {
-        "schema": HTTP.RESPONSE_SCHEMA,
+        "schema": HTTP.TOMBSTONE_RESPONSE_SCHEMA if tombstone else HTTP.RESPONSE_SCHEMA,
         "acknowledgement": acknowledgement,
         "signature": {
             "algorithm": signature.algorithm,
@@ -171,6 +198,18 @@ class HTTPPublisherAdapterTests(unittest.TestCase):
         self.assertEqual(envelope["publication"], self.request.payload)
         self.assertEqual(envelope["payload_sha256"], self.request.payload_sha256)
         self.assertEqual(envelope["signature"]["key_id"], "cms-http-key-1")
+
+    def test_posts_signed_tombstone_without_localized_content(self):
+        request = tombstone_request()
+        self.transport.result = response_for(request, self.ack_authority)
+
+        acknowledgement = self.adapter.publish(request)
+
+        self.assertEqual(acknowledgement["status"], "deleted")
+        envelope = json.loads(self.transport.calls[0][2].decode("utf-8"))
+        self.assertEqual(envelope["schema"], HTTP.TOMBSTONE_REQUEST_SCHEMA)
+        self.assertEqual(envelope["tombstone"], request.payload)
+        self.assertNotIn("target_text", json.dumps(envelope))
 
     def test_request_tampering_is_blocked_before_network(self):
         changed = SimpleNamespace(**vars(self.request))

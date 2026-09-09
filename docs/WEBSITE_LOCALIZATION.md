@@ -1211,8 +1211,14 @@ reverify the cancellation and expose only the stable `cancelled` state.
 Cancellation never rewrites an acknowledged publication. It also refuses a
 currently leased publication because the external CMS may already have
 accepted the request. The caller must observe the lease outcome before retrying.
-Deleting content already published requires an independently signed CMS
-tombstone operation; cancellation is deliberately limited to unpublished work.
+Deleting content already published uses an independently signed CMS tombstone;
+cancellation remains deliberately limited to unpublished work. The tombstone
+is accepted only for an exactly acknowledged publication and is bound to its
+delivery ID, payload hash, plan, source generation, website version, and full
+sorted locale set. A separate durable, signed outbox retries delivery after a
+crash and accepts only an exact signed `deleted` acknowledgement. It contains
+no source or target prose and preserves the original publication as immutable
+audit history.
 
 Cancellation remains available during the durable intake crash gap, after the
 signed event and source sequence are stored but before queue insertion has
@@ -1334,6 +1340,13 @@ responses, network failures and malformed response transport are retryable
 under the existing bounded outbox policy; other non-200 statuses, wrong
 bindings and invalid signatures are terminal. No response body, credential or
 exception detail enters the durable status record.
+
+The same adapter transports a tombstone without changing its security model.
+It uses `blun.cms-localization-tombstone-http.v1`, nests the exact signed
+object under `tombstone`, and accepts only a signed
+`blun.cms-localization-tombstone-http-ack.v1` envelope whose acknowledgement
+is exactly bound to the delivery ID and payload hash and has status `deleted`.
+The locale list is sorted and unique, while source and target prose are absent.
 
 Wrong or malformed acknowledgements retry with bounded exponential backoff;
 explicit permanent rejections become terminal. Crashed leases are recovered,
@@ -1586,8 +1599,9 @@ opens nor closes them. It also never reads a configuration file, environment
 variable, credential, signing key, or network endpoint.
 
 The same composition root binds its approval and publication authorities into
-the tenant-facing `runtime.cms_api`. It accepts both signed change events and
-exact signed cancellations of unpublished work. Before submitting content, a CMS can use a
+the tenant-facing `runtime.cms_api`. It accepts signed change events, exact
+signed cancellations of unpublished work, and exact signed tombstones for
+acknowledged publications. Before submitting content, a CMS can use a
 separately signed read to discover the exact current 24-locale registry,
 content types, quality phases, schema versions, and locale-profile hashes as
 one canonical capability object. In addition to durable change intake and
@@ -1726,7 +1740,8 @@ For every check, the monitor verifies every configured SQLite schema and
 database, queued payload and result hashes, evidence-to-event/plan/job/result
 bindings, deterministic evidence request IDs, stored approval bytes and
 signatures, authenticated CMS events, publication payload hashes and
-signatures, live lease times, and approval expiry before pending publication.
+signatures, tombstone request and delivery bindings, live lease times, and
+approval expiry before pending publication.
 Missing or malformed provider probes, signature failures, tampering, and
 unreadable state make the report `blocked`. Recoverable operational state such
 as an expired evidence or worker lease, failed evidence review, failed locale,
@@ -1735,7 +1750,8 @@ evidence lease and ordinary pending work remain healthy.
 
 Each website version reports one lifecycle state: `cancelled`, `processing`,
 `localization_failed`, `awaiting_approval`, `ready`, `publishing`,
-`publication_failed`, or `published`. The report includes only site, version,
+`publication_failed`, `published`, `deleting`, `deletion_failed`, or `deleted`.
+The report includes only site, version,
 plan and event identifiers, counts, locale names, and stable failure codes.
 Source and target text, exception messages, provider responses, receipts, and
 transport details are never returned. Stable queue and outbox errors remain

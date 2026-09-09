@@ -829,6 +829,67 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         self.assertEqual(published.website_versions[0].status, "published")
         self.assertEqual(dict(self.component(published, "cms").counts)["succeeded"], 1)
 
+    def test_tombstone_state_is_verified_visible_and_needs_no_model_probe(self):
+        plan = self.ingest()
+        self.complete(plan)
+        self.bridge.prepare_delivery(
+            event()["event_id"], self.event_authority, self.approval_authority,
+            self.publication_authority, now=250,
+        )
+        self.bridge.run_delivery(
+            Publisher(), self.publication_authority,
+            worker_id="cms-worker", clock=lambda: 260,
+        )
+        value = {
+            "schema": CMS.TOMBSTONE_SCHEMA,
+            "tombstone_id": "tombstone-184",
+            "event_id": event()["event_id"],
+            "site_id": event()["site_id"],
+            "website_version": event()["website_version"],
+            "source_id": event()["localization"]["source_id"],
+            "source_sequence": event()["source_sequence"],
+        }
+        self.bridge.request_tombstone(
+            value,
+            self.event_authority.sign(CMS._canonical_json(value).encode("utf-8")),
+            self.event_authority, self.publication_authority, now=261,
+        )
+
+        pending = self.report(now=262)
+        self.assertEqual(pending.website_versions[0].status, "deleting")
+        self.assertEqual(self.probe.calls, [])
+        self.assertEqual(
+            dict(self.component(pending, "cms").counts)["tombstone_pending"], 1,
+        )
+
+        class TombstonePublisher:
+            def publish(_, request):
+                return {
+                    "schema": CMS.TOMBSTONE_ACK_SCHEMA,
+                    "delivery_id": request.delivery_id,
+                    "payload_sha256": request.payload_sha256,
+                    "status": "deleted",
+                }
+
+        self.bridge.run_tombstone(
+            TombstonePublisher(), self.event_authority, self.publication_authority,
+            worker_id="delete-worker", clock=lambda: 263,
+        )
+        deleted = self.report(now=264)
+        self.assertEqual(deleted.website_versions[0].status, "deleted")
+        self.assertEqual(deleted.status, "healthy")
+
+        self.cms_connection.execute(
+            "UPDATE cms_tombstone_deliveries SET payload_sha256 = ?",
+            ("0" * 64,),
+        )
+        self.cms_connection.commit()
+        blocked = self.report(now=265)
+        self.assertEqual(blocked.status, "blocked")
+        self.assertIn(
+            "cms.tombstone.invalid", self.component(blocked, "cms").reasons,
+        )
+
     def test_retrying_publication_exposes_only_the_stable_ack_error(self):
         plan = self.ingest()
         self.complete(plan)

@@ -145,11 +145,12 @@ class Publisher:
             raise CMS.CMSPublishFailed(
                 "network", retryable=True, detail="private transport prose",
             )
+        tombstone = request.payload["schema"] == CMS.TOMBSTONE_DELIVERY_SCHEMA
         return {
-            "schema": CMS.ACK_SCHEMA,
+            "schema": CMS.TOMBSTONE_ACK_SCHEMA if tombstone else CMS.ACK_SCHEMA,
             "delivery_id": request.delivery_id,
             "payload_sha256": request.payload_sha256,
-            "status": "accepted",
+            "status": "deleted" if tombstone else "accepted",
         }
 
 
@@ -241,6 +242,24 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
             now=self.clock(),
         )
 
+    def request_tombstone(self):
+        value = {
+            "schema": CMS.TOMBSTONE_SCHEMA,
+            "tombstone_id": "tombstone-event-1",
+            "event_id": "event-1",
+            "site_id": "public-site",
+            "website_version": "site-version-1",
+            "source_id": "homepage.hero",
+            "source_sequence": 1,
+        }
+        return self.bridge.request_tombstone(
+            value,
+            self.event_authority.sign(CMS._canonical_json(value).encode("utf-8")),
+            self.event_authority,
+            self.publication_authority,
+            now=self.clock(),
+        )
+
     def assets(self, payload):
         return WORKER.LocalizationAssets(
             glossary_version=payload["glossary_version"],
@@ -295,6 +314,22 @@ class WebsiteLocalizationServiceTests(unittest.TestCase):
         self.assertEqual(len(self.publisher.requests), 1)
         idle = self.tick()
         self.assertEqual((idle.phase, idle.status), ("idle", "idle"))
+
+    def test_confirmed_publication_is_deleted_before_any_new_model_work(self):
+        self.tick()
+        self.tick()
+        self.tick()
+        calls_before = list(self.provider.calls)
+        accepted = self.request_tombstone()
+
+        deleted = self.tick()
+
+        self.assertEqual((deleted.phase, deleted.status), ("tombstone", "succeeded"))
+        self.assertEqual(deleted.delivery_id, accepted.delivery_id)
+        self.assertEqual(self.provider.calls, calls_before)
+        self.assertEqual(self.publisher.requests[-1].payload["schema"], (
+            CMS.TOMBSTONE_DELIVERY_SCHEMA
+        ))
 
     def test_cancelled_event_never_reaches_model_or_release(self):
         self.cancel()

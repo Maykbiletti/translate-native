@@ -23,7 +23,9 @@ from typing import Any, Mapping, Protocol
 SCHEMA = "blun.website-localization-health.v1"
 PROVIDER_HEALTH_SCHEMA = "blun.localization-provider-health.v1"
 SUPERVISOR_SCHEMA = "blun.website-localization-supervisor.v1"
-SUPERVISOR_PHASES = {"delivery", "release", "translation", "idle", "supervisor"}
+SUPERVISOR_PHASES = {
+    "tombstone", "delivery", "release", "translation", "idle", "supervisor",
+}
 SUPERVISOR_STATUSES = {
     "idle", "succeeded", "retry_wait", "failed", "blocked", "approved",
     "delivery_ready", "delivered",
@@ -671,6 +673,52 @@ class LocalizationHealthMonitor:
             reasons.add("cms.delivery.failed")
         return counts, reasons
 
+    def _check_tombstones(
+        self,
+        event_verifier: Any,
+        publication_authority: Any,
+        now: float,
+    ) -> tuple[dict[str, int], set[str]]:
+        counts = _counts(
+            self.bridge.connection,
+            "cms_tombstone_deliveries",
+            DELIVERY_STATUSES,
+        )
+        reasons: set[str] = set()
+        rows = self.bridge.connection.execute(
+            "SELECT * FROM cms_tombstone_deliveries"
+        ).fetchall()
+        for row in rows:
+            try:
+                request = self.bridge._tombstone_request_from_row(
+                    row, event_verifier, publication_authority,
+                )
+                status = self.bridge.tombstone_status(request.delivery_id)
+                if (
+                    status.event_id != row["event_id"]
+                    or status.plan_id != row["plan_id"]
+                    or status.payload_sha256 != request.payload_sha256
+                    or not 0 <= status.attempts <= status.max_attempts <= _CMS.MAX_ATTEMPTS
+                ):
+                    raise ValueError
+                if status.status == "leased" and (
+                    status.lease_expires_at is None
+                    or float(status.lease_expires_at) <= now
+                ):
+                    reasons.add("cms.tombstone.lease_expired")
+                if status.status in {"retry_wait", "failed"}:
+                    if (
+                        not isinstance(status.last_error_code, str)
+                        or _CMS.ERROR_CODE.fullmatch(status.last_error_code) is None
+                    ):
+                        raise ValueError
+                    reasons.add("cms.tombstone.error." + status.last_error_code)
+            except Exception:
+                reasons.add("cms.tombstone.invalid")
+        if counts["failed"]:
+            reasons.add("cms.tombstone.failed")
+        return counts, reasons
+
     def _check_supersessions(self, event_verifier: Any) -> set[str]:
         reasons: set[str] = set()
         topic_order: dict[tuple[str, str], list[tuple[int, float]]] = {}
@@ -825,6 +873,10 @@ class LocalizationHealthMonitor:
                 "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
                 (row["event_id"],),
             ).fetchone() is not None
+            tombstone = self.bridge.connection.execute(
+                "SELECT status FROM cms_tombstone_deliveries WHERE event_id = ?",
+                (row["event_id"],),
+            ).fetchone()
             if row["status"] != "enqueued" and not cancelled:
                 reasons.add("cms.event.awaiting_queue_resume")
                 continue
@@ -840,7 +892,7 @@ class LocalizationHealthMonitor:
                     allow_accepted=cancelled,
                 )
                 localization = event["localization"]
-                if not superseded and not cancelled:
+                if not superseded and not cancelled and tombstone is None:
                     providers.add((
                         localization["provider_id"],
                         localization["model_id"],
@@ -864,6 +916,12 @@ class LocalizationHealthMonitor:
             delivery_status = delivery["status"] if delivery is not None else None
             if cancelled:
                 status = "cancelled"
+            elif tombstone is not None and tombstone["status"] == "succeeded":
+                status = "deleted"
+            elif tombstone is not None and tombstone["status"] == "failed":
+                status = "deletion_failed"
+            elif tombstone is not None:
+                status = "deleting"
             elif superseded:
                 status = "superseded"
             elif delivery_status == "succeeded":
@@ -1281,6 +1339,7 @@ class LocalizationHealthMonitor:
         queue_counts: dict[str, int] = {status: 0 for status in QUEUE_STATUSES}
         approval_counts = {"total": 0, "current": 0, "expired": 0}
         delivery_counts: dict[str, int] = {status: 0 for status in DELIVERY_STATUSES}
+        tombstone_counts: dict[str, int] = {status: 0 for status in DELIVERY_STATUSES}
         evidence_counts: dict[str, int] = {status: 0 for status in EVIDENCE_STATUSES}
         workflow_reasons: set[str] = set()
         versions: tuple[WebsiteVersionHealth, ...] = ()
@@ -1298,6 +1357,9 @@ class LocalizationHealthMonitor:
                 delivery_counts, delivery_reasons = self._check_deliveries(
                     publication_authority, now,
                 )
+                tombstone_counts, tombstone_reasons = self._check_tombstones(
+                    event_verifier, publication_authority, now,
+                )
                 supersession_reasons = self._check_supersessions(event_verifier)
                 versions, event_reasons, provider_bindings = self._versions(
                     event_verifier, approval_authority, now,
@@ -1306,6 +1368,7 @@ class LocalizationHealthMonitor:
                 workflow_reasons.update(evidence_reasons)
                 workflow_reasons.update(approval_reasons)
                 workflow_reasons.update(delivery_reasons)
+                workflow_reasons.update(tombstone_reasons)
                 workflow_reasons.update(supersession_reasons)
                 workflow_reasons.update(event_reasons)
             except Exception:
@@ -1321,6 +1384,7 @@ class LocalizationHealthMonitor:
             "evidence.state_invalid",
             "release.approval_invalid",
             "cms.delivery.invalid",
+            "cms.tombstone.invalid",
             "cms.event.invalid",
             "cms.supersession.invalid",
         }
@@ -1369,7 +1433,10 @@ class LocalizationHealthMonitor:
                     "degraded" if cms_reasons else "healthy"
                 ),
                 cms_reasons,
-                delivery_counts,
+                {
+                    **delivery_counts,
+                    **{f"tombstone_{key}": value for key, value in tombstone_counts.items()},
+                },
             ),
             _component(
                 "providers",

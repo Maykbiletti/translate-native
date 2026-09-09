@@ -101,6 +101,21 @@ def cancellation(value=None, **overrides):
     return request
 
 
+def tombstone(value=None, **overrides):
+    value = value or event()
+    request = {
+        "schema": CMS.TOMBSTONE_SCHEMA,
+        "tombstone_id": "tombstone-1",
+        "event_id": value["event_id"],
+        "site_id": value["site_id"],
+        "website_version": value["website_version"],
+        "source_id": value["localization"]["source_id"],
+        "source_sequence": value["source_sequence"],
+    }
+    request.update(overrides)
+    return request
+
+
 class WebsiteLocalizationAPITests(unittest.TestCase):
     def setUp(self):
         self.queue_connection = sqlite3.connect(":memory:")
@@ -233,6 +248,15 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             PATH_INFO=API.CANCELLATION_PATH,
         )
 
+    def tombstone_request(self, value=None, *, authority=None, key_id="event-key-1"):
+        value = value or tombstone()
+        authority = authority or self.authority
+        return self.request(
+            value,
+            signature=authority.sign(value, key_id=key_id),
+            PATH_INFO=API.TOMBSTONE_PATH,
+        )
+
     def test_signed_v2_change_enqueues_each_locale_and_replays_idempotently(self):
         first = self.request()
         second = self.request()
@@ -261,6 +285,29 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(lifecycle[2]["status"], "cancelled")
         for payload in (first[2], replay[2], progress[2], lifecycle[2]):
             self.assertNotIn("source_text", json.dumps(payload))
+
+    def test_tombstone_endpoint_is_signed_content_free_and_requires_publication(self):
+        self.request()
+        rejected = self.tombstone_request()
+        self.assertEqual((rejected[0], rejected[2]["error"]), (
+            "409 Conflict", "cms.tombstone.not_published",
+        ))
+
+        calls = []
+
+        def accept(value, signature, verifier, authority, **options):
+            calls.append((value, signature, verifier, authority, options))
+            return CMS.TombstoneAccepted(
+                value["tombstone_id"], value["event_id"],
+                "blun-cms-tombstone-test", "pending", True,
+            )
+
+        self.bridge.request_tombstone = accept
+        accepted = self.tombstone_request()
+        self.assertEqual(accepted[0], "202 Accepted")
+        self.assertEqual(accepted[2]["delivery_id"], "blun-cms-tombstone-test")
+        self.assertNotIn("source_text", json.dumps(accepted[2]))
+        self.assertEqual(len(calls), 1)
 
     def test_public_cancellation_recovers_the_prequeue_crash_gap(self):
         enqueue_plan = self.queue.enqueue_plan
@@ -334,6 +381,11 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(capabilities["schema"], CMS.CAPABILITIES_SCHEMA)
         self.assertEqual(
             capabilities["cancellation_schema"], CMS.CANCELLATION_SCHEMA,
+        )
+        self.assertEqual(capabilities["tombstone_schema"], CMS.TOMBSTONE_SCHEMA)
+        self.assertEqual(
+            capabilities["tombstone_delivery_schema"],
+            CMS.TOMBSTONE_DELIVERY_SCHEMA,
         )
         self.assertEqual(len(capabilities["locales"]), 24)
         self.assertEqual(

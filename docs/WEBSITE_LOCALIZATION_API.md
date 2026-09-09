@@ -1,8 +1,9 @@
 # CMS localization webhook API v2
 
 `WebsiteLocalizationAPI` is the provider-neutral WSGI ingress exposed by the
-composed website-localization runtime. It accepts a signed current CMS change
-or cancellation, durably enqueues one job per required locale, and returns
+composed website-localization runtime. It accepts a signed current CMS change,
+cancellation, or published-content tombstone, durably enqueues one job per
+required locale, and returns
 content-free capabilities, queue progress, or end-to-end lifecycle status. It
 never calls a model, approves a translation, prepares a publication, or returns
 source or target prose.
@@ -110,8 +111,39 @@ leased delivery also returns `409 Conflict`: after an external request starts,
 the service cannot truthfully retract bytes that the CMS may already have
 accepted. The caller must wait for the lease outcome; an accepted publication
 remains immutable, while a failed or retryable delivery can then be cancelled.
-Removing content that was already published requires a separately signed CMS
-deletion/tombstone contract and is outside this cancellation operation.
+Removing content that was already published uses the separately signed
+tombstone operation below.
+
+## Delete an acknowledged publication
+
+```http
+POST /v2/localization/tombstones HTTP/1.1
+Content-Type: application/json; charset=utf-8
+Content-Length: <exact UTF-8 byte count>
+X-Localization-Signature-Algorithm: <configured algorithm>
+X-Localization-Key-Id: <same site credential that created the event>
+X-Localization-Signature: <signature>
+```
+
+```json
+{"event_id":"cms-event-184","schema":"blun.cms-content-tombstone.v1","site_id":"public-site","source_id":"homepage.hero","source_sequence":184,"tombstone_id":"cms-tombstone-184","website_version":"website-2026-08-29.1"}
+```
+
+The service accepts this request only after the exact publication has a valid,
+signed `succeeded` acknowledgement. It binds the immutable tombstone to the
+original tenant key, event, site, source generation, website version,
+publication delivery ID, publication-payload hash, plan, and complete sorted
+locale set. It never copies target text into the tombstone payload.
+
+The first request returns `202 Accepted`; an exact replay returns `200 OK` and
+the same deterministic delivery ID. Unknown, unpublished, cancelled,
+differently bound, or colliding requests fail closed. A durable lease-based
+outbox sends `blun.cms-localization-tombstone.v1`; the CMS must return the exact
+signed `blun.cms-localization-tombstone-ack.v1` acknowledgement with status
+`deleted`. Network and retryable acknowledgement failures use the bounded
+outbox retry policy. Lifecycle and health report `deleting`,
+`deletion_failed`, or `deleted`; accepting or retrying a tombstone does not call
+a model or remove the immutable publication audit record.
 
 ## Discover the active localization contract
 

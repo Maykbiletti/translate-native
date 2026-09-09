@@ -144,8 +144,9 @@ def run_service_tick(
 ) -> ServiceTickOutcome:
     """Advance the durable pipeline by at most one externally active step.
 
-    Priority is due CMS delivery, one release/evidence transition, then one
-    locale translation. Backoff or active leases in one event do not prevent
+    Priority is due CMS tombstone, due publication delivery, one
+    release/evidence transition, then one locale translation. Backoff or an
+    active lease in one event does not prevent
     another event from becoming releasable in the same read-only scan.
     """
     if not isinstance(bridge, _CMS.WebsiteLocalizationCMSBridge):
@@ -156,6 +157,39 @@ def run_service_tick(
         raise TypeError("clock must be callable")
     if operation_guard is not None and not callable(operation_guard):
         raise TypeError("operation_guard must be callable")
+
+    try:
+        tombstone = bridge.run_tombstone(
+            publisher,
+            event_verifier,
+            publication_authority,
+            worker_id=delivery_worker_id,
+            clock=clock,
+            lease_seconds=delivery_lease_seconds,
+            operation_guard=operation_guard,
+        )
+    except Exception as error:
+        return _runtime_error("tombstone", error)
+    if tombstone.status != "idle":
+        event_id = plan_id = None
+        if tombstone.delivery_id is not None:
+            try:
+                status = bridge.tombstone_status(tombstone.delivery_id)
+                event_id = _identifier(status.event_id)
+                plan_id = _identifier(status.plan_id)
+            except Exception as error:
+                return _runtime_error(
+                    "tombstone", error, delivery_id=tombstone.delivery_id,
+                )
+        return _outcome(
+            "tombstone",
+            tombstone.status,
+            event_id=event_id,
+            plan_id=plan_id,
+            delivery_id=tombstone.delivery_id,
+            attempt=tombstone.attempt,
+            error_code=tombstone.error_code,
+        )
 
     try:
         delivery = bridge.run_delivery(

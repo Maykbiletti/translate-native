@@ -23,11 +23,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CHANGE_SCHEMA = "blun.cms-content-change.v2"
 CANCELLATION_SCHEMA = "blun.cms-content-cancellation.v1"
+TOMBSTONE_SCHEMA = "blun.cms-content-tombstone.v1"
 PUBLICATION_SCHEMA = "blun.cms-localization-publication.v2"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
+TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
+TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
 CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v1"
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_ATTEMPTS = 20
@@ -56,6 +59,15 @@ _SUPERSESSION_COLUMNS = (
 _CANCELLATION_COLUMNS = (
     "cancellation_id", "event_id", "cancellation_sha256", "cancellation_json",
     "signature_algorithm", "key_id", "signature", "created_at",
+)
+_TOMBSTONE_COLUMNS = (
+    "tombstone_id", "event_id", "tombstone_sha256", "tombstone_json",
+    "request_signature_algorithm", "request_key_id", "request_signature",
+    "delivery_id", "plan_id", "payload_json", "payload_sha256",
+    "signature_algorithm", "key_id", "signature", "status", "attempts",
+    "max_attempts", "next_attempt_at", "lease_owner", "lease_token",
+    "lease_expires_at", "last_error_code", "last_error_detail_hash",
+    "created_at", "updated_at",
 )
 _LOCALE_PROFILE_FIELDS = (
     "locale", "eu_code", "language", "native_name", "script",
@@ -174,7 +186,24 @@ class CancelledChange:
 
 
 @dataclass(frozen=True)
+class TombstoneAccepted:
+    tombstone_id: str
+    event_id: str
+    delivery_id: str
+    status: str
+    newly_requested: bool
+
+
+@dataclass(frozen=True)
 class CMSPublicationRequest:
+    delivery_id: str
+    payload: dict[str, Any]
+    payload_sha256: str
+    signature: CMSMessageSignature
+
+
+@dataclass(frozen=True)
+class CMSTombstoneRequest:
     delivery_id: str
     payload: dict[str, Any]
     payload_sha256: str
@@ -184,6 +213,16 @@ class CMSPublicationRequest:
 @dataclass(frozen=True)
 class ClaimedDelivery:
     request: CMSPublicationRequest
+    attempt: int
+    max_attempts: int
+    lease_owner: str
+    lease_token: str
+    lease_expires_at: float
+
+
+@dataclass(frozen=True)
+class ClaimedTombstone:
+    request: CMSTombstoneRequest
     attempt: int
     max_attempts: int
     lease_owner: str
@@ -255,6 +294,7 @@ class ChangeLifecycle:
     blocked_locales: tuple[tuple[str, str], ...]
     queue_counts: dict[str, int]
     delivery: dict[str, Any] | None
+    tombstone: dict[str, Any] | None
 
 
 def _canonical_json(value: Any) -> str:
@@ -384,7 +424,7 @@ class WebsiteLocalizationCMSBridge:
         self.queue = queue
         self.release_store = release_store
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, 1, 2, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, SCHEMA_VERSION}:
             raise CMSBridgeBlocked("cms.schema.unsupported")
         if version == 0:
             self._create_schema()
@@ -392,6 +432,8 @@ class WebsiteLocalizationCMSBridge:
             self._migrate_v1()
         elif version == 2:
             self._migrate_v2()
+        elif version == 3:
+            self._migrate_v3()
         self._verify_schema()
 
     def localization_capabilities(self) -> dict[str, Any]:
@@ -478,7 +520,9 @@ class WebsiteLocalizationCMSBridge:
                 "schema": CAPABILITIES_SCHEMA,
                 "change_schema": CHANGE_SCHEMA,
                 "cancellation_schema": CANCELLATION_SCHEMA,
+                "tombstone_schema": TOMBSTONE_SCHEMA,
                 "publication_schema": PUBLICATION_SCHEMA,
+                "tombstone_delivery_schema": TOMBSTONE_DELIVERY_SCHEMA,
                 "plan_schema": _token(
                     _PLANNER.SCHEMA, "cms.capabilities.registry_invalid",
                 ),
@@ -545,6 +589,46 @@ class WebsiteLocalizationCMSBridge:
             )
         """)
 
+    def _create_tombstone_schema(self) -> None:
+        self.connection.execute(f"""
+            CREATE TABLE IF NOT EXISTS cms_tombstone_deliveries (
+                tombstone_id TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL UNIQUE,
+                tombstone_sha256 TEXT NOT NULL,
+                tombstone_json TEXT NOT NULL,
+                request_signature_algorithm TEXT NOT NULL,
+                request_key_id TEXT NOT NULL,
+                request_signature TEXT NOT NULL,
+                delivery_id TEXT NOT NULL UNIQUE,
+                plan_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                signature_algorithm TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'leased', 'retry_wait', 'succeeded', 'failed')
+                ),
+                attempts INTEGER NOT NULL CHECK (attempts >= 0),
+                max_attempts INTEGER NOT NULL CHECK (
+                    max_attempts BETWEEN 1 AND {MAX_ATTEMPTS}
+                ),
+                next_attempt_at REAL NOT NULL,
+                lease_owner TEXT,
+                lease_token TEXT,
+                lease_expires_at REAL,
+                last_error_code TEXT,
+                last_error_detail_hash TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (event_id) REFERENCES cms_change_events (event_id)
+            )
+        """)
+        self.connection.execute("""
+            CREATE INDEX IF NOT EXISTS cms_tombstone_ready
+            ON cms_tombstone_deliveries (status, next_attempt_at, created_at, delivery_id)
+        """)
+
     def _create_schema(self) -> None:
         with _transaction(self.connection):
             self.connection.execute("""
@@ -594,6 +678,7 @@ class WebsiteLocalizationCMSBridge:
                 ON cms_publication_deliveries (status, next_attempt_at, created_at, delivery_id)
             """)
             self._create_revision_schema()
+            self._create_tombstone_schema()
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate_v1(self) -> None:
@@ -682,6 +767,7 @@ class WebsiteLocalizationCMSBridge:
                     WHERE event_id IN (SELECT event_id FROM cms_event_supersessions)
                       AND status <> 'succeeded'
                 """)
+                self._create_tombstone_schema()
                 self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         except CMSBridgeBlocked:
             raise
@@ -717,6 +803,17 @@ class WebsiteLocalizationCMSBridge:
                 ):
                     raise CMSBridgeBlocked("cms.schema.altered")
                 self._create_cancellation_schema()
+                self._create_tombstone_schema()
+                self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        except CMSBridgeBlocked:
+            raise
+        except Exception:
+            raise CMSBridgeBlocked("cms.migration.failed") from None
+
+    def _migrate_v3(self) -> None:
+        try:
+            with _transaction(self.connection):
+                self._create_tombstone_schema()
                 self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         except CMSBridgeBlocked:
             raise
@@ -742,6 +839,10 @@ class WebsiteLocalizationCMSBridge:
             row["name"]
             for row in self.connection.execute("PRAGMA table_info(cms_event_cancellations)")
         )
+        tombstone_columns = tuple(
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(cms_tombstone_deliveries)")
+        )
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
         if (
             version != SCHEMA_VERSION
@@ -750,6 +851,7 @@ class WebsiteLocalizationCMSBridge:
             or topic_columns != _EVENT_TOPIC_COLUMNS
             or supersession_columns != _SUPERSESSION_COLUMNS
             or cancellation_columns != _CANCELLATION_COLUMNS
+            or tombstone_columns != _TOMBSTONE_COLUMNS
         ):
             raise CMSBridgeBlocked("cms.schema.altered")
 
@@ -807,6 +909,27 @@ class WebsiteLocalizationCMSBridge:
             "cms.cancellation.source_sequence_invalid",
         )
         return cancellation
+
+    def _validated_tombstone(self, tombstone: Any) -> dict[str, Any]:
+        expected = {
+            "schema", "tombstone_id", "event_id", "site_id",
+            "website_version", "source_id", "source_sequence",
+        }
+        if (
+            not isinstance(tombstone, dict)
+            or set(tombstone) != expected
+            or tombstone.get("schema") != TOMBSTONE_SCHEMA
+        ):
+            raise CMSBridgeBlocked("cms.tombstone.invalid")
+        for field in (
+            "tombstone_id", "event_id", "site_id", "website_version", "source_id",
+        ):
+            _token(tombstone.get(field), f"cms.tombstone.{field}_invalid")
+        _positive_integer(
+            tombstone.get("source_sequence"),
+            "cms.tombstone.source_sequence_invalid",
+        )
+        return tombstone
 
     def _verify_stored_cancellation(
         self,
@@ -940,6 +1063,181 @@ class WebsiteLocalizationCMSBridge:
         return CancelledChange(
             cancellation["cancellation_id"], event["event_id"], "cancelled",
             newly_cancelled,
+        )
+
+    def request_tombstone(
+        self,
+        tombstone: Any,
+        signature: CMSMessageSignature,
+        event_verifier: CMSMessageAuthority,
+        publication_authority: CMSMessageAuthority,
+        *,
+        now: float | int,
+        max_attempts: int = 5,
+    ) -> TombstoneAccepted:
+        """Accept and sign deletion only for an exactly confirmed publication."""
+        tombstone = self._validated_tombstone(tombstone)
+        signature = _signature(signature)
+        now = _timestamp(now, "cms.time.invalid")
+        if (
+            isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or not 1 <= max_attempts <= MAX_ATTEMPTS
+        ):
+            raise CMSBridgeBlocked("cms.max_attempts.invalid")
+        tombstone_json = _canonical_json(tombstone)
+        tombstone_hash = _hash(tombstone_json)
+        _verify(
+            event_verifier,
+            tombstone_json.encode("utf-8"),
+            signature,
+            "cms.tombstone.signature_rejected",
+        )
+        event, plan = self._load_event(
+            tombstone["event_id"], event_verifier, allow_superseded=True,
+        )
+        topic = self.connection.execute(
+            "SELECT generation FROM cms_event_topics WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()
+        event_row = self.connection.execute(
+            "SELECT key_id FROM cms_change_events WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()
+        if topic is None or event_row is None:
+            raise CMSBridgeBlocked("cms.event.topic_invalid")
+        if signature.key_id != event_row["key_id"]:
+            raise CMSBridgeBlocked("cms.tombstone.scope_rejected")
+        expected = {
+            "event_id": event["event_id"],
+            "site_id": event["site_id"],
+            "website_version": event["website_version"],
+            "source_id": event["localization"]["source_id"],
+            "source_sequence": int(topic["generation"]),
+        }
+        if any(tombstone[field] != value for field, value in expected.items()):
+            raise CMSBridgeBlocked("cms.tombstone.binding_invalid")
+        if self.connection.execute(
+            "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone() is not None:
+            raise CMSBridgeBlocked("cms.tombstone.not_published")
+        publication_row = self.connection.execute(
+            "SELECT * FROM cms_publication_deliveries WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()
+        if publication_row is None or publication_row["status"] != "succeeded":
+            raise CMSBridgeBlocked("cms.tombstone.not_published")
+        publication = self._request_from_row(
+            publication_row, publication_authority, now,
+            require_current_approvals=False,
+        )
+
+        existing = self.connection.execute(
+            "SELECT * FROM cms_tombstone_deliveries WHERE tombstone_id = ? OR event_id = ?",
+            (tombstone["tombstone_id"], event["event_id"]),
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["tombstone_id"] != tombstone["tombstone_id"]
+                or existing["event_id"] != event["event_id"]
+                or existing["tombstone_sha256"] != tombstone_hash
+                or existing["request_key_id"] != signature.key_id
+            ):
+                raise CMSBridgeBlocked("cms.tombstone.idempotency_collision")
+            request = self._tombstone_request_from_row(
+                existing, event_verifier, publication_authority,
+            )
+            return TombstoneAccepted(
+                tombstone["tombstone_id"], event["event_id"],
+                request.delivery_id, existing["status"], False,
+            )
+
+        locales = sorted(
+            item["locale"] for item in publication.payload["localizations"]
+        )
+        unsigned = {
+            "schema": TOMBSTONE_DELIVERY_SCHEMA,
+            "tombstone_id": tombstone["tombstone_id"],
+            "event_id": event["event_id"],
+            "site_id": event["site_id"],
+            "website_version": event["website_version"],
+            "plan_id": plan.plan_id,
+            "source_id": event["localization"]["source_id"],
+            "source_sequence": int(topic["generation"]),
+            "publication_delivery_id": publication.delivery_id,
+            "publication_payload_sha256": publication.payload_sha256,
+            "locales": locales,
+        }
+        delivery_id = "blun-cms-tombstone-" + _hash(_canonical_json(unsigned))
+        payload = {**unsigned, "delivery_id": delivery_id}
+        payload_json = _canonical_json(payload)
+        payload_hash = _hash(payload_json)
+        sign = getattr(publication_authority, "sign", None)
+        try:
+            delivery_signature = _signature(
+                sign(payload_json.encode("utf-8")) if callable(sign) else None,
+            )
+        except CMSBridgeBlocked:
+            raise
+        except Exception:
+            raise CMSBridgeBlocked("cms.tombstone.signing_failed") from None
+        _verify(
+            publication_authority,
+            payload_json.encode("utf-8"),
+            delivery_signature,
+            "cms.tombstone.signature_rejected",
+        )
+        with _transaction(self.connection):
+            concurrent = self.connection.execute(
+                "SELECT * FROM cms_tombstone_deliveries WHERE tombstone_id = ? OR event_id = ?",
+                (tombstone["tombstone_id"], event["event_id"]),
+            ).fetchone()
+            if concurrent is not None:
+                if (
+                    concurrent["tombstone_id"] != tombstone["tombstone_id"]
+                    or concurrent["event_id"] != event["event_id"]
+                    or concurrent["tombstone_sha256"] != tombstone_hash
+                    or concurrent["request_key_id"] != signature.key_id
+                ):
+                    raise CMSBridgeBlocked("cms.tombstone.idempotency_collision")
+                request = self._tombstone_request_from_row(
+                    concurrent, event_verifier, publication_authority,
+                )
+                return TombstoneAccepted(
+                    tombstone["tombstone_id"], event["event_id"],
+                    request.delivery_id, concurrent["status"], False,
+                )
+            live_publication = self.connection.execute(
+                "SELECT status, payload_sha256 FROM cms_publication_deliveries WHERE event_id = ?",
+                (event["event_id"],),
+            ).fetchone()
+            if (
+                live_publication is None
+                or live_publication["status"] != "succeeded"
+                or live_publication["payload_sha256"] != publication.payload_sha256
+            ):
+                raise CMSBridgeBlocked("cms.tombstone.not_published")
+            self.connection.execute("""
+                INSERT INTO cms_tombstone_deliveries (
+                    tombstone_id, event_id, tombstone_sha256, tombstone_json,
+                    request_signature_algorithm, request_key_id, request_signature,
+                    delivery_id, plan_id, payload_json, payload_sha256,
+                    signature_algorithm, key_id, signature, status, attempts,
+                    max_attempts, next_attempt_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          'pending', 0, ?, ?, ?, ?)
+            """, (
+                tombstone["tombstone_id"], event["event_id"], tombstone_hash,
+                tombstone_json, signature.algorithm, signature.key_id,
+                signature.signature, delivery_id, plan.plan_id, payload_json,
+                payload_hash, delivery_signature.algorithm,
+                delivery_signature.key_id, delivery_signature.signature,
+                max_attempts, now, now, now,
+            ))
+        return TombstoneAccepted(
+            tombstone["tombstone_id"], event["event_id"], delivery_id,
+            "pending", True,
         )
 
     def ingest_change(
@@ -1364,8 +1662,41 @@ class WebsiteLocalizationCMSBridge:
                 "last_error_detail_hash": delivery_status.last_error_detail_hash,
             }
 
+        tombstone_row = self.connection.execute(
+            "SELECT * FROM cms_tombstone_deliveries WHERE event_id = ?",
+            (progress.event_id,),
+        ).fetchone()
+        tombstone = None
+        if tombstone_row is not None:
+            tombstone_request = self._tombstone_request_from_row(
+                tombstone_row, event_verifier, publication_authority,
+            )
+            tombstone_status = self.tombstone_status(tombstone_request.delivery_id)
+            tombstone = {
+                "tombstone_id": tombstone_row["tombstone_id"],
+                "delivery_id": tombstone_status.delivery_id,
+                "status": tombstone_status.status,
+                "attempts": tombstone_status.attempts,
+                "max_attempts": tombstone_status.max_attempts,
+                "next_attempt_at": tombstone_status.next_attempt_at,
+                "lease_expires_at": tombstone_status.lease_expires_at,
+                "lease_expired": (
+                    tombstone_status.status == "leased"
+                    and tombstone_status.lease_expires_at is not None
+                    and tombstone_status.lease_expires_at <= now
+                ),
+                "last_error_code": tombstone_status.last_error_code,
+                "last_error_detail_hash": tombstone_status.last_error_detail_hash,
+            }
+
         if progress.cancelled:
             status = "cancelled"
+        elif tombstone is not None and tombstone["status"] == "succeeded":
+            status = "deleted"
+        elif tombstone is not None and tombstone["status"] == "failed":
+            status = "deletion_failed"
+        elif tombstone is not None:
+            status = "deleting"
         elif delivery is not None and delivery["status"] == "succeeded":
             status = "published"
         elif delivery is not None and delivery["status"] == "failed":
@@ -1397,6 +1728,7 @@ class WebsiteLocalizationCMSBridge:
             blocked_locales=readiness.blocked,
             queue_counts=progress.counts,
             delivery=delivery,
+            tombstone=tombstone,
         )
 
     def _load_event(
@@ -1641,6 +1973,296 @@ class WebsiteLocalizationCMSBridge:
             "cms.delivery.signature_invalid",
         )
         return CMSPublicationRequest(row["delivery_id"], payload, row["payload_sha256"], signature)
+
+    def _tombstone_request_from_row(
+        self,
+        row: sqlite3.Row,
+        event_verifier: CMSMessageAuthority,
+        publication_authority: CMSMessageAuthority,
+    ) -> CMSTombstoneRequest:
+        if (
+            _hash(row["tombstone_json"]) != row["tombstone_sha256"]
+            or _hash(row["payload_json"]) != row["payload_sha256"]
+        ):
+            raise CMSBridgeBlocked("cms.tombstone.tampered")
+        try:
+            tombstone = json.loads(row["tombstone_json"])
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError:
+            raise CMSBridgeBlocked("cms.tombstone.tampered") from None
+        if (
+            _canonical_json(tombstone) != row["tombstone_json"]
+            or _canonical_json(payload) != row["payload_json"]
+        ):
+            raise CMSBridgeBlocked("cms.tombstone.tampered")
+        tombstone = self._validated_tombstone(tombstone)
+        event, plan = self._load_event(
+            row["event_id"], event_verifier, allow_superseded=True,
+        )
+        topic = self.connection.execute(
+            "SELECT generation FROM cms_event_topics WHERE event_id = ?",
+            (row["event_id"],),
+        ).fetchone()
+        event_row = self.connection.execute(
+            "SELECT key_id FROM cms_change_events WHERE event_id = ?",
+            (row["event_id"],),
+        ).fetchone()
+        if topic is None or event_row is None:
+            raise CMSBridgeBlocked("cms.tombstone.tampered")
+        request_signature = _signature(CMSMessageSignature(
+            row["request_signature_algorithm"], row["request_key_id"],
+            row["request_signature"],
+        ))
+        _verify(
+            event_verifier, row["tombstone_json"].encode("utf-8"),
+            request_signature, "cms.tombstone.signature_rejected",
+        )
+        request_binding = {
+            "tombstone_id": row["tombstone_id"],
+            "event_id": event["event_id"],
+            "site_id": event["site_id"],
+            "website_version": event["website_version"],
+            "source_id": event["localization"]["source_id"],
+            "source_sequence": int(topic["generation"]),
+        }
+        if (
+            any(tombstone[field] != value for field, value in request_binding.items())
+            or row["request_key_id"] != event_row["key_id"]
+        ):
+            raise CMSBridgeBlocked("cms.tombstone.binding_invalid")
+        publication_row = self.connection.execute(
+            "SELECT * FROM cms_publication_deliveries WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()
+        if publication_row is None or publication_row["status"] != "succeeded":
+            raise CMSBridgeBlocked("cms.tombstone.publication_invalid")
+        publication = self._request_from_row(
+            publication_row, publication_authority, 0,
+            require_current_approvals=False,
+        )
+        expected_keys = {
+            "schema", "delivery_id", "tombstone_id", "event_id", "site_id",
+            "website_version", "plan_id", "source_id", "source_sequence",
+            "publication_delivery_id", "publication_payload_sha256", "locales",
+        }
+        locales = sorted(
+            item["locale"] for item in publication.payload["localizations"]
+        )
+        expected_payload = {
+            "schema": TOMBSTONE_DELIVERY_SCHEMA,
+            "delivery_id": row["delivery_id"],
+            "tombstone_id": row["tombstone_id"],
+            "event_id": event["event_id"],
+            "site_id": event["site_id"],
+            "website_version": event["website_version"],
+            "plan_id": plan.plan_id,
+            "source_id": event["localization"]["source_id"],
+            "source_sequence": int(topic["generation"]),
+            "publication_delivery_id": publication.delivery_id,
+            "publication_payload_sha256": publication.payload_sha256,
+            "locales": locales,
+        }
+        unsigned = {key: value for key, value in payload.items() if key != "delivery_id"}
+        if (
+            set(payload) != expected_keys
+            or payload != expected_payload
+            or locales != sorted(set(locales))
+            or payload["delivery_id"]
+            != "blun-cms-tombstone-" + _hash(_canonical_json(unsigned))
+            or row["plan_id"] != plan.plan_id
+        ):
+            raise CMSBridgeBlocked("cms.tombstone.tampered")
+        delivery_signature = _signature(CMSMessageSignature(
+            row["signature_algorithm"], row["key_id"], row["signature"],
+        ))
+        _verify(
+            publication_authority, row["payload_json"].encode("utf-8"),
+            delivery_signature, "cms.tombstone.delivery_signature_invalid",
+        )
+        return CMSTombstoneRequest(
+            row["delivery_id"], payload, row["payload_sha256"], delivery_signature,
+        )
+
+    def claim_tombstone(
+        self,
+        worker_id: Any,
+        event_verifier: CMSMessageAuthority,
+        publication_authority: CMSMessageAuthority,
+        *,
+        now: float | int,
+        lease_seconds: float | int = 300,
+    ) -> ClaimedTombstone | None:
+        worker_id = _token(worker_id, "cms.worker_id.invalid")
+        now = _timestamp(now, "cms.time.invalid")
+        lease_seconds = _duration(lease_seconds, "cms.lease.invalid")
+        with _transaction(self.connection):
+            self.connection.execute("""
+                UPDATE cms_tombstone_deliveries
+                SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, last_error_code = 'lease_expired', updated_at = ?
+                WHERE status = 'leased' AND lease_expires_at <= ? AND attempts >= max_attempts
+            """, (now, now))
+            self.connection.execute("""
+                UPDATE cms_tombstone_deliveries
+                SET status = 'retry_wait', next_attempt_at = ?, lease_owner = NULL,
+                    lease_token = NULL, lease_expires_at = NULL,
+                    last_error_code = 'lease_expired', updated_at = ?
+                WHERE status = 'leased' AND lease_expires_at <= ? AND attempts < max_attempts
+            """, (now, now, now))
+            row = self.connection.execute("""
+                SELECT * FROM cms_tombstone_deliveries
+                WHERE status IN ('pending', 'retry_wait') AND next_attempt_at <= ?
+                  AND attempts < max_attempts
+                ORDER BY created_at, delivery_id LIMIT 1
+            """, (now,)).fetchone()
+            if row is None:
+                return None
+            request = self._tombstone_request_from_row(
+                row, event_verifier, publication_authority,
+            )
+            lease_token = secrets.token_urlsafe(32)
+            expires = now + lease_seconds
+            updated = self.connection.execute("""
+                UPDATE cms_tombstone_deliveries
+                SET status = 'leased', attempts = attempts + 1, lease_owner = ?,
+                    lease_token = ?, lease_expires_at = ?, last_error_code = NULL,
+                    last_error_detail_hash = NULL, updated_at = ?
+                WHERE delivery_id = ? AND status IN ('pending', 'retry_wait')
+            """, (worker_id, lease_token, expires, now, row["delivery_id"]))
+            if updated.rowcount != 1:
+                raise CMSBridgeBlocked("cms.tombstone.claim_lost")
+            return ClaimedTombstone(
+                request, int(row["attempts"]) + 1, int(row["max_attempts"]),
+                worker_id, lease_token, expires,
+            )
+
+    def _live_tombstone(
+        self,
+        claim: Any,
+        event_verifier: CMSMessageAuthority,
+        publication_authority: CMSMessageAuthority,
+        now: float,
+    ) -> sqlite3.Row:
+        if not isinstance(claim, ClaimedTombstone):
+            raise CMSBridgeBlocked("cms.tombstone.claim_invalid")
+        row = self.connection.execute(
+            "SELECT * FROM cms_tombstone_deliveries WHERE delivery_id = ?",
+            (claim.request.delivery_id,),
+        ).fetchone()
+        if row is None or row["status"] != "leased":
+            raise CMSBridgeBlocked("cms.tombstone.lease_lost")
+        if row["lease_owner"] != claim.lease_owner or row["lease_token"] != claim.lease_token:
+            raise CMSBridgeBlocked("cms.tombstone.lease_lost")
+        if float(row["lease_expires_at"]) <= now:
+            raise CMSBridgeBlocked("cms.tombstone.lease_expired")
+        request = self._tombstone_request_from_row(
+            row, event_verifier, publication_authority,
+        )
+        if request != claim.request:
+            raise CMSBridgeBlocked("cms.tombstone.claim_mutated")
+        return row
+
+    def _finish_tombstone(
+        self,
+        claim: ClaimedTombstone,
+        event_verifier: CMSMessageAuthority,
+        publication_authority: CMSMessageAuthority,
+        *,
+        now: float,
+        error: CMSPublishFailed | None,
+    ) -> DeliveryStatus:
+        with _transaction(self.connection):
+            row = self._live_tombstone(
+                claim, event_verifier, publication_authority, now,
+            )
+            if error is None:
+                status, next_attempt, code, detail_hash = "succeeded", now, None, None
+            else:
+                terminal = not error.retryable or int(row["attempts"]) >= int(row["max_attempts"])
+                status = "failed" if terminal else "retry_wait"
+                next_attempt = now if terminal else now + min(
+                    3600.0, 5.0 * (2 ** (int(row["attempts"]) - 1)),
+                )
+                code = error.code
+                detail_hash = _hash(error.detail) if error.detail is not None else None
+            updated = self.connection.execute("""
+                UPDATE cms_tombstone_deliveries
+                SET status = ?, next_attempt_at = ?, lease_owner = NULL,
+                    lease_token = NULL, lease_expires_at = NULL,
+                    last_error_code = ?, last_error_detail_hash = ?, updated_at = ?
+                WHERE delivery_id = ? AND status = 'leased'
+                  AND lease_owner = ? AND lease_token = ?
+            """, (
+                status, next_attempt, code, detail_hash, now,
+                claim.request.delivery_id, claim.lease_owner, claim.lease_token,
+            ))
+            if updated.rowcount != 1:
+                raise CMSBridgeBlocked("cms.tombstone.finish_lost")
+        return self.tombstone_status(claim.request.delivery_id)
+
+    def run_tombstone(
+        self,
+        publisher: CMSPublisher,
+        event_verifier: CMSMessageAuthority,
+        publication_authority: CMSMessageAuthority,
+        *,
+        worker_id: Any,
+        clock: Callable[[], float] = time.time,
+        lease_seconds: float | int = 300,
+        operation_guard: Callable[[float], Any] | None = None,
+    ) -> DeliveryOutcome:
+        if operation_guard is not None and not callable(operation_guard):
+            raise CMSBridgeBlocked("cms.tombstone.operation_guard_invalid")
+        claim = self.claim_tombstone(
+            worker_id, event_verifier, publication_authority,
+            now=clock(), lease_seconds=lease_seconds,
+        )
+        if claim is None:
+            return DeliveryOutcome("idle")
+        if operation_guard is not None:
+            try:
+                operation_guard(float(lease_seconds))
+            except Exception:
+                raise CMSBridgeBlocked("cms.tombstone.operation_guard_failed") from None
+        publish = getattr(publisher, "publish", None)
+        try:
+            if not callable(publish):
+                raise CMSPublishFailed("publisher.invalid", retryable=False)
+            acknowledgement = publish(claim.request)
+            expected = {
+                "schema": TOMBSTONE_ACK_SCHEMA,
+                "delivery_id": claim.request.delivery_id,
+                "payload_sha256": claim.request.payload_sha256,
+                "status": "deleted",
+            }
+            if not isinstance(acknowledgement, Mapping) or dict(acknowledgement) != expected:
+                raise CMSPublishFailed("publisher.ack_invalid", retryable=True)
+        except Exception as original_error:
+            error = _declared_publish_failure(original_error)
+            if error is None:
+                error = CMSPublishFailed("publisher.unavailable", retryable=True)
+            status = self._finish_tombstone(
+                claim, event_verifier, publication_authority,
+                now=_timestamp(clock(), "cms.time.invalid"), error=error,
+            )
+            return DeliveryOutcome(status.status, status.delivery_id, status.attempts, error.code)
+        status = self._finish_tombstone(
+            claim, event_verifier, publication_authority,
+            now=_timestamp(clock(), "cms.time.invalid"), error=None,
+        )
+        return DeliveryOutcome(status.status, status.delivery_id, status.attempts)
+
+    def tombstone_status(self, delivery_id: Any) -> DeliveryStatus:
+        delivery_id = _token(delivery_id, "cms.delivery_id.invalid")
+        row = self.connection.execute("""
+            SELECT delivery_id, event_id, plan_id, status, attempts, max_attempts,
+                   next_attempt_at, lease_expires_at, last_error_code,
+                   last_error_detail_hash, payload_sha256
+            FROM cms_tombstone_deliveries WHERE delivery_id = ?
+        """, (delivery_id,)).fetchone()
+        if row is None:
+            raise CMSBridgeBlocked("cms.tombstone.missing")
+        return DeliveryStatus(**dict(row))
 
     def claim_delivery(
         self,

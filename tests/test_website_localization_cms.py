@@ -152,6 +152,21 @@ def cancellation_event(event=None, **overrides):
     return cancellation
 
 
+def tombstone_event(event=None, **overrides):
+    event = event or change_event()
+    tombstone = {
+        "schema": CMS.TOMBSTONE_SCHEMA,
+        "tombstone_id": "cms-tombstone-184",
+        "event_id": event["event_id"],
+        "site_id": event["site_id"],
+        "website_version": event["website_version"],
+        "source_id": event["localization"]["source_id"],
+        "source_sequence": event["source_sequence"],
+    }
+    tombstone.update(overrides)
+    return tombstone
+
+
 def completed_result(job, candidate):
     payload = job.as_payload()
     return {
@@ -281,6 +296,29 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.publication_authority,
             now=250,
             **values,
+        )
+
+    def publish_all(self, event=None):
+        event = event or change_event()
+        self.ingest(event)
+        self.release_all(event)
+        request = self.prepare(event)
+        outcome = self.bridge.run_delivery(
+            Publisher(), self.publication_authority,
+            worker_id="cms-worker", clock=Clock(260),
+        )
+        self.assertEqual(outcome.status, "succeeded")
+        return request
+
+    def tombstone(self, event=None, value=None, *, now=300, max_attempts=5):
+        event = event or change_event()
+        value = value or tombstone_event(event)
+        signature = self.event_authority.sign(
+            CMS._canonical_json(value).encode("utf-8")
+        )
+        return self.bridge.request_tombstone(
+            value, signature, self.event_authority, self.publication_authority,
+            now=now, max_attempts=max_attempts,
         )
 
     def test_signed_change_is_enqueued_once_and_exact_replay_resumes(self):
@@ -971,6 +1009,149 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
             (old["event_id"],),
         ).fetchone())
+
+    def test_tombstone_requires_exact_confirmed_publication_and_original_key(self):
+        event = change_event()
+        self.ingest(event)
+        value = tombstone_event(event)
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.tombstone(event, value)
+        self.assertEqual(caught.exception.code, "cms.tombstone.not_published")
+
+        self.release_all(event)
+        self.prepare(event)
+        self.bridge.run_delivery(
+            Publisher(), self.publication_authority,
+            worker_id="cms-worker", clock=Clock(260),
+        )
+        wrong = tombstone_event(event, website_version="website-other")
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.tombstone(event, wrong)
+        self.assertEqual(caught.exception.code, "cms.tombstone.binding_invalid")
+
+        other = CMSAuthority(b"other-event-key")
+        other_value = tombstone_event(event)
+        other_signature = CMS.CMSMessageSignature(
+            other.sign(CMS._canonical_json(other_value).encode("utf-8")).algorithm,
+            self.signed_event(event).key_id + "-other",
+            other.sign(CMS._canonical_json(other_value).encode("utf-8")).signature,
+        )
+        with self.assertRaises(CMS.CMSBridgeBlocked):
+            self.bridge.request_tombstone(
+                other_value, other_signature, other, self.publication_authority,
+                now=300,
+            )
+
+    def test_tombstone_is_signed_content_free_idempotent_and_visible(self):
+        publication = self.publish_all()
+
+        first = self.tombstone()
+        replay = self.tombstone(now=301)
+        row = self.cms_connection.execute(
+            "SELECT * FROM cms_tombstone_deliveries"
+        ).fetchone()
+        request = self.bridge._tombstone_request_from_row(
+            row, self.event_authority, self.publication_authority,
+        )
+
+        self.assertTrue(first.newly_requested)
+        self.assertFalse(replay.newly_requested)
+        self.assertEqual(first.delivery_id, replay.delivery_id)
+        self.assertEqual(request.payload["locales"], ["de-AT", "sv-SE"])
+        self.assertEqual(
+            request.payload["publication_payload_sha256"],
+            publication.payload_sha256,
+        )
+        self.assertNotIn("target_text", json.dumps(request.payload))
+        self.assertTrue(self.publication_authority.verify(
+            CMS._canonical_json(request.payload).encode("utf-8"),
+            request.signature,
+        ))
+        lifecycle = self.bridge.change_lifecycle(
+            change_event()["event_id"], self.event_authority,
+            self.approval_authority, self.publication_authority,
+            site_id=change_event()["site_id"], requester_key_id="cms-key-1", now=302,
+        )
+        self.assertEqual(lifecycle.status, "deleting")
+        self.assertEqual(lifecycle.tombstone["status"], "pending")
+
+    def test_tombstone_delivery_retries_recovers_lease_and_requires_exact_ack(self):
+        self.publish_all()
+        accepted = self.tombstone(max_attempts=3)
+        invalid = Publisher(response=lambda _: {"status": "deleted"})
+        first = self.bridge.run_tombstone(
+            invalid, self.event_authority, self.publication_authority,
+            worker_id="delete-worker", clock=Clock(310), lease_seconds=5,
+        )
+        self.assertEqual((first.status, first.error_code), (
+            "retry_wait", "publisher.ack_invalid",
+        ))
+        stale = self.bridge.claim_tombstone(
+            "crashed-worker", self.event_authority, self.publication_authority,
+            now=315, lease_seconds=5,
+        )
+        fresh = self.bridge.claim_tombstone(
+            "recovery-worker", self.event_authority, self.publication_authority,
+            now=320, lease_seconds=5,
+        )
+        self.assertEqual((stale.attempt, fresh.attempt), (2, 3))
+        with self.assertRaises(CMS.CMSBridgeBlocked):
+            self.bridge._finish_tombstone(
+                stale, self.event_authority, self.publication_authority,
+                now=321, error=None,
+            )
+        good = Publisher(response=lambda request: {
+            "schema": CMS.TOMBSTONE_ACK_SCHEMA,
+            "delivery_id": request.delivery_id,
+            "payload_sha256": request.payload_sha256,
+            "status": "deleted",
+        })
+        status = self.bridge._finish_tombstone(
+            fresh, self.event_authority, self.publication_authority,
+            now=321, error=None,
+        )
+        self.assertEqual((status.delivery_id, status.status), (
+            accepted.delivery_id, "succeeded",
+        ))
+        lifecycle = self.bridge.change_lifecycle(
+            change_event()["event_id"], self.event_authority,
+            self.approval_authority, self.publication_authority,
+            site_id=change_event()["site_id"], requester_key_id="cms-key-1", now=322,
+        )
+        self.assertEqual(lifecycle.status, "deleted")
+
+    def test_tombstone_tampering_blocks_before_publisher(self):
+        self.publish_all()
+        self.tombstone()
+        self.cms_connection.execute(
+            "UPDATE cms_tombstone_deliveries SET payload_json = '{}'"
+        )
+        self.cms_connection.commit()
+        publisher = Publisher()
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge.run_tombstone(
+                publisher, self.event_authority, self.publication_authority,
+                worker_id="delete-worker", clock=Clock(310),
+            )
+        self.assertEqual(caught.exception.code, "cms.tombstone.tampered")
+        self.assertEqual(publisher.requests, [])
+
+    def test_v3_database_adds_empty_tombstone_outbox_transactionally(self):
+        self.cms_connection.execute("DROP TABLE cms_tombstone_deliveries")
+        self.cms_connection.execute("PRAGMA user_version = 3")
+        self.cms_connection.commit()
+
+        migrated = CMS.WebsiteLocalizationCMSBridge(
+            self.cms_connection, self.queue, self.release_store,
+        )
+
+        self.assertEqual(
+            tuple(row["name"] for row in self.cms_connection.execute(
+                "PRAGMA table_info(cms_tombstone_deliveries)"
+            )),
+            CMS._TOMBSTONE_COLUMNS,
+        )
+        migrated._verify_schema()
 
     def test_v1_database_migrates_existing_events_with_generation(self):
         current = change_event()

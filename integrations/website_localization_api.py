@@ -20,12 +20,13 @@ from typing import Any, Callable, Mapping
 API_SCHEMA = "blun.website-localization-api.v2"
 CHANGE_PATH = "/v2/localization/changes"
 CANCELLATION_PATH = "/v2/localization/cancellations"
+TOMBSTONE_PATH = "/v2/localization/tombstones"
 STATUS_PATH = "/v2/localization/status"
 LIFECYCLE_PATH = "/v2/localization/lifecycle"
 CAPABILITIES_PATH = "/v2/localization/capabilities"
 STATUS_REQUEST_SCHEMA = "blun.cms-localization-status-request.v2"
 LIFECYCLE_REQUEST_SCHEMA = "blun.cms-localization-lifecycle-request.v1"
-LIFECYCLE_RESPONSE_SCHEMA = "blun.cms-localization-lifecycle.v1"
+LIFECYCLE_RESPONSE_SCHEMA = "blun.cms-localization-lifecycle.v2"
 CAPABILITIES_REQUEST_SCHEMA = "blun.cms-localization-capabilities-request.v1"
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_STATUS_CLOCK_SKEW = 300.0
@@ -104,7 +105,7 @@ class WebsiteLocalizationAPI:
     ):
         if not all(callable(getattr(bridge, name, None)) for name in (
             "ingest_change", "cancel_change", "change_progress",
-            "localization_capabilities",
+            "localization_capabilities", "request_tombstone",
         )):
             raise TypeError("bridge must provide CMS ingress, capabilities, and progress")
         if not callable(getattr(event_verifier, "verify", None)):
@@ -187,6 +188,8 @@ class WebsiteLocalizationAPI:
             "cms.signature.invalid", "cms.event.signature_rejected",
             "cms.cancellation.signature_rejected",
             "cms.cancellation.scope_rejected",
+            "cms.tombstone.signature_rejected",
+            "cms.tombstone.scope_rejected",
             "cms.status.signature_rejected", "cms.status.request_expired",
             "cms.status.scope_rejected", "cms.lifecycle.signature_rejected",
             "cms.lifecycle.request_expired", "cms.lifecycle.scope_rejected",
@@ -200,6 +203,8 @@ class WebsiteLocalizationAPI:
             "cms.event.cancelled", "cms.cancellation.idempotency_collision",
             "cms.cancellation.already_published",
             "cms.cancellation.delivery_in_flight",
+            "cms.tombstone.idempotency_collision",
+            "cms.tombstone.not_published",
         }:
             return "409 Conflict"
         if code == "cms.event.not_enqueued":
@@ -211,6 +216,8 @@ class WebsiteLocalizationAPI:
             "cms.lifecycle.unavailable", "cms.release.integrity_failed",
             "cms.delivery.tampered", "cms.delivery.signature_invalid",
             "cms.capabilities.registry_invalid",
+            "cms.tombstone.tampered", "cms.tombstone.publication_invalid",
+            "cms.tombstone.delivery_signature_invalid",
         }:
             return "503 Service Unavailable"
         return "400 Bad Request"
@@ -222,7 +229,8 @@ class WebsiteLocalizationAPI:
             )
         path = environ.get("PATH_INFO")
         if path not in {
-            CHANGE_PATH, CANCELLATION_PATH, STATUS_PATH, LIFECYCLE_PATH,
+            CHANGE_PATH, CANCELLATION_PATH, TOMBSTONE_PATH,
+            STATUS_PATH, LIFECYCLE_PATH,
             CAPABILITIES_PATH,
         }:
             return self._blocked("404 Not Found", "api.path.not_found", start_response)
@@ -294,6 +302,22 @@ class WebsiteLocalizationAPI:
                 return self._json(
                     "202 Accepted" if cancelled.newly_cancelled else "200 OK",
                     {"schema": API_SCHEMA, **asdict(cancelled)},
+                    start_response,
+                )
+            if path == TOMBSTONE_PATH:
+                if self.publication_authority is None:
+                    raise _APIRequestBlocked("cms.lifecycle.unavailable")
+                accepted = self.bridge.request_tombstone(
+                    request,
+                    signature,
+                    self.event_verifier,
+                    self.publication_authority,
+                    now=now,
+                    max_attempts=self.max_attempts,
+                )
+                return self._json(
+                    "202 Accepted" if accepted.newly_requested else "200 OK",
+                    {"schema": API_SCHEMA, **asdict(accepted)},
                     start_response,
                 )
             ingested = self.bridge.ingest_change(

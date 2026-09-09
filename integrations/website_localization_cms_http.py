@@ -19,6 +19,8 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.cms-localization-publication-http.v1"
 RESPONSE_SCHEMA = "blun.cms-localization-publication-http-ack.v1"
+TOMBSTONE_REQUEST_SCHEMA = "blun.cms-localization-tombstone-http.v1"
+TOMBSTONE_RESPONSE_SCHEMA = "blun.cms-localization-tombstone-http-ack.v1"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_RESPONSE_BYTES = 65_536
@@ -35,6 +37,11 @@ RESERVED_HEADERS = {
 PUBLICATION_FIELDS = {
     "schema", "delivery_id", "event_id", "site_id", "website_version", "plan_id",
     "source_id", "source_revision", "source_sequence", "source_sha256", "localizations",
+}
+TOMBSTONE_FIELDS = {
+    "schema", "delivery_id", "tombstone_id", "event_id", "site_id",
+    "website_version", "plan_id", "source_id", "source_sequence",
+    "publication_delivery_id", "publication_payload_sha256", "locales",
 }
 
 
@@ -315,20 +322,39 @@ class HTTPPublisherAdapter:
             raw_signature = request.signature
         except Exception:
             raise HTTPPublisherFailed("request_invalid", retryable=False) from None
+        tombstone = isinstance(payload, dict) and payload.get("schema") == _CMS.TOMBSTONE_DELIVERY_SCHEMA
+        expected_fields = TOMBSTONE_FIELDS if tombstone else PUBLICATION_FIELDS
         if (
             not isinstance(delivery_id, str)
             or TOKEN.fullmatch(delivery_id) is None
             or not isinstance(payload_sha256, str)
             or re.fullmatch(r"[a-f0-9]{64}", payload_sha256) is None
             or not isinstance(payload, dict)
-            or set(payload) != PUBLICATION_FIELDS
-            or payload.get("schema") != _CMS.PUBLICATION_SCHEMA
+            or set(payload) != expected_fields
+            or payload.get("schema") not in {
+                _CMS.PUBLICATION_SCHEMA, _CMS.TOMBSTONE_DELIVERY_SCHEMA,
+            }
             or payload.get("delivery_id") != delivery_id
             or isinstance(payload.get("source_sequence"), bool)
             or not isinstance(payload.get("source_sequence"), int)
             or payload["source_sequence"] <= 0
-            or not isinstance(payload.get("localizations"), list)
-            or not payload["localizations"]
+            or not isinstance(
+                payload.get("locales") if tombstone else payload.get("localizations"),
+                list,
+            )
+            or not (payload.get("locales") if tombstone else payload.get("localizations"))
+        ):
+            raise HTTPPublisherFailed("request_invalid", retryable=False)
+        if tombstone and (
+            payload["locales"] != sorted(set(payload["locales"]))
+            or any(
+                not isinstance(locale, str) or TOKEN.fullmatch(locale) is None
+                for locale in payload["locales"]
+            )
+            or not isinstance(payload.get("publication_payload_sha256"), str)
+            or re.fullmatch(
+                r"[a-f0-9]{64}", payload["publication_payload_sha256"],
+            ) is None
         ):
             raise HTTPPublisherFailed("request_invalid", retryable=False)
         payload_bytes = _canonical_json(
@@ -341,9 +367,9 @@ class HTTPPublisherAdapter:
         _, signature_payload = _signature(raw_signature)
         body = _canonical_json(
             {
-                "schema": REQUEST_SCHEMA,
+                "schema": TOMBSTONE_REQUEST_SCHEMA if tombstone else REQUEST_SCHEMA,
                 "payload_sha256": payload_sha256,
-                "publication": payload,
+                "tombstone" if tombstone else "publication": payload,
                 "signature": signature_payload,
             },
             code="request_invalid",
@@ -415,12 +441,13 @@ class HTTPPublisherAdapter:
             raise HTTPPublisherFailed("acknowledgement_invalid", retryable=False)
         acknowledgement = envelope["acknowledgement"]
         expected = {
-            "schema": _CMS.ACK_SCHEMA,
+            "schema": _CMS.TOMBSTONE_ACK_SCHEMA if tombstone else _CMS.ACK_SCHEMA,
             "delivery_id": delivery_id,
             "payload_sha256": payload_sha256,
-            "status": "accepted",
+            "status": "deleted" if tombstone else "accepted",
         }
-        if envelope["schema"] != RESPONSE_SCHEMA or acknowledgement != expected:
+        expected_response_schema = TOMBSTONE_RESPONSE_SCHEMA if tombstone else RESPONSE_SCHEMA
+        if envelope["schema"] != expected_response_schema or acknowledgement != expected:
             raise HTTPPublisherFailed("acknowledgement_binding", retryable=False)
         signature_mapping = envelope["signature"]
         if not isinstance(signature_mapping, dict) or set(signature_mapping) != {
