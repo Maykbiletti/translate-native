@@ -338,6 +338,52 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             0,
         )
 
+    def test_prequeue_crash_is_visible_without_exposing_or_mutating_content(self):
+        enqueue_plan = self.queue.enqueue_plan
+
+        def fail_before_queue(*_args, **_kwargs):
+            raise QUEUE.LocalizationQueueBlocked("simulated queue outage")
+
+        self.queue.enqueue_plan = fail_before_queue
+        try:
+            failed = self.request()
+        finally:
+            self.queue.enqueue_plan = enqueue_plan
+        self.assertEqual(failed[0], "503 Service Unavailable")
+        changes_before = (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        )
+
+        progress = self.status_request(request_id="status-prequeue-recovery")
+        lifecycle = self.lifecycle_request(
+            request_id="lifecycle-prequeue-recovery",
+        )
+
+        self.assertEqual(progress[0], "200 OK")
+        self.assertTrue(progress[2]["queue_recovery_pending"])
+        self.assertEqual(sum(progress[2]["counts"].values()), 0)
+        self.assertEqual(
+            [item["status"] for item in progress[2]["locales"]],
+            ["awaiting_queue_resume", "awaiting_queue_resume"],
+        )
+        self.assertEqual(lifecycle[0], "200 OK")
+        self.assertEqual(lifecycle[2]["schema"], API.LIFECYCLE_RESPONSE_SCHEMA)
+        self.assertEqual(lifecycle[2]["status"], "queue_recovery")
+        self.assertEqual(lifecycle[2]["blocked_locales"], [
+            ["fi-FI", "queue.awaiting_resume"],
+            ["mt-MT", "queue.awaiting_resume"],
+        ])
+        rendered = json.dumps((progress[2], lifecycle[2]))
+        self.assertNotIn("source_text", rendered)
+        self.assertNotIn("Save up", rendered)
+        self.assertEqual(changes_before, (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        ))
+
     def test_cancellation_rejects_wrong_binding_and_other_accepted_key(self):
         self.request()
         wrong = cancellation(website_version="web-other")
@@ -558,6 +604,7 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         status, headers, payload = self.status_request()
         self.assertEqual(status, "200 OK")
         self.assertEqual(payload["status"], "PROGRESS")
+        self.assertFalse(payload["queue_recovery_pending"])
         self.assertEqual(payload["site_id"], "site-1")
         self.assertEqual(payload["source_sequence"], 1)
         self.assertEqual(payload["counts"]["pending"], 2)
@@ -568,6 +615,30 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertNotIn("source_text", json.dumps(payload))
         self.assertNotIn("Save up", json.dumps(payload))
         self.assertEqual(headers["Cache-Control"], "no-store")
+
+    def test_prequeue_recovery_status_rejects_tampered_stored_event(self):
+        enqueue_plan = self.queue.enqueue_plan
+
+        def fail_before_queue(*_args, **_kwargs):
+            raise QUEUE.LocalizationQueueBlocked("simulated queue outage")
+
+        self.queue.enqueue_plan = fail_before_queue
+        try:
+            self.request()
+        finally:
+            self.queue.enqueue_plan = enqueue_plan
+        self.cms_connection.execute(
+            "UPDATE cms_change_events SET event_json = '{}'"
+        )
+        self.cms_connection.commit()
+
+        status, _, payload = self.status_request(
+            request_id="status-tampered-prequeue",
+        )
+
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertEqual(payload["error"], "cms.event.tampered")
+        self.assertNotIn("Save up", json.dumps(payload))
 
     def test_signed_lifecycle_reports_processing_without_mutating_state(self):
         self.request()

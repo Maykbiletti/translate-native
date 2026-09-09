@@ -461,6 +461,39 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             runtime.queue.enqueue_plan = enqueue
         self.assertEqual(caught.exception.code, "cms.queue.rejected")
 
+        progress_request = {
+            "schema": RUNTIME._API.STATUS_REQUEST_SCHEMA,
+            "request_id": "runtime-prequeue-status",
+            "event_id": event["event_id"],
+            "site_id": event["site_id"],
+            "requested_at": self.clock(),
+        }
+        raw = json.dumps(progress_request).encode("utf-8")
+        progress_signature = self.event_authority.sign(
+            RUNTIME._API._canonical_json(progress_request).encode("utf-8"),
+        )
+        captured = {}
+        progress = json.loads(b"".join(runtime.cms_api({
+            "PATH_INFO": RUNTIME._API.STATUS_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json; charset=utf-8",
+            "CONTENT_LENGTH": str(len(raw)),
+            "wsgi.input": io.BytesIO(raw),
+            "HTTP_X_LOCALIZATION_SIGNATURE_ALGORITHM": (
+                progress_signature.algorithm
+            ),
+            "HTTP_X_LOCALIZATION_KEY_ID": progress_signature.key_id,
+            "HTTP_X_LOCALIZATION_SIGNATURE": progress_signature.signature,
+        }, lambda status, headers: captured.update(status=status))))
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertTrue(progress["queue_recovery_pending"])
+        self.assertEqual(
+            progress["locales"][0]["status"], "awaiting_queue_resume",
+        )
+        self.assertNotIn("source_text", json.dumps(progress))
+
         self.clock.value = 101
         recovered = runtime.run_once(now=101)
 

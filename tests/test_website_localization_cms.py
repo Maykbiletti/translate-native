@@ -788,6 +788,39 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         finally:
             self.queue.enqueue_plan = enqueue_plan
 
+        changes_before = (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        )
+        progress = self.bridge.change_progress(
+            event["event_id"], self.event_authority,
+            site_id=event["site_id"], requester_key_id="cms-key-1", now=199,
+        )
+        lifecycle = self.bridge.change_lifecycle(
+            event["event_id"], self.event_authority,
+            self.approval_authority, self.publication_authority,
+            site_id=event["site_id"], requester_key_id="cms-key-1", now=199,
+        )
+
+        self.assertTrue(progress.queue_recovery_pending)
+        self.assertEqual(sum(progress.counts.values()), 0)
+        self.assertEqual(
+            tuple(item.status for item in progress.locales),
+            ("awaiting_queue_resume", "awaiting_queue_resume"),
+        )
+        self.assertEqual(lifecycle.status, "queue_recovery")
+        self.assertEqual(lifecycle.approved_locales, ())
+        self.assertEqual(lifecycle.blocked_locales, (
+            ("de-AT", "queue.awaiting_resume"),
+            ("sv-SE", "queue.awaiting_resume"),
+        ))
+        self.assertEqual(changes_before, (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        ))
+
         resumed = self.bridge.resume_accepted_change(
             event["event_id"], self.event_authority,
             max_attempts=8, now=200,

@@ -259,6 +259,14 @@ hash. The top-level `cancelled` flag records an accepted withdrawal.
 `lease_expired: true` makes recoverable crashes visible. A succeeded queue
 row is reloaded and hash-checked before it can appear successful.
 
+If the signed event is durable but the process stopped before queue insertion,
+`queue_recovery_pending` is `true`. Every required locale then reports
+`awaiting_queue_resume` with the stable content-free reason
+`cms.event.awaiting_queue_resume`; all real queue counts remain zero. The read
+does not create jobs or invoke a provider. The supervised service separately
+revalidates and resumes that exact event. Once queue insertion succeeds, the
+flag becomes `false` and ordinary queue state replaces the synthetic status.
+
 Status is not readiness. Valid independent evidence, signed per-locale
 approvals, and the all-required-locales release gate remain authoritative.
 Superseded events, wrong site or credential scope, missing work, altered queue
@@ -292,12 +300,14 @@ verification authorities. A standalone `WebsiteLocalizationAPI` must supply
 both authorities together; otherwise this route returns a fail-closed `503`.
 
 A successful response uses
-`blun.cms-localization-lifecycle.v1`. It contains the event, site, website
+`blun.cms-localization-lifecycle.v3`. It contains the event, site, website
 version, plan and source-sequence identifiers; aggregate queue counts; required,
 approved and blocked locales; and an optional content-free delivery summary.
 The lifecycle `status` is exactly one of:
 
 - `cancelled`: the exact unpublished event has an accepted signed cancellation;
+- `queue_recovery`: the event is durably accepted but its per-locale queue rows
+  still await the supervised, idempotent recovery pass;
 - `processing`: at least one required locale still has queue work;
 - `localization_failed`: at least one required locale failed terminally;
 - `awaiting_approval`: all locale results exist, but signed release evidence is

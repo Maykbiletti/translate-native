@@ -279,6 +279,7 @@ class ChangeProgress:
     counts: dict[str, int]
     locales: tuple[LocaleProgress, ...]
     cancelled: bool
+    queue_recovery_pending: bool
 
 
 @dataclass(frozen=True)
@@ -1455,11 +1456,14 @@ class WebsiteLocalizationCMSBridge:
             "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
             (event_id,),
         ).fetchone() is not None
+        queue_recovery_pending = (
+            event_row["status"] == "accepted" and not cancelled
+        )
         event, plan = self._load_event(
             event_id,
             event_verifier,
             allow_cancelled=cancelled,
-            allow_accepted=cancelled,
+            allow_accepted=cancelled or queue_recovery_pending,
         )
         if event["site_id"] != site_id:
             raise CMSBridgeBlocked("cms.status.scope_rejected")
@@ -1489,6 +1493,34 @@ class WebsiteLocalizationCMSBridge:
                 counts=counts,
                 locales=locales,
                 cancelled=True,
+                queue_recovery_pending=False,
+            )
+        if queue_recovery_pending:
+            counts = {status: 0 for status in _QUEUE._STATUSES}
+            locales = tuple(LocaleProgress(
+                job_id=job.job_id,
+                target_locale=job.target.locale,
+                status="awaiting_queue_resume",
+                attempts=0,
+                max_attempts=0,
+                next_attempt_at=0.0,
+                lease_expires_at=None,
+                lease_expired=False,
+                last_error_code="cms.event.awaiting_queue_resume",
+                last_error_detail_hash=None,
+                result_sha256=None,
+            ) for job in sorted(plan.jobs, key=lambda item: item.target.locale))
+            return ChangeProgress(
+                event_id=event["event_id"],
+                site_id=event["site_id"],
+                plan_id=plan.plan_id,
+                website_version=event["website_version"],
+                source_sequence=int(topic["generation"]),
+                job_count=len(plan.jobs),
+                counts=counts,
+                locales=locales,
+                cancelled=False,
+                queue_recovery_pending=True,
             )
         locales = []
         try:
@@ -1533,6 +1565,7 @@ class WebsiteLocalizationCMSBridge:
             counts=counts,
             locales=tuple(sorted(locales, key=lambda item: item.target_locale)),
             cancelled=cancelled,
+            queue_recovery_pending=False,
         )
 
     def change_lifecycle(
@@ -1559,8 +1592,31 @@ class WebsiteLocalizationCMSBridge:
             progress.event_id,
             event_verifier,
             allow_cancelled=progress.cancelled,
-            allow_accepted=progress.cancelled,
+            allow_accepted=(
+                progress.cancelled or progress.queue_recovery_pending
+            ),
         )
+        if progress.queue_recovery_pending:
+            required_locales = tuple(sorted(
+                job.target.locale for job in plan.jobs
+            ))
+            return ChangeLifecycle(
+                event_id=progress.event_id,
+                site_id=progress.site_id,
+                plan_id=progress.plan_id,
+                website_version=progress.website_version,
+                source_sequence=progress.source_sequence,
+                status="queue_recovery",
+                required_locales=required_locales,
+                approved_locales=(),
+                blocked_locales=tuple(
+                    (locale, "queue.awaiting_resume")
+                    for locale in required_locales
+                ),
+                queue_counts=progress.counts,
+                delivery=None,
+                tombstone=None,
+            )
         try:
             readiness = self.release_store.readiness(
                 plan, approval_authority, now=now,
