@@ -13,6 +13,7 @@ import re
 import sqlite3
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,6 +52,10 @@ _REFERENCE_INTAKE = _load_module(
     "blun_website_localization_runtime_reference_intake",
     _ROOT / "integrations" / "website_localization_native_reference_intake.py",
 )
+_REFERENCE_QUEUE = _load_module(
+    "blun_website_localization_runtime_reference_queue",
+    _ROOT / "integrations" / "website_localization_native_reference_queue.py",
+)
 _REVIEW = _load_module(
     "blun_website_localization_runtime_review_store",
     _ROOT / "integrations" / "website_localization_benchmark_review_store.py",
@@ -71,6 +76,25 @@ class BenchmarkRuntimeFailed(RuntimeError):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+
+
+@dataclass(frozen=True)
+class LeasedNativeReferenceWorkOrder:
+    """One private lease plus its target-free editorial work order."""
+
+    claim: Any
+    work_order: dict[str, Any]
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": "blun.website-localization-native-reference-lease.v1",
+            "work_id": self.claim.work_id,
+            "attempt": self.claim.attempt,
+            "max_attempts": self.claim.max_attempts,
+            "lease_token": self.claim.lease_token,
+            "lease_expires_at": self.claim.lease_expires_at,
+            "work_order": self.work_order,
+        }
 
 
 def _callable(value: Any, code: str) -> Any:
@@ -421,6 +445,15 @@ class WebsiteLocalizationBenchmarkRuntime:
         self.campaign_id = self.campaign_store.create(
             policy, max_attempts=max_attempts, now=initial_now,
         )
+        self.native_reference_queue = _REFERENCE_QUEUE.NativeReferenceWorkQueue(
+            self.campaign_store,
+        )
+        self.native_reference_queue.ensure(
+            policy,
+            self.campaign_id,
+            max_attempts=max_attempts,
+            now=initial_now,
+        )
         self.input_resolver = DurableBenchmarkInputResolver(
             candidate_store=candidate_store,
             baseline_store=baseline_store,
@@ -498,6 +531,334 @@ class WebsiteLocalizationBenchmarkRuntime:
 
     def status(self):
         return self.campaign_store.status(self.policy, self.campaign_id)
+
+    @staticmethod
+    def _retry_delay(attempt: int, base: Any, maximum: Any) -> float:
+        base = _REFERENCE_QUEUE._duration(base)
+        maximum = _REFERENCE_QUEUE._duration(maximum)
+        return min(maximum, base * (2 ** max(0, attempt - 1)))
+
+    def claim_native_reference_work_order(
+        self,
+        editor_id: Any,
+        *,
+        operation_guard: Callable[[float], Any] | None = None,
+        lease_seconds: Any = 3600,
+        retry_base_seconds: Any = 30,
+        retry_max_seconds: Any = 3600,
+    ) -> LeasedNativeReferenceWorkOrder | None:
+        """Lease the next unresolved exact job without persisting its prose."""
+        if operation_guard is not None and not callable(operation_guard):
+            raise BenchmarkRuntimeFailed(
+                "benchmark.runtime.reference_queue.guard_invalid",
+            )
+        lease_seconds = _REFERENCE_QUEUE._duration(lease_seconds)
+        self._retry_delay(1, retry_base_seconds, retry_max_seconds)
+        expected_count = len(_CAMPAIGN._expected_work(self.policy))
+        for _ in range(expected_count):
+            claim = self.native_reference_queue.claim(
+                self.policy,
+                self.campaign_id,
+                editor_id,
+                now=self.clock(),
+                lease_seconds=lease_seconds,
+            )
+            if claim is None:
+                return None
+
+            def guard() -> None:
+                try:
+                    if operation_guard is not None:
+                        operation_guard(lease_seconds)
+                    _CAMPAIGN._assert_policy_current(
+                        self.policy, self.clock(),
+                    )
+                    self.native_reference_queue.assert_live(
+                        claim, now=self.clock(),
+                    )
+                except _CAMPAIGN.BenchmarkCampaignBlocked as error:
+                    if error.code == "benchmark.campaign.validity_expired":
+                        raise _REFERENCE_INTAKE.NativeReferenceIntakeFailed(
+                            "native_reference.queue.policy_expired",
+                        ) from None
+                    raise _REFERENCE_INTAKE.NativeReferenceIntakeFailed(
+                        "native_reference.intake.operation_guard_failed",
+                        retryable=True,
+                    ) from None
+                except _REFERENCE_INTAKE.NativeReferenceIntakeFailed:
+                    raise
+                except Exception:
+                    raise _REFERENCE_INTAKE.NativeReferenceIntakeFailed(
+                        "native_reference.intake.operation_guard_failed",
+                        retryable=True,
+                    ) from None
+
+            guarded_verifier = _REFERENCE_INTAKE._GuardedAdapter(
+                self.native_reference_verifier, guard,
+            )
+            guarded_authority = _REFERENCE_INTAKE._GuardedAdapter(
+                self.evidence_authority, guard,
+            )
+            try:
+                guard()
+                artifact = self.input_resolver.reference_store.load(
+                    claim.job_payload,
+                    self.policy,
+                    self.input_resolver.native_reference_route_id,
+                    native_reference_verifier=guarded_verifier,
+                    evidence_authority=guarded_authority,
+                )
+                guard()
+                if artifact is None:
+                    return LeasedNativeReferenceWorkOrder(
+                        claim=claim,
+                        work_order=self.create_native_reference_work_order(
+                            claim.job_payload,
+                        ),
+                    )
+                self.native_reference_queue.complete(
+                    self.policy,
+                    claim,
+                    _REFERENCE_INTAKE._hash_json(artifact),
+                    now=self.clock(),
+                )
+            except Exception as error:
+                code = getattr(
+                    error,
+                    "code",
+                    "native_reference.queue.reconciliation_failed",
+                )
+                retryable = getattr(error, "retryable", False)
+                if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
+                    code = "native_reference.queue.reconciliation_failed"
+                if not isinstance(retryable, bool):
+                    retryable = False
+                try:
+                    outcome = self.native_reference_queue.transition_failure(
+                        self.policy,
+                        claim,
+                        code,
+                        retryable=retryable,
+                        delay_seconds=self._retry_delay(
+                            claim.attempt,
+                            retry_base_seconds,
+                            retry_max_seconds,
+                        ),
+                        now=self.clock(),
+                    )
+                except Exception as transition_error:
+                    transition_code = getattr(
+                        transition_error,
+                        "code",
+                        "benchmark.runtime.reference_queue.state_invalid",
+                    )
+                    if (
+                        not isinstance(transition_code, str)
+                        or ERROR_CODE.fullmatch(transition_code) is None
+                    ):
+                        transition_code = (
+                            "benchmark.runtime.reference_queue.state_invalid"
+                        )
+                    raise BenchmarkRuntimeFailed(
+                        code
+                        if code == "native_reference.queue.policy_expired"
+                        else transition_code,
+                    ) from None
+                raise BenchmarkRuntimeFailed(
+                    outcome.error_code or code,
+                    retryable=outcome.status == "retry_wait",
+                ) from None
+        raise BenchmarkRuntimeFailed(
+            "benchmark.runtime.reference_queue.state_invalid",
+        )
+
+    def renew_native_reference_work_order(
+        self,
+        lease: Any,
+        *,
+        lease_seconds: Any = 3600,
+    ) -> LeasedNativeReferenceWorkOrder:
+        """Renew only the exact live editorial lease token."""
+        if not isinstance(lease, LeasedNativeReferenceWorkOrder):
+            raise BenchmarkRuntimeFailed(
+                "benchmark.runtime.reference_queue.claim_invalid",
+            )
+        try:
+            claim = self.native_reference_queue.renew(
+                lease.claim,
+                now=self.clock(),
+                lease_seconds=lease_seconds,
+            )
+        except Exception as error:
+            code = getattr(
+                error, "code", "benchmark.runtime.reference_queue.state_invalid",
+            )
+            raise BenchmarkRuntimeFailed(code) from None
+        return LeasedNativeReferenceWorkOrder(
+            claim=claim, work_order=lease.work_order,
+        )
+
+    def accept_leased_native_reference_submission(
+        self,
+        lease: Any,
+        submission: Any,
+        *,
+        operation_guard: Callable[[float], Any] | None = None,
+        lease_seconds: Any = 3600,
+        retry_base_seconds: Any = 30,
+        retry_max_seconds: Any = 3600,
+    ):
+        """Verify, store, and complete one exact leased editorial result."""
+        if not isinstance(lease, LeasedNativeReferenceWorkOrder):
+            raise BenchmarkRuntimeFailed(
+                "benchmark.runtime.reference_queue.claim_invalid",
+            )
+        if operation_guard is not None and not callable(operation_guard):
+            raise BenchmarkRuntimeFailed(
+                "benchmark.runtime.reference_queue.guard_invalid",
+            )
+        lease_seconds = _REFERENCE_QUEUE._duration(lease_seconds)
+
+        def guard() -> None:
+            try:
+                if operation_guard is not None:
+                    operation_guard(lease_seconds)
+                _CAMPAIGN._assert_policy_current(
+                    self.policy, self.clock(),
+                )
+                self.native_reference_queue.assert_live(
+                    lease.claim, now=self.clock(),
+                )
+            except _CAMPAIGN.BenchmarkCampaignBlocked as error:
+                if error.code == "benchmark.campaign.validity_expired":
+                    raise _REFERENCE_INTAKE.NativeReferenceIntakeFailed(
+                        "native_reference.queue.policy_expired",
+                    ) from None
+                raise _REFERENCE_INTAKE.NativeReferenceIntakeFailed(
+                    "native_reference.intake.operation_guard_failed",
+                    retryable=True,
+                ) from None
+            except _REFERENCE_INTAKE.NativeReferenceIntakeFailed:
+                raise
+            except Exception:
+                raise _REFERENCE_INTAKE.NativeReferenceIntakeFailed(
+                    "native_reference.intake.operation_guard_failed",
+                    retryable=True,
+                ) from None
+
+        try:
+            artifact = _REFERENCE_INTAKE.accept_native_reference_submission(
+                self.input_resolver.reference_store,
+                lease.work_order,
+                submission,
+                lease.claim.job_payload,
+                self.policy,
+                self.input_resolver.native_reference_route_id,
+                native_reference_verifier=self.native_reference_verifier,
+                evidence_authority=self.evidence_authority,
+                operation_guard=guard,
+                now=self.clock(),
+            )
+            guard()
+            return self.native_reference_queue.complete(
+                self.policy,
+                lease.claim,
+                _REFERENCE_INTAKE._hash_json(artifact),
+                now=self.clock(),
+            )
+        except Exception as error:
+            code = getattr(
+                error, "code", "native_reference.intake.adapter_invalid",
+            )
+            retryable = getattr(error, "retryable", False)
+            if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
+                code = "native_reference.intake.adapter_invalid"
+            if not isinstance(retryable, bool):
+                retryable = False
+            try:
+                return self.native_reference_queue.transition_failure(
+                    self.policy,
+                    lease.claim,
+                    code,
+                    retryable=retryable,
+                    delay_seconds=self._retry_delay(
+                        lease.claim.attempt,
+                        retry_base_seconds,
+                        retry_max_seconds,
+                    ),
+                    now=self.clock(),
+                )
+            except Exception as transition_error:
+                transition_code = getattr(
+                    transition_error,
+                    "code",
+                    "benchmark.runtime.reference_queue.state_invalid",
+                )
+                if (
+                    not isinstance(transition_code, str)
+                    or ERROR_CODE.fullmatch(transition_code) is None
+                ):
+                    transition_code = (
+                        "benchmark.runtime.reference_queue.state_invalid"
+                    )
+                raise BenchmarkRuntimeFailed(
+                    code
+                    if code == "native_reference.queue.policy_expired"
+                    else transition_code,
+                ) from None
+
+    def native_reference_queue_status(self):
+        """Return content-free intake counts and stable failure codes."""
+        return self.native_reference_queue.status(
+            self.policy, self.campaign_id,
+        )
+
+    def native_reference_queue_health(
+        self, *, now: Any, stale_after_seconds: Any = 3600,
+    ):
+        """Reverify every completed digest in a content-free health snapshot."""
+        health = self.native_reference_queue.health(
+            self.policy,
+            self.campaign_id,
+            now=now,
+            stale_after_seconds=stale_after_seconds,
+        )
+        if health.status == "blocked":
+            return health
+        try:
+            rows = self.native_reference_queue.connection.execute("""
+                SELECT target_locale, suite_case_key, artifact_sha256
+                FROM benchmark_native_reference_queue
+                WHERE campaign_id = ? AND status = 'succeeded'
+                ORDER BY target_locale, suite_case_key
+            """, (self.campaign_id,)).fetchall()
+            for row in rows:
+                payload = _CAMPAIGN._job_payload(
+                    self.policy, row["target_locale"], row["suite_case_key"],
+                )
+                artifact = self.input_resolver.reference_store.load(
+                    payload,
+                    self.policy,
+                    self.input_resolver.native_reference_route_id,
+                    native_reference_verifier=self.native_reference_verifier,
+                    evidence_authority=self.evidence_authority,
+                )
+                if (
+                    artifact is None
+                    or _REFERENCE_INTAKE._hash_json(artifact)
+                    != row["artifact_sha256"]
+                ):
+                    raise ValueError
+        except Exception:
+            return _REFERENCE_QUEUE.NativeReferenceQueueHealth(
+                campaign_id=self.campaign_id,
+                status="blocked",
+                reasons=("native_reference.queue.state_invalid",),
+                counts=health.counts,
+                work_count=health.work_count,
+                last_progress_at=health.last_progress_at,
+            )
+        return health
 
     def create_native_reference_work_order(self, job_payload: Any):
         """Export one current target-free order for qualified native review."""

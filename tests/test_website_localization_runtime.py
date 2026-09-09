@@ -630,6 +630,46 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertEqual(review_health.status, "healthy")
         self.assertEqual(dict(review_health.counts)["scoped"], 0)
         self.assertEqual(dict(review_health.counts)["required"], 0)
+        reference_health = next(
+            component for component in report.components
+            if component.component == "benchmark_native_references"
+        )
+        self.assertEqual(reference_health.status, "healthy")
+        self.assertEqual(
+            dict(reference_health.counts)["work_count"], work_count,
+        )
+
+        lease = runtime.claim_native_reference_work_order("native-editor-1")
+        reference_status = runtime.native_reference_queue_status()
+        reference_health = runtime.native_reference_queue_health(now=100)
+        self.assertEqual(lease.as_payload()["work_id"], lease.claim.work_id)
+        self.assertEqual(reference_status["counts"]["leased"], 1)
+        self.assertEqual(reference_health.status, "healthy")
+        self.clock.value = 101
+        renewed = runtime.renew_native_reference_work_order(
+            lease, lease_seconds=3600,
+        )
+        self.assertGreater(
+            renewed.claim.lease_expires_at,
+            lease.claim.lease_expires_at,
+        )
+
+    def test_runtime_native_reference_queue_boundary_fails_closed(self):
+        runtime = self.runtime()
+        for operation in (
+            lambda: runtime.claim_native_reference_work_order("native-editor-1"),
+            runtime.native_reference_queue_status,
+            lambda: runtime.native_reference_queue_health(now=100),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaises(
+                    RUNTIME.LocalizationRuntimeBlocked,
+                ) as caught:
+                    operation()
+                self.assertEqual(
+                    caught.exception.code,
+                    "runtime.benchmark.unavailable",
+                )
 
     def test_runtime_exposes_only_a_stored_reverified_benchmark_report(self):
         values = self.benchmark_configuration()

@@ -2193,6 +2193,287 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             "SELECT COUNT(*) FROM benchmark_native_references"
         ).fetchone()[0], 1)
 
+    def _leased_reference_submission(self, runtime, lease, target=None):
+        target = target or _target_fixture(lease.claim.job_payload, "reference")
+        request = runtime.native_reference_verification_request(
+            lease.work_order,
+            lease.claim.job_payload,
+            target,
+            reviewer_id="qualified-native-reviewer-17",
+            reviewer_version="credential-2026-08-30",
+        )
+        return {
+            "schema": BENCHMARK_RUNTIME._REFERENCE_INTAKE.SUBMISSION_SCHEMA,
+            "work_order_id": lease.work_order["work_order_id"],
+            "work_order_sha256": hashlib.sha256(
+                BENCHMARK_RUNTIME._REFERENCE_INTAKE._canonical_json(
+                    lease.work_order,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "verification_request": request,
+            "qualification_receipt": (
+                runtime.native_reference_verifier.receipt(request)
+            ),
+        }
+
+    def test_native_reference_queue_leases_distinct_target_free_work_orders(self):
+        runtime, _, _, calls, _ = self._benchmark_runtime_fixture()
+
+        first = runtime.claim_native_reference_work_order("native-editor-1")
+        second = runtime.claim_native_reference_work_order("native-editor-2")
+        status = runtime.native_reference_queue_status()
+
+        self.assertNotEqual(first.claim.work_id, second.claim.work_id)
+        self.assertNotEqual(first.claim.lease_token, second.claim.lease_token)
+        self.assertEqual(
+            status["work_count"],
+            len(CAMPAIGN._expected_work(runtime.policy)),
+        )
+        self.assertEqual(status["counts"]["leased"], 2)
+        public = first.as_payload()
+        self.assertEqual(
+            set(public),
+            {
+                "schema", "work_id", "attempt", "max_attempts",
+                "lease_token", "lease_expires_at", "work_order",
+            },
+        )
+        self.assertNotIn("job_payload", public)
+        self.assertNotIn("target_text", json.dumps(public, ensure_ascii=False))
+        self.assertEqual(calls, {
+            "candidate_provider": 0, "baseline": 0, "reference": 0,
+        })
+
+    def test_native_reference_queue_accepts_exact_submission_and_completes(self):
+        runtime, connections, _, calls, _ = self._benchmark_runtime_fixture()
+        lease = runtime.claim_native_reference_work_order("native-editor-1")
+        submission = self._leased_reference_submission(runtime, lease)
+        guard_calls = []
+
+        outcome = runtime.accept_leased_native_reference_submission(
+            lease,
+            submission,
+            operation_guard=guard_calls.append,
+        )
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertRegex(outcome.artifact_sha256, r"^[0-9a-f]{64}$")
+        self.assertGreaterEqual(len(guard_calls), 1)
+        row = connections[0].execute("""
+            SELECT status, artifact_sha256
+            FROM benchmark_native_reference_queue WHERE work_id = ?
+        """, (lease.claim.work_id,)).fetchone()
+        self.assertEqual(tuple(row), ("succeeded", outcome.artifact_sha256))
+        self.assertEqual(connections[3].execute(
+            "SELECT COUNT(*) FROM benchmark_native_references"
+        ).fetchone()[0], 1)
+        self.assertEqual(calls["reference"], 0)
+
+    def test_native_reference_queue_rejects_tamper_without_target_storage(self):
+        runtime, connections, _, _, _ = self._benchmark_runtime_fixture()
+        lease = runtime.claim_native_reference_work_order("native-editor-1")
+        submission = self._leased_reference_submission(runtime, lease)
+        submission["work_order_sha256"] = "0" * 64
+
+        outcome = runtime.accept_leased_native_reference_submission(
+            lease, submission,
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(
+            outcome.error_code,
+            "native_reference.intake.submission_invalid",
+        )
+        self.assertEqual(connections[3].execute(
+            "SELECT COUNT(*) FROM benchmark_native_references"
+        ).fetchone()[0], 0)
+        encoded = json.dumps(runtime.native_reference_queue_status())
+        self.assertNotIn(
+            submission["verification_request"]["target_text"], encoded,
+        )
+
+    def test_native_reference_queue_retries_transient_verifier_failure(self):
+        runtime, connections, _, _, _ = self._benchmark_runtime_fixture()
+        lease = runtime.claim_native_reference_work_order("native-editor-1")
+        submission = self._leased_reference_submission(runtime, lease)
+
+        class UnavailableVerifier:
+            def verify(self, *_):
+                raise TimeoutError("private target and verifier detail")
+
+        runtime.native_reference_verifier = UnavailableVerifier()
+        outcome = runtime.accept_leased_native_reference_submission(
+            lease, submission, retry_base_seconds=30,
+        )
+
+        self.assertEqual(outcome.status, "retry_wait")
+        self.assertEqual(
+            outcome.error_code,
+            "native_reference.intake.verification_unavailable",
+        )
+        self.assertEqual(outcome.next_attempt_at, 130)
+        self.assertNotIn("private", json.dumps(
+            runtime.native_reference_queue_status(),
+        ))
+        self.assertEqual(connections[3].execute(
+            "SELECT COUNT(*) FROM benchmark_native_references"
+        ).fetchone()[0], 0)
+
+    def test_native_reference_queue_recovers_store_commit_before_queue_commit(self):
+        runtime, connections, _, calls, current_time = (
+            self._benchmark_runtime_fixture()
+        )
+        lease = runtime.claim_native_reference_work_order(
+            "native-editor-1", lease_seconds=10,
+        )
+        submission = self._leased_reference_submission(runtime, lease)
+        runtime.accept_native_reference_submission(
+            lease.work_order,
+            submission,
+            lease.claim.job_payload,
+        )
+        current_time[0] = 111
+
+        next_lease = runtime.claim_native_reference_work_order(
+            "native-editor-2", lease_seconds=10,
+        )
+
+        self.assertNotEqual(next_lease.claim.work_id, lease.claim.work_id)
+        row = connections[0].execute("""
+            SELECT status, artifact_sha256
+            FROM benchmark_native_reference_queue WHERE work_id = ?
+        """, (lease.claim.work_id,)).fetchone()
+        self.assertEqual(row["status"], "succeeded")
+        self.assertRegex(row["artifact_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(calls["reference"], 0)
+
+    def test_native_reference_queue_health_blocks_corrupt_state(self):
+        runtime, connections, _, _, _ = self._benchmark_runtime_fixture()
+        lease = runtime.claim_native_reference_work_order("native-editor-1")
+        submission = self._leased_reference_submission(runtime, lease)
+        runtime.accept_leased_native_reference_submission(lease, submission)
+        healthy = runtime.native_reference_queue_health(now=100)
+        self.assertEqual(healthy.status, "healthy")
+
+        connections[0].execute("""
+            UPDATE benchmark_native_reference_queue
+            SET artifact_sha256 = ? WHERE work_id = ?
+        """, ("0" * 64, lease.claim.work_id))
+        connections[0].commit()
+        blocked = runtime.native_reference_queue_health(now=100)
+
+        self.assertEqual(blocked.status, "blocked")
+        self.assertEqual(
+            blocked.reasons,
+            ("native_reference.queue.state_invalid",),
+        )
+
+    def test_native_reference_queue_covers_every_eu_target_and_suite_case(self):
+        required = tuple(
+            profile.locale for profile in PLANNER.EU_OFFICIAL_LOCALES
+            if profile.locale != "en-IE"
+        )
+        selected = campaign_policy(required_locales=required)
+        with sqlite3.connect(":memory:") as connection:
+            store = CAMPAIGN.BenchmarkCampaignStore(connection)
+            campaign_id = store.create(selected, now=100)
+            queue = BENCHMARK_RUNTIME._REFERENCE_QUEUE.NativeReferenceWorkQueue(
+                store,
+            )
+            queue.ensure(selected, campaign_id, max_attempts=3, now=100)
+            rows = connection.execute("""
+                SELECT target_locale, suite_case_key
+                FROM benchmark_native_reference_queue
+            """).fetchall()
+
+        expected = {
+            (locale, case["key"])
+            for locale in required for case in SUITE.manifest()["cases"]
+        }
+        self.assertEqual({tuple(row) for row in rows}, expected)
+        self.assertEqual(len(rows), 64 * 23)
+
+    def test_native_reference_queue_bounds_expired_claim_retries(self):
+        runtime, connections, _, _, current_time = (
+            self._benchmark_runtime_fixture(max_attempts=2)
+        )
+        first = runtime.claim_native_reference_work_order(
+            "native-editor-1", lease_seconds=1,
+        )
+        current_time[0] = 102
+        second = runtime.claim_native_reference_work_order(
+            "native-editor-2", lease_seconds=1,
+        )
+        self.assertEqual(second.claim.work_id, first.claim.work_id)
+        self.assertEqual(second.claim.attempt, 2)
+
+        current_time[0] = 104
+        third = runtime.claim_native_reference_work_order(
+            "native-editor-3", lease_seconds=1,
+        )
+        row = connections[0].execute("""
+            SELECT status, attempts, last_error_code
+            FROM benchmark_native_reference_queue WHERE work_id = ?
+        """, (first.claim.work_id,)).fetchone()
+
+        self.assertNotEqual(third.claim.work_id, first.claim.work_id)
+        self.assertEqual(
+            tuple(row),
+            ("failed", 2, "native_reference.queue.lease_expired"),
+        )
+
+    def test_native_reference_queue_lost_lease_blocks_before_storage(self):
+        runtime, connections, _, _, current_time = (
+            self._benchmark_runtime_fixture()
+        )
+        lease = runtime.claim_native_reference_work_order(
+            "native-editor-1", lease_seconds=1,
+        )
+        submission = self._leased_reference_submission(runtime, lease)
+        current_time[0] = 102
+
+        with self.assertRaises(
+            BENCHMARK_RUNTIME.BenchmarkRuntimeFailed,
+        ) as caught:
+            runtime.accept_leased_native_reference_submission(
+                lease, submission, lease_seconds=1,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "native_reference.queue.lease_lost",
+        )
+        self.assertEqual(connections[3].execute(
+            "SELECT COUNT(*) FROM benchmark_native_references"
+        ).fetchone()[0], 0)
+
+    def test_native_reference_queue_policy_expiry_blocks_external_verification(self):
+        runtime, connections, _, _, current_time = (
+            self._benchmark_runtime_fixture()
+        )
+        lease = runtime.claim_native_reference_work_order("native-editor-1")
+        submission = self._leased_reference_submission(runtime, lease)
+
+        def expire_policy(_lease_seconds):
+            current_time[0] = runtime.policy.valid_until + 1
+
+        with self.assertRaises(
+            BENCHMARK_RUNTIME.BenchmarkRuntimeFailed,
+        ) as caught:
+            runtime.accept_leased_native_reference_submission(
+                lease,
+                submission,
+                operation_guard=expire_policy,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "native_reference.queue.policy_expired",
+        )
+        self.assertEqual(connections[3].execute(
+            "SELECT COUNT(*) FROM benchmark_native_references"
+        ).fetchone()[0], 0)
+
     def test_benchmark_runtime_retries_with_exact_durable_inputs(self):
         reviewer = RetryOnceCampaignReviewer()
         runtime, connections, provider, calls, current_time = (

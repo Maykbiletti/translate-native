@@ -200,12 +200,14 @@ class _GuardedAdapter:
         self._adapter = adapter
         self._guard = guard
         self.guard_failed = False
+        self.guard_error: NativeReferenceIntakeFailed | None = None
 
     def _check(self) -> None:
         try:
             self._guard()
-        except NativeReferenceIntakeFailed:
+        except NativeReferenceIntakeFailed as error:
             self.guard_failed = True
+            self.guard_error = error
             raise
 
     def verify(self, *args):
@@ -291,6 +293,8 @@ def accept_native_reference_submission(
             return
         try:
             operation_guard()
+        except NativeReferenceIntakeFailed:
+            raise
         except Exception:
             raise NativeReferenceIntakeFailed(
                 "native_reference.intake.operation_guard_failed",
@@ -323,19 +327,13 @@ def accept_native_reference_submission(
         raise
     except _STORE.NativeReferenceStoreFailed as error:
         if verifier.guard_failed or authority.guard_failed:
-            raise NativeReferenceIntakeFailed(
-                "native_reference.intake.operation_guard_failed",
-                retryable=True,
-            ) from None
+            raise (verifier.guard_error or authority.guard_error) from None
         raise NativeReferenceIntakeFailed(
             error.code, retryable=error.retryable,
         ) from None
     except _BENCHMARK.BenchmarkBlocked as error:
         if verifier.guard_failed or authority.guard_failed:
-            raise NativeReferenceIntakeFailed(
-                "native_reference.intake.operation_guard_failed",
-                retryable=True,
-            ) from None
+            raise (verifier.guard_error or authority.guard_error) from None
         retryable = error.code in {
             "benchmark.attestation.sign_failed",
             "benchmark.attestation.verify_failed",
@@ -348,10 +346,7 @@ def accept_native_reference_submission(
         ) from None
     except Exception as error:
         if verifier.guard_failed or authority.guard_failed:
-            raise NativeReferenceIntakeFailed(
-                "native_reference.intake.operation_guard_failed",
-                retryable=True,
-            ) from None
+            raise (verifier.guard_error or authority.guard_error) from None
         code = getattr(error, "code", None)
         retryable = getattr(error, "retryable", None)
         if (

@@ -473,6 +473,36 @@ module performs no network call, reads no credential or environment variable,
 and deliberately leaves authentication and qualified-review operations to the
 host adapters.
 
+`integrations/website_localization_native_reference_queue.py` makes that hand-off
+durable for a complete campaign. It creates exactly one text-free queue row for
+every policy-required `(target_locale, suite_case_key)` pair in the campaign
+database. `claim_native_reference_work_order` returns one expiring,
+token-bound lease and its exact target-free work order; concurrent editors
+cannot claim the same live row. The lease payload contains the source and is a
+private editorial artifact even though it contains no target. Renew it with
+`renew_native_reference_work_order` when a qualified review legitimately needs
+more time.
+
+Submit only through `accept_native_reference_submission` on the production
+runtime. The runtime checks the exact live queue lease before each receipt or
+attestation operation, saves the verified artifact in the separate native-
+reference store, and only then records the artifact SHA-256 digest as queue
+success. A verifier or authority outage enters bounded exponential retry;
+malformed, replayed, stale, or rejected evidence becomes a terminal stable
+error without storing its prose. Expired leases are recovered with a new token
+and stop permanently at the configured attempt limit. If a process crashes
+after the artifact commit but before queue completion, the next claim
+reverifies that immutable artifact and reconciles the queue without asking a
+model or external reference loader to create replacement text.
+
+`native_reference_queue_status` and `native_reference_queue_health` expose only
+counts, hashes, timestamps, and stable codes. Health is rollback-only and
+blocks on corrupt state, terminal failures, or an expired benchmark policy;
+expired leases, due retries, and stalled progress degrade visibly. A transport
+adapter must keep the lease token and work-order source private, authenticate
+the editor, reject duplicate JSON keys and oversized bodies, and map the
+runtime's exact content-free outcomes without weakening these checks.
+
 The transport-neutral submission envelope has exactly these top-level fields:
 
 ```json

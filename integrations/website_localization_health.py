@@ -62,6 +62,10 @@ _BENCHMARK_REVIEW = _load_module(
     "blun_website_localization_health_benchmark_review",
     _ROOT / "integrations" / "website_localization_benchmark_review_store.py",
 )
+_REFERENCE_QUEUE = _load_module(
+    "blun_website_localization_health_native_reference_queue",
+    _ROOT / "integrations" / "website_localization_native_reference_queue.py",
+)
 
 
 class LocalizationHealthBlocked(RuntimeError):
@@ -196,6 +200,7 @@ class LocalizationHealthMonitor:
         benchmark_stale_after_seconds: float | int = 3600,
         benchmark_review_store: Any | None = None,
         benchmark_reviewer_route_id: str | None = None,
+        benchmark_reference_queue: Any | None = None,
     ):
         if not self._supports_bridge(bridge):
             raise LocalizationHealthBlocked("bridge must be WebsiteLocalizationCMSBridge")
@@ -230,6 +235,10 @@ class LocalizationHealthMonitor:
             raise LocalizationHealthBlocked("benchmark review configuration is incomplete")
         if benchmark_review_store is not None and benchmark_store is None:
             raise LocalizationHealthBlocked("benchmark review requires campaign configuration")
+        if benchmark_reference_queue is not None and benchmark_store is None:
+            raise LocalizationHealthBlocked(
+                "native-reference queue requires campaign configuration",
+            )
         if benchmark_review_store is not None and (
             not isinstance(
                 getattr(benchmark_review_store, "connection", None),
@@ -243,6 +252,17 @@ class LocalizationHealthMonitor:
             ) is None
         ):
             raise LocalizationHealthBlocked("benchmark review store is invalid")
+        if benchmark_reference_queue is not None and (
+            getattr(
+                getattr(benchmark_reference_queue, "native_reference_queue", None),
+                "connection",
+                None,
+            ) is not benchmark_store.connection
+            or not callable(getattr(
+                benchmark_reference_queue, "native_reference_queue_health", None,
+            ))
+        ):
+            raise LocalizationHealthBlocked("native-reference queue is invalid")
         if (
             isinstance(supervisor_stale_after_seconds, bool)
             or not isinstance(supervisor_stale_after_seconds, (int, float))
@@ -270,6 +290,7 @@ class LocalizationHealthMonitor:
         self.benchmark_stale_after_seconds = float(benchmark_stale_after_seconds)
         self.benchmark_review_store = benchmark_review_store
         self.benchmark_reviewer_route_id = benchmark_reviewer_route_id
+        self.benchmark_reference_queue = benchmark_reference_queue
 
     @staticmethod
     def _supports_bridge(bridge: Any) -> bool:
@@ -1113,6 +1134,86 @@ class LocalizationHealthMonitor:
                 counts,
             )
 
+    def _check_native_reference_queue(
+        self, now: float,
+    ) -> ComponentHealth | None:
+        if self.benchmark_reference_queue is None:
+            return None
+        counts = {status: 0 for status in _REFERENCE_QUEUE.STATUSES}
+        counts["work_count"] = 0
+        try:
+            value = self.benchmark_reference_queue.native_reference_queue_health(
+                now=now,
+                stale_after_seconds=self.benchmark_stale_after_seconds,
+            )
+            payload_method = getattr(value, "as_payload", None)
+            payload = payload_method() if callable(payload_method) else value
+            expected = {
+                "schema", "campaign_id", "status", "reasons", "counts",
+                "work_count", "last_progress_at",
+            }
+            if (
+                not isinstance(payload, Mapping)
+                or set(payload) != expected
+                or payload["schema"] != _REFERENCE_QUEUE.HEALTH_SCHEMA
+                or payload["campaign_id"] != self.benchmark_campaign_id
+                or payload["status"] not in {"healthy", "degraded", "blocked"}
+                or not isinstance(payload["reasons"], list)
+                or payload["reasons"] != sorted(set(payload["reasons"]))
+                or not isinstance(payload["counts"], Mapping)
+                or set(payload["counts"]) != set(_REFERENCE_QUEUE.STATUSES)
+            ):
+                raise ValueError
+            work_count = payload["work_count"]
+            if (
+                isinstance(work_count, bool) or not isinstance(work_count, int)
+                or work_count <= 0
+            ):
+                raise ValueError
+            for name, count in payload["counts"].items():
+                if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                    raise ValueError
+                counts[name] = count
+            if sum(counts[name] for name in _REFERENCE_QUEUE.STATUSES) != work_count:
+                raise ValueError
+            reasons = set(payload["reasons"])
+            if any(
+                not isinstance(reason, str)
+                or _CAMPAIGN.HEALTH_REASON.fullmatch(reason) is None
+                or not reason.startswith("native_reference.queue.")
+                for reason in reasons
+            ):
+                raise ValueError
+            progress = payload["last_progress_at"]
+            if progress is None or _timestamp(progress) > now:
+                raise ValueError
+            expected_status = (
+                "blocked" if counts["failed"] or any(
+                    reason in {
+                        "native_reference.queue.policy_expired",
+                        "native_reference.queue.failed",
+                        "native_reference.queue.state_invalid",
+                    } for reason in reasons
+                )
+                else "degraded" if reasons else "healthy"
+            )
+            if payload["status"] != expected_status:
+                raise ValueError
+            counts["work_count"] = work_count
+            return _component(
+                "benchmark_native_references",
+                expected_status,
+                reasons,
+                counts,
+            )
+        except Exception:
+            return _component(
+                "benchmark_native_references",
+                "blocked",
+                {"native_reference.queue.state_invalid"},
+                counts,
+            )
+
     def check(
         self,
         *,
@@ -1161,6 +1262,7 @@ class LocalizationHealthMonitor:
         supervisor = self._check_supervisor(now)
         benchmark = self._check_benchmark(now)
         benchmark_reviews = self._check_benchmark_reviews(now)
+        benchmark_references = self._check_native_reference_queue(now)
         blocking_workflow = {
             "queue.state_invalid",
             "evidence.state_invalid",
@@ -1233,6 +1335,8 @@ class LocalizationHealthMonitor:
             components = components + (benchmark,)
         if benchmark_reviews is not None:
             components = components + (benchmark_reviews,)
+        if benchmark_references is not None:
+            components = components + (benchmark_references,)
         if (
             storage_reasons
             or provider_reasons
@@ -1243,12 +1347,19 @@ class LocalizationHealthMonitor:
                 benchmark_reviews is not None
                 and benchmark_reviews.status == "blocked"
             )
+            or (
+                benchmark_references is not None
+                and benchmark_references.status == "blocked"
+            )
         ):
             status = "blocked"
         elif workflow_reasons or (
             supervisor is not None and supervisor.status == "degraded"
         ) or (
             benchmark is not None and benchmark.status == "degraded"
+        ) or (
+            benchmark_references is not None
+            and benchmark_references.status == "degraded"
         ):
             status = "degraded"
         else:

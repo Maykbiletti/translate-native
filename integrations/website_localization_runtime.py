@@ -576,6 +576,14 @@ class WebsiteLocalizationRuntime:
                 self.benchmark_runtime.reviewer_route_id
                 if self.benchmark_runtime is not None else None
             ),
+            benchmark_reference_queue=(
+                self.benchmark_runtime
+                if self.benchmark_runtime is not None
+                and "native_reference_queue" in getattr(
+                    self.benchmark_runtime, "__dict__", {},
+                )
+                else None
+            ),
         )
 
     def __repr__(self) -> str:
@@ -628,4 +636,98 @@ class WebsiteLocalizationRuntime:
                 r"[a-z][a-z0-9_.-]{0,127}", code,
             ) is None:
                 code = "runtime.benchmark.report.invalid"
+            raise LocalizationRuntimeBlocked(code) from None
+
+    def claim_native_reference_work_order(
+        self,
+        editor_id: Any,
+        **options: Any,
+    ):
+        """Lease one exact benchmark source to a qualified native editor."""
+        if self.benchmark_runtime is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        try:
+            return self.benchmark_runtime.claim_native_reference_work_order(
+                editor_id, **options,
+            )
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.reference_queue.invalid"
+            raise LocalizationRuntimeBlocked(code) from None
+
+    def renew_native_reference_work_order(self, lease: Any, **options: Any):
+        """Renew one exact live native-editor lease."""
+        if self.benchmark_runtime is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        try:
+            return self.benchmark_runtime.renew_native_reference_work_order(
+                lease, **options,
+            )
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.reference_queue.invalid"
+            raise LocalizationRuntimeBlocked(code) from None
+
+    def accept_native_reference_submission(
+        self,
+        lease: Any,
+        submission: Any,
+        **options: Any,
+    ):
+        """Verify and persist one exact leased qualified-native submission."""
+        if self.benchmark_runtime is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        try:
+            return self.benchmark_runtime.accept_leased_native_reference_submission(
+                lease, submission, **options,
+            )
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.reference_queue.invalid"
+            raise LocalizationRuntimeBlocked(code) from None
+
+    def native_reference_queue_status(self):
+        """Return content-free editorial progress for the active benchmark."""
+        if self.benchmark_runtime is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        try:
+            return self.benchmark_runtime.native_reference_queue_status()
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.reference_queue.invalid"
+            raise LocalizationRuntimeBlocked(code) from None
+
+    def native_reference_queue_health(
+        self,
+        *,
+        now: float | int | None = None,
+        stale_after_seconds: Any = 3600,
+    ):
+        """Return a read-only, content-free native-reference queue check."""
+        if self.benchmark_runtime is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        checked_at = self._clock() if now is None else now
+        try:
+            return self.benchmark_runtime.native_reference_queue_health(
+                now=checked_at,
+                stale_after_seconds=stale_after_seconds,
+            )
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.reference_queue.invalid"
             raise LocalizationRuntimeBlocked(code) from None
