@@ -7,7 +7,7 @@ import json
 import sqlite3
 import sys
 import unittest
-from dataclasses import replace
+from dataclasses import make_dataclass, replace
 from pathlib import Path
 
 
@@ -281,6 +281,38 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.ingest(changed)
         self.assertEqual(caught.exception.code, "cms.event.idempotency_collision")
         self.assertEqual(self.queue_connection.execute("SELECT COUNT(*) FROM localization_jobs").fetchone()[0], 2)
+
+    def test_only_exact_frozen_cross_module_signature_values_are_normalized(self):
+        event = change_event()
+        valid = self.signed_event(event)
+        ForeignSignature = make_dataclass(
+            "CMSMessageSignature",
+            (("algorithm", str), ("key_id", str), ("signature", str)),
+            frozen=True,
+        )
+        accepted = ForeignSignature(
+            valid.algorithm, valid.key_id, valid.signature,
+        )
+        outcome = self.bridge.ingest_change(
+            event, accepted, self.event_authority, now=100,
+        )
+        self.assertEqual(outcome.inserted_jobs, 2)
+
+        MutableSignature = make_dataclass(
+            "CMSMessageSignature",
+            (("algorithm", str), ("key_id", str), ("signature", str)),
+        )
+        rejected = MutableSignature(
+            valid.algorithm, valid.key_id, valid.signature,
+        )
+        changed = change_event(
+            event_id="cms-event-185", source_sequence=185,
+        )
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge.ingest_change(
+                changed, rejected, self.event_authority, now=101,
+            )
+        self.assertEqual(caught.exception.code, "cms.signature.invalid")
 
     def test_new_events_require_signed_positive_source_sequence(self):
         for value in (None, 0, True, 1.5):

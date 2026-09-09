@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib.util
+import io
+import json
 import sqlite3
 import sys
 import unittest
@@ -367,6 +369,61 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             "healthy",
         )
 
+    def test_runtime_exposes_authenticated_v2_cms_ingress_and_progress(self):
+        runtime = self.runtime(cms_api_max_attempts=4)
+        event = self.event()
+
+        def request(path, value):
+            raw = json.dumps(value, ensure_ascii=False).encode("utf-8")
+            signature = self.event_authority.sign(
+                RUNTIME._API._canonical_json(value).encode("utf-8"),
+            )
+            environ = {
+                "PATH_INFO": path,
+                "QUERY_STRING": "",
+                "REQUEST_METHOD": "POST",
+                "wsgi.url_scheme": "https",
+                "CONTENT_TYPE": "application/json; charset=utf-8",
+                "CONTENT_LENGTH": str(len(raw)),
+                "wsgi.input": io.BytesIO(raw),
+                "HTTP_X_LOCALIZATION_SIGNATURE_ALGORITHM": signature.algorithm,
+                "HTTP_X_LOCALIZATION_KEY_ID": signature.key_id,
+                "HTTP_X_LOCALIZATION_SIGNATURE": signature.signature,
+            }
+            captured = {}
+            body = b"".join(runtime.cms_api(
+                environ,
+                lambda status, headers: captured.update(
+                    status=status, headers=headers,
+                ),
+            ))
+            return captured["status"], json.loads(body)
+
+        status, accepted = request(RUNTIME._API.CHANGE_PATH, event)
+        self.assertEqual(status, "202 Accepted")
+        self.assertEqual(accepted["job_count"], 1)
+        self.assertEqual(runtime.queue.plan_counts(accepted["plan_id"])["pending"], 1)
+        queue_status = runtime.queue.status(
+            runtime.queue.connection.execute(
+                "SELECT job_id FROM localization_jobs",
+            ).fetchone()[0],
+        )
+        self.assertEqual(queue_status.max_attempts, 4)
+
+        progress_request = {
+            "schema": RUNTIME._API.STATUS_REQUEST_SCHEMA,
+            "request_id": "runtime-status-1",
+            "event_id": event["event_id"],
+            "site_id": event["site_id"],
+            "requested_at": self.clock(),
+        }
+        status, progress = request(RUNTIME._API.STATUS_PATH, progress_request)
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(progress["source_sequence"], 1)
+        self.assertEqual(progress["locales"][0]["target_locale"], "fi-FI")
+        self.assertNotIn("source_text", json.dumps(progress))
+        self.assertIs(runtime.cms_api.bridge, runtime.bridge)
+
     def test_runtime_restores_only_its_signed_local_translation_memory(self):
         self.seed_approval_then_replace_operational_stores()
         calls = []
@@ -460,6 +517,20 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
 
         after = tuple(connection.total_changes for connection in self.connections)
         self.assertEqual(before, after)
+
+    def test_runtime_rejects_invalid_cms_ingress_policy_without_schema_writes(self):
+        before = tuple(connection.total_changes for connection in self.connections)
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.cms_api.max_attempts.invalid",
+        ):
+            self.runtime(cms_api_max_attempts=0)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
 
     def test_runtime_integrates_bound_benchmark_campaign_health(self):
         campaign = RUNTIME._HEALTH._CAMPAIGN

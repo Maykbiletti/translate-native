@@ -18,7 +18,7 @@ import sys
 import time
 import unicodedata
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol
 
@@ -190,6 +190,33 @@ class DeliveryOutcome:
     error_code: str | None = None
 
 
+@dataclass(frozen=True)
+class LocaleProgress:
+    job_id: str
+    target_locale: str
+    status: str
+    attempts: int
+    max_attempts: int
+    next_attempt_at: float
+    lease_expires_at: float | None
+    lease_expired: bool
+    last_error_code: str | None
+    last_error_detail_hash: str | None
+    result_sha256: str | None
+
+
+@dataclass(frozen=True)
+class ChangeProgress:
+    event_id: str
+    site_id: str
+    plan_id: str
+    website_version: str
+    source_sequence: int
+    job_count: int
+    counts: dict[str, int]
+    locales: tuple[LocaleProgress, ...]
+
+
 def _canonical_json(value: Any) -> str:
     try:
         encoded = json.dumps(
@@ -249,7 +276,23 @@ def _duration(value: Any, code: str, *, maximum: float = MAX_LEASE_SECONDS) -> f
 
 def _signature(value: Any, code: str = "cms.signature.invalid") -> CMSMessageSignature:
     if not isinstance(value, CMSMessageSignature):
-        raise CMSBridgeBlocked(code)
+        expected = tuple(field.name for field in fields(CMSMessageSignature))
+        try:
+            actual = tuple(field.name for field in fields(value))
+            parameters = type(value).__dataclass_params__
+            if (
+                not is_dataclass(value)
+                or isinstance(value, type)
+                or type(value).__name__ != CMSMessageSignature.__name__
+                or parameters.frozen is not True
+                or actual != expected
+            ):
+                raise TypeError("incompatible signature")
+            value = CMSMessageSignature(**{
+                field: getattr(value, field) for field in expected
+            })
+        except Exception:
+            raise CMSBridgeBlocked(code) from None
     for part in (value.algorithm, value.key_id):
         if not isinstance(part, str) or TOKEN.fullmatch(part) is None:
             raise CMSBridgeBlocked(code)
@@ -647,6 +690,85 @@ class WebsiteLocalizationCMSBridge:
         return IngestedChange(
             event_id, plan.plan_id, len(plan.jobs), inserted,
             "superseded" if superseded else "enqueued",
+        )
+
+    def change_progress(
+        self,
+        event_id: Any,
+        event_verifier: CMSMessageAuthority,
+        *,
+        site_id: Any,
+        requester_key_id: Any,
+        now: float | int,
+    ) -> ChangeProgress:
+        """Return content-free progress only to the event's exact site credential."""
+        event_id = _token(event_id, "cms.event_id.invalid")
+        site_id = _token(site_id, "cms.site_id.invalid")
+        requester_key_id = _token(
+            requester_key_id, "cms.status.requester_key_id.invalid",
+        )
+        now = _timestamp(now, "cms.time.invalid")
+        topic = self.connection.execute(
+            "SELECT site_id, generation FROM cms_event_topics WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        event_row = self.connection.execute(
+            "SELECT key_id FROM cms_change_events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if (
+            topic is None
+            or event_row is None
+            or topic["site_id"] != site_id
+            or event_row["key_id"] != requester_key_id
+        ):
+            raise CMSBridgeBlocked("cms.status.scope_rejected")
+
+        event, plan = self._load_event(event_id, event_verifier)
+        if event["site_id"] != site_id:
+            raise CMSBridgeBlocked("cms.status.scope_rejected")
+        locales = []
+        try:
+            for job in plan.jobs:
+                status = self.queue.status(job.job_id)
+                if (
+                    status.target_locale != job.target.locale
+                    or plan.plan_id not in status.plan_ids
+                ):
+                    raise CMSBridgeBlocked("cms.queue.identity_lost")
+                if status.status == "succeeded":
+                    self.queue.result(job.job_id)
+                locales.append(LocaleProgress(
+                    job_id=status.job_id,
+                    target_locale=status.target_locale,
+                    status=status.status,
+                    attempts=status.attempts,
+                    max_attempts=status.max_attempts,
+                    next_attempt_at=status.next_attempt_at,
+                    lease_expires_at=status.lease_expires_at,
+                    lease_expired=(
+                        status.status == "leased"
+                        and status.lease_expires_at is not None
+                        and status.lease_expires_at <= now
+                    ),
+                    last_error_code=status.last_error_code,
+                    last_error_detail_hash=status.last_error_detail_hash,
+                    result_sha256=status.result_sha256,
+                ))
+            counts = self.queue.plan_counts(plan.plan_id)
+        except _QUEUE.LocalizationQueueBlocked:
+            raise CMSBridgeBlocked("cms.queue.integrity_failed") from None
+        if sum(counts.values()) != len(plan.jobs) or len(locales) != len(plan.jobs):
+            raise CMSBridgeBlocked("cms.queue.identity_lost")
+        return ChangeProgress(
+            event_id=event["event_id"],
+            site_id=event["site_id"],
+            plan_id=plan.plan_id,
+            website_version=event["website_version"],
+            source_sequence=int(topic["generation"]),
+            job_count=len(plan.jobs),
+            counts=counts,
+            locales=tuple(sorted(locales, key=lambda item: item.target_locale)),
         )
 
     def _load_event(

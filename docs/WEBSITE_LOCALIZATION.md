@@ -1337,6 +1337,32 @@ immediately before delivery. Regression tests cover replay, collision,
 supersession, migration, partial readiness, tampering, exact acknowledgements,
 bounded retries, opaque failures, and crash recovery.
 
+### Authenticated CMS webhook API
+
+`integrations/website_localization_api.py` exposes the current signed CMS
+change contract and content-free per-locale progress through two strict
+HTTPS-only WSGI routes. The composed runtime publishes the same callable as
+`runtime.cms_api`; no second bridge, queue, or database is constructed.
+
+`POST /v2/localization/changes` accepts only a complete signed
+`blun.cms-content-change.v2` event. Successful intake durably enqueues one exact
+job per locale before returning. Exact replay is idempotent; changed event IDs,
+reused source sequences, new schema-v1 events, and delayed superseded changes
+cannot become current work. `POST /v2/localization/status` accepts a separate
+short-lived signed request and returns only identifiers, counts, lease/retry
+state, stable errors, and hashes. The signed site and original event credential
+must match, preventing cross-site status access even when a verifier recognizes
+multiple credentials.
+
+Both routes reject plaintext transport, query strings, transfer encoding,
+ambiguous or oversized JSON, and invalid framing. Status revalidates the stored
+event signature, current source generation, exact plan/job/locale identities,
+and every successful result before returning a complete response. Superseded,
+missing, altered, or wrong-scope state blocks fail-closed without exposing
+source text, target text, provider prose, signatures, or credentials. The full
+public request, response, deployment, and failure contract is documented in
+[CMS localization webhook API v2](WEBSITE_LOCALIZATION_API.md).
+
 ## Commercial price and offer profile
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,

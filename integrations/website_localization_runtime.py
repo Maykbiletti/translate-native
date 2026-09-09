@@ -68,6 +68,10 @@ _BENCHMARK_RUNTIME = _load_module(
     "blun_website_localization_runtime_benchmark_execution",
     _ROOT / "integrations" / "website_localization_benchmark_runtime.py",
 )
+_API = _load_module(
+    "blun_website_localization_runtime_api",
+    _ROOT / "integrations" / "website_localization_api.py",
+)
 _CMS = _SERVICE._CMS
 _QUEUE = _CMS._QUEUE
 _RELEASE = _CMS._RELEASE
@@ -330,6 +334,7 @@ class WebsiteLocalizationRuntime:
         supervisor_connection: sqlite3.Connection,
         dependencies: Mapping[str, Any],
         supervisor_worker_id: str,
+        cms_api_max_attempts: int = 3,
         supervisor_policy: Any = None,
         supervisor_stale_after_seconds: float | int = 30,
         benchmark_connection: sqlite3.Connection | None = None,
@@ -383,6 +388,12 @@ class WebsiteLocalizationRuntime:
             "runtime.benchmark.stale_after_seconds.invalid",
             maximum=_HEALTH._CAMPAIGN.MAX_STALE_SECONDS,
         )
+        if (
+            isinstance(cms_api_max_attempts, bool)
+            or not isinstance(cms_api_max_attempts, int)
+            or not 1 <= cms_api_max_attempts <= 20
+        ):
+            raise LocalizationRuntimeBlocked("runtime.cms_api.max_attempts.invalid")
         connections = (
             queue_connection, release_connection, cms_connection,
             evidence_connection, supervisor_connection,
@@ -440,6 +451,12 @@ class WebsiteLocalizationRuntime:
         self._dependencies = MappingProxyType(runtime_dependencies)
         self.bridge = _CMS.WebsiteLocalizationCMSBridge(
             cms_connection, self.queue, self.release_store,
+        )
+        self.cms_api = _API.WebsiteLocalizationAPI(
+            self.bridge,
+            validated["event_verifier"],
+            clock=self._clock,
+            max_attempts=cms_api_max_attempts,
         )
         self.evidence_state = _COORDINATOR.QualityEvidenceStateStore(
             evidence_connection,
