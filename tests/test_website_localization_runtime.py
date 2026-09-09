@@ -424,6 +424,55 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertNotIn("source_text", json.dumps(progress))
         self.assertIs(runtime.cms_api.bridge, runtime.bridge)
 
+    def test_runtime_exposes_health_only_with_explicit_operator_authentication(self):
+        authentication_requests = []
+
+        def authenticate(request):
+            authentication_requests.append(request)
+            return {
+                "schema": RUNTIME._HEALTH_HTTP.PRINCIPAL_SCHEMA,
+                "reader_id": "operations-1",
+                "credential_id": "health-reader-1",
+                "credential_version": "2026-09-09",
+                "scope": "service-health",
+            }
+
+        runtime = self.runtime(
+            health_http_authenticator=authenticate,
+            health_provider_probe=ProviderProbe(),
+        )
+        changes_before = tuple(
+            connection.total_changes for connection in self.connections
+        )
+        captured = {}
+        body = b"".join(runtime.health_http({
+            "PATH_INFO": RUNTIME._HEALTH_HTTP.HEALTH_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "GET",
+            "wsgi.url_scheme": "https",
+            "CONTENT_LENGTH": "",
+            "wsgi.input": io.BytesIO(b""),
+            "HTTP_AUTHORIZATION": "Bearer private-operator-token",
+        }, lambda status, headers: captured.update(
+            status=status, headers=dict(headers),
+        )))
+        payload = json.loads(body)
+
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertEqual(payload["schema"], RUNTIME._HEALTH_HTTP.RESPONSE_SCHEMA)
+        self.assertEqual(payload["report"]["status"], "degraded")
+        self.assertEqual(payload["report"]["schema"], RUNTIME._HEALTH.SCHEMA)
+        self.assertEqual(len(authentication_requests), 1)
+        self.assertNotIn("private-operator-token", json.dumps(payload))
+        self.assertNotIn("source_text", json.dumps(payload))
+        self.assertEqual(
+            changes_before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+
+        unconfigured = self.runtime()
+        self.assertIsNone(unconfigured.health_http)
+
     def test_runtime_restores_only_its_signed_local_translation_memory(self):
         self.seed_approval_then_replace_operational_stores()
         calls = []
@@ -531,6 +580,40 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             before,
             tuple(connection.total_changes for connection in self.connections),
         )
+
+    def test_runtime_rejects_invalid_health_http_configuration_without_schema_writes(self):
+        scenarios = (
+            (
+                {"health_http_authenticator": object()},
+                "runtime.health_http.authenticator.invalid",
+            ),
+            (
+                {"health_provider_probe": ProviderProbe()},
+                "runtime.health_http.incomplete",
+            ),
+            (
+                {
+                    "health_http_authenticator": lambda request: None,
+                    "health_provider_probe": object(),
+                },
+                "runtime.health_http.provider_probe.invalid",
+            ),
+        )
+        for options, code in scenarios:
+            with self.subTest(code=code):
+                before = tuple(
+                    connection.total_changes for connection in self.connections
+                )
+                with self.assertRaisesRegex(
+                    RUNTIME.LocalizationRuntimeBlocked, code,
+                ):
+                    self.runtime(**options)
+                self.assertEqual(
+                    before,
+                    tuple(
+                        connection.total_changes for connection in self.connections
+                    ),
+                )
 
     def test_runtime_integrates_bound_benchmark_campaign_health(self):
         campaign = RUNTIME._HEALTH._CAMPAIGN

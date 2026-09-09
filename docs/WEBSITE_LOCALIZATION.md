@@ -1558,6 +1558,16 @@ independent schemas, transactions, and migration rules. The runtime neither
 opens nor closes them. It also never reads a configuration file, environment
 variable, credential, signing key, or network endpoint.
 
+Service-wide HTTP health is disabled unless the host supplies an explicit
+`health_http_authenticator`. With that capability, the same composition root
+exposes `runtime.health_http`; an optional `health_provider_probe` is bound to
+that reader and cannot be configured on its own. Both values are validated
+before any store creates or migrates a schema. The operator endpoint is distinct
+from signed tenant CMS progress because its content-free report can contain
+identifiers for every configured site. Its complete authentication, response,
+and failure contract is documented in
+[`WEBSITE_LOCALIZATION_HEALTH_HTTP.md`](WEBSITE_LOCALIZATION_HEALTH_HTTP.md).
+
 When configured, the existing content-free health report gains a
 `benchmark_campaign` component. Full `benchmark_execution` configuration also
 adds `benchmark_reviews`, bound to the same durable review store and reviewer
@@ -1646,6 +1656,14 @@ model endpoints. It accepts the same host-owned event, approval, and
 publication verifiers as the runtime, an optional `ProviderHealthProbe`, and
 the coordinator's optional `QualityEvidenceStateStore`. A check performs no
 repair, retry, lease transition, signing action, or CMS call.
+
+`integrations/website_localization_health_http.py` makes that exact report
+available to a separately authenticated service operator. It authenticates
+before invoking the monitor, requires HTTPS and an empty query-free request,
+and validates the complete returned report again before serialization. A valid
+blocked assessment uses HTTP `503`; malformed monitor output or private
+exceptions are reduced to stable content-free errors. No endpoint exists when
+the runtime lacks the explicit operator authenticator.
 
 The provider probe receives only `provider_id`, `model_id`, and
 `model_version`—never source text, target text, glossary terms, or reviewer

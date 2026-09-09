@@ -64,6 +64,10 @@ _HEALTH = _load_module(
     "blun_website_localization_runtime_health",
     _ROOT / "integrations" / "website_localization_health.py",
 )
+_HEALTH_HTTP = _load_module(
+    "blun_website_localization_runtime_health_http",
+    _ROOT / "integrations" / "website_localization_health_http.py",
+)
 _BENCHMARK_RUNTIME = _load_module(
     "blun_website_localization_runtime_benchmark_execution",
     _ROOT / "integrations" / "website_localization_benchmark_runtime.py",
@@ -335,6 +339,8 @@ class WebsiteLocalizationRuntime:
         dependencies: Mapping[str, Any],
         supervisor_worker_id: str,
         cms_api_max_attempts: int = 3,
+        health_http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
+        health_provider_probe: Any | None = None,
         supervisor_policy: Any = None,
         supervisor_stale_after_seconds: float | int = 30,
         benchmark_connection: sqlite3.Connection | None = None,
@@ -394,6 +400,20 @@ class WebsiteLocalizationRuntime:
             or not 1 <= cms_api_max_attempts <= 20
         ):
             raise LocalizationRuntimeBlocked("runtime.cms_api.max_attempts.invalid")
+        if health_http_authenticator is not None and not callable(
+            health_http_authenticator
+        ):
+            raise LocalizationRuntimeBlocked(
+                "runtime.health_http.authenticator.invalid",
+            )
+        if health_provider_probe is not None:
+            if health_http_authenticator is None:
+                raise LocalizationRuntimeBlocked("runtime.health_http.incomplete")
+            _capability(
+                health_provider_probe,
+                "check",
+                "runtime.health_http.provider_probe.invalid",
+            )
         connections = (
             queue_connection, release_connection, cms_connection,
             evidence_connection, supervisor_connection,
@@ -602,6 +622,18 @@ class WebsiteLocalizationRuntime:
                 else None
             ),
         )
+        self.health_http = None
+        if health_http_authenticator is not None:
+            self.health_http = (
+                _HEALTH_HTTP.WebsiteLocalizationHealthHTTPApplication(
+                    lambda *, now: self.health(
+                        provider_probe=health_provider_probe,
+                        now=now,
+                    ),
+                    health_http_authenticator,
+                    clock=self._clock,
+                )
+            )
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} schema={SCHEMA}>"

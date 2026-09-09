@@ -15,6 +15,11 @@ a trusted proxy may derive `wsgi.url_scheme`; never trust an arbitrary forwarded
 header. The host owns keys, credential-to-site provisioning, network access,
 rate limits, timeouts, database backup, and request-log redaction.
 
+This tenant-facing API deliberately does not expose service-wide health. An
+operator can enable the separately authenticated `runtime.health_http` reader
+described in
+[`WEBSITE_LOCALIZATION_HEALTH_HTTP.md`](WEBSITE_LOCALIZATION_HEALTH_HTTP.md).
+
 `require_https=False` is only for an authenticated loopback or test transport.
 The application rejects query strings, transfer encoding, ambiguous JSON,
 invalid UTF-8, a UTF-8 BOM, non-finite numbers, unknown fields, missing or
