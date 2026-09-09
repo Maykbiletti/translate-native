@@ -953,6 +953,35 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             self.component(tampered, "cms").reasons,
         )
 
+    def test_cancelled_prequeue_crash_gap_is_healthy_without_provider_probe(self):
+        current = event()
+        enqueue_plan = self.queue.enqueue_plan
+
+        def fail_before_queue(*_args, **_kwargs):
+            raise QUEUE.LocalizationQueueBlocked("simulated queue outage")
+
+        self.queue.enqueue_plan = fail_before_queue
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked):
+                self.ingest_event(current)
+        finally:
+            self.queue.enqueue_plan = enqueue_plan
+        self.cancel(current)
+
+        report = self.report()
+
+        self.assertEqual(report.status, "healthy")
+        self.assertEqual(report.website_versions[0].status, "cancelled")
+        self.assertEqual(
+            dict(report.website_versions[0].queue_counts)["cancelled"],
+            2,
+        )
+        self.assertNotIn(
+            "cms.event.awaiting_queue_resume",
+            self.component(report, "cms").reasons,
+        )
+        self.assertEqual(self.probe.calls, [])
+
     def test_tampered_source_generation_blocks_health(self):
         self.ingest()
         self.cms_connection.execute("""

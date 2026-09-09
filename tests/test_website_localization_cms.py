@@ -679,6 +679,88 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "cms.event.cancelled")
 
+    def test_cancellation_closes_prequeue_crash_gap_and_blocks_replay(self):
+        event = change_event()
+        enqueue_plan = self.queue.enqueue_plan
+
+        def fail_before_queue(*_args, **_kwargs):
+            raise QUEUE.LocalizationQueueBlocked("simulated queue outage")
+
+        self.queue.enqueue_plan = fail_before_queue
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+                self.ingest(event)
+        finally:
+            self.queue.enqueue_plan = enqueue_plan
+        self.assertEqual(caught.exception.code, "cms.queue.rejected")
+        self.assertEqual(
+            self.cms_connection.execute(
+                "SELECT status FROM cms_change_events WHERE event_id = ?",
+                (event["event_id"],),
+            ).fetchone()[0],
+            "accepted",
+        )
+        self.assertEqual(
+            self.queue_connection.execute(
+                "SELECT COUNT(*) FROM localization_jobs"
+            ).fetchone()[0],
+            0,
+        )
+
+        self.cancel(event)
+        replay = self.ingest(event, now=300)
+        progress = self.bridge.change_progress(
+            event["event_id"],
+            self.event_authority,
+            site_id=event["site_id"],
+            requester_key_id="cms-key-1",
+            now=301,
+        )
+
+        self.assertEqual((replay.status, replay.inserted_jobs), ("cancelled", 0))
+        self.assertEqual(progress.counts["cancelled"], 2)
+        self.assertEqual(
+            tuple(item.status for item in progress.locales),
+            ("cancelled", "cancelled"),
+        )
+        self.assertEqual(
+            self.queue_connection.execute(
+                "SELECT COUNT(*) FROM localization_jobs"
+            ).fetchone()[0],
+            0,
+        )
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge.prepare_delivery(
+                event["event_id"], self.event_authority,
+                self.approval_authority, self.publication_authority, now=302,
+            )
+        self.assertEqual(caught.exception.code, "cms.event.cancelled")
+
+    def test_cancellation_during_queue_enqueue_remains_terminal(self):
+        event = change_event()
+        enqueue_plan = self.queue.enqueue_plan
+
+        def enqueue_after_cancellation(plan, **values):
+            self.cancel(event, now=150)
+            return enqueue_plan(plan, **values)
+
+        self.queue.enqueue_plan = enqueue_after_cancellation
+        try:
+            result = self.ingest(event)
+        finally:
+            self.queue.enqueue_plan = enqueue_plan
+
+        self.assertEqual((result.status, result.inserted_jobs), ("cancelled", 2))
+        self.assertEqual(
+            self.cms_connection.execute(
+                "SELECT status FROM cms_change_events WHERE event_id = ?",
+                (event["event_id"],),
+            ).fetchone()[0],
+            "accepted",
+        )
+        replay = self.ingest(event, now=300)
+        self.assertEqual((replay.status, replay.inserted_jobs), ("cancelled", 0))
+
     def test_cancellation_revokes_pending_delivery_and_never_calls_publisher(self):
         event = change_event()
         self.ingest(event)

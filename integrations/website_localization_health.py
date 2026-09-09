@@ -802,6 +802,7 @@ class LocalizationHealthMonitor:
                     event_verifier,
                     allow_superseded=True,
                     allow_cancelled=True,
+                    allow_accepted=True,
                 )
             except Exception:
                 reasons.add("cms.cancellation.invalid")
@@ -820,7 +821,11 @@ class LocalizationHealthMonitor:
             "SELECT event_id, status FROM cms_change_events ORDER BY event_id"
         ).fetchall()
         for row in rows:
-            if row["status"] != "enqueued":
+            cancelled = self.bridge.connection.execute(
+                "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+                (row["event_id"],),
+            ).fetchone() is not None
+            if row["status"] != "enqueued" and not cancelled:
                 reasons.add("cms.event.awaiting_queue_resume")
                 continue
             try:
@@ -828,14 +833,11 @@ class LocalizationHealthMonitor:
                     "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
                     (row["event_id"],),
                 ).fetchone() is not None
-                cancelled = self.bridge.connection.execute(
-                    "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
-                    (row["event_id"],),
-                ).fetchone() is not None
                 event, plan = self.bridge._load_event(
                     row["event_id"], event_verifier,
                     allow_superseded=superseded,
                     allow_cancelled=cancelled,
+                    allow_accepted=cancelled,
                 )
                 localization = event["localization"]
                 if not superseded and not cancelled:
@@ -844,7 +846,11 @@ class LocalizationHealthMonitor:
                         localization["model_id"],
                         localization["model_version"],
                     ))
-                queue_counts = self.queue.plan_counts(plan.plan_id)
+                if cancelled and row["status"] == "accepted":
+                    queue_counts = {status: 0 for status in QUEUE_STATUSES}
+                    queue_counts["cancelled"] = len(plan.jobs)
+                else:
+                    queue_counts = self.queue.plan_counts(plan.plan_id)
                 readiness = self.release_store.readiness(
                     plan, approval_authority, now=now,
                 )

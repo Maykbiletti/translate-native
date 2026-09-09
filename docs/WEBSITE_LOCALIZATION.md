@@ -1214,10 +1214,20 @@ accepted the request. The caller must observe the lease outcome before retrying.
 Deleting content already published requires an independently signed CMS
 tombstone operation; cancellation is deliberately limited to unpublished work.
 
+Cancellation remains available during the durable intake crash gap, after the
+signed event and source sequence are stored but before queue insertion has
+finished. The bridge checks the ledger both before and after queue insertion.
+Therefore an exact replay cannot revive withdrawn work, and a cancellation that
+races insertion prevents the event from becoming production-eligible. Tenant
+status, lifecycle, and health expose this intentionally queue-free state as
+`cancelled` instead of misreporting it as an intake outage; no provider health
+probe is made for that event.
+
 The CMS signs the canonical UTF-8 JSON bytes outside the envelope. The bridge
 verifies the signature before its first write, derives the deterministic plan,
 and persists the event before enqueuing it. If the process stops between those
-two transactions, replaying the exact event resumes queue insertion safely.
+two transactions, replaying the exact event resumes queue insertion safely
+unless the CMS has meanwhile submitted its exact signed cancellation.
 The same `event_id` with different canonical bytes is an idempotency collision
 and cannot add work.
 

@@ -871,6 +871,7 @@ class WebsiteLocalizationCMSBridge:
             verifier,
             allow_superseded=True,
             allow_cancelled=True,
+            allow_accepted=True,
         )
         topic = self.connection.execute(
             "SELECT * FROM cms_event_topics WHERE event_id = ?",
@@ -995,58 +996,90 @@ class WebsiteLocalizationCMSBridge:
                 if topic is None or (topic["site_id"], topic["source_id"]) != (site_id, source_id):
                     raise CMSBridgeBlocked("cms.event.topic_invalid")
 
+            cancelled = self.connection.execute(
+                "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
+                (event_id,),
+            ).fetchone() is not None
+
+        if cancelled:
+            self._load_event(
+                event_id,
+                verifier,
+                allow_superseded=True,
+                allow_cancelled=True,
+                allow_accepted=True,
+            )
+            return IngestedChange(event_id, plan.plan_id, len(plan.jobs), 0, "cancelled")
+
         try:
             inserted = self.queue.enqueue_plan(plan, max_attempts=max_attempts, now=now)
         except _QUEUE.LocalizationQueueBlocked:
             raise CMSBridgeBlocked("cms.queue.rejected") from None
         with _transaction(self.connection):
-            updated = self.connection.execute("""
-                UPDATE cms_change_events SET status = 'enqueued', updated_at = ?
-                WHERE event_id = ? AND event_sha256 = ? AND plan_id = ?
-            """, (now, event_id, event_hash, plan.plan_id))
-            if updated.rowcount != 1:
-                raise CMSBridgeBlocked("cms.event.identity_lost")
-            newest = self.connection.execute("""
-                SELECT topic.event_id, topic.generation
-                FROM cms_event_topics AS topic
-                JOIN cms_change_events AS event ON event.event_id = topic.event_id
-                WHERE topic.site_id = ? AND topic.source_id = ?
-                  AND event.status = 'enqueued'
-                ORDER BY topic.generation DESC LIMIT 1
-            """, (site_id, source_id)).fetchone()
-            if newest is None:
-                raise CMSBridgeBlocked("cms.event.topic_invalid")
-            older = self.connection.execute("""
-                SELECT older.event_id
-                FROM cms_event_topics AS older
-                JOIN cms_change_events AS events ON events.event_id = older.event_id
-                LEFT JOIN cms_publication_deliveries AS delivery
-                    ON delivery.event_id = older.event_id AND delivery.status = 'succeeded'
-                WHERE older.site_id = ? AND older.source_id = ?
-                  AND older.generation < ? AND events.status = 'enqueued'
-                  AND delivery.event_id IS NULL
-                ORDER BY older.generation, older.event_id
-            """, (site_id, source_id, newest["generation"])).fetchall()
-            for prior in older:
-                self.connection.execute("""
-                    INSERT OR IGNORE INTO cms_event_supersessions
-                    VALUES (?, ?, ?)
-                """, (prior["event_id"], newest["event_id"], now))
-            self.connection.execute("""
-                UPDATE cms_publication_deliveries
-                SET status = 'failed', lease_owner = NULL, lease_token = NULL,
-                    lease_expires_at = NULL, last_error_code = 'event_superseded',
-                    last_error_detail_hash = NULL, updated_at = ?
-                WHERE event_id IN (
-                    SELECT supersession.event_id FROM cms_event_supersessions AS supersession
-                    JOIN cms_event_topics AS topic ON topic.event_id = supersession.event_id
-                    WHERE topic.site_id = ? AND topic.source_id = ?
-                ) AND status <> 'succeeded'
-            """, (now, site_id, source_id))
-            superseded = self.connection.execute(
-                "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
+            cancelled = self.connection.execute(
+                "SELECT 1 FROM cms_event_cancellations WHERE event_id = ?",
                 (event_id,),
             ).fetchone() is not None
+            if cancelled:
+                self._load_event(
+                    event_id,
+                    verifier,
+                    allow_superseded=True,
+                    allow_cancelled=True,
+                    allow_accepted=True,
+                )
+            else:
+                updated = self.connection.execute("""
+                    UPDATE cms_change_events SET status = 'enqueued', updated_at = ?
+                    WHERE event_id = ? AND event_sha256 = ? AND plan_id = ?
+                """, (now, event_id, event_hash, plan.plan_id))
+                if updated.rowcount != 1:
+                    raise CMSBridgeBlocked("cms.event.identity_lost")
+                newest = self.connection.execute("""
+                    SELECT topic.event_id, topic.generation
+                    FROM cms_event_topics AS topic
+                    JOIN cms_change_events AS event ON event.event_id = topic.event_id
+                    WHERE topic.site_id = ? AND topic.source_id = ?
+                      AND event.status = 'enqueued'
+                    ORDER BY topic.generation DESC LIMIT 1
+                """, (site_id, source_id)).fetchone()
+                if newest is None:
+                    raise CMSBridgeBlocked("cms.event.topic_invalid")
+                older = self.connection.execute("""
+                    SELECT older.event_id
+                    FROM cms_event_topics AS older
+                    JOIN cms_change_events AS events ON events.event_id = older.event_id
+                    LEFT JOIN cms_publication_deliveries AS delivery
+                        ON delivery.event_id = older.event_id AND delivery.status = 'succeeded'
+                    WHERE older.site_id = ? AND older.source_id = ?
+                      AND older.generation < ? AND events.status = 'enqueued'
+                      AND delivery.event_id IS NULL
+                    ORDER BY older.generation, older.event_id
+                """, (site_id, source_id, newest["generation"])).fetchall()
+                for prior in older:
+                    self.connection.execute("""
+                        INSERT OR IGNORE INTO cms_event_supersessions
+                        VALUES (?, ?, ?)
+                    """, (prior["event_id"], newest["event_id"], now))
+                self.connection.execute("""
+                    UPDATE cms_publication_deliveries
+                    SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+                        lease_expires_at = NULL, last_error_code = 'event_superseded',
+                        last_error_detail_hash = NULL, updated_at = ?
+                    WHERE event_id IN (
+                        SELECT supersession.event_id FROM cms_event_supersessions AS supersession
+                        JOIN cms_event_topics AS topic ON topic.event_id = supersession.event_id
+                        WHERE topic.site_id = ? AND topic.source_id = ?
+                    ) AND status <> 'succeeded'
+                """, (now, site_id, source_id))
+                superseded = self.connection.execute(
+                    "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone() is not None
+        if cancelled:
+            return IngestedChange(
+                event_id, plan.plan_id, len(plan.jobs), inserted, "cancelled",
+            )
         return IngestedChange(
             event_id, plan.plan_id, len(plan.jobs), inserted,
             "superseded" if superseded else "enqueued",
@@ -1073,7 +1106,7 @@ class WebsiteLocalizationCMSBridge:
             (event_id,),
         ).fetchone()
         event_row = self.connection.execute(
-            "SELECT key_id FROM cms_change_events WHERE event_id = ?",
+            "SELECT key_id, status FROM cms_change_events WHERE event_id = ?",
             (event_id,),
         ).fetchone()
         if (
@@ -1089,10 +1122,40 @@ class WebsiteLocalizationCMSBridge:
             (event_id,),
         ).fetchone() is not None
         event, plan = self._load_event(
-            event_id, event_verifier, allow_cancelled=cancelled,
+            event_id,
+            event_verifier,
+            allow_cancelled=cancelled,
+            allow_accepted=cancelled,
         )
         if event["site_id"] != site_id:
             raise CMSBridgeBlocked("cms.status.scope_rejected")
+        if cancelled and event_row["status"] == "accepted":
+            counts = {status: 0 for status in _QUEUE._STATUSES}
+            counts["cancelled"] = len(plan.jobs)
+            locales = tuple(LocaleProgress(
+                job_id=job.job_id,
+                target_locale=job.target.locale,
+                status="cancelled",
+                attempts=0,
+                max_attempts=0,
+                next_attempt_at=0.0,
+                lease_expires_at=None,
+                lease_expired=False,
+                last_error_code="event_cancelled",
+                last_error_detail_hash=None,
+                result_sha256=None,
+            ) for job in sorted(plan.jobs, key=lambda item: item.target.locale))
+            return ChangeProgress(
+                event_id=event["event_id"],
+                site_id=event["site_id"],
+                plan_id=plan.plan_id,
+                website_version=event["website_version"],
+                source_sequence=int(topic["generation"]),
+                job_count=len(plan.jobs),
+                counts=counts,
+                locales=locales,
+                cancelled=True,
+            )
         locales = []
         try:
             for job in plan.jobs:
@@ -1162,6 +1225,7 @@ class WebsiteLocalizationCMSBridge:
             progress.event_id,
             event_verifier,
             allow_cancelled=progress.cancelled,
+            allow_accepted=progress.cancelled,
         )
         try:
             readiness = self.release_store.readiness(
@@ -1355,10 +1419,7 @@ class WebsiteLocalizationCMSBridge:
             "SELECT * FROM cms_change_events WHERE event_id = ?",
             (event_id,),
         ).fetchone()
-        if row is None or (
-            row["status"] != "enqueued"
-            and not (allow_accepted and row["status"] == "accepted")
-        ):
+        if row is None:
             raise CMSBridgeBlocked("cms.event.not_enqueued")
         supersession = self.connection.execute(
             "SELECT 1 FROM cms_event_supersessions WHERE event_id = ?",
@@ -1399,6 +1460,11 @@ class WebsiteLocalizationCMSBridge:
             )
             if not allow_cancelled:
                 raise CMSBridgeBlocked("cms.event.cancelled")
+        if (
+            row["status"] != "enqueued"
+            and not (allow_accepted and row["status"] == "accepted")
+        ):
+            raise CMSBridgeBlocked("cms.event.not_enqueued")
         newer = self.connection.execute("""
             SELECT 1
             FROM cms_event_topics AS candidate

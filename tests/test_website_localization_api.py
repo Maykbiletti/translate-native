@@ -262,6 +262,35 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         for payload in (first[2], replay[2], progress[2], lifecycle[2]):
             self.assertNotIn("source_text", json.dumps(payload))
 
+    def test_public_cancellation_recovers_the_prequeue_crash_gap(self):
+        enqueue_plan = self.queue.enqueue_plan
+
+        def fail_before_queue(*_args, **_kwargs):
+            raise QUEUE.LocalizationQueueBlocked("simulated queue outage")
+
+        self.queue.enqueue_plan = fail_before_queue
+        try:
+            failed = self.request()
+        finally:
+            self.queue.enqueue_plan = enqueue_plan
+        self.assertEqual(failed[0], "503 Service Unavailable")
+
+        cancelled = self.cancellation_request()
+        replay = self.request()
+        progress = self.status_request(request_id="status-crash-cancelled")
+        lifecycle = self.lifecycle_request(request_id="lifecycle-crash-cancelled")
+
+        self.assertEqual(cancelled[0], "202 Accepted")
+        self.assertEqual((replay[0], replay[2]["status"]), ("200 OK", "cancelled"))
+        self.assertEqual(progress[2]["counts"]["cancelled"], 2)
+        self.assertEqual(lifecycle[2]["status"], "cancelled")
+        self.assertEqual(
+            self.queue_connection.execute(
+                "SELECT COUNT(*) FROM localization_jobs"
+            ).fetchone()[0],
+            0,
+        )
+
     def test_cancellation_rejects_wrong_binding_and_other_accepted_key(self):
         self.request()
         wrong = cancellation(website_version="web-other")

@@ -96,6 +96,15 @@ immutable and reverified on reads and health checks. It does not delete shared
 queue artifacts or translation memory because another current plan may validly
 reference the same deterministic job.
 
+The same operation also closes the crash gap after the signed event has been
+stored but before its locale plan reaches the queue. Such an `accepted` event
+can be cancelled without first replaying it. Status and lifecycle then report
+every required locale as `cancelled` even though no queue row exists. An exact
+change-event replay returns `cancelled` and cannot recreate work. If the
+cancellation arrives while the atomic queue insertion is running, the bridge
+rechecks the immutable ledger before promoting the event to `enqueued`; any
+already-created shared queue artifacts remain ineligible through that event.
+
 A confirmed publication cannot be cancelled through this endpoint. A currently
 leased delivery also returns `409 Conflict`: after an external request starts,
 the service cannot truthfully retract bytes that the CMS may already have
