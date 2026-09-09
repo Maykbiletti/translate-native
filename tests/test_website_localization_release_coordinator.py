@@ -83,12 +83,13 @@ class ReceiptVerifier:
 
     def verify(self, **values):
         self.calls.append(values)
+        binding = values["binding"]
         return any(
             values["receipt"] == receipt(
                 self.kind,
-                values["source_text"],
-                values["target_text"],
-                values["target_locale"],
+                binding["source_text"],
+                binding["target_text"],
+                binding["target_locale"],
                 request.request_id,
             )
             for request in self.requests

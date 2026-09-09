@@ -351,11 +351,12 @@ class CommercialLocalizationTests(unittest.TestCase):
                 independent_model_review_verifier=verifier,
             )
             self.assertTrue(store.readiness(plan, authority, now=302).ready)
-            self.assertEqual(verifier.calls[0]["content_type"], "commercial")
-            self.assertEqual(verifier.calls[0]["commercial_profile"], SCHEMA)
-            self.assertEqual(verifier.calls[0]["policy_version"], "native-web-1")
+            binding = verifier.calls[0]["binding"]
+            self.assertEqual(binding["content_type"], "commercial")
+            self.assertEqual(binding["commercial_profile"], SCHEMA)
+            self.assertEqual(binding["policy_version"], "native-web-1")
             self.assertEqual(
-                verifier.calls[0]["review_confidence"]["source_fidelity"], "low",
+                binding["review_confidence"]["source_fidelity"], "low",
             )
 
     def test_many_offer_evidence_items_survive_without_price_bag_matching(self):

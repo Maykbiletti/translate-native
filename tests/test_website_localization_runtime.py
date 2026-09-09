@@ -108,8 +108,13 @@ class QualityVerifier:
         self.evidence = evidence
 
     def verify(self, **values):
-        return any(values["receipt"] == receipt(request)
-                   for request in self.evidence.requests)
+        binding = values["binding"]
+        return any(
+            values["receipt"] == receipt(request)
+            and request.job_id == binding["job_id"]
+            and request.result_sha256 == binding["result_sha256"]
+            for request in self.evidence.requests
+        )
 
 
 class Publisher:

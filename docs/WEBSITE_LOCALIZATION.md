@@ -989,12 +989,23 @@ its own prose.
 
 `integrations/website_localization_release.py` turns a completed queue result
 into an append-only translation-memory entry only after a host-owned verifier
-accepts a quality receipt for the exact source, target, and locale. The module
+accepts a quality receipt for the complete release context. The module
 never reads a signing key. Instead, a trusted `ApprovalAuthority` signs and
 immediately verifies the canonical approval bytes outside the worker's
 authority. Production hosts should implement that interface with an isolated
 service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
+
+The receipt-verifier contract receives exactly `binding` and `receipt`.
+`binding` uses `blun.localization-quality-receipt-binding.v1` and contains the
+review purpose, job and canonical result hashes, full source and target text
+plus hashes and locales, content type, glossary and policy versions, primary
+and optional review-provider identities, software version, two-pass
+confidence, locale quality profile, optional commercial profile, and the
+human/independent-review requirements. The verifier must cryptographically
+bind every field. It must reject a receipt issued for another result, policy,
+model, profile, software version, locale, or review purpose. In particular, a
+quality receipt cannot satisfy a qualified-human or independent-model review.
 
 Every approval binds the exact source and target hashes, source and target
 locales, content type, glossary and policy versions, provider/model identity,
@@ -1017,7 +1028,7 @@ the whole website version without deleting an older known-good entry. The
 release store uses its own trusted host-supplied SQLite connection, separate
 from the queue connection, and performs no network or publication action.
 
-Premortem: a signature might be replayed after policy drift, a database edit
+Premortem: a receipt or signature might be replayed after policy drift, a database edit
 might swap the target, or a partial rollout might be mistaken for completion.
 The deterministic job binding invalidates drift, append-only target hashes and
 canonical payload signatures expose tampering, and readiness requires exact

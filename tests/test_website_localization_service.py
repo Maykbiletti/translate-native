@@ -122,11 +122,12 @@ class QualityVerifier:
         self.provider = provider
 
     def verify(self, **values):
+        binding = values["binding"]
         return any(
             values["receipt"] == quality_receipt(
-                values["source_text"],
-                values["target_text"],
-                values["target_locale"],
+                binding["source_text"],
+                binding["target_text"],
+                binding["target_locale"],
                 request.request_id,
             )
             for request in self.provider.requests

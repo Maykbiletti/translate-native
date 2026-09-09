@@ -104,7 +104,15 @@ A successful service returns HTTP 200, JSON content type, and exactly:
 The adapter rejects extra or missing fields, duplicate JSON keys, non-finite
 numbers, a UTF-8 byte-order mark, wrong bindings, ambiguous content types,
 incorrect lengths, and oversized bodies. The release coordinator then applies
-its existing independent receipt checks. Legal content still requires a
+its existing independent receipt checks. Each opaque receipt must verify
+against the complete canonical
+`blun.localization-quality-receipt-binding.v1` object supplied by the release
+coordinator, including the review purpose, job and result hashes, both texts
+and locales, content type, glossary and policy versions, provider/model and
+software identities, locale quality and commercial profiles, confidence, and
+escalation requirements. Reuse across a changed field or between quality,
+qualified-human, and independent-model review purposes must fail closed.
+Legal content still requires a
 separately verified qualified-human receipt. Low-confidence non-legal content
 still requires exactly one qualified-human receipt or a differently identified
 and independently verified second model review.
