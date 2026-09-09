@@ -441,16 +441,18 @@ generated locally.
 
 Every benchmark policy must bind the exact version and SHA-256 digest of the
 output-free source manifest in
-`integrations/website_localization_benchmark_suite.py`. Suite v2 contains
-fifteen cases: one for each non-commercial type and eight complete commercial
-cases across eight commercial domains. Seven cases are connected long-form
-pages, including six commercial pages. Together they exercise HTML, JSON,
-placeholders, links, negation, modality, amounts, currencies, discount and
-surcharge bases, tax, deposits, trials, billing versus commitment, renewal,
-cancellation, refunds, proration, tiered prices and offer assignment. The suite
-contains no target, candidate, baseline, or supposed reference translation.
-Actual targets must still come from the attached candidate and lawfully
-acquired baseline so unreviewed prose cannot silently become a gold standard.
+`integrations/website_localization_benchmark_suite.py`. Suite v3 contains 64
+cases: eight independently bound cases from eight distinct domains for each of
+`headline`, `cta`, `marketing`, `ui`, `documentation`, `seo`, `legal`, and
+`commercial`. Eighteen cases are connected long-form pages across commercial,
+marketing, documentation, and legally sensitive content. Together they
+exercise HTML, JSON, placeholders, links, native register and rhythm,
+translationese, negation, modality, amounts, currencies, discount and surcharge
+bases, tax, deposits, trials, billing versus commitment, renewal, cancellation,
+refunds, proration, tiered prices, and offer assignment. The suite contains no
+target, candidate, baseline, or supposed reference translation. Actual targets
+must still come from the attached candidate and lawfully acquired baseline so
+unreviewed prose cannot silently become a gold standard.
 
 The policy also requires `valid_until`, an absolute positive integer Unix
 timestamp chosen by the trusted host for that exact candidate, baseline,
@@ -467,7 +469,7 @@ profile, or evaluation policy changes.
 `integrations/website_localization_benchmark_campaign.py` turns the bound suite
 and benchmark policy into a durable execution matrix. With the current
 English-source suite and complete EU target scope, one campaign contains
-exactly 345 work items: 15 source cases multiplied by 23 target locales. Work
+exactly 1,472 work items: 64 source cases multiplied by 23 target locales. Work
 IDs bind the complete policy hash, suite hash, locale, and case key. Creating
 the same campaign again is idempotent; changing any candidate, reviewer,
 reference, baseline, threshold, locale, or suite field creates a different
@@ -623,10 +625,12 @@ Early locale lanes may be run and reported independently, but passing them no
 longer authorizes an EU-wide superiority statement. The attested report exposes
 `configured_lanes_status` separately from `superiority_claim_allowed` and
 includes an exact `claim_scope` with required, evaluated, missing, unexpected,
-and source-language locales. A public claim is allowed only when the configured
-locale set exactly covers every EU target eligible for the bound source suite
-and every one of those locale reports passes on its own. One missing or blocked
-locale therefore blocks the overall report; no aggregate can conceal it.
+and source-language locales plus the required and evaluated content types. A
+public claim is allowed only when the configured locale set exactly covers
+every EU target eligible for the bound source suite, all eight content types
+are configured, and every locale report passes on its own. One missing locale,
+missing content-type lane, or blocked result therefore blocks the overall
+report; no aggregate can conceal it.
 
 Each locale report also exposes separate statistics for `target_native` and
 `source_fidelity`: candidate wins, baseline wins, ties, decisive rate, candidate
@@ -637,13 +641,14 @@ attested report. Joint case winners remain an additional conservative metric,
 but discarded cross-axis disagreements can no longer make a weak axis appear
 statistically convincing.
 
-Suite v2 also predeclares `commercial` as a required content-type lane with a
-minimum of eight cases per locale. The report repeats joint and independent
-axis statistics for that lane. A weak price/offer lane blocks its locale even
-when wins from the other content types make the all-content aggregate appear
-significant. The other seven content types remain diversity coverage, not yet
-standalone statistically supported content-type claims; adding such a claim
-requires a future bound suite and policy with enough cases for that type.
+Suite v3 predeclares all eight content types as required statistical lanes with
+a minimum of eight cases per type and locale. For every lane, the report repeats
+the joint and independent `target_native` and `source_fidelity` statistics. A
+weak headline, CTA, marketing, UI, documentation, SEO, legal, or price/offer
+lane blocks its locale even when wins from the other content types make the
+all-content aggregate appear significant. A policy may deliberately evaluate a
+smaller diagnostic subset, but its signed claim scope records every omitted
+content type and cannot authorize a public superiority claim.
 
 The current suite source language is English, so its EU localization target
 scope contains the other 23 official-language locale profiles. `en-IE` is

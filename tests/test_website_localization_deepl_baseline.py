@@ -74,7 +74,7 @@ def policy(**overrides):
         "native_reference_verifier_version": "2026-09-08",
         "valid_until": 1_800_000_000,
         "required_locales": ("mt-MT", "fi-FI"),
-        "required_content_types": ("commercial",),
+        "required_content_types": BENCHMARK.EU_BENCHMARK_CONTENT_TYPES,
         "minimum_cases_per_locale": len(SUITE.SOURCE_CASES),
         "minimum_cases_per_content_type": 8,
         "minimum_decisive_rate": 0.75,

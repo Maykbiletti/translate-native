@@ -89,10 +89,11 @@ remain mandatory. No live provider or native-editor quality is established by
 scripted adapter tests. Profile changes require a new profile version, and
 project condition/glossary/prompt changes require new bound policy versions.
 
-The website benchmark suite v2 treats commercial localization as its first
-separately gated content-type lane. Each locale needs all eight brand-neutral
-commercial cases and must pass the predeclared joint, target-native and
-source-fidelity statistics inside that lane. Wins on headlines, UI or other
-content cannot compensate for a weak pricing lane. This gate proves only the
-integrity of recorded blind evidence; it does not manufacture native review or
-establish superiority without real qualified reviewers and a lawful baseline.
+The website benchmark suite v3 treats commercial localization as one of eight
+separately gated content-type lanes. Each locale needs all eight brand-neutral
+commercial cases and must pass the predeclared joint, target-native, and
+source-fidelity statistics inside that lane. Wins on headlines, UI, or other
+content cannot compensate for a weak pricing lane, just as commercial wins
+cannot hide another weak content type. These gates prove only the integrity of
+recorded blind evidence; they do not manufacture native review or establish
+superiority without real qualified reviewers and a lawful baseline.

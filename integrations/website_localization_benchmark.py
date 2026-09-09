@@ -32,8 +32,8 @@ NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-re
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
 CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v7"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v10"
-CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v1"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v11"
+CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
 BASELINE_PROVENANCE_METHODS = frozenset(("official_api", "lawful_fixture"))
@@ -67,6 +67,7 @@ _SUITE = _load_module(
     _ROOT / "integrations" / "website_localization_benchmark_suite.py",
 )
 
+EU_BENCHMARK_CONTENT_TYPES = tuple(sorted(_PLANNER.CONTENT_TYPES))
 _SUITE_SOURCE_LANGUAGES = tuple(sorted({
     item["source_locale"].split("-", 1)[0]
     for item in _SUITE.manifest()["cases"]
@@ -150,7 +151,7 @@ class BenchmarkPolicy:
     native_reference_verifier_version: str
     valid_until: int
     required_locales: tuple[str, ...]
-    required_content_types: tuple[str, ...] = ("commercial",)
+    required_content_types: tuple[str, ...] = EU_BENCHMARK_CONTENT_TYPES
     minimum_cases_per_locale: int = 8
     minimum_cases_per_content_type: int = 8
     minimum_decisive_rate: float = 0.75
@@ -1478,10 +1479,28 @@ def _unsigned_benchmark_report(
     eu_target_scope_complete = (
         not missing_target_locales and not unexpected_target_locales
     )
-    claim_allowed = configured_lanes_passed and eu_target_scope_complete
+    configured_content_types = set(policy.required_content_types)
+    required_content_types = set(EU_BENCHMARK_CONTENT_TYPES)
+    missing_content_types = [
+        content_type for content_type in EU_BENCHMARK_CONTENT_TYPES
+        if content_type not in configured_content_types
+    ]
+    unexpected_content_types = [
+        content_type for content_type in policy.required_content_types
+        if content_type not in required_content_types
+    ]
+    content_type_scope_complete = (
+        not missing_content_types and not unexpected_content_types
+    )
+    claim_scope_complete = (
+        eu_target_scope_complete and content_type_scope_complete
+    )
+    claim_allowed = configured_lanes_passed and claim_scope_complete
     claim_block_reasons: list[str] = []
     if not eu_target_scope_complete:
         claim_block_reasons.append("eu_target_locale_coverage_incomplete")
+    if not content_type_scope_complete:
+        claim_block_reasons.append("content_type_coverage_incomplete")
     if not configured_lanes_passed:
         claim_block_reasons.append("configured_locale_evaluation_failed")
     return {
@@ -1532,7 +1551,13 @@ def _unsigned_benchmark_report(
             "evaluated_target_locales": list(policy.required_locales),
             "missing_target_locales": missing_target_locales,
             "unexpected_target_locales": unexpected_target_locales,
-            "complete": eu_target_scope_complete,
+            "required_content_types": list(EU_BENCHMARK_CONTENT_TYPES),
+            "evaluated_content_types": list(policy.required_content_types),
+            "missing_content_types": missing_content_types,
+            "unexpected_content_types": unexpected_content_types,
+            "locales_complete": eu_target_scope_complete,
+            "content_types_complete": content_type_scope_complete,
+            "complete": claim_scope_complete,
         },
         "configured_lanes_status": (
             "PASS" if configured_lanes_passed else "BLOCK"

@@ -37,7 +37,7 @@ class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
             sort_keys=True, separators=(",", ":"),
         ).encode()
         self.assertEqual(claimed_hash, hashlib.sha256(encoded).hexdigest())
-        self.assertEqual(len(manifest["cases"]), 15)
+        self.assertEqual(len(manifest["cases"]), 64)
         self.assertEqual(
             {case["content_type"] for case in manifest["cases"]},
             set(PLANNER.CONTENT_TYPES),

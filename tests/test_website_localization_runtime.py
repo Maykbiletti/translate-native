@@ -211,7 +211,7 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             native_reference_verifier_version="2026-09-08",
             valid_until=1_800_000_000,
             required_locales=("mt-MT", "fi-FI"),
-            required_content_types=("commercial",),
+            required_content_types=benchmark.EU_BENCHMARK_CONTENT_TYPES,
             minimum_cases_per_locale=len(manifest["cases"]),
             minimum_cases_per_content_type=8,
         )
@@ -485,8 +485,9 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             if item.component == "benchmark_campaign"
         )
         self.assertEqual(component.status, "healthy")
-        self.assertEqual(dict(component.counts)["work_count"], 30)
-        self.assertEqual(dict(component.counts)["pending"], 30)
+        work_count = 2 * len(campaign._SUITE.manifest()["cases"])
+        self.assertEqual(dict(component.counts)["work_count"], work_count)
+        self.assertEqual(dict(component.counts)["pending"], work_count)
 
     def test_runtime_rejects_partial_benchmark_before_schema_writes(self):
         before = tuple(connection.total_changes for connection in self.connections)
@@ -616,8 +617,11 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             values["benchmark_connection"],
         )
         status = runtime.benchmark_runtime.status()
-        self.assertEqual(status["work_count"], 30)
-        self.assertEqual(status["counts"]["pending"], 30)
+        work_count = 2 * len(
+            RUNTIME._HEALTH._CAMPAIGN._SUITE.manifest()["cases"]
+        )
+        self.assertEqual(status["work_count"], work_count)
+        self.assertEqual(status["counts"]["pending"], work_count)
         report = runtime.health(now=100)
         review_health = next(
             component for component in report.components
