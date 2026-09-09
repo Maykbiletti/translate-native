@@ -741,6 +741,50 @@ Missing, mismatched, altered, or unverifiable evidence blocks with stable
 reason codes. The health payload contains only counts and never invokes the
 reviewer or returns source, target, explanation, excerpt, or finding text.
 
+### Provider-neutral benchmark reviewer HTTPS adapter
+
+`integrations/website_localization_benchmark_reviewer_http.py` implements the
+runtime's `BenchmarkReviewer` contract for an independently hosted human or
+model review gateway. Configure one fixed HTTPS endpoint and a host-owned
+authentication-header callback, then pass the adapter as `reviewer` in the
+existing `benchmark_execution` mapping. The adapter performs exactly one
+request per invocation; the durable campaign and review store remain the only
+owners of retry limits, backoff, leases, and reuse.
+
+Each `POST` body uses
+`blun.website-localization-benchmark-review-http-request.v1` and contains the
+exact anonymous `BenchmarkReviewRequest`, its deterministic `review_id`, and
+the SHA-256 digest of its canonical UTF-8 JSON. The same values are bound in
+`Idempotency-Key`, `X-Benchmark-Review-Id`,
+`X-Benchmark-Review-Phase`, and
+`X-Benchmark-Review-Request-Sha256`. Authentication headers are obtained for
+that attempt only and cannot replace protocol, routing, framing, or binding
+headers. Credentials never enter the body, error state, or durable benchmark
+evidence.
+
+The source-blind request is accepted only with the exact `target_native`
+instruction and input field set; `source`, `glossary`, and `protected_terms`
+are forbidden. The later `source_fidelity` request has a different exact field
+set and instruction and carries the source. Both retain only anonymous `A` and
+`B` variants. Candidate provider, baseline identity, acquisition provenance,
+and unblinding data are absent from the transport contract.
+
+The service must return
+`blun.website-localization-benchmark-review-http-response.v1` with the same
+`review_id` and request digest plus one exact benchmark-review object. The
+adapter rejects wrong phase, locale or blind ID, unknown fields, malformed
+defects, and a preferred variant that still has a blocking or major defect.
+Responses are strict UTF-8 JSON with duplicate keys, BOMs, non-finite numbers,
+wrong media types, inconsistent lengths, redirects, and oversized bodies
+rejected. Only `408`, `425`, `429`, network failures, and `5xx` responses are
+retryable; orchestration receives stable content-free error codes.
+
+Plain HTTP is available only through an explicit loopback-only development
+option. Production TLS termination, authentication, credential rotation,
+access control, request logging policy, and reviewer independence remain host
+responsibilities. This adapter makes the blind review runnable; it does not
+itself establish linguistic quality or superiority over a baseline.
+
 `run_next_benchmark_case` claims and processes at most one exact
 case/locale pair. Random token-bound leases are renewed before dependency
 resolution and before each of the two reviewer calls. An abandoned lease can
