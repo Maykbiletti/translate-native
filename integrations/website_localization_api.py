@@ -8,6 +8,7 @@ It never runs a model, approves text, or returns source/target prose.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -28,6 +29,7 @@ STATUS_REQUEST_SCHEMA = "blun.cms-localization-status-request.v2"
 LIFECYCLE_REQUEST_SCHEMA = "blun.cms-localization-lifecycle-request.v1"
 LIFECYCLE_RESPONSE_SCHEMA = "blun.cms-localization-lifecycle.v3"
 CAPABILITIES_REQUEST_SCHEMA = "blun.cms-localization-capabilities-request.v1"
+API_CAPABILITIES_SCHEMA = "blun.website-localization-http-capabilities.v1"
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_STATUS_CLOCK_SKEW = 300.0
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
@@ -181,6 +183,81 @@ class WebsiteLocalizationAPI:
     @staticmethod
     def _constant(value):
         raise ValueError("nonfinite number")
+
+    def _api_contract(self, capabilities: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            change_schema = _token(capabilities.get("change_schema"))
+            cancellation_schema = _token(
+                capabilities.get("cancellation_schema")
+            )
+            tombstone_schema = _token(capabilities.get("tombstone_schema"))
+        except ValueError:
+            raise _APIRequestBlocked(
+                "cms.capabilities.registry_invalid"
+            ) from None
+        lifecycle_enabled = (
+            self.approval_authority is not None
+            and self.publication_authority is not None
+        )
+        body = {
+            "schema": API_CAPABILITIES_SCHEMA,
+            "api_schema": API_SCHEMA,
+            "error_schema": API_SCHEMA,
+            "operations": [
+                {
+                    "name": "change",
+                    "method": "POST",
+                    "path": CHANGE_PATH,
+                    "request_schema": change_schema,
+                    "response_schema": API_SCHEMA,
+                    "enabled": True,
+                },
+                {
+                    "name": "cancellation",
+                    "method": "POST",
+                    "path": CANCELLATION_PATH,
+                    "request_schema": cancellation_schema,
+                    "response_schema": API_SCHEMA,
+                    "enabled": True,
+                },
+                {
+                    "name": "tombstone",
+                    "method": "POST",
+                    "path": TOMBSTONE_PATH,
+                    "request_schema": tombstone_schema,
+                    "response_schema": API_SCHEMA,
+                    "enabled": self.publication_authority is not None,
+                },
+                {
+                    "name": "status",
+                    "method": "POST",
+                    "path": STATUS_PATH,
+                    "request_schema": STATUS_REQUEST_SCHEMA,
+                    "response_schema": API_SCHEMA,
+                    "enabled": True,
+                },
+                {
+                    "name": "lifecycle",
+                    "method": "POST",
+                    "path": LIFECYCLE_PATH,
+                    "request_schema": LIFECYCLE_REQUEST_SCHEMA,
+                    "response_schema": LIFECYCLE_RESPONSE_SCHEMA,
+                    "enabled": lifecycle_enabled,
+                },
+                {
+                    "name": "capabilities",
+                    "method": "POST",
+                    "path": CAPABILITIES_PATH,
+                    "request_schema": CAPABILITIES_REQUEST_SCHEMA,
+                    "response_schema": API_SCHEMA,
+                    "enabled": True,
+                },
+            ],
+        }
+        digest = hashlib.sha256(
+            _canonical_json(body).encode("utf-8")
+        ).hexdigest()
+        return {**body, "sha256": digest}
 
     @staticmethod
     def _status_for(code: str) -> str:
@@ -486,11 +563,13 @@ class WebsiteLocalizationAPI:
         capabilities = self.bridge.localization_capabilities()
         if not isinstance(capabilities, dict):
             raise _APIRequestBlocked("cms.capabilities.registry_invalid")
+        api_contract = self._api_contract(capabilities)
         return self._json("200 OK", {
             "schema": API_SCHEMA,
             "status": "CAPABILITIES",
             "request_id": request_id,
             "capabilities": capabilities,
+            "api_contract": api_contract,
         }, start_response)
 
 

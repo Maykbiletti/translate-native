@@ -433,6 +433,36 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             capabilities["tombstone_delivery_schema"],
             CMS.TOMBSTONE_DELIVERY_SCHEMA,
         )
+        contract = payload["api_contract"]
+        self.assertEqual(contract["schema"], API.API_CAPABILITIES_SCHEMA)
+        unsigned_contract = dict(contract)
+        digest = unsigned_contract.pop("sha256")
+        self.assertEqual(digest, hashlib.sha256(
+            API._canonical_json(unsigned_contract).encode("utf-8")
+        ).hexdigest())
+        operations = {
+            item["name"]: item for item in contract["operations"]
+        }
+        self.assertEqual(set(operations), {
+            "change", "cancellation", "tombstone", "status", "lifecycle",
+            "capabilities",
+        })
+        self.assertTrue(all(
+            item["method"] == "POST" for item in operations.values()
+        ))
+        self.assertEqual(
+            operations["change"]["request_schema"], CMS.CHANGE_SCHEMA,
+        )
+        self.assertEqual(
+            operations["status"]["request_schema"],
+            API.STATUS_REQUEST_SCHEMA,
+        )
+        self.assertEqual(
+            operations["lifecycle"]["response_schema"],
+            API.LIFECYCLE_RESPONSE_SCHEMA,
+        )
+        self.assertTrue(operations["lifecycle"]["enabled"])
+        self.assertTrue(operations["tombstone"]["enabled"])
         self.assertEqual(len(capabilities["locales"]), 24)
         self.assertEqual(
             [item["locale"] for item in capabilities["locales"]],
@@ -466,6 +496,28 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             self.release_connection.total_changes,
             self.cms_connection.total_changes,
         ))
+
+    def test_capabilities_report_optional_routes_as_disabled(self):
+        configured_api = self.api
+        self.api = API.WebsiteLocalizationAPI(
+            self.bridge, self.authority, clock=lambda: 100,
+        )
+        try:
+            status, _, payload = self.capabilities_request(
+                request_id="capabilities-standalone",
+            )
+        finally:
+            self.api = configured_api
+
+        operations = {
+            item["name"]: item
+            for item in payload["api_contract"]["operations"]
+        }
+        self.assertEqual(status, "200 OK")
+        self.assertFalse(operations["lifecycle"]["enabled"])
+        self.assertFalse(operations["tombstone"]["enabled"])
+        self.assertTrue(operations["change"]["enabled"])
+        self.assertTrue(operations["status"]["enabled"])
 
     def test_capabilities_are_purpose_bound_fresh_and_authenticated(self):
         status_request = {
@@ -514,6 +566,29 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
         )
         self.assertNotIn("locales", payload)
+
+    def test_capabilities_block_an_incomplete_http_schema_registry(self):
+        current = self.bridge.localization_capabilities
+
+        def incomplete():
+            value = current()
+            del value["change_schema"]
+            return value
+
+        self.bridge.localization_capabilities = incomplete
+        try:
+            status, _, payload = self.capabilities_request(
+                request_id="capabilities-incomplete-http",
+            )
+        finally:
+            self.bridge.localization_capabilities = current
+
+        self.assertEqual(
+            (status, payload["error"]),
+            ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+        )
+        self.assertNotIn("api_contract", payload)
+        self.assertNotIn("capabilities", payload)
 
     def test_signature_idempotency_and_source_sequence_collisions_fail_closed(self):
         value = event()

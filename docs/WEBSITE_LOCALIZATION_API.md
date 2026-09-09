@@ -184,6 +184,15 @@ script, direction, quality-profile version, and quality-profile SHA-256 digest.
 It does not expose the full profile instructions, credentials, customer text,
 provider data, or mutable service state.
 
+The separate `api_contract` object lists all six tenant operations with their
+exact path, `POST` method, request schema, response schema, and current
+`enabled` state. A standalone host without approval and publication authorities
+still advertises lifecycle and tombstone schemas but marks those operations
+disabled, so a CMS can fail closed before submitting work. The object uses
+`blun.website-localization-http-capabilities.v1` and carries its own SHA-256
+over every other canonical field. Paths and schemas come from the same runtime
+constants used for routing; they are not copied into a second configuration.
+
 The nested `blun.website-localization-capabilities.v1` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
@@ -217,14 +226,29 @@ without a partial locale list.
     "schema": "blun.website-localization-capabilities.v1",
     "sha256": "<sha256>"
   },
+  "api_contract": {
+    "api_schema": "blun.website-localization-api.v2",
+    "error_schema": "blun.website-localization-api.v2",
+    "operations": [{
+      "enabled": true,
+      "method": "POST",
+      "name": "lifecycle",
+      "path": "/v2/localization/lifecycle",
+      "request_schema": "blun.cms-localization-lifecycle-request.v1",
+      "response_schema": "blun.cms-localization-lifecycle.v3"
+    }],
+    "schema": "blun.website-localization-http-capabilities.v1",
+    "sha256": "<sha256>"
+  },
   "request_id": "capabilities-9",
   "schema": "blun.website-localization-api.v2",
   "status": "CAPABILITIES"
 }
 ```
 
-The abbreviated example shows one locale only; a successful real response
-always contains all 24 entries and otherwise blocks.
+The abbreviated example shows one locale and one operation only; a successful
+real response always contains all 24 locales and all six operations, and
+otherwise blocks.
 
 ## Read per-locale progress
 
@@ -329,7 +353,7 @@ its former approval validity window ends; expiration before acknowledgement is
 reported as `publication_blocked`.
 
 ```json
-{"approved_locales":["fi-FI"],"blocked_locales":[],"delivery":{"attempts":0,"delivery_id":"blun-cms-delivery-…","last_error_code":null,"last_error_detail_hash":null,"lease_expired":false,"lease_expires_at":null,"max_attempts":5,"next_attempt_at":1788955201.0,"status":"pending"},"event_id":"cms-event-184","plan_id":"blun-l10n-plan-…","queue_counts":{"failed":0,"leased":0,"pending":0,"retry_wait":0,"succeeded":1},"request_id":"lifecycle-8","required_locales":["fi-FI"],"schema":"blun.cms-localization-lifecycle.v1","site_id":"public-site","source_sequence":42,"status":"publishing","website_version":"release-42"}
+{"approved_locales":["fi-FI"],"blocked_locales":[],"delivery":{"attempts":0,"delivery_id":"blun-cms-delivery-…","last_error_code":null,"last_error_detail_hash":null,"lease_expired":false,"lease_expires_at":null,"max_attempts":5,"next_attempt_at":1788955201.0,"status":"pending"},"event_id":"cms-event-184","plan_id":"blun-l10n-plan-…","queue_counts":{"failed":0,"leased":0,"pending":0,"retry_wait":0,"succeeded":1},"request_id":"lifecycle-8","required_locales":["fi-FI"],"schema":"blun.cms-localization-lifecycle.v3","site_id":"public-site","source_sequence":42,"status":"publishing","website_version":"release-42"}
 ```
 
 ## Failure contract

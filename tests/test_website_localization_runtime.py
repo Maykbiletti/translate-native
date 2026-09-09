@@ -410,6 +410,18 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertEqual(status, "200 OK")
         self.assertEqual(capabilities["status"], "CAPABILITIES")
         self.assertEqual(len(capabilities["capabilities"]["locales"]), 24)
+        operations = {
+            item["name"]: item
+            for item in capabilities["api_contract"]["operations"]
+        }
+        self.assertEqual(
+            operations["change"]["path"], RUNTIME._API.CHANGE_PATH,
+        )
+        self.assertEqual(
+            operations["lifecycle"]["response_schema"],
+            RUNTIME._API.LIFECYCLE_RESPONSE_SCHEMA,
+        )
+        self.assertTrue(all(item["enabled"] for item in operations.values()))
         self.assertEqual(
             capabilities["capabilities"]["quality_passes"],
             ["target_native", "source_fidelity"],
