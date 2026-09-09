@@ -503,6 +503,66 @@ adapter must keep the lease token and work-order source private, authenticate
 the editor, reject duplicate JSON keys and oversized bodies, and map the
 runtime's exact content-free outcomes without weakening these checks.
 
+`integrations/website_localization_native_reference_http.py` provides that
+transport as a provider-neutral WSGI application. The host supplies one
+authenticator; after checking the complete method, path, normalized headers,
+and request-body SHA-256 digest, it must return a credential-bound editor ID
+and exactly one qualified BCP-47 target locale. The client cannot choose or
+override either value. The application requires an effective HTTPS WSGI
+scheme, rejects query strings, transfer encoding, missing or false content
+lengths, non-JSON media types, BOMs, duplicate keys, non-finite numbers,
+invalid UTF-8, extra fields, and bodies above 4 MiB. Authentication happens
+before JSON decoding, and neither credentials nor exception prose enter a
+response.
+
+The private endpoints are:
+
+- `POST /v1/native-references/claim` with the exact claim schema, a durable
+  request ID, and a lease duration. The queue filters by the authenticated
+  locale. Replaying the same request while its lease is live returns the exact
+  same lease and cannot reserve a second source; replay after expiry or reuse
+  under another credential fails closed.
+- `POST /v1/native-references/renew` with the exact private lease envelope and
+  a new duration. The runtime reconstructs the canonical job from policy and
+  suite state, then requires the authenticated editor, locale, work ID,
+  attempt, token, expiry, and complete work order to match the live row.
+- `POST /v1/native-references/submit` with that lease and the complete
+  transport-neutral submission envelope below. Receipt verification,
+  attestation, immutable artifact storage, and queue completion remain inside
+  the runtime. A repeated or stale request cannot store a second result.
+- `GET /v1/native-references/status`, which returns only the authenticated
+  locale plus the existing content-free counts, timestamps, hashes, and stable
+  codes. It never returns a source, target, receipt, credential, or lease
+  token.
+
+Every response sets `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`. A claim response necessarily contains the
+source and lease token, so operators must also prevent proxy/access-log body
+capture and apply owner-only retention to request bodies. When TLS terminates
+before WSGI, only a trusted proxy may set the effective HTTPS scheme;
+forwarding an untrusted client header is not sufficient. Request IDs are
+idempotency keys, not evidence and not authorization.
+
+The three write requests use these exact outer shapes; `lease` is the complete
+claim response value and `submission` is the complete envelope in the next
+section:
+
+```json
+{"schema":"blun.website-localization-native-reference-http-claim.v1","request_id":"<idempotency key>","lease_seconds":3600}
+{"schema":"blun.website-localization-native-reference-http-renew.v1","request_id":"<idempotency key>","lease":{},"lease_seconds":3600}
+{"schema":"blun.website-localization-native-reference-http-submit.v1","request_id":"<idempotency key>","lease":{},"submission":{}}
+```
+
+The authentication adapter receives
+`blun.website-localization-native-reference-http-auth.v1` with the exact HTTP
+method, path, normalized headers, and body digest. It returns exactly
+`schema`, `editor_id`, `target_locale`, `credential_id`, and
+`credential_version` under
+`blun.website-localization-native-reference-editor.v1`. The WSGI application
+validates this shape but does not decide whether the credential is qualified;
+that trust decision belongs to the host authenticator and its separately
+managed registry.
+
 The transport-neutral submission envelope has exactly these top-level fields:
 
 ```json

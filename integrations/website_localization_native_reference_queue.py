@@ -36,6 +36,10 @@ TABLE_COLUMNS = (
     "lease_token", "lease_expires_at", "last_error_code",
     "last_error_detail_hash", "artifact_sha256", "created_at", "updated_at",
 )
+CLAIM_REQUEST_COLUMNS = (
+    "request_id", "campaign_id", "editor_id", "target_locale", "work_id",
+    "attempt", "lease_token", "lease_expires_at", "created_at",
+)
 
 
 def _load_module(name: str, path: Path):
@@ -202,6 +206,21 @@ class NativeReferenceWorkQueue:
                 ON benchmark_native_reference_queue
                 (campaign_id, status, next_attempt_at, target_locale, suite_case_key)
             """)
+            self.connection.execute("""
+                CREATE TABLE IF NOT EXISTS benchmark_native_reference_claim_requests (
+                    request_id TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL,
+                    editor_id TEXT NOT NULL,
+                    target_locale TEXT NOT NULL,
+                    work_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL CHECK (attempt > 0),
+                    lease_token TEXT NOT NULL,
+                    lease_expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY (work_id) REFERENCES benchmark_native_reference_queue(work_id),
+                    FOREIGN KEY (campaign_id) REFERENCES benchmark_campaigns(campaign_id)
+                )
+            """)
         self._verify_schema()
 
     def _verify_schema(self) -> None:
@@ -211,6 +230,15 @@ class NativeReferenceWorkQueue:
             )
         )
         if columns != TABLE_COLUMNS:
+            raise NativeReferenceQueueBlocked(
+                "native_reference.queue.schema_unsupported",
+            )
+        request_columns = tuple(
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(benchmark_native_reference_claim_requests)"
+            )
+        )
+        if request_columns != CLAIM_REQUEST_COLUMNS:
             raise NativeReferenceQueueBlocked(
                 "native_reference.queue.schema_unsupported",
             )
@@ -286,6 +314,47 @@ class NativeReferenceWorkQueue:
             raise NativeReferenceQueueBlocked(
                 "native_reference.queue.state_invalid",
             )
+        requests = self.connection.execute("""
+            SELECT * FROM benchmark_native_reference_claim_requests
+            WHERE campaign_id = ?
+        """, (campaign_id,)).fetchall()
+        by_work_id = {row["work_id"]: row for row in rows}
+        for request in requests:
+            try:
+                queued = by_work_id.get(request["work_id"])
+                if (
+                    tuple(request.keys()) != CLAIM_REQUEST_COLUMNS
+                    or queued is None
+                    or request["campaign_id"] != campaign_id
+                    or request["target_locale"] != queued["target_locale"]
+                    or request["target_locale"] not in policy.required_locales
+                    or isinstance(request["attempt"], bool)
+                    or not isinstance(request["attempt"], int)
+                    or not 1 <= request["attempt"] <= queued["max_attempts"]
+                ):
+                    raise ValueError
+                _identifier(request["request_id"])
+                _identifier(request["editor_id"])
+                _identifier(request["lease_token"])
+                expires = _timestamp(request["lease_expires_at"])
+                created = _timestamp(request["created_at"])
+                if expires <= created:
+                    raise ValueError
+                if (
+                    queued["status"] == "leased"
+                    and queued["attempts"] == request["attempt"]
+                    and queued["lease_owner"] == request["editor_id"]
+                ) and (
+                    queued["lease_token"] != request["lease_token"]
+                    or queued["lease_expires_at"] != expires
+                ):
+                    raise ValueError
+            except NativeReferenceQueueBlocked:
+                raise
+            except Exception:
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.state_invalid",
+                ) from None
 
     @staticmethod
     def _validate_row(row: sqlite3.Row, *, now: float | None = None) -> None:
@@ -358,9 +427,14 @@ class NativeReferenceWorkQueue:
 
     def claim(
         self, policy: Any, campaign_id: str, worker_id: Any, *,
-        now: Any, lease_seconds: Any = 3600,
+        now: Any, lease_seconds: Any = 3600, target_locale: Any = None,
+        request_id: Any = None,
     ) -> ClaimedNativeReference | None:
         worker_id = _identifier(worker_id)
+        if target_locale is not None:
+            target_locale = _identifier(target_locale)
+        if request_id is not None:
+            request_id = _identifier(request_id)
         now = _timestamp(now)
         lease_seconds = _duration(lease_seconds)
         try:
@@ -372,6 +446,67 @@ class NativeReferenceWorkQueue:
             ) from None
         with _transaction(self.connection):
             self._verify_binding_locked(policy, campaign_id)
+            if target_locale is not None and target_locale not in policy.required_locales:
+                raise NativeReferenceQueueBlocked(
+                    "native_reference.queue.locale_not_allowed",
+                )
+            if request_id is not None:
+                replay = self.connection.execute("""
+                    SELECT * FROM benchmark_native_reference_claim_requests
+                    WHERE request_id = ?
+                """, (request_id,)).fetchone()
+                if replay is not None:
+                    try:
+                        if (
+                            tuple(replay.keys()) != CLAIM_REQUEST_COLUMNS
+                            or replay["campaign_id"] != campaign_id
+                            or replay["editor_id"] != worker_id
+                            or (
+                                target_locale is not None
+                                and replay["target_locale"] != target_locale
+                            )
+                        ):
+                            raise ValueError
+                        row = self.connection.execute("""
+                            SELECT * FROM benchmark_native_reference_queue
+                            WHERE work_id = ?
+                        """, (replay["work_id"],)).fetchone()
+                        if row is None:
+                            raise ValueError
+                        self._validate_row(row, now=now)
+                        if (
+                            row["status"] != "leased"
+                            or row["campaign_id"] != campaign_id
+                            or row["target_locale"] != replay["target_locale"]
+                            or row["attempts"] != replay["attempt"]
+                            or row["lease_owner"] != worker_id
+                            or row["lease_token"] != replay["lease_token"]
+                            or row["lease_expires_at"] != replay["lease_expires_at"]
+                            or row["lease_expires_at"] <= now
+                        ):
+                            raise NativeReferenceQueueBlocked(
+                                "native_reference.queue.claim_replay_stale",
+                            )
+                        job_payload = _CAMPAIGN._job_payload(
+                            policy, row["target_locale"], row["suite_case_key"],
+                        )
+                        return ClaimedNativeReference(
+                            work_id=row["work_id"], campaign_id=campaign_id,
+                            target_locale=row["target_locale"],
+                            suite_case_key=row["suite_case_key"],
+                            job_payload=job_payload,
+                            attempt=row["attempts"],
+                            max_attempts=row["max_attempts"],
+                            lease_owner=worker_id,
+                            lease_token=row["lease_token"],
+                            lease_expires_at=row["lease_expires_at"],
+                        )
+                    except NativeReferenceQueueBlocked:
+                        raise
+                    except Exception:
+                        raise NativeReferenceQueueBlocked(
+                            "native_reference.queue.claim_request_invalid",
+                        ) from None
             expired = self.connection.execute("""
                 SELECT work_id, attempts, max_attempts
                 FROM benchmark_native_reference_queue
@@ -390,13 +525,19 @@ class NativeReferenceWorkQueue:
                     "failed" if terminal else "retry_wait", now, now,
                     row["work_id"],
                 ))
-            row = self.connection.execute("""
+            locale_filter = "" if target_locale is None else "AND target_locale = ?"
+            parameters = (
+                (campaign_id, now)
+                if target_locale is None else (campaign_id, now, target_locale)
+            )
+            row = self.connection.execute(f"""
                 SELECT * FROM benchmark_native_reference_queue
                 WHERE campaign_id = ?
                   AND status IN ('pending', 'retry_wait')
                   AND next_attempt_at <= ? AND attempts < max_attempts
+                  {locale_filter}
                 ORDER BY target_locale, suite_case_key LIMIT 1
-            """, (campaign_id, now)).fetchone()
+            """, parameters).fetchone()
             if row is None:
                 return None
             job_payload = _CAMPAIGN._job_payload(
@@ -419,6 +560,16 @@ class NativeReferenceWorkQueue:
                 raise NativeReferenceQueueBlocked(
                     "native_reference.queue.claim_lost",
                 )
+            if request_id is not None:
+                self.connection.execute("""
+                    INSERT INTO benchmark_native_reference_claim_requests (
+                        request_id, campaign_id, editor_id, target_locale,
+                        work_id, attempt, lease_token, lease_expires_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    request_id, campaign_id, worker_id, row["target_locale"],
+                    row["work_id"], attempt, token, expires, now,
+                ))
         return ClaimedNativeReference(
             work_id=row["work_id"], campaign_id=campaign_id,
             target_locale=row["target_locale"],
@@ -445,6 +596,7 @@ class NativeReferenceWorkQueue:
             or row["target_locale"] != claim.target_locale
             or row["suite_case_key"] != claim.suite_case_key
             or row["attempts"] != claim.attempt
+            or row["max_attempts"] != claim.max_attempts
             or row["lease_owner"] != claim.lease_owner
             or row["lease_token"] != claim.lease_token
             or row["lease_expires_at"] != claim.lease_expires_at
@@ -471,6 +623,15 @@ class NativeReferenceWorkQueue:
                 UPDATE benchmark_native_reference_queue
                 SET lease_expires_at = ?, updated_at = ? WHERE work_id = ?
             """, (expires, now, claim.work_id))
+            self.connection.execute("""
+                UPDATE benchmark_native_reference_claim_requests
+                SET lease_expires_at = ?
+                WHERE work_id = ? AND attempt = ? AND editor_id = ?
+                  AND lease_token = ?
+            """, (
+                expires, claim.work_id, claim.attempt,
+                claim.lease_owner, claim.lease_token,
+            ))
         return ClaimedNativeReference(**{
             **asdict(claim), "lease_expires_at": expires,
         })

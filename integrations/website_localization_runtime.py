@@ -674,6 +674,26 @@ class WebsiteLocalizationRuntime:
                 code = "runtime.benchmark.reference_queue.invalid"
             raise LocalizationRuntimeBlocked(code) from None
 
+    def native_reference_lease_from_payload(
+        self, payload: Any, *, editor_id: Any, target_locale: Any,
+    ):
+        """Reconstruct one authenticated editor lease without trusting input."""
+        if self.benchmark_runtime is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        try:
+            return self.benchmark_runtime.native_reference_lease_from_payload(
+                payload,
+                editor_id=editor_id,
+                target_locale=target_locale,
+            )
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.reference_queue.invalid"
+            raise LocalizationRuntimeBlocked(code) from None
+
     def accept_native_reference_submission(
         self,
         lease: Any,

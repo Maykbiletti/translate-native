@@ -542,6 +542,8 @@ class WebsiteLocalizationBenchmarkRuntime:
         self,
         editor_id: Any,
         *,
+        target_locale: Any = None,
+        request_id: Any = None,
         operation_guard: Callable[[float], Any] | None = None,
         lease_seconds: Any = 3600,
         retry_base_seconds: Any = 30,
@@ -556,13 +558,25 @@ class WebsiteLocalizationBenchmarkRuntime:
         self._retry_delay(1, retry_base_seconds, retry_max_seconds)
         expected_count = len(_CAMPAIGN._expected_work(self.policy))
         for _ in range(expected_count):
-            claim = self.native_reference_queue.claim(
-                self.policy,
-                self.campaign_id,
-                editor_id,
-                now=self.clock(),
-                lease_seconds=lease_seconds,
-            )
+            try:
+                claim = self.native_reference_queue.claim(
+                    self.policy,
+                    self.campaign_id,
+                    editor_id,
+                    now=self.clock(),
+                    lease_seconds=lease_seconds,
+                    target_locale=target_locale,
+                    request_id=request_id,
+                )
+            except Exception as error:
+                code = getattr(
+                    error,
+                    "code",
+                    "benchmark.runtime.reference_queue.state_invalid",
+                )
+                if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
+                    code = "benchmark.runtime.reference_queue.state_invalid"
+                raise BenchmarkRuntimeFailed(code) from None
             if claim is None:
                 return None
 
@@ -671,6 +685,85 @@ class WebsiteLocalizationBenchmarkRuntime:
         raise BenchmarkRuntimeFailed(
             "benchmark.runtime.reference_queue.state_invalid",
         )
+
+    def native_reference_lease_from_payload(
+        self, payload: Any, *, editor_id: Any, target_locale: Any,
+    ) -> LeasedNativeReferenceWorkOrder:
+        """Reconstruct and verify one private lease at a stateless boundary."""
+        keys = {
+            "schema", "work_id", "attempt", "max_attempts",
+            "lease_token", "lease_expires_at", "work_order",
+        }
+        try:
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != keys
+                or payload.get("schema")
+                != "blun.website-localization-native-reference-lease.v1"
+                or not isinstance(payload.get("work_order"), dict)
+            ):
+                raise ValueError
+            editor_id = _REFERENCE_QUEUE._identifier(editor_id)
+            target_locale = _REFERENCE_QUEUE._identifier(target_locale)
+            work_order = payload["work_order"]
+            suite = work_order.get("suite")
+            if (
+                work_order.get("target_locale") != target_locale
+                or not isinstance(suite, dict)
+                or not isinstance(suite.get("case_key"), str)
+            ):
+                raise ValueError
+            case_key = suite["case_key"]
+            expected = {
+                (locale, key): work_id
+                for work_id, locale, key in _CAMPAIGN._expected_work(self.policy)
+            }
+            work_id = expected.get((target_locale, case_key))
+            if work_id is None or payload.get("work_id") != work_id:
+                raise ValueError
+            attempt = payload.get("attempt")
+            maximum = payload.get("max_attempts")
+            if (
+                isinstance(attempt, bool) or not isinstance(attempt, int)
+                or isinstance(maximum, bool) or not isinstance(maximum, int)
+                or not 1 <= attempt <= maximum <= _REFERENCE_QUEUE.MAX_ATTEMPTS
+            ):
+                raise ValueError
+            token = _REFERENCE_QUEUE._identifier(payload.get("lease_token"))
+            expires = _REFERENCE_QUEUE._timestamp(payload.get("lease_expires_at"))
+            job_payload = _CAMPAIGN._job_payload(
+                self.policy, target_locale, case_key,
+            )
+            expected_order = self.create_native_reference_work_order(job_payload)
+            if _REFERENCE_INTAKE._canonical_json(
+                work_order,
+            ) != _REFERENCE_INTAKE._canonical_json(expected_order):
+                raise ValueError
+            claim = _REFERENCE_QUEUE.ClaimedNativeReference(
+                work_id=work_id,
+                campaign_id=self.campaign_id,
+                target_locale=target_locale,
+                suite_case_key=case_key,
+                job_payload=job_payload,
+                attempt=attempt,
+                max_attempts=maximum,
+                lease_owner=editor_id,
+                lease_token=token,
+                lease_expires_at=expires,
+            )
+            self.native_reference_queue.assert_live(claim, now=self.clock())
+            return LeasedNativeReferenceWorkOrder(
+                claim=claim, work_order=expected_order,
+            )
+        except BenchmarkRuntimeFailed:
+            raise
+        except Exception as error:
+            code = getattr(
+                error, "code", "benchmark.runtime.reference_queue.claim_invalid",
+            )
+            if not isinstance(code, str) or ERROR_CODE.fullmatch(code) is None:
+                code = "benchmark.runtime.reference_queue.claim_invalid"
+            raise BenchmarkRuntimeFailed(code) from None
 
     def renew_native_reference_work_order(
         self,
