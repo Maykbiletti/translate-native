@@ -698,27 +698,45 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         values = self.benchmark_configuration()
         values.pop("benchmark_execution")
         expected = {"schema": "verified-report", "status": "BLOCK"}
+        expected_status = {
+            "campaign_id": values["benchmark_campaign_id"],
+            "complete": False,
+        }
         with mock.patch.object(
             RUNTIME._HEALTH._CAMPAIGN.BenchmarkCampaignStore,
             "load_report",
             return_value=expected,
-        ) as load_report:
+        ) as load_report, mock.patch.object(
+            RUNTIME._HEALTH._CAMPAIGN.BenchmarkCampaignStore,
+            "status",
+            return_value=expected_status,
+        ) as campaign_status:
             runtime = self.runtime(**values)
             observed = runtime.load_benchmark_report(now=123)
+            observed_status = runtime.benchmark_campaign_status()
 
         self.assertIs(observed, expected)
+        self.assertIs(observed_status, expected_status)
         load_report.assert_called_once_with(
             values["benchmark_policy"],
             values["benchmark_campaign_id"],
             values["benchmark_evidence_authority"],
             now=123,
         )
+        campaign_status.assert_called_once_with(
+            values["benchmark_policy"],
+            values["benchmark_campaign_id"],
+        )
 
     def test_runtime_benchmark_report_boundary_is_content_free(self):
         runtime = self.runtime()
-        with self.assertRaises(RUNTIME.LocalizationRuntimeBlocked) as caught:
-            runtime.load_benchmark_report(now=100)
-        self.assertEqual(caught.exception.code, "runtime.benchmark.unavailable")
+        for operation in (
+            lambda: runtime.load_benchmark_report(now=100),
+            runtime.benchmark_campaign_status,
+        ):
+            with self.assertRaises(RUNTIME.LocalizationRuntimeBlocked) as caught:
+                operation()
+            self.assertEqual(caught.exception.code, "runtime.benchmark.unavailable")
 
         values = self.benchmark_configuration()
         values.pop("benchmark_execution")
@@ -735,6 +753,17 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             "runtime.benchmark.report.invalid",
         )
         self.assertNotIn("private report failure", str(caught.exception))
+
+        with mock.patch.object(
+            RUNTIME._HEALTH._CAMPAIGN.BenchmarkCampaignStore,
+            "status",
+            side_effect=RuntimeError("private status failure"),
+        ):
+            runtime = self.runtime(**values)
+            with self.assertRaises(RUNTIME.LocalizationRuntimeBlocked) as caught:
+                runtime.benchmark_campaign_status()
+        self.assertEqual(caught.exception.code, "runtime.benchmark.status.invalid")
+        self.assertNotIn("private status failure", str(caught.exception))
 
     def test_runtime_prioritizes_all_customer_phases_over_benchmark(self):
         values = self.benchmark_configuration()

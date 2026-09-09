@@ -761,7 +761,7 @@ byte-for-byte without signing again. A failed, omitted, duplicated, exchanged,
 or policy-stale work item therefore cannot disappear behind a partial aggregate,
 and a crash cannot silently replace the report used for a claim. Existing v1
 and v2 campaign databases migrate transactionally to the v3 report schema.
-Case-result schema v7 and report schema v10 bind the same `valid_until` value.
+Case-result schema v7 and report schema v11 bind the same `valid_until` value.
 
 After finalization, `BenchmarkCampaignStore.load_report` is the read-only
 consumer boundary. It opens a consistent snapshot, requires the exact complete
@@ -771,6 +771,34 @@ ordered-result digest, canonical JSON, content hash, timestamp, and signature.
 It never calls the signing capability and never repairs, replaces, or creates
 state. Missing, incomplete, stale, future-dated, state-inconsistent, or altered
 evidence therefore returns a stable failure instead of a report.
+
+### Authenticated benchmark report HTTP reader
+
+`integrations/website_localization_benchmark_http.py` exposes that verified
+read-only boundary to an operator dashboard or evidence consumer without
+granting database access. It provides exactly two HTTPS-only WSGI routes:
+
+- `GET /v1/benchmarks/status` returns the configured campaign identity,
+  policy and suite hashes, validity deadline, work and error counts, plus the
+  content-free report-finalization state.
+- `GET /v1/benchmarks/report` first requires the exact campaign to be complete
+  and finalized, then invokes only `load_benchmark_report`. Its response binds
+  the authenticated campaign ID to the canonical signed report and a SHA-256
+  digest of those exact report bytes.
+
+The host authenticator receives
+`blun.website-localization-benchmark-http-auth.v1` with the exact method, path,
+sorted request headers, and the empty-body digest. It must return
+`blun.website-localization-benchmark-reader.v1` with `reader_id`,
+`campaign_id`, `credential_id`, and `credential_version`. The application
+requires the principal's campaign to equal the runtime's verified campaign
+status before report loading. Authentication failure, credential rotation,
+cross-campaign access, request bodies, query parameters, plaintext transport,
+incomplete or expired campaigns, malformed runtime output, and report
+verification failures all return only a stable code and retry flag. Responses
+use `Cache-Control: no-store`; neither route starts benchmark work, signs a
+report, repairs state, or returns case prose, source text, target text,
+credentials, or adapter exceptions.
 
 `BenchmarkCampaignStore.health` verifies the complete campaign binding, every
 row invariant, successful result hash, and case attestation in a consistent
@@ -1373,10 +1401,12 @@ CMS, evidence, and supervisor. An optional monitored benchmark campaign adds a
 sixth connection plus its exact policy, campaign ID, evidence verifier, and
 staleness threshold. Monitor-only configuration remains supported and performs
 no benchmark work. Both monitor-only and executing configurations may call
-`load_benchmark_report`; it delegates only to the store's read-only verified
-load path. A runtime without benchmark configuration returns
-`runtime.benchmark.unavailable`, and unexpected adapter failures are reduced to
-the content-free `runtime.benchmark.report.invalid` boundary code.
+`benchmark_campaign_status` and `load_benchmark_report`; they delegate only to
+the store's content-free status and read-only verified report paths. A runtime
+without benchmark configuration returns `runtime.benchmark.unavailable`, and
+unexpected adapter failures are reduced to the content-free
+`runtime.benchmark.status.invalid` or `runtime.benchmark.report.invalid`
+boundary code.
 
 To execute the same campaign, supply the exact `benchmark_execution` mapping.
 It adds separate `candidate_connection`, `baseline_connection`,

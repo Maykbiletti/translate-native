@@ -638,6 +638,23 @@ class WebsiteLocalizationRuntime:
                 code = "runtime.benchmark.report.invalid"
             raise LocalizationRuntimeBlocked(code) from None
 
+    def benchmark_campaign_status(self) -> dict[str, Any]:
+        """Return content-free progress for the configured benchmark campaign."""
+        if self.benchmark_store is None:
+            raise LocalizationRuntimeBlocked("runtime.benchmark.unavailable")
+        try:
+            return self.benchmark_store.status(
+                self._benchmark_policy,
+                self._benchmark_campaign_id,
+            )
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if not isinstance(code, str) or re.fullmatch(
+                r"[a-z][a-z0-9_.-]{0,127}", code,
+            ) is None:
+                code = "runtime.benchmark.status.invalid"
+            raise LocalizationRuntimeBlocked(code) from None
+
     def claim_native_reference_work_order(
         self,
         editor_id: Any,
