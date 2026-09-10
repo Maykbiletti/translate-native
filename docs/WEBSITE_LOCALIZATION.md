@@ -1486,10 +1486,15 @@ clock, path, and HTTPS policy before opening SQLite or creating a table. It then
 returns one worker-owned object that exposes the WSGI callable plus the three
 trusted CMS operations: source registration, tombstone registration, and
 last-known-good rendering. Initialization closes its connection on every store
-or application failure, and `close` is idempotent. Construct the runtime after
-each worker starts; do not create it before a process fork or share it across
-request threads. The database URI form is intentionally rejected so connection
-flags cannot be smuggled through deployment configuration.
+or application failure, and `close` is idempotent. Every resolver, transaction,
+health check, trusted registration, and rendering read uses the same reentrant
+worker lock. A multithreaded WSGI worker may therefore share this composed
+runtime without concurrent use of its SQLite connection; failures release the
+lock before later work. Construct the runtime after each worker process starts
+and never before a process fork. Separate worker processes still require
+separate runtime instances and SQLite connections. The database URI form is
+intentionally rejected so connection flags cannot be smuggled through
+deployment configuration.
 
 The same adapter transports a tombstone without changing its security model.
 It uses `blun.cms-localization-tombstone-http.v1`, nests the exact signed

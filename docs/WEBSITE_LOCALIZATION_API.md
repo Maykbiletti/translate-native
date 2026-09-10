@@ -266,7 +266,12 @@ trusted registration and rendering methods, connection lifetime, and WSGI
 callable. A failed preflight creates no database; a later initialization failure
 closes the connection and never returns a partial application. Instantiate it
 once after each WSGI worker starts and call `close` during that worker's orderly
-shutdown.
+shutdown. Inside one worker, a shared reentrant lock serializes all eight store
+paths: both expectation resolvers, commit, delete, health, trusted registration,
+and rendering. The composition root opens SQLite for cross-thread access only
+behind that lock, so a multithreaded worker can share the WSGI callable without
+racing transactions or reads. This does not make a pre-fork connection safe;
+each worker process must construct and own its own runtime.
 
 The separate `api_contract` object lists all six tenant operations with their
 exact path, `POST` method, request schema, response schema, and current

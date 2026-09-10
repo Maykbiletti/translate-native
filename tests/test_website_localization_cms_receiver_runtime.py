@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -202,6 +203,59 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
                     RUNTIME.DurableCMSReceiverRuntimeBlocked
                 ):
                     operation()
+
+    def test_concurrent_wsgi_replays_share_one_worker_safely(self):
+        runtime = self.open(":memory:")
+        publication = HELPERS.publication_payload()
+        runtime.register_source(HELPERS.expectation(publication))
+        request = HELPERS.request(publication, self.publication_authority)
+
+        def publish(_index):
+            publisher = HTTP.HTTPPublisherAdapter(
+                "https://cms.example.test/v1/localization/callback",
+                lambda: {"Authorization": "Bearer secret"},
+                self.acknowledgement_authority,
+                transport=HELPERS.WSGIReceiverTransport(runtime),
+            )
+            return publisher.publish(request)
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                receipts = list(executor.map(publish, range(24)))
+
+            self.assertEqual(receipts, [receipts[0]] * 24)
+            self.assertEqual(receipts[0]["status"], "accepted")
+            self.assertEqual(
+                runtime.read_active_bundle(
+                    publication["site_id"], publication["source_id"],
+                ),
+                publication,
+            )
+        finally:
+            runtime.close()
+
+    def test_failed_locked_operation_releases_for_later_health(self):
+        runtime = self.open(":memory:")
+        publication = HELPERS.publication_payload()
+        try:
+            with self.assertRaises(
+                RUNTIME.DurableCMSReceiverRuntimeBlocked
+            ):
+                runtime.register_source({})
+            runtime.register_source(HELPERS.expectation(publication))
+            publisher = HTTP.HTTPPublisherAdapter(
+                "https://cms.example.test/v1/localization/callback",
+                lambda: {"Authorization": "Bearer secret"},
+                self.acknowledgement_authority,
+                transport=HELPERS.WSGIReceiverTransport(runtime),
+                probe_id_factory=lambda: "publisher-health-probe-503",
+            )
+            self.assertEqual(
+                publisher.check(contract_sha256=self.contract_sha256)["status"],
+                "healthy",
+            )
+        finally:
+            runtime.close()
 
     def test_http_failure_after_close_is_content_free(self):
         runtime = self.open(":memory:")

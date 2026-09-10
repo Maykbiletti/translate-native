@@ -13,6 +13,7 @@ import importlib.util
 import os
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -64,6 +65,66 @@ def _unused(*_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
     return {}
 
 
+class _SynchronizedStore:
+    """Serialize every use of one worker-owned SQLite connection."""
+
+    def __init__(self, connection: sqlite3.Connection, store: Any):
+        self._connection = connection
+        self._store = store
+        self._lock = threading.RLock()
+        self._closed = False
+
+    def _call(self, name: str, *args: Any) -> Any:
+        with self._lock:
+            if self._closed:
+                raise DurableCMSReceiverRuntimeBlocked(
+                    "CMS receiver runtime is closed"
+                )
+            try:
+                return getattr(self._store, name)(*args)
+            except _STORE.CMSReceiverStoreBlocked as error:
+                raise DurableCMSReceiverRuntimeBlocked(
+                    "CMS receiver store operation failed"
+                ) from error
+
+    def resolve_publication_expectation(self, value: Any) -> Mapping[str, Any]:
+        return self._call("resolve_publication_expectation", value)
+
+    def commit(self, value: Any) -> Mapping[str, Any]:
+        return self._call("commit", value)
+
+    def resolve_tombstone_expectation(self, value: Any) -> Mapping[str, Any]:
+        return self._call("resolve_tombstone_expectation", value)
+
+    def delete(self, value: Any) -> Mapping[str, Any]:
+        return self._call("delete", value)
+
+    def check(self, value: Any) -> Mapping[str, Any]:
+        return self._call("check", value)
+
+    def register_source(self, value: Any) -> Mapping[str, Any]:
+        return self._call("register_source", value)
+
+    def register_tombstone(self, value: Any) -> Mapping[str, Any]:
+        return self._call("register_tombstone", value)
+
+    def read_active_bundle(
+        self, site_id: str, source_id: str,
+    ) -> Mapping[str, Any] | None:
+        return self._call("read_active_bundle", site_id, source_id)
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._closed:
+                self._connection.close()
+                self._closed = True
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+
 def _preflight_receiver(
     publication_authority: Any,
     acknowledgement_authority: Any,
@@ -103,22 +164,17 @@ class DurableCMSReceiverRuntime:
     """One worker-owned SQLite store and its exact HTTPS-only WSGI boundary."""
 
     def __init__(
-        self,
-        connection: sqlite3.Connection,
-        store: Any,
-        application: Any,
+        self, synchronized_store: _SynchronizedStore, application: Any,
     ):
-        self._connection = connection
-        self._store = store
+        self._store = synchronized_store
         self.application = application
-        self._closed = False
 
     def __repr__(self) -> str:
-        state = "closed" if self._closed else "open"
+        state = "closed" if self._store.closed else "open"
         return f"DurableCMSReceiverRuntime(state={state!r})"
 
     def __enter__(self) -> "DurableCMSReceiverRuntime":
-        if self._closed:
+        if self._store.closed:
             raise DurableCMSReceiverRuntimeBlocked("CMS receiver runtime is closed")
         return self
 
@@ -128,34 +184,27 @@ class DurableCMSReceiverRuntime:
     def __call__(self, environ: Mapping[str, Any], start_response: Callable[..., Any]):
         return self.application(environ, start_response)
 
-    def _active_store(self):
-        if self._closed:
-            raise DurableCMSReceiverRuntimeBlocked("CMS receiver runtime is closed")
-        return self._store
-
     def register_source(self, expectation: Any) -> Mapping[str, Any]:
         """Register a trusted current-source expectation."""
 
-        return self._active_store().register_source(expectation)
+        return self._store.register_source(expectation)
 
     def register_tombstone(self, expectation: Any) -> Mapping[str, Any]:
         """Pre-authorize deletion of one exact acknowledged publication."""
 
-        return self._active_store().register_tombstone(expectation)
+        return self._store.register_tombstone(expectation)
 
     def read_active_bundle(
         self, site_id: str, source_id: str,
     ) -> Mapping[str, Any] | None:
         """Return target prose only to trusted CMS rendering code."""
 
-        return self._active_store().read_active_bundle(site_id, source_id)
+        return self._store.read_active_bundle(site_id, source_id)
 
     def close(self) -> None:
         """Close the worker-owned connection; repeated close is harmless."""
 
-        if not self._closed:
-            self._connection.close()
-            self._closed = True
+        self._store.close()
 
 
 def open_durable_cms_receiver(
@@ -186,7 +235,7 @@ def open_durable_cms_receiver(
             database_path,
             timeout=5.0,
             isolation_level=None,
-            check_same_thread=True,
+            check_same_thread=False,
         )
     except (OSError, sqlite3.Error) as error:
         raise DurableCMSReceiverRuntimeBlocked(
@@ -194,15 +243,20 @@ def open_durable_cms_receiver(
         ) from error
     try:
         store = _STORE.DurableCMSReceiverStore(connection, clock=clock)
+        synchronized_store = _SynchronizedStore(connection, store)
         application = _RECEIVER.CMSReceiverApplication(
             publication_authority=publication_authority,
             acknowledgement_authority=acknowledgement_authority,
             authenticate=authenticate,
-            resolve_publication_expectation=store.resolve_publication_expectation,
-            commit=store.commit,
-            resolve_tombstone_expectation=store.resolve_tombstone_expectation,
-            delete=store.delete,
-            check=store.check,
+            resolve_publication_expectation=(
+                synchronized_store.resolve_publication_expectation
+            ),
+            commit=synchronized_store.commit,
+            resolve_tombstone_expectation=(
+                synchronized_store.resolve_tombstone_expectation
+            ),
+            delete=synchronized_store.delete,
+            check=synchronized_store.check,
             contract_sha256=contract_sha256,
             clock=clock,
             path=path,
@@ -216,4 +270,4 @@ def open_durable_cms_receiver(
     except Exception:
         connection.close()
         raise
-    return DurableCMSReceiverRuntime(connection, store, application)
+    return DurableCMSReceiverRuntime(synchronized_store, application)
