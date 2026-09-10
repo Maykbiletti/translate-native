@@ -73,6 +73,13 @@ semantic dimensions, exact preservation rules, permitted locale-aware
 rendering, the evidence method and the fail-closed route for ambiguity. CMS
 integrations can therefore preflight the implemented offer contract without
 receiving project prices, product lists, protected terms or deployment secrets.
+Its separately hashed `review_summary_contract` also declares the exact five
+summary fields, both valid statuses, the only permitted ordered dimension
+names, the evidence-hash canonicalization and the explicit exclusion of source
+text, target text, spans, reviewer prose, project prices and project brands.
+Adapters therefore do not need to infer the targeted-review envelope from a
+schema name or prose. A changed, missing, reordered or unknown dimension makes
+the complete capability response unavailable.
 The worker uses the existing three ordered passes; the source-fidelity response
 additionally requires `commercial_review`. It contains all ten named dimensions,
 coverage and per-offer evidence. Each item declares `matched`, `source_only`, or

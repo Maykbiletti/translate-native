@@ -997,12 +997,13 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v1` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v2` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
-confidence, locale quality profile, optional commercial profile, and the
-human/independent-review requirements. The verifier must cryptographically
+confidence, locale quality profile, optional commercial profile, its exact
+content-free targeted-review summary, and the human/independent-review
+requirements. The verifier must cryptographically
 bind every field. It must reject a receipt issued for another result, policy,
 model, profile, software version, locale, or review purpose. In particular, a
 quality receipt cannot satisfy a qualified-human or independent-model review.
@@ -1458,6 +1459,13 @@ Do not classify legal text as commercial to bypass the legal human-review gate.
 
 The full commercial response hash stays in the normal quality-pass receipt;
 job IDs bind the profile version through queue, signed memory and publication.
+The content-free result summary uses
+`translate-native.commercial-review-summary.v1`; the authenticated capability
+response publishes its exact separately hashed machine contract, including the
+ordered allowed dimensions and the invariant between status and unresolved
+dimensions. Quality-evidence request v5 and receipt-binding v2 carry that exact
+summary, so adapters can reject unknown, reordered or contradictory review
+scope without reconstructing it from prose.
 As before, the host must verify an independent quality receipt before signing.
 Schema validation does not prove that a model's semantic findings are true or
 complete. The receipt verifier must validate evidence held by the trusted host;

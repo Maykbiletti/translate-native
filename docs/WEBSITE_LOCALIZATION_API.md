@@ -208,19 +208,44 @@ disabled, so a CMS can fail closed before submitting work. The object uses
 over every other canonical field. Paths and schemas come from the same runtime
 constants used for routing; they are not copied into a second configuration.
 
-The nested `blun.website-localization-capabilities.v2` object carries a
+The nested `blun.website-localization-capabilities.v3` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
 runtime rebuilds and validates the complete registry on every read; duplicate,
 missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
+Within it, `commercial_profile` is a separately hashed
+`translate-native.commercial-capabilities.v2` object. Its nested and separately
+hashed `review_summary_contract` defines the exact content-free result schema,
+field set, verified/review-required state invariant, ten allowed ordered
+review dimensions, complete-evidence hash semantics, and excluded sensitive
+content. A CMS or independent-review adapter can validate targeted commercial
+escalation without receiving project prices, brands, source/target text, spans,
+or reviewer prose. Any registry or digest drift blocks the whole discovery
+response rather than advertising a partial contract.
+
 ```json
 {
   "capabilities": {
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
-    "commercial_profile": "translate-native.commercial.v2",
+    "commercial_profile": {
+      "profile": "translate-native.commercial.v2",
+      "review_summary_contract": {
+        "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
+        "evidence_sha256": {"algorithm": "sha-256", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": "complete-commercial-review-evidence"},
+        "profile": "translate-native.commercial.v2",
+        "required_fields": ["schema", "profile", "status", "review_required_dimensions", "evidence_sha256"],
+        "result_schema": "translate-native.commercial-review-summary.v1",
+        "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
+        "schema": "translate-native.commercial-review-summary-capabilities.v1",
+        "sha256": "<sha256>",
+        "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
+      },
+      "schema": "translate-native.commercial-capabilities.v2",
+      "sha256": "<sha256>"
+    },
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
     "default_target_policy": "all-eu-official-locales-except-source-language",
     "eu_language_source": "https://european-union.europa.eu/principles-countries-history/languages_en",
@@ -264,7 +289,7 @@ without a partial locale list.
     },
     "publication_schema": "blun.cms-localization-publication.v2",
     "quality_passes": ["target_native", "source_fidelity"],
-    "schema": "blun.website-localization-capabilities.v2",
+    "schema": "blun.website-localization-capabilities.v3",
     "sha256": "<sha256>"
   },
   "api_contract": {
@@ -287,9 +312,10 @@ without a partial locale list.
 }
 ```
 
-The abbreviated example shows one locale, one inbound operation, and one of the
-three outbound adapter operations only; a successful real response always
-contains all 24 locales, all six inbound operations, and all three outbound
+The abbreviated example shows one locale, one inbound operation, one outbound
+adapter operation, and only the commercial profile fields relevant to summary
+discovery. A successful real response always contains the complete commercial
+profile, all 24 locales, all six inbound operations, and all three outbound
 operations, and otherwise blocks.
 
 ## Read per-locale progress

@@ -29,9 +29,10 @@ Neither credentials nor remote response prose appears in adapter errors.
 ## Request
 
 The adapter accepts only the coordinator's exact immutable
-`blun.localization-quality-evidence-request.v4` object. It validates the
+`blun.localization-quality-evidence-request.v5` object. It validates the
 complete field set, request ID, SHA-256 values, locale profile, model identity,
-confidence decisions, UTF-8 size, Unicode NFC, and the source and target text
+confidence decisions, optional commercial profile and its exact content-free
+targeted-review summary, UTF-8 size, Unicode NFC, and the source and target text
 hashes before authentication or transport.
 
 It sends one canonical UTF-8 JSON document:
@@ -42,7 +43,7 @@ It sends one canonical UTF-8 JSON document:
   "request_id": "blun-l10n-evidence-<64 lowercase hexadecimal characters>",
   "request_sha256": "<SHA-256 of the canonical inner request>",
   "request": {
-    "schema": "blun.localization-quality-evidence-request.v4",
+    "schema": "blun.localization-quality-evidence-request.v5",
     "request_id": "<same request ID>",
     "source_locale": "en-IE",
     "target_locale": "fi-FI",
@@ -62,7 +63,9 @@ It sends one canonical UTF-8 JSON document:
 ```
 
 The abbreviated example omits other required inner fields for readability.
-Production requests always contain exactly the full v4 field set. Source and
+Production requests always contain exactly the full v5 field set. Commercial
+requests include `commercial_profile` and the matching `commercial_review`
+summary; non-commercial requests require both fields to be `null`. Source and
 target text are intentionally present because this external step verifies the
 existing source-blind native review and the separate source-aware fidelity
 review. The service must preserve their confidentiality.
@@ -106,11 +109,12 @@ numbers, a UTF-8 byte-order mark, wrong bindings, ambiguous content types,
 incorrect lengths, and oversized bodies. The release coordinator then applies
 its existing independent receipt checks. Each opaque receipt must verify
 against the complete canonical
-`blun.localization-quality-receipt-binding.v1` object supplied by the release
+`blun.localization-quality-receipt-binding.v2` object supplied by the release
 coordinator, including the review purpose, job and result hashes, both texts
 and locales, content type, glossary and policy versions, provider/model and
-software identities, locale quality and commercial profiles, confidence, and
-escalation requirements. Reuse across a changed field or between quality,
+software identities, locale quality and commercial profiles, the exact
+commercial review scope, confidence, and escalation requirements. Reuse across
+a changed field or between quality,
 qualified-human, and independent-model review purposes must fail closed.
 Legal content still requires a
 separately verified qualified-human receipt. Low-confidence non-legal content

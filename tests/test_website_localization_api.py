@@ -440,6 +440,56 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             commercial["review_summary_schema"],
             CMS._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
         )
+        review_summary_contract = commercial["review_summary_contract"]
+        self.assertEqual(
+            review_summary_contract["schema"],
+            CMS._COMMERCIAL.REVIEW_SUMMARY_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            review_summary_contract["result_schema"],
+            CMS._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+        )
+        self.assertEqual(
+            review_summary_contract["profile"],
+            CMS._PLANNER.COMMERCIAL_PROFILE,
+        )
+        self.assertEqual(
+            review_summary_contract["required_fields"],
+            [
+                "schema", "profile", "status",
+                "review_required_dimensions", "evidence_sha256",
+            ],
+        )
+        self.assertEqual(
+            review_summary_contract["review_required_dimensions"]["allowed"],
+            list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
+        )
+        self.assertEqual(
+            review_summary_contract["review_required_dimensions"]["order"],
+            list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
+        )
+        self.assertTrue(
+            review_summary_contract["review_required_dimensions"]["unique"],
+        )
+        self.assertEqual(
+            review_summary_contract["statuses"]["verified"]
+            ["review_required_dimensions"],
+            "empty",
+        )
+        self.assertTrue(
+            review_summary_contract["statuses"]["review_required"]
+            ["requires_independent_review"],
+        )
+        self.assertTrue(all(
+            value is False
+            for value in review_summary_contract["content_policy"].values()
+        ))
+        unsigned_review_summary = dict(review_summary_contract)
+        review_summary_digest = unsigned_review_summary.pop("sha256")
+        self.assertEqual(
+            review_summary_digest,
+            CMS._hash(CMS._canonical_json(unsigned_review_summary)),
+        )
         self.assertEqual(
             [item["name"] for item in commercial["dimensions"]],
             list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
@@ -704,6 +754,44 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         )
         self.assertNotIn("capabilities", payload)
         self.assertNotIn("locales", payload)
+
+    def test_capabilities_block_commercial_review_contract_drift(self):
+        current = CMS._COMMERCIAL.public_review_summary_contract
+
+        def rehashed(profile, mutation):
+            value = current(profile)
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "reordered": lambda value: value[
+                "review_required_dimensions"
+            ]["allowed"].reverse(),
+            "unknown": lambda value: value[
+                "review_required_dimensions"
+            ]["allowed"].append("invented_dimension"),
+            "contradictory": lambda value: value["statuses"]["verified"].update(
+                review_required_dimensions="one-or-more",
+            ),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._COMMERCIAL,
+                "public_review_summary_contract",
+                lambda profile, mutation=mutation: rehashed(profile, mutation),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-commercial-summary-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
+            self.assertNotIn("locales", payload)
 
     def test_capabilities_block_an_incomplete_http_schema_registry(self):
         current = self.bridge.localization_capabilities

@@ -12,7 +12,10 @@ import json
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v1"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v2"
+REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
+    "translate-native.commercial-review-summary-capabilities.v1"
+)
 REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v1"
 
 DIMENSIONS = {
@@ -35,12 +38,56 @@ def _canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def public_review_summary_contract(profile: str) -> dict[str, Any]:
+    """Return the exact content-free summary contract external adapters consume."""
+    body = {
+        "schema": REVIEW_SUMMARY_CAPABILITIES_SCHEMA,
+        "result_schema": REVIEW_SUMMARY_SCHEMA,
+        "profile": profile,
+        "required_fields": [
+            "schema", "profile", "status", "review_required_dimensions",
+            "evidence_sha256",
+        ],
+        "statuses": {
+            "verified": {"review_required_dimensions": "empty"},
+            "review_required": {
+                "review_required_dimensions": "one-or-more",
+                "requires_independent_review": True,
+            },
+        },
+        "review_required_dimensions": {
+            "allowed": list(DIMENSIONS),
+            "order": list(DIMENSIONS),
+            "unique": True,
+        },
+        "evidence_sha256": {
+            "algorithm": "sha-256",
+            "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace",
+            "covers": "complete-commercial-review-evidence",
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "source_spans": False,
+            "target_spans": False,
+            "reviewer_prose": False,
+            "project_prices": False,
+            "project_brands": False,
+        },
+    }
+    return {
+        **body,
+        "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
+    }
+
+
 def public_profile(profile: str) -> dict[str, Any]:
     """Return the public, brand-neutral contract implemented by this module."""
     body = {
         "schema": PUBLIC_PROFILE_SCHEMA,
         "profile": profile,
         "review_summary_schema": REVIEW_SUMMARY_SCHEMA,
+        "review_summary_contract": public_review_summary_contract(profile),
         "applies_to": {
             "content_type": "commercial",
             "locales": "all-supported-target-locales",

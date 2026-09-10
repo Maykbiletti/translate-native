@@ -48,6 +48,31 @@ class CommercialLocalizationTests(unittest.TestCase):
         adapter = provider(report=report)
         return WORKER.run_localization_job(job(SOURCE, "commercial"), assets(), adapter), adapter
 
+    def test_public_review_summary_contract_is_exact_content_free_and_hashed(self):
+        value = PROFILE.public_review_summary_contract(SCHEMA)
+        self.assertEqual(
+            value["schema"], PROFILE.REVIEW_SUMMARY_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(value["result_schema"], PROFILE.REVIEW_SUMMARY_SCHEMA)
+        self.assertEqual(value["profile"], SCHEMA)
+        self.assertEqual(
+            value["review_required_dimensions"]["allowed"],
+            list(PROFILE.DIMENSIONS),
+        )
+        self.assertEqual(
+            value["review_required_dimensions"]["order"],
+            list(PROFILE.DIMENSIONS),
+        )
+        unsigned = dict(value)
+        digest = unsigned.pop("sha256")
+        self.assertEqual(
+            digest,
+            PROFILE.hashlib.sha256(PROFILE._canonical_json(unsigned)).hexdigest(),
+        )
+        serialized = json.dumps(value).lower()
+        for private_value in ("480", "vat", "blun", "offer-1"):
+            self.assertNotIn(private_value, serialized)
+
     def test_ordered_review_preserves_source_blindness_and_hashes_full_evidence(self):
         result, adapter = self.run_worker()
         self.assertEqual([r.phase for r in adapter.requests], list(WORKER.PHASES))

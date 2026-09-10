@@ -489,17 +489,22 @@ class WebsiteLocalizationCMSBridge:
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
 
             commercial = _COMMERCIAL.public_profile(_PLANNER.COMMERCIAL_PROFILE)
+            review_summary_contract = _COMMERCIAL.public_review_summary_contract(
+                _PLANNER.COMMERCIAL_PROFILE,
+            )
             if (
                 not isinstance(commercial, dict)
                 or set(commercial) != {
                     "schema", "profile", "applies_to", "dimensions",
                     "preservation", "rendering", "verification",
-                    "protected_terms", "review_summary_schema", "sha256",
+                    "protected_terms", "review_summary_schema",
+                    "review_summary_contract", "sha256",
                 }
                 or commercial["schema"] != _COMMERCIAL.PUBLIC_PROFILE_SCHEMA
                 or commercial["profile"] != _PLANNER.COMMERCIAL_PROFILE
                 or commercial["review_summary_schema"]
                 != _COMMERCIAL.REVIEW_SUMMARY_SCHEMA
+                or commercial["review_summary_contract"] != review_summary_contract
                 or commercial["applies_to"] != {
                     "content_type": "commercial",
                     "locales": "all-supported-target-locales",
@@ -508,6 +513,60 @@ class WebsiteLocalizationCMSBridge:
                 or [item.get("name") for item in commercial["dimensions"]]
                 != list(_EXPECTED_COMMERCIAL_DIMENSIONS)
                 or tuple(_COMMERCIAL.DIMENSIONS) != _EXPECTED_COMMERCIAL_DIMENSIONS
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+            unsigned_review_summary_contract = dict(review_summary_contract)
+            review_summary_digest = unsigned_review_summary_contract.pop(
+                "sha256", None,
+            )
+            if (
+                set(review_summary_contract) != {
+                    "schema", "result_schema", "profile", "required_fields",
+                    "statuses", "review_required_dimensions", "evidence_sha256",
+                    "content_policy", "sha256",
+                }
+                or review_summary_contract["schema"]
+                != _COMMERCIAL.REVIEW_SUMMARY_CAPABILITIES_SCHEMA
+                or review_summary_contract["result_schema"]
+                != _COMMERCIAL.REVIEW_SUMMARY_SCHEMA
+                or review_summary_contract["profile"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or review_summary_contract["required_fields"] != [
+                    "schema", "profile", "status", "review_required_dimensions",
+                    "evidence_sha256",
+                ]
+                or review_summary_contract["statuses"] != {
+                    "verified": {"review_required_dimensions": "empty"},
+                    "review_required": {
+                        "review_required_dimensions": "one-or-more",
+                        "requires_independent_review": True,
+                    },
+                }
+                or review_summary_contract["review_required_dimensions"] != {
+                    "allowed": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
+                    "order": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
+                    "unique": True,
+                }
+                or review_summary_contract["evidence_sha256"] != {
+                    "algorithm": "sha-256",
+                    "canonicalization": (
+                        "utf-8-json-sort-keys-no-insignificant-whitespace"
+                    ),
+                    "covers": "complete-commercial-review-evidence",
+                }
+                or review_summary_contract["content_policy"] != {
+                    "source_text": False,
+                    "target_text": False,
+                    "source_spans": False,
+                    "target_spans": False,
+                    "reviewer_prose": False,
+                    "project_prices": False,
+                    "project_brands": False,
+                }
+                or not isinstance(review_summary_digest, str)
+                or SHA256.fullmatch(review_summary_digest) is None
+                or review_summary_digest
+                != _hash(_canonical_json(unsigned_review_summary_contract))
             ):
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
             unsigned_commercial = dict(commercial)
