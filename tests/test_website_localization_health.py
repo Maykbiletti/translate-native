@@ -94,6 +94,26 @@ class ProviderProbe:
         return response
 
 
+class PublisherProbe:
+    def __init__(self, mode="healthy"):
+        self.mode = mode
+        self.calls = []
+
+    def check(self, **binding):
+        self.calls.append(binding)
+        if self.mode == "raise":
+            raise RuntimeError("private callback diagnostic")
+        response = {
+            "schema": CMS.PUBLICATION_HEALTH_ACK_SCHEMA,
+            "probe_id": "publisher-health-probe-1",
+            "contract_sha256": binding["contract_sha256"],
+            "status": "healthy",
+        }
+        if self.mode == "malformed":
+            response["contract_sha256"] = "0" * 64
+        return response
+
+
 class Publisher:
     def __init__(self):
         self.requests = []
@@ -324,12 +344,13 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             current, plan, job, result, result_sha256, revision,
         )
 
-    def report(self, now=250, probe=None):
+    def report(self, now=250, probe=None, publisher_probe=None):
         return self.monitor.check(
             event_verifier=self.event_authority,
             approval_authority=self.approval_authority,
             publication_authority=self.publication_authority,
             provider_probe=self.probe if probe is None else probe,
+            publisher_probe=publisher_probe,
             now=now,
         )
 
@@ -727,6 +748,32 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         self.assertEqual(report.status, "blocked")
         provider = self.component(report, "providers")
         self.assertEqual(provider.reasons, ("provider.unavailable",))
+
+    def test_configured_publisher_probe_is_content_free_and_fail_closed(self):
+        publisher = PublisherProbe()
+        healthy = self.report(publisher_probe=publisher)
+        component = self.component(healthy, "cms_publisher")
+        self.assertEqual(component.status, "healthy")
+        self.assertEqual(dict(component.counts), {
+            "blocked": 0, "configured": 1, "healthy": 1,
+        })
+        contract_sha256 = self.bridge.localization_capabilities()[
+            "publication_http"
+        ]["sha256"]
+        self.assertEqual(publisher.calls, [{"contract_sha256": contract_sha256}])
+
+        for mode in ("malformed", "raise"):
+            with self.subTest(mode=mode):
+                blocked = self.report(publisher_probe=PublisherProbe(mode))
+                self.assertEqual(blocked.status, "blocked")
+                publisher_component = self.component(blocked, "cms_publisher")
+                self.assertEqual(
+                    publisher_component.reasons, ("cms.publisher_unavailable",),
+                )
+                self.assertNotIn(
+                    "private callback diagnostic",
+                    json.dumps(blocked.as_payload()),
+                )
 
     def test_completed_signed_locales_make_the_version_ready(self):
         plan = self.ingest()

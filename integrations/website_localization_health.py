@@ -78,6 +78,10 @@ class ProviderHealthProbe(Protocol):
     def check(self, *, provider_id: str, model_id: str, model_version: str) -> Mapping[str, Any]: ...
 
 
+class PublisherHealthProbe(Protocol):
+    def check(self, *, contract_sha256: str) -> Mapping[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class ComponentHealth:
     component: str
@@ -992,6 +996,44 @@ class LocalizationHealthMonitor:
             ))
         return tuple(statuses), reasons
 
+    def _publisher(self, probe: PublisherHealthProbe | None) -> ComponentHealth | None:
+        if probe is None:
+            return None
+        reasons: set[str] = set()
+        try:
+            check = getattr(probe, "check", None)
+            if not callable(check):
+                raise ValueError
+            capabilities = self.bridge.localization_capabilities()
+            contract = capabilities["publication_http"]
+            contract_sha256 = contract["sha256"]
+            response = check(contract_sha256=contract_sha256)
+            if (
+                not isinstance(response, Mapping)
+                or set(response) != {
+                    "schema", "probe_id", "contract_sha256", "status",
+                }
+                or response["schema"] != _CMS.PUBLICATION_HEALTH_ACK_SCHEMA
+                or not isinstance(response["probe_id"], str)
+                or not 16 <= len(response["probe_id"]) <= 256
+                or _CMS.TOKEN.fullmatch(response["probe_id"]) is None
+                or response["contract_sha256"] != contract_sha256
+                or response["status"] != "healthy"
+            ):
+                raise ValueError
+        except Exception:
+            reasons.add("cms.publisher_unavailable")
+        return _component(
+            "cms_publisher",
+            "blocked" if reasons else "healthy",
+            reasons,
+            {
+                "configured": 1,
+                "healthy": int(not reasons),
+                "blocked": int(bool(reasons)),
+            },
+        )
+
     def _check_supervisor(self, now: float) -> ComponentHealth | None:
         if self.supervisor is None:
             return None
@@ -1332,6 +1374,7 @@ class LocalizationHealthMonitor:
         approval_authority: Any,
         publication_authority: Any,
         provider_probe: ProviderHealthProbe | None,
+        publisher_probe: PublisherHealthProbe | None = None,
         now: float | int,
     ) -> LocalizationHealthReport:
         now = _timestamp(now)
@@ -1375,6 +1418,7 @@ class LocalizationHealthMonitor:
                 storage_reasons.add("monitor.state_unreadable")
 
         providers, provider_reasons = self._providers(provider_bindings, provider_probe)
+        publisher = self._publisher(publisher_probe)
         supervisor = self._check_supervisor(now)
         benchmark = self._check_benchmark(now)
         benchmark_reviews = self._check_benchmark_reviews(now)
@@ -1451,6 +1495,8 @@ class LocalizationHealthMonitor:
         )
         if supervisor is not None:
             components = components + (supervisor,)
+        if publisher is not None:
+            components = components + (publisher,)
         if benchmark is not None:
             components = components + (benchmark,)
         if benchmark_reviews is not None:
@@ -1460,6 +1506,7 @@ class LocalizationHealthMonitor:
         if (
             storage_reasons
             or provider_reasons
+            or (publisher is not None and publisher.status == "blocked")
             or workflow_reasons & blocking_workflow
             or (supervisor is not None and supervisor.status == "blocked")
             or (benchmark is not None and benchmark.status == "blocked")

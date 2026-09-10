@@ -439,7 +439,8 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         )
         self.assertEqual(set(publication_http), {
             "schema", "method", "request_content_type", "response_content_types",
-            "delivery_semantics", "binding_headers", "operations", "sha256",
+            "delivery_semantics", "binding_headers", "health_binding_headers",
+            "operations", "sha256",
         })
         unsigned_publication_http = dict(publication_http)
         publication_http_digest = unsigned_publication_http.pop("sha256")
@@ -450,7 +451,9 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         publication_operations = {
             item["name"]: item for item in publication_http["operations"]
         }
-        self.assertEqual(set(publication_operations), {"publication", "tombstone"})
+        self.assertEqual(
+            set(publication_operations), {"publication", "tombstone", "health"},
+        )
         self.assertTrue(all(set(item) == {
             "name", "payload_schema", "request_schema",
             "acknowledgement_schema", "response_schema",
@@ -480,6 +483,14 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             publication_operations["tombstone"]["acknowledgement_status"],
             "deleted",
         )
+        self.assertEqual(
+            publication_operations["health"]["payload_schema"],
+            CMS.PUBLICATION_HEALTH_SCHEMA,
+        )
+        self.assertEqual(
+            publication_operations["health"]["acknowledgement_status"],
+            "healthy",
+        )
         self.assertEqual(publication_http["delivery_semantics"], "at-least-once")
         self.assertEqual(publication_http["method"], "POST")
         self.assertEqual(
@@ -491,6 +502,13 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             [
                 {"name": name, "binding": binding}
                 for name, binding in CMS.PUBLICATION_HTTP_BINDING_HEADERS
+            ],
+        )
+        self.assertEqual(
+            publication_http["health_binding_headers"],
+            [
+                {"name": name, "binding": binding}
+                for name, binding in CMS.PUBLICATION_HEALTH_HTTP_BINDING_HEADERS
             ],
         )
         self.assertNotIn("endpoint", json.dumps(publication_http))
@@ -660,6 +678,22 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             )
         finally:
             CMS.PUBLICATION_HTTP_BINDING_HEADERS = original_headers
+        self.assertEqual(
+            (status, payload["error"]),
+            ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+        )
+        self.assertNotIn("capabilities", payload)
+
+        original_health_headers = CMS.PUBLICATION_HEALTH_HTTP_BINDING_HEADERS
+        CMS.PUBLICATION_HEALTH_HTTP_BINDING_HEADERS = (
+            ("X-Localization-Probe-Id", "wrong"),
+        )
+        try:
+            status, _, payload = self.capabilities_request(
+                request_id="capabilities-invalid-health-headers",
+            )
+        finally:
+            CMS.PUBLICATION_HEALTH_HTTP_BINDING_HEADERS = original_health_headers
         self.assertEqual(
             (status, payload["error"]),
             ("503 Service Unavailable", "cms.capabilities.registry_invalid"),

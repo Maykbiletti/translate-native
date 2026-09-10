@@ -341,6 +341,7 @@ class WebsiteLocalizationRuntime:
         cms_api_max_attempts: int = 3,
         health_http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
         health_provider_probe: Any | None = None,
+        health_publisher_probe: Any | None = None,
         supervisor_policy: Any = None,
         supervisor_stale_after_seconds: float | int = 30,
         benchmark_connection: sqlite3.Connection | None = None,
@@ -414,6 +415,14 @@ class WebsiteLocalizationRuntime:
                 "check",
                 "runtime.health_http.provider_probe.invalid",
             )
+        if health_publisher_probe is not None:
+            if health_http_authenticator is None:
+                raise LocalizationRuntimeBlocked("runtime.health_http.incomplete")
+            _capability(
+                health_publisher_probe,
+                "check",
+                "runtime.health_http.publisher_probe.invalid",
+            )
         connections = (
             queue_connection, release_connection, cms_connection,
             evidence_connection, supervisor_connection,
@@ -427,6 +436,13 @@ class WebsiteLocalizationRuntime:
         )
         _validate_connections(connections)
         validated = _validate_dependencies(dependencies)
+        if (
+            health_publisher_probe is not None
+            and health_publisher_probe is not validated["publisher"]
+        ):
+            raise LocalizationRuntimeBlocked(
+                "runtime.health_http.publisher_binding.invalid",
+            )
         supervisor_worker_id = _identifier(
             supervisor_worker_id, "runtime.supervisor_worker_id.invalid",
         )
@@ -631,6 +647,7 @@ class WebsiteLocalizationRuntime:
                 _HEALTH_HTTP.WebsiteLocalizationHealthHTTPApplication(
                     lambda *, now: self.health(
                         provider_probe=health_provider_probe,
+                        publisher_probe=health_publisher_probe,
                         now=now,
                     ),
                     health_http_authenticator,
@@ -657,7 +674,13 @@ class WebsiteLocalizationRuntime:
             sleeper=sleeper,
         )
 
-    def health(self, *, provider_probe: Any = None, now: float | int | None = None):
+    def health(
+        self,
+        *,
+        provider_probe: Any = None,
+        publisher_probe: Any = None,
+        now: float | int | None = None,
+    ):
         """Return the existing content-free, read-only health report."""
         checked_at = self._clock() if now is None else now
         return self.health_monitor.check(
@@ -665,6 +688,7 @@ class WebsiteLocalizationRuntime:
             approval_authority=self._dependencies["approval_authority"],
             publication_authority=self._dependencies["publication_authority"],
             provider_probe=provider_probe,
+            publisher_probe=publisher_probe,
             now=checked_at,
         )
 

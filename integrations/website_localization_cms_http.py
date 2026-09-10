@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import secrets
 import socket
 import sys
 import urllib.error
@@ -60,8 +61,15 @@ REQUEST_SCHEMA = _CMS.PUBLICATION_HTTP_REQUEST_SCHEMA
 RESPONSE_SCHEMA = _CMS.PUBLICATION_HTTP_RESPONSE_SCHEMA
 TOMBSTONE_REQUEST_SCHEMA = _CMS.TOMBSTONE_HTTP_REQUEST_SCHEMA
 TOMBSTONE_RESPONSE_SCHEMA = _CMS.TOMBSTONE_HTTP_RESPONSE_SCHEMA
+HEALTH_SCHEMA = _CMS.PUBLICATION_HEALTH_SCHEMA
+HEALTH_ACK_SCHEMA = _CMS.PUBLICATION_HEALTH_ACK_SCHEMA
+HEALTH_REQUEST_SCHEMA = _CMS.PUBLICATION_HEALTH_HTTP_REQUEST_SCHEMA
+HEALTH_RESPONSE_SCHEMA = _CMS.PUBLICATION_HEALTH_HTTP_RESPONSE_SCHEMA
 RESERVED_HEADERS.update(
     name.lower() for name, _ in _CMS.PUBLICATION_HTTP_BINDING_HEADERS
+)
+RESERVED_HEADERS.update(
+    name.lower() for name, _ in _CMS.PUBLICATION_HEALTH_HTTP_BINDING_HEADERS
 )
 
 
@@ -296,6 +304,7 @@ class HTTPPublisherAdapter:
         transport: HTTPTransport | None = None,
         timeout: float = 30.0,
         allow_loopback_http: bool = False,
+        probe_id_factory: Callable[[], str] | None = None,
     ):
         if not isinstance(allow_loopback_http, bool):
             raise TypeError("allow_loopback_http must be boolean")
@@ -316,6 +325,11 @@ class HTTPPublisherAdapter:
         if not callable(getattr(self.transport, "post", None)):
             raise TypeError("transport must provide post")
         self.timeout = float(timeout)
+        self.probe_id_factory = (
+            secrets.token_hex if probe_id_factory is None else probe_id_factory
+        )
+        if not callable(self.probe_id_factory):
+            raise TypeError("probe_id_factory must be callable")
 
     def publish(self, request: Any) -> Mapping[str, Any]:
         try:
@@ -396,57 +410,7 @@ class HTTPPublisherAdapter:
             "Content-Type": "application/json; charset=utf-8",
             **protocol_headers,
         })
-        try:
-            result = self.transport.post(
-                self.endpoint,
-                headers,
-                body,
-                timeout=self.timeout,
-            )
-        except HTTPPublisherFailed:
-            raise
-        except Exception:
-            raise HTTPPublisherFailed("network", retryable=True) from None
-        if (
-            not isinstance(result, HTTPResult)
-            or isinstance(result.status, bool)
-            or not isinstance(result.status, int)
-            or not 100 <= result.status <= 599
-        ):
-            raise HTTPPublisherFailed("transport_invalid", retryable=True)
-        if result.status != 200:
-            if 300 <= result.status <= 399:
-                raise HTTPPublisherFailed("redirect", retryable=False)
-            retryable = result.status in {408, 425, 429} or 500 <= result.status <= 599
-            raise HTTPPublisherFailed("http_status", retryable=retryable)
-        response_headers = _response_headers(result.headers)
-        content_type = response_headers.get("content-type", "").lower().replace(" ", "")
-        if content_type not in {"application/json", "application/json;charset=utf-8"}:
-            raise HTTPPublisherFailed("response_content_type", retryable=True)
-        if (
-            not isinstance(result.body, bytes)
-            or not result.body
-            or len(result.body) > MAX_RESPONSE_BYTES
-        ):
-            raise HTTPPublisherFailed("response_size", retryable=True)
-        declared = response_headers.get("content-length")
-        if declared is not None and (
-            not declared.isascii()
-            or not declared.isdecimal()
-            or int(declared) != len(result.body)
-        ):
-            raise HTTPPublisherFailed("response_size", retryable=True)
-        try:
-            text = result.body.decode("utf-8")
-            if text.startswith("\ufeff"):
-                raise ValueError("BOM rejected")
-            envelope = json.loads(
-                text,
-                object_pairs_hook=_pairs,
-                parse_constant=_constant,
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
-            raise HTTPPublisherFailed("response_json", retryable=True) from None
+        envelope = self._post_json(headers, body)
         if not isinstance(envelope, dict) or set(envelope) != {
             "schema", "acknowledgement", "signature",
         }:
@@ -458,7 +422,9 @@ class HTTPPublisherAdapter:
             "payload_sha256": payload_sha256,
             "status": "deleted" if tombstone else "accepted",
         }
-        expected_response_schema = TOMBSTONE_RESPONSE_SCHEMA if tombstone else RESPONSE_SCHEMA
+        expected_response_schema = (
+            TOMBSTONE_RESPONSE_SCHEMA if tombstone else RESPONSE_SCHEMA
+        )
         if envelope["schema"] != expected_response_schema or acknowledgement != expected:
             raise HTTPPublisherFailed("acknowledgement_binding", retryable=False)
         signature_mapping = envelope["signature"]
@@ -485,3 +451,138 @@ class HTTPPublisherAdapter:
         if not verified:
             raise HTTPPublisherFailed("acknowledgement_signature", retryable=False)
         return acknowledgement
+
+    def check(self, *, contract_sha256: str) -> Mapping[str, Any]:
+        """Challenge the configured receiver without sending localized content."""
+        if (
+            not isinstance(contract_sha256, str)
+            or re.fullmatch(r"[a-f0-9]{64}", contract_sha256) is None
+        ):
+            raise HTTPPublisherFailed("health_request_invalid", retryable=False)
+        try:
+            probe_id = self.probe_id_factory()
+        except Exception:
+            raise HTTPPublisherFailed("health_request_invalid", retryable=False) from None
+        if (
+            not isinstance(probe_id, str)
+            or not 16 <= len(probe_id) <= 256
+            or TOKEN.fullmatch(probe_id) is None
+        ):
+            raise HTTPPublisherFailed("health_request_invalid", retryable=False)
+        probe = {
+            "schema": HEALTH_SCHEMA,
+            "probe_id": probe_id,
+            "contract_sha256": contract_sha256,
+        }
+        body = _canonical_json(
+            {"schema": HEALTH_REQUEST_SCHEMA, "probe": probe},
+            code="health_request_invalid",
+            maximum=MAX_REQUEST_BYTES,
+        )
+        headers = _authentication_headers(self.authentication_headers)
+        bindings = {"probe_id": probe_id, "contract_sha256": contract_sha256}
+        try:
+            protocol_headers = {
+                name: bindings[binding]
+                for name, binding in _CMS.PUBLICATION_HEALTH_HTTP_BINDING_HEADERS
+            }
+        except (KeyError, TypeError, ValueError):
+            raise HTTPPublisherFailed("health_request_invalid", retryable=False) from None
+        headers.update({
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "Content-Type": "application/json; charset=utf-8",
+            **protocol_headers,
+        })
+        envelope = self._post_json(headers, body)
+        if not isinstance(envelope, dict) or set(envelope) != {
+            "schema", "acknowledgement", "signature",
+        }:
+            raise HTTPPublisherFailed(
+                "health_acknowledgement_invalid", retryable=False,
+            )
+        acknowledgement = envelope["acknowledgement"]
+        expected = {
+            "schema": HEALTH_ACK_SCHEMA,
+            "probe_id": probe_id,
+            "contract_sha256": contract_sha256,
+            "status": "healthy",
+        }
+        if envelope["schema"] != HEALTH_RESPONSE_SCHEMA or acknowledgement != expected:
+            raise HTTPPublisherFailed(
+                "health_acknowledgement_binding", retryable=False,
+            )
+        signature_mapping = envelope["signature"]
+        if not isinstance(signature_mapping, dict) or set(signature_mapping) != {
+            "algorithm", "key_id", "signature",
+        }:
+            raise HTTPPublisherFailed(
+                "health_acknowledgement_invalid", retryable=False,
+            )
+        try:
+            signature, _ = _signature(type("Signature", (), signature_mapping)())
+            acknowledgement_bytes = _canonical_json(
+                acknowledgement,
+                code="health_acknowledgement_invalid",
+                maximum=MAX_RESPONSE_BYTES,
+            )
+            verified = self.acknowledgement_verifier.verify(
+                acknowledgement_bytes, signature,
+            ) is True
+        except Exception:
+            verified = False
+        if not verified:
+            raise HTTPPublisherFailed(
+                "health_acknowledgement_signature", retryable=False,
+            )
+        return acknowledgement
+
+    def _post_json(self, headers: Mapping[str, str], body: bytes) -> Any:
+        try:
+            result = self.transport.post(
+                self.endpoint, headers, body, timeout=self.timeout,
+            )
+        except HTTPPublisherFailed:
+            raise
+        except Exception:
+            raise HTTPPublisherFailed("network", retryable=True) from None
+        if (
+            not isinstance(result, HTTPResult)
+            or isinstance(result.status, bool)
+            or not isinstance(result.status, int)
+            or not 100 <= result.status <= 599
+        ):
+            raise HTTPPublisherFailed("transport_invalid", retryable=True)
+        if result.status != 200:
+            if 300 <= result.status <= 399:
+                raise HTTPPublisherFailed("redirect", retryable=False)
+            retryable = result.status in {408, 425, 429} or 500 <= result.status <= 599
+            raise HTTPPublisherFailed("http_status", retryable=retryable)
+        response_headers = _response_headers(result.headers)
+        content_type = (
+            response_headers.get("content-type", "").lower().replace(" ", "")
+        )
+        if content_type not in {"application/json", "application/json;charset=utf-8"}:
+            raise HTTPPublisherFailed("response_content_type", retryable=True)
+        if (
+            not isinstance(result.body, bytes)
+            or not result.body
+            or len(result.body) > MAX_RESPONSE_BYTES
+        ):
+            raise HTTPPublisherFailed("response_size", retryable=True)
+        declared = response_headers.get("content-length")
+        if declared is not None and (
+            not declared.isascii()
+            or not declared.isdecimal()
+            or int(declared) != len(result.body)
+        ):
+            raise HTTPPublisherFailed("response_size", retryable=True)
+        try:
+            text = result.body.decode("utf-8")
+            if text.startswith("\ufeff"):
+                raise ValueError("BOM rejected")
+            return json.loads(
+                text, object_pairs_hook=_pairs, parse_constant=_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+            raise HTTPPublisherFailed("response_json", retryable=True) from None

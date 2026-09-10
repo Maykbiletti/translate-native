@@ -185,12 +185,15 @@ It does not expose the full profile instructions, credentials, customer text,
 provider data, or mutable service state.
 
 The nested `publication_http` object is the separately hashed, machine-readable
-contract for the built-in outbound CMS adapter. It declares publication and
-tombstone payload, request, acknowledgement, and response schemas; exact
+contract for the built-in outbound CMS adapter. It declares publication,
+tombstone, and content-free health payload, request, acknowledgement, and
+response schemas; exact
 success values; accepted JSON content types; at-least-once delivery; and the
 three headers that bind every attempt to its delivery ID and payload hash. It
-does not advertise an active endpoint, credential, or claim that a custom host
-publisher uses this adapter. A receiver can therefore implement and test the
+also declares the three health headers that bind a fresh probe ID and this
+contract's digest. It does not advertise an active endpoint or credential, or
+claim that a custom host publisher uses this adapter. A receiver can therefore
+implement and test the
 supported callback protocol without copying prose from the integration guide.
 The transport and discovery manifest use the same constants, so schema or
 header drift changes the digest or blocks discovery rather than producing a
@@ -240,6 +243,11 @@ without a partial locale list.
         {"binding": "payload_sha256", "name": "X-Localization-Payload-Sha256"}
       ],
       "delivery_semantics": "at-least-once",
+      "health_binding_headers": [
+        {"binding": "probe_id", "name": "Idempotency-Key"},
+        {"binding": "probe_id", "name": "X-Localization-Probe-Id"},
+        {"binding": "contract_sha256", "name": "X-Localization-Contract-Sha256"}
+      ],
       "method": "POST",
       "operations": [{
         "acknowledgement_schema": "blun.cms-localization-publication-ack.v1",
@@ -251,7 +259,7 @@ without a partial locale list.
       }],
       "request_content_type": "application/json; charset=utf-8",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
-      "schema": "blun.cms-localization-publication-http-capabilities.v1",
+      "schema": "blun.cms-localization-publication-http-capabilities.v2",
       "sha256": "<sha256>"
     },
     "publication_schema": "blun.cms-localization-publication.v2",
@@ -280,8 +288,8 @@ without a partial locale list.
 ```
 
 The abbreviated example shows one locale, one inbound operation, and one of the
-two outbound adapter operations only; a successful real response always
-contains all 24 locales, all six inbound operations, and both outbound
+three outbound adapter operations only; a successful real response always
+contains all 24 locales, all six inbound operations, and all three outbound
 operations, and otherwise blocks.
 
 ## Read per-locale progress

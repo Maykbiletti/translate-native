@@ -1352,6 +1352,17 @@ object under `tombstone`, and accepts only a signed
 is exactly bound to the delivery ID and payload hash and has status `deleted`.
 The locale list is sorted and unique, while source and target prose are absent.
 
+The adapter also exposes an optional, content-free `check` operation for
+operator health. Each call creates a fresh probe ID and sends only that ID plus
+the SHA-256 digest of the advertised publication HTTP contract. The same
+authentication, HTTPS-only endpoint, redirect prohibition, transport bounds,
+and strict JSON parser apply. The CMS must return status `healthy` in a signed
+`blun.cms-localization-publication-health-ack.v1` acknowledgement bound to the
+exact probe ID and contract digest. Replayed challenges, a receiver implementing
+a different contract, or an invalid signature therefore cannot make readiness
+green. No source text, target text, locale, site, publication, or tombstone is
+included in this request.
+
 Wrong or malformed acknowledgements retry with bounded exponential backoff;
 explicit permanent rejections become terminal. Crashed leases are recovered,
 but stale workers cannot acknowledge a later attempt. Free-form transport
@@ -1620,8 +1631,11 @@ in [`WEBSITE_LOCALIZATION_API.md`](WEBSITE_LOCALIZATION_API.md).
 
 Service-wide HTTP health is disabled unless the host supplies an explicit
 `health_http_authenticator`. With that capability, the same composition root
-exposes `runtime.health_http`; an optional `health_provider_probe` is bound to
-that reader and cannot be configured on its own. Both values are validated
+exposes `runtime.health_http`; optional `health_provider_probe` and
+`health_publisher_probe` capabilities are bound to that reader and cannot be
+configured on their own. The publisher probe must be the same object as the
+runtime's delivery publisher, so a second endpoint cannot mask failure of the
+real callback. All values are validated
 before any store creates or migrates a schema. The operator endpoint is distinct
 from signed tenant CMS progress because its content-free report can contain
 identifiers for every configured site. Its complete authentication, response,
@@ -1713,9 +1727,11 @@ capabilities and connections cause no schema writes.
 provider-neutral, content-free view across the queue, signed translation
 memory, quality-evidence state, CMS events, publication outbox, and configured
 model endpoints. It accepts the same host-owned event, approval, and
-publication verifiers as the runtime, an optional `ProviderHealthProbe`, and
-the coordinator's optional `QualityEvidenceStateStore`. A check performs no
-repair, retry, lease transition, signing action, or CMS call.
+publication verifiers as the runtime, optional `ProviderHealthProbe` and
+`PublisherHealthProbe` capabilities, plus the coordinator's optional
+`QualityEvidenceStateStore`. A check performs no repair, retry, lease
+transition, signing action, or content publication. When the publisher probe
+is configured, it performs exactly one content-free CMS callback challenge.
 
 `integrations/website_localization_health_http.py` makes that exact report
 available to a separately authenticated service operator. It authenticates
@@ -1748,7 +1764,10 @@ signatures, authenticated CMS events, publication payload hashes and
 signatures, tombstone request and delivery bindings, live lease times, and
 approval expiry before pending publication.
 Missing or malformed provider probes, signature failures, tampering, and
-unreadable state make the report `blocked`. Recoverable operational state such
+unreadable state make the report `blocked`. A configured publisher probe also
+adds the `cms_publisher` component; an unavailable, malformed, unsigned, or
+contract-mismatched callback blocks it without exposing transport details.
+Recoverable operational state such
 as an expired evidence or worker lease, failed evidence review, failed locale,
 retrying delivery, or an expired current approval is `degraded`. A live
 evidence lease and ordinary pending work remain healthy.

@@ -132,6 +132,14 @@ class Publisher:
             "status": "accepted",
         }
 
+    def check(self, *, contract_sha256):
+        return {
+            "schema": CMS.PUBLICATION_HEALTH_ACK_SCHEMA,
+            "probe_id": "runtime-publisher-probe-1",
+            "contract_sha256": contract_sha256,
+            "status": "healthy",
+        }
+
 
 class ProviderProbe:
     def check(self, **provider):
@@ -142,6 +150,21 @@ class ProviderProbe:
                 "model_id": provider["model_id"],
                 "model_version": provider["model_version"],
             },
+            "status": "healthy",
+        }
+
+
+class PublisherProbe:
+    def __init__(self, mode="healthy"):
+        self.mode = mode
+
+    def check(self, *, contract_sha256):
+        if self.mode == "raise":
+            raise RuntimeError("private publisher diagnostic")
+        return {
+            "schema": CMS.PUBLICATION_HEALTH_ACK_SCHEMA,
+            "probe_id": "runtime-publisher-probe-1",
+            "contract_sha256": contract_sha256,
             "status": "healthy",
         }
 
@@ -686,6 +709,7 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         runtime = self.runtime(
             health_http_authenticator=authenticate,
             health_provider_probe=ProviderProbe(),
+            health_publisher_probe=self.publisher,
         )
         changes_before = tuple(
             connection.total_changes for connection in self.connections
@@ -708,6 +732,11 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["schema"], RUNTIME._HEALTH_HTTP.RESPONSE_SCHEMA)
         self.assertEqual(payload["report"]["status"], "degraded")
         self.assertEqual(payload["report"]["schema"], RUNTIME._HEALTH.SCHEMA)
+        publisher_health = next(
+            item for item in payload["report"]["components"]
+            if item["component"] == "cms_publisher"
+        )
+        self.assertEqual(publisher_health["status"], "healthy")
         self.assertEqual(len(authentication_requests), 1)
         self.assertNotIn("private-operator-token", json.dumps(payload))
         self.assertNotIn("source_text", json.dumps(payload))
@@ -838,11 +867,29 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
                 "runtime.health_http.incomplete",
             ),
             (
+                {"health_publisher_probe": PublisherProbe()},
+                "runtime.health_http.incomplete",
+            ),
+            (
                 {
                     "health_http_authenticator": lambda request: None,
                     "health_provider_probe": object(),
                 },
                 "runtime.health_http.provider_probe.invalid",
+            ),
+            (
+                {
+                    "health_http_authenticator": lambda request: None,
+                    "health_publisher_probe": object(),
+                },
+                "runtime.health_http.publisher_probe.invalid",
+            ),
+            (
+                {
+                    "health_http_authenticator": lambda request: None,
+                    "health_publisher_probe": PublisherProbe(),
+                },
+                "runtime.health_http.publisher_binding.invalid",
             ),
         )
         for options, code in scenarios:

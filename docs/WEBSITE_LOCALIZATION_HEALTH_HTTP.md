@@ -6,6 +6,8 @@ provider-neutral and returns identifiers, lifecycle states, stable reasons,
 and counts only. It never repairs state, advances a lease, retries work, signs
 an approval, calls a model, publishes content, or returns source text, target
 text, reviewer prose, credentials, receipts, or transport exceptions.
+An explicitly configured publisher probe may make one content-free callback
+challenge as part of the read.
 
 This is an operator endpoint, not a tenant CMS status endpoint. Its response
 can contain site and website-version identifiers from the complete configured
@@ -18,9 +20,13 @@ continues to use the separately signed endpoint documented in
 Pass a callable `health_http_authenticator` to
 `WebsiteLocalizationRuntime`. The runtime then exposes `runtime.health_http`.
 Without that explicit capability the attribute is `None` and no operator
-reader exists. An optional `health_provider_probe` must implement `check` and
-is accepted only together with the authenticator. Invalid or partial settings
-block before any SQLite schema is created or migrated.
+reader exists. Optional `health_provider_probe` and `health_publisher_probe`
+values must implement `check` and are accepted only together with the
+authenticator. Invalid or partial settings block before any SQLite schema is
+created or migrated. The publisher probe must be the exact same capability as
+the runtime's delivery publisher. The built-in HTTPS publisher implements it
+with a fresh probe ID and the exact advertised callback-contract digest; its signed
+response contains no website or locale data.
 
 Mount the WSGI callable behind a production server and trusted TLS terminator.
 The application requires `wsgi.url_scheme == "https"`; only the trusted server
@@ -118,7 +124,7 @@ logs from retaining operator credentials.
 Premortem: an unauthenticated probe could enumerate sites, a malformed monitor
 could leak customer prose, a blocked report could be returned as an ordinary
 healthy response, authentication failure could fall through to state access,
-or a provider probe could be enabled without an operator boundary. Explicit
+or an external probe could be enabled without an operator boundary. Explicit
 service-wide scope, authentication-before-monitor ordering, strict output
 revalidation, HTTP `503` for blocked state, and pre-schema runtime validation
 keep those paths fail-closed.

@@ -33,16 +33,29 @@ TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
 CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v2"
 PUBLICATION_HTTP_CONTRACT_SCHEMA = (
-    "blun.cms-localization-publication-http-capabilities.v1"
+    "blun.cms-localization-publication-http-capabilities.v2"
 )
 PUBLICATION_HTTP_REQUEST_SCHEMA = "blun.cms-localization-publication-http.v1"
 PUBLICATION_HTTP_RESPONSE_SCHEMA = "blun.cms-localization-publication-http-ack.v1"
 TOMBSTONE_HTTP_REQUEST_SCHEMA = "blun.cms-localization-tombstone-http.v1"
 TOMBSTONE_HTTP_RESPONSE_SCHEMA = "blun.cms-localization-tombstone-http-ack.v1"
+PUBLICATION_HEALTH_SCHEMA = "blun.cms-localization-publication-health.v1"
+PUBLICATION_HEALTH_ACK_SCHEMA = "blun.cms-localization-publication-health-ack.v1"
+PUBLICATION_HEALTH_HTTP_REQUEST_SCHEMA = (
+    "blun.cms-localization-publication-health-http.v1"
+)
+PUBLICATION_HEALTH_HTTP_RESPONSE_SCHEMA = (
+    "blun.cms-localization-publication-health-http-ack.v1"
+)
 PUBLICATION_HTTP_BINDING_HEADERS = (
     ("Idempotency-Key", "delivery_id"),
     ("X-Localization-Delivery-Id", "delivery_id"),
     ("X-Localization-Payload-Sha256", "payload_sha256"),
+)
+PUBLICATION_HEALTH_HTTP_BINDING_HEADERS = (
+    ("Idempotency-Key", "probe_id"),
+    ("X-Localization-Probe-Id", "probe_id"),
+    ("X-Localization-Contract-Sha256", "contract_sha256"),
 )
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_ATTEMPTS = 20
@@ -602,6 +615,26 @@ class WebsiteLocalizationCMSBridge:
                     ),
                     "acknowledgement_status": "deleted",
                 },
+                {
+                    "name": "health",
+                    "payload_schema": _token(
+                        PUBLICATION_HEALTH_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "request_schema": _token(
+                        PUBLICATION_HEALTH_HTTP_REQUEST_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "acknowledgement_schema": _token(
+                        PUBLICATION_HEALTH_ACK_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "response_schema": _token(
+                        PUBLICATION_HEALTH_HTTP_RESPONSE_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "acknowledgement_status": "healthy",
+                },
             ]
             headers = []
             seen_headers: set[str] = set()
@@ -633,8 +666,32 @@ class WebsiteLocalizationCMSBridge:
                 ],
                 "delivery_semantics": "at-least-once",
                 "binding_headers": headers,
+                "health_binding_headers": [
+                    {
+                        "name": _token(
+                            name, "cms.capabilities.registry_invalid",
+                        ),
+                        "binding": _token(
+                            binding, "cms.capabilities.registry_invalid",
+                        ),
+                    }
+                    for name, binding in PUBLICATION_HEALTH_HTTP_BINDING_HEADERS
+                ],
                 "operations": operations,
             }
+            health_headers = body["health_binding_headers"]
+            if (
+                len(health_headers) != len(PUBLICATION_HEALTH_HTTP_BINDING_HEADERS)
+                or len({item["name"].lower() for item in health_headers})
+                != len(health_headers)
+                or any(
+                    item["binding"] not in {"probe_id", "contract_sha256"}
+                    or not item["name"].isascii()
+                    or re.fullmatch(r"[A-Za-z0-9-]{1,128}", item["name"]) is None
+                    for item in health_headers
+                )
+            ):
+                raise ValueError
             return {**body, "sha256": _hash(_canonical_json(body))}
         except CMSBridgeBlocked:
             raise

@@ -162,6 +162,37 @@ def response_for(request, authority, **overrides):
     )
 
 
+def health_response(probe_id, contract_sha256, authority, **overrides):
+    acknowledgement = {
+        "schema": HTTP.HEALTH_ACK_SCHEMA,
+        "probe_id": probe_id,
+        "contract_sha256": contract_sha256,
+        "status": "healthy",
+    }
+    acknowledgement.update(overrides)
+    raw = HTTP._canonical_json(
+        acknowledgement,
+        code="health_acknowledgement_invalid",
+        maximum=HTTP.MAX_RESPONSE_BYTES,
+    )
+    signature = authority.sign(raw)
+    envelope = {
+        "schema": HTTP.HEALTH_RESPONSE_SCHEMA,
+        "acknowledgement": acknowledgement,
+        "signature": {
+            "algorithm": signature.algorithm,
+            "key_id": signature.key_id,
+            "signature": signature.signature,
+        },
+    }
+    body = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
+    return HTTP.HTTPResult(
+        200,
+        (("Content-Type", "application/json"), ("Content-Length", str(len(body)))),
+        body,
+    )
+
+
 class HTTPPublisherAdapterTests(unittest.TestCase):
     def setUp(self):
         self.transport = Transport()
@@ -174,6 +205,7 @@ class HTTPPublisherAdapterTests(unittest.TestCase):
             self.ack_authority,
             transport=self.transport,
             timeout=12,
+            probe_id_factory=lambda: "publisher-health-probe-1",
         )
 
     def failure(self, action):
@@ -196,6 +228,9 @@ class HTTPPublisherAdapterTests(unittest.TestCase):
         )
         self.assertEqual(
             operations["tombstone"]["response_schema"], HTTP.TOMBSTONE_RESPONSE_SCHEMA,
+        )
+        self.assertEqual(
+            operations["health"]["request_schema"], HTTP.HEALTH_REQUEST_SCHEMA,
         )
 
         acknowledgement = self.adapter.publish(self.request)
@@ -225,6 +260,77 @@ class HTTPPublisherAdapterTests(unittest.TestCase):
         self.assertEqual(envelope["schema"], HTTP.TOMBSTONE_REQUEST_SCHEMA)
         self.assertEqual(envelope["tombstone"], request.payload)
         self.assertNotIn("target_text", json.dumps(envelope))
+
+    def test_content_free_health_challenge_is_bound_and_signed(self):
+        contract_sha256 = CMS.WebsiteLocalizationCMSBridge._publication_http_capabilities()[
+            "sha256"
+        ]
+        self.transport.result = health_response(
+            "publisher-health-probe-1", contract_sha256, self.ack_authority,
+        )
+
+        acknowledgement = self.adapter.check(contract_sha256=contract_sha256)
+
+        self.assertEqual(acknowledgement["status"], "healthy")
+        _, headers, body, _ = self.transport.calls[0]
+        self.assertEqual(headers["Idempotency-Key"], "publisher-health-probe-1")
+        self.assertEqual(
+            headers["X-Localization-Contract-Sha256"], contract_sha256,
+        )
+        envelope = json.loads(body)
+        self.assertEqual(envelope, {
+            "schema": HTTP.HEALTH_REQUEST_SCHEMA,
+            "probe": {
+                "schema": HTTP.HEALTH_SCHEMA,
+                "probe_id": "publisher-health-probe-1",
+                "contract_sha256": contract_sha256,
+            },
+        })
+        self.assertNotIn("source", json.dumps(envelope))
+        self.assertNotIn("target", json.dumps(envelope))
+        self.assertNotIn("localizations", json.dumps(envelope))
+
+    def test_health_challenge_rejects_replay_binding_and_signature(self):
+        contract_sha256 = CMS.WebsiteLocalizationCMSBridge._publication_http_capabilities()[
+            "sha256"
+        ]
+        self.transport.result = health_response(
+            "older-probe", contract_sha256, self.ack_authority,
+        )
+        error = self.failure(lambda: self.adapter.check(
+            contract_sha256=contract_sha256,
+        ))
+        self.assertEqual(
+            (error.code, error.retryable),
+            ("health_acknowledgement_binding", False),
+        )
+
+        self.transport.result = health_response(
+            "publisher-health-probe-1", contract_sha256, Authority(b"wrong-key"),
+        )
+        error = self.failure(lambda: self.adapter.check(
+            contract_sha256=contract_sha256,
+        ))
+        self.assertEqual(
+            (error.code, error.retryable),
+            ("health_acknowledgement_signature", False),
+        )
+
+        unsafe = HTTP.HTTPPublisherAdapter(
+            "https://cms.example.test/localization/publications",
+            lambda: {"Authorization": "Bearer deployment-secret"},
+            self.ack_authority,
+            transport=self.transport,
+            probe_id_factory=lambda: "short",
+        )
+        calls_before = len(self.transport.calls)
+        error = self.failure(lambda: unsafe.check(
+            contract_sha256=contract_sha256,
+        ))
+        self.assertEqual(
+            (error.code, error.retryable), ("health_request_invalid", False),
+        )
+        self.assertEqual(len(self.transport.calls), calls_before)
 
     def test_request_tampering_is_blocked_before_network(self):
         changed = SimpleNamespace(**vars(self.request))
