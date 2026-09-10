@@ -139,6 +139,129 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
             finally:
                 second.close()
 
+    def test_filesystem_database_is_created_owner_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            runtime = self.open(path)
+            try:
+                database_stat = path.stat()
+                self.assertEqual(database_stat.st_uid, os.geteuid())
+                self.assertEqual(database_stat.st_nlink, 1)
+                self.assertEqual(database_stat.st_mode & 0o777, 0o600)
+            finally:
+                runtime.close()
+
+    def test_unsafe_filesystem_boundaries_block_before_sqlite_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            outside = root / "outside.sqlite3"
+            outside.touch(mode=0o600)
+
+            cases = [Path("relative-receiver.sqlite3")]
+
+            permissive = private / "permissive.sqlite3"
+            permissive.touch(mode=0o600)
+            permissive.chmod(0o640)
+            cases.append(permissive)
+
+            linked = private / "linked.sqlite3"
+            linked.symlink_to(outside)
+            cases.append(linked)
+
+            hard_linked = private / "hard-linked.sqlite3"
+            os.link(outside, hard_linked)
+            cases.append(hard_linked)
+
+            unsafe_parent = root / "shared"
+            unsafe_parent.mkdir(mode=0o770)
+            unsafe_parent.chmod(0o770)
+            cases.append(unsafe_parent / "receiver.sqlite3")
+
+            unsafe_ancestor = root / "shared-ancestor"
+            unsafe_ancestor.mkdir(mode=0o770)
+            unsafe_ancestor.chmod(0o770)
+            nested_private = unsafe_ancestor / "private"
+            nested_private.mkdir(mode=0o700)
+            cases.append(nested_private / "receiver.sqlite3")
+
+            alias_parent = root / "alias"
+            alias_parent.symlink_to(private, target_is_directory=True)
+            cases.append(alias_parent / "receiver.sqlite3")
+
+            for path in cases:
+                with self.subTest(path=path):
+                    with self.assertRaises(
+                        RUNTIME.DurableCMSReceiverRuntimeBlocked
+                    ):
+                        self.open(path)
+
+            self.assertFalse(cases[0].exists())
+            self.assertFalse((unsafe_parent / "receiver.sqlite3").exists())
+            self.assertFalse((nested_private / "receiver.sqlite3").exists())
+            self.assertFalse((private / "receiver.sqlite3").exists())
+
+    def test_runtime_blocks_if_database_permissions_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            runtime = self.open(path)
+            publication = HELPERS.publication_payload()
+            try:
+                path.chmod(0o640)
+                for operation in (
+                    lambda: runtime.register_source(
+                        HELPERS.expectation(publication)
+                    ),
+                    lambda: runtime.read_active_bundle(
+                        publication["site_id"], publication["source_id"],
+                    ),
+                ):
+                    with self.subTest(operation=operation):
+                        with self.assertRaises(
+                            RUNTIME.DurableCMSReceiverRuntimeBlocked
+                        ):
+                            operation()
+            finally:
+                path.chmod(0o600)
+                runtime.close()
+
+    def test_runtime_blocks_if_database_path_identity_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            displaced = Path(directory) / "displaced.sqlite3"
+            runtime = self.open(path)
+            try:
+                os.replace(path, displaced)
+                path.touch(mode=0o600)
+                with self.assertRaises(
+                    RUNTIME.DurableCMSReceiverRuntimeBlocked
+                ):
+                    runtime.register_source(
+                        HELPERS.expectation(HELPERS.publication_payload())
+                    )
+            finally:
+                runtime.close()
+
+    def test_concurrent_first_open_converges_on_private_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                runtimes = list(
+                    executor.map(lambda _index: self.open(path), range(4))
+                )
+            try:
+                database_stat = path.stat()
+                self.assertEqual(database_stat.st_nlink, 1)
+                self.assertEqual(database_stat.st_mode & 0o777, 0o600)
+                publication = HELPERS.publication_payload()
+                expectation = HELPERS.expectation(publication)
+                for runtime in runtimes:
+                    runtime.register_source(expectation)
+            finally:
+                for runtime in runtimes:
+                    runtime.close()
+
     def test_invalid_configuration_does_not_create_database(self):
         cases = (
             {"contract_sha256": "wrong"},
@@ -172,6 +295,7 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
             connection.execute("PRAGMA user_version = 99")
             connection.commit()
             connection.close()
+            path.chmod(0o600)
 
             with self.assertRaises(
                 RUNTIME.DurableCMSReceiverRuntimeBlocked

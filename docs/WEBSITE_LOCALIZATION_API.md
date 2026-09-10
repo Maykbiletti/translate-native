@@ -278,6 +278,17 @@ The runtime binds itself to its creator process and rejects inherited callbacks
 and trusted host operations before lock acquisition; each worker process must
 construct and own its own runtime after forking.
 
+For a durable store, pass a canonical absolute POSIX database path. Its direct
+parent must be a real service-owned directory. Every ancestor must be root- or
+service-owned and non-shared-writable, apart from a root-owned sticky temporary
+directory. The runtime atomically creates a missing database as `0600` and
+accepts an existing one only when it is a service-owned, single-link regular
+file with
+that exact mode. Directory and file identity, permissions, ownership, and link
+count are checked again before every callback or trusted host operation;
+symlinks, hard links, path replacement, and permission drift fail closed.
+`:memory:` is retained solely for ephemeral test composition.
+
 The separate `api_contract` object lists all six tenant operations with their
 exact path, `POST` method, request schema, response schema, and current
 `enabled` state. A standalone host without approval and publication authorities

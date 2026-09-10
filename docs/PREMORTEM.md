@@ -1,5 +1,30 @@
 # Version 6 premortem
 
+## Durable CMS database path confinement (10 September 2026)
+
+Assume a correctly signed localization was exposed or written to an unintended
+SQLite file even though callback validation remained correct.
+
+- A deployment path could traverse a symlink or a shared writable directory,
+  letting another account substitute the database before it opens.
+- A pre-existing permissive file or a hard link could expose approved target
+  prose outside the CMS receiver's intended storage boundary.
+- Permissions or the path identity could change after startup while health and
+  publication continued to report success.
+- Two workers starting together could race creation and leave inconsistent
+  access modes.
+
+The composition root now accepts only canonical absolute POSIX paths beneath a
+real service-owned parent whose ancestors are also trusted and non-shared-
+writable, except for root-owned sticky temporary directories. It reserves a
+missing file with exclusive creation and mode `0600`, or verifies the same
+ownership, mode,
+regular-file type, and single-link invariant on an existing database. Every
+store path rechecks those properties and the original device/inode identity
+under the worker lock. Concurrent creators converge by validating the winning
+file; symlink, hard-link, replacement, ownership, permission, or parent drift
+blocks before SQLite work and returns no customer text.
+
 Assume the Version 6 response-and-translation gateway and automatic updater shipped and failed in production.
 
 | Failure | Early warning | Mitigation | Proof required |

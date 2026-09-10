@@ -239,7 +239,12 @@ class DurableCMSReceiverStore:
 
     def _create_schema(self) -> None:
         with _transaction(self.connection):
-            if int(self.connection.execute("PRAGMA user_version").fetchone()[0]) != 0:
+            version = int(
+                self.connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            if version == SCHEMA_VERSION:
+                return
+            if version != 0:
                 raise CMSReceiverStoreBlocked("CMS receiver store schema changed")
             self.connection.execute("""
                 CREATE TABLE cms_receiver_sources (

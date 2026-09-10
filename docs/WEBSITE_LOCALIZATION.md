@@ -1501,7 +1501,18 @@ blocks every inherited store operation before attempting to acquire a possibly
 orphaned thread lock. Separate worker processes still require
 separate runtime instances and SQLite connections. The database URI form is
 intentionally rejected so connection flags cannot be smuggled through
-deployment configuration.
+deployment configuration. Filesystem-backed stores additionally require a
+canonical absolute POSIX path in a real, service-owned directory. Every path
+ancestor must be root- or service-owned and not shared-writable, except for a
+root-owned sticky world-writable ancestor such as `/tmp`. A new database is
+reserved atomically with mode `0600`; an existing database must be a
+single-link regular file owned by
+the service account with that exact mode. The runtime rechecks the directory,
+file identity, ownership, link count, and permissions before every store
+operation. A symlink, hard link, path replacement, permission drift, or shared
+writable directory therefore blocks both callbacks and trusted rendering
+instead of redirecting approved target text. `:memory:` remains available for
+ephemeral tests only.
 
 The same adapter transports a tombstone without changing its security model.
 It uses `blun.cms-localization-tombstone-http.v1`, nests the exact signed

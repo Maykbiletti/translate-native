@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -58,7 +59,122 @@ def _database_path(value: Any) -> str:
         or result.startswith("file:")
     ):
         raise DurableCMSReceiverRuntimeBlocked("database path is invalid")
+    if result == ":memory:":
+        return result
+    if (
+        os.name != "posix"
+        or not os.path.isabs(result)
+        or os.path.normpath(result) != result
+    ):
+        raise DurableCMSReceiverRuntimeBlocked(
+            "database path must be a canonical absolute POSIX path"
+        )
     return result
+
+
+def _validate_database_parent(database_path: str) -> None:
+    parent = os.path.dirname(database_path)
+    current = parent
+    first = True
+    while True:
+        try:
+            current_stat = os.lstat(current)
+        except OSError as error:
+            raise DurableCMSReceiverRuntimeBlocked(
+                "CMS receiver database directory is unavailable"
+            ) from error
+        mode = stat.S_IMODE(current_stat.st_mode)
+        sticky_root_directory = (
+            current_stat.st_uid == 0
+            and bool(mode & stat.S_ISVTX)
+            and bool(mode & 0o002)
+        )
+        if (
+            not stat.S_ISDIR(current_stat.st_mode)
+            or current_stat.st_uid not in {0, os.geteuid()}
+            or (first and current_stat.st_uid != os.geteuid())
+            or (mode & 0o022 and not sticky_root_directory)
+        ):
+            raise DurableCMSReceiverRuntimeBlocked(
+                "CMS receiver database directory is not private"
+            )
+        parent_of_current = os.path.dirname(current)
+        if parent_of_current == current:
+            break
+        current = parent_of_current
+        first = False
+
+
+def _validate_database_file(
+    database_path: str,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    try:
+        database_stat = os.lstat(database_path)
+    except OSError as error:
+        raise DurableCMSReceiverRuntimeBlocked(
+            "CMS receiver database file is unavailable"
+        ) from error
+    identity = (database_stat.st_dev, database_stat.st_ino)
+    if (
+        not stat.S_ISREG(database_stat.st_mode)
+        or database_stat.st_uid != os.geteuid()
+        or database_stat.st_nlink != 1
+        or stat.S_IMODE(database_stat.st_mode) != 0o600
+        or (expected_identity is not None and identity != expected_identity)
+    ):
+        raise DurableCMSReceiverRuntimeBlocked(
+            "CMS receiver database file is not private"
+        )
+    return identity
+
+
+def _prepare_database_file(database_path: str) -> Callable[[], None]:
+    if database_path == ":memory:":
+        return lambda: None
+
+    _validate_database_parent(database_path)
+    try:
+        identity = _validate_database_file(database_path)
+    except DurableCMSReceiverRuntimeBlocked as error:
+        if error.__cause__ is None or not isinstance(
+            error.__cause__, FileNotFoundError
+        ):
+            raise
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(database_path, flags, 0o600)
+        except FileExistsError:
+            identity = _validate_database_file(database_path)
+        except OSError as create_error:
+            raise DurableCMSReceiverRuntimeBlocked(
+                "CMS receiver database file could not be created"
+            ) from create_error
+        else:
+            try:
+                os.fchmod(descriptor, 0o600)
+                created_stat = os.fstat(descriptor)
+                identity = (created_stat.st_dev, created_stat.st_ino)
+                if (
+                    not stat.S_ISREG(created_stat.st_mode)
+                    or created_stat.st_uid != os.geteuid()
+                    or created_stat.st_nlink != 1
+                    or stat.S_IMODE(created_stat.st_mode) != 0o600
+                ):
+                    raise DurableCMSReceiverRuntimeBlocked(
+                        "CMS receiver database file was not created privately"
+                    )
+            finally:
+                os.close(descriptor)
+
+    def guard() -> None:
+        _validate_database_parent(database_path)
+        _validate_database_file(database_path, identity)
+
+    guard()
+    return guard
 
 
 def _unused(*_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
@@ -68,10 +184,16 @@ def _unused(*_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
 class _SynchronizedStore:
     """Serialize every use of one worker-owned SQLite connection."""
 
-    def __init__(self, connection: sqlite3.Connection, store: Any):
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        store: Any,
+        database_guard: Callable[[], None],
+    ):
         self._connection = connection
         self._store = store
         self._lock = threading.RLock()
+        self._database_guard = database_guard
         self._closed = False
         self._owner_pid = os.getpid()
 
@@ -90,6 +212,7 @@ class _SynchronizedStore:
                 raise DurableCMSReceiverRuntimeBlocked(
                     "CMS receiver runtime is closed"
                 )
+            self._database_guard()
             try:
                 return getattr(self._store, name)(*args)
             except _STORE.CMSReceiverStoreBlocked as error:
@@ -248,6 +371,7 @@ def open_durable_cms_receiver(
         path=path,
         require_https=require_https,
     )
+    database_guard = _prepare_database_file(database_path)
     try:
         connection = sqlite3.connect(
             database_path,
@@ -261,7 +385,10 @@ def open_durable_cms_receiver(
         ) from error
     try:
         store = _STORE.DurableCMSReceiverStore(connection, clock=clock)
-        synchronized_store = _SynchronizedStore(connection, store)
+        database_guard()
+        synchronized_store = _SynchronizedStore(
+            connection, store, database_guard,
+        )
         application = _RECEIVER.CMSReceiverApplication(
             publication_authority=publication_authority,
             acknowledgement_authority=acknowledgement_authority,
