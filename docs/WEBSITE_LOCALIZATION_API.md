@@ -201,14 +201,16 @@ partial contract.
 
 CMS implementations can use
 `integrations/website_localization_cms_receiver.py` as the fail-closed
-publication reference receiver. The host supplies the expected source
-generation, complete required-locale set, content type, and commercial profile;
-the receiver validates those bindings, all release evidence, hashes, headers,
-expiry times, and the publisher signature before invoking the host's atomic,
-idempotent commit callback. It returns a signed `accepted` acknowledgement only
-after the callback confirms the exact delivery ID and payload hash. The host
-continues to own authentication, key provisioning, durable transactions, and
-target-text log redaction.
+publication and tombstone reference receiver. For publication, the host
+supplies the expected source generation, complete required-locale set, content
+type, and commercial profile. For deletion, it supplies the exact acknowledged
+publication delivery and payload hash as well as the complete locale set. The
+receiver validates those bindings, release evidence where applicable, hashes,
+headers, expiry times, and the publisher signature before invoking the host's
+atomic, idempotent commit or delete callback. It returns a signed `accepted` or
+`deleted` acknowledgement only after the callback confirms the exact delivery
+ID and payload hash. The host continues to own authentication, key provisioning,
+durable transactions, and target-text log redaction.
 
 The separate `api_contract` object lists all six tenant operations with their
 exact path, `POST` method, request schema, response schema, and current

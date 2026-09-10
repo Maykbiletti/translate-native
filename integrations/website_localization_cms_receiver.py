@@ -36,6 +36,11 @@ LOCALIZATION_FIELDS = {
     "locale", "target_text", "target_sha256", "approval_id",
     "approval_expires_at", "release_evidence",
 }
+TOMBSTONE_FIELDS = {
+    "schema", "delivery_id", "tombstone_id", "event_id", "site_id",
+    "website_version", "plan_id", "source_id", "source_sequence",
+    "publication_delivery_id", "publication_payload_sha256", "locales",
+}
 
 
 def _load_module(name: str, path: Path):
@@ -95,6 +100,28 @@ class PublicationExpectation:
 
 
 @dataclass(frozen=True)
+class VerifiedTombstone:
+    delivery_id: str
+    payload_sha256: str
+    payload: dict[str, Any]
+    signature: Any
+
+
+@dataclass(frozen=True)
+class TombstoneExpectation:
+    tombstone_id: str
+    event_id: str
+    site_id: str
+    website_version: str
+    plan_id: str
+    source_id: str
+    source_sequence: int
+    publication_delivery_id: str
+    publication_payload_sha256: str
+    locales: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CMSReceiverHTTPResponse:
     status: int
     headers: tuple[tuple[str, str], ...]
@@ -108,6 +135,10 @@ class CMSMessageAuthority(Protocol):
 
 class PublicationCommitter(Protocol):
     def __call__(self, publication: VerifiedPublication) -> Mapping[str, Any]: ...
+
+
+class TombstoneCommitter(Protocol):
+    def __call__(self, tombstone: VerifiedTombstone) -> Mapping[str, Any]: ...
 
 
 def _canonical_json(value: Any, *, maximum: int) -> bytes:
@@ -409,6 +440,103 @@ def _verify_expectation(
             )
 
 
+def _verify_tombstone(value: Any, payload_sha256: str) -> bytes:
+    if not isinstance(value, dict) or set(value) != TOMBSTONE_FIELDS:
+        raise CMSReceiverBlocked(
+            "receiver.tombstone_invalid", retryable=False, http_status=400,
+        )
+    token_fields = (
+        "delivery_id", "tombstone_id", "event_id", "site_id",
+        "website_version", "plan_id", "source_id", "publication_delivery_id",
+    )
+    locales = value.get("locales")
+    if (
+        value.get("schema") != _CMS.TOMBSTONE_DELIVERY_SCHEMA
+        or any(
+            not isinstance(value.get(field), str)
+            or TOKEN.fullmatch(value[field]) is None
+            for field in token_fields
+        )
+        or isinstance(value.get("source_sequence"), bool)
+        or not isinstance(value.get("source_sequence"), int)
+        or value["source_sequence"] <= 0
+        or not isinstance(value.get("publication_payload_sha256"), str)
+        or SHA256.fullmatch(value["publication_payload_sha256"]) is None
+        or not isinstance(locales, list)
+        or not locales
+        or locales != sorted(set(locales))
+        or any(
+            not isinstance(locale, str) or TOKEN.fullmatch(locale) is None
+            for locale in locales
+        )
+    ):
+        raise CMSReceiverBlocked(
+            "receiver.tombstone_invalid", retryable=False, http_status=400,
+        )
+    payload_bytes = _canonical_json(value, maximum=MAX_REQUEST_BYTES)
+    if hashlib.sha256(payload_bytes).hexdigest() != payload_sha256:
+        raise CMSReceiverBlocked(
+            "receiver.payload_binding", retryable=False, http_status=409,
+        )
+    unsigned = {key: content for key, content in value.items() if key != "delivery_id"}
+    expected_delivery_id = "blun-cms-tombstone-" + hashlib.sha256(
+        _canonical_json(unsigned, maximum=MAX_REQUEST_BYTES)
+    ).hexdigest()
+    if value["delivery_id"] != expected_delivery_id:
+        raise CMSReceiverBlocked(
+            "receiver.delivery_binding", retryable=False, http_status=409,
+        )
+    return payload_bytes
+
+
+def _verify_tombstone_expectation(
+    tombstone: dict[str, Any],
+    expectation: TombstoneExpectation,
+) -> None:
+    if not isinstance(expectation, TombstoneExpectation):
+        raise TypeError("expectation must be TombstoneExpectation")
+    token_fields = (
+        "tombstone_id", "event_id", "site_id", "website_version", "plan_id",
+        "source_id", "publication_delivery_id",
+    )
+    if (
+        any(
+            not isinstance(getattr(expectation, field), str)
+            or TOKEN.fullmatch(getattr(expectation, field)) is None
+            for field in token_fields
+        )
+        or isinstance(expectation.source_sequence, bool)
+        or not isinstance(expectation.source_sequence, int)
+        or expectation.source_sequence <= 0
+        or not isinstance(expectation.publication_payload_sha256, str)
+        or SHA256.fullmatch(expectation.publication_payload_sha256) is None
+        or not isinstance(expectation.locales, tuple)
+        or not expectation.locales
+        or expectation.locales != tuple(sorted(set(expectation.locales)))
+        or any(
+            not isinstance(locale, str) or TOKEN.fullmatch(locale) is None
+            for locale in expectation.locales
+        )
+    ):
+        raise ValueError("expectation is invalid")
+    expected = {
+        "tombstone_id": expectation.tombstone_id,
+        "event_id": expectation.event_id,
+        "site_id": expectation.site_id,
+        "website_version": expectation.website_version,
+        "plan_id": expectation.plan_id,
+        "source_id": expectation.source_id,
+        "source_sequence": expectation.source_sequence,
+        "publication_delivery_id": expectation.publication_delivery_id,
+        "publication_payload_sha256": expectation.publication_payload_sha256,
+        "locales": list(expectation.locales),
+    }
+    if any(tombstone.get(field) != content for field, content in expected.items()):
+        raise CMSReceiverBlocked(
+            "receiver.tombstone_binding", retryable=False, http_status=409,
+        )
+
+
 def verify_publication_request(
     body: bytes,
     headers: Any,
@@ -477,6 +605,123 @@ def verify_publication_request(
     )
 
 
+def verify_tombstone_request(
+    body: bytes,
+    headers: Any,
+    publication_authority: CMSMessageAuthority,
+    expectation: TombstoneExpectation,
+) -> VerifiedTombstone:
+    """Verify one exact tombstone callback without deleting CMS content."""
+
+    if not callable(getattr(publication_authority, "verify", None)):
+        raise TypeError("publication_authority must provide verify")
+    envelope, _ = _parse_body(body)
+    parsed_headers = _headers(headers)
+    if set(envelope) != {"schema", "payload_sha256", "tombstone", "signature"}:
+        raise CMSReceiverBlocked(
+            "receiver.request_invalid", retryable=False, http_status=400,
+        )
+    payload_sha256 = envelope.get("payload_sha256")
+    if (
+        envelope.get("schema") != _CMS.TOMBSTONE_HTTP_REQUEST_SCHEMA
+        or not isinstance(payload_sha256, str)
+        or SHA256.fullmatch(payload_sha256) is None
+    ):
+        raise CMSReceiverBlocked(
+            "receiver.request_invalid", retryable=False, http_status=400,
+        )
+    payload_bytes = _verify_tombstone(envelope.get("tombstone"), payload_sha256)
+    tombstone = envelope["tombstone"]
+    _verify_tombstone_expectation(tombstone, expectation)
+    bindings = {
+        "delivery_id": tombstone["delivery_id"],
+        "payload_sha256": payload_sha256,
+    }
+    for name, binding in _CMS.PUBLICATION_HTTP_BINDING_HEADERS:
+        if parsed_headers.get(name.lower()) != bindings.get(binding):
+            raise CMSReceiverBlocked(
+                "receiver.header_binding", retryable=False, http_status=409,
+            )
+    declared_length = parsed_headers.get("content-length")
+    if declared_length is not None and (
+        not declared_length.isascii()
+        or not declared_length.isdecimal()
+        or int(declared_length) != len(body)
+    ):
+        raise CMSReceiverBlocked(
+            "receiver.framing_invalid", retryable=False, http_status=400,
+        )
+    signature = _signature(envelope.get("signature"))
+    try:
+        verified = publication_authority.verify(payload_bytes, signature) is True
+    except Exception:
+        verified = False
+    if not verified:
+        raise CMSReceiverBlocked(
+            "receiver.signature_invalid", retryable=False, http_status=401,
+        )
+    return VerifiedTombstone(
+        delivery_id=tombstone["delivery_id"],
+        payload_sha256=payload_sha256,
+        payload=json.loads(payload_bytes.decode("utf-8")),
+        signature=signature,
+    )
+
+
+def _signed_acknowledgement(
+    *,
+    delivery_id: str,
+    payload_sha256: str,
+    acknowledgement_schema: str,
+    status: str,
+    response_schema: str,
+    authority: CMSMessageAuthority,
+) -> CMSReceiverHTTPResponse:
+    acknowledgement = {
+        "schema": acknowledgement_schema,
+        "delivery_id": delivery_id,
+        "payload_sha256": payload_sha256,
+        "status": status,
+    }
+    acknowledgement_bytes = _canonical_json(
+        acknowledgement, maximum=MAX_RESPONSE_BYTES,
+    )
+    try:
+        signature = authority.sign(acknowledgement_bytes)
+        signature_mapping = {
+            "algorithm": signature.algorithm,
+            "key_id": signature.key_id,
+            "signature": signature.signature,
+        }
+        normalized_signature = _signature(signature_mapping)
+        verified = authority.verify(
+            acknowledgement_bytes, normalized_signature,
+        ) is True
+    except Exception:
+        raise CMSReceiverBlocked(
+            "receiver.acknowledgement_signing", retryable=True, http_status=503,
+        ) from None
+    if not verified:
+        raise CMSReceiverBlocked(
+            "receiver.acknowledgement_signing", retryable=True, http_status=503,
+        )
+    response = {
+        "schema": response_schema,
+        "acknowledgement": acknowledgement,
+        "signature": signature_mapping,
+    }
+    response_body = _canonical_json(response, maximum=MAX_RESPONSE_BYTES)
+    return CMSReceiverHTTPResponse(
+        status=200,
+        headers=(
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(response_body))),
+            ("Cache-Control", "no-store"),
+        ),
+        body=response_body,
+    )
+
+
 def receive_publication(
     body: bytes,
     headers: Any,
@@ -514,46 +759,56 @@ def receive_publication(
         raise CMSReceiverBlocked(
             "receiver.commit_unconfirmed", retryable=True, http_status=503,
         )
-    acknowledgement = {
-        "schema": _CMS.ACK_SCHEMA,
-        "delivery_id": publication.delivery_id,
-        "payload_sha256": publication.payload_sha256,
-        "status": "accepted",
-    }
-    acknowledgement_bytes = _canonical_json(
-        acknowledgement, maximum=MAX_RESPONSE_BYTES,
+    return _signed_acknowledgement(
+        delivery_id=publication.delivery_id,
+        payload_sha256=publication.payload_sha256,
+        acknowledgement_schema=_CMS.ACK_SCHEMA,
+        status="accepted",
+        response_schema=_CMS.PUBLICATION_HTTP_RESPONSE_SCHEMA,
+        authority=acknowledgement_authority,
+    )
+
+
+def receive_tombstone(
+    body: bytes,
+    headers: Any,
+    publication_authority: CMSMessageAuthority,
+    acknowledgement_authority: CMSMessageAuthority,
+    expectation: TombstoneExpectation,
+    delete: Callable[[VerifiedTombstone], Mapping[str, Any]],
+) -> CMSReceiverHTTPResponse:
+    """Verify, delete through the host, then return one signed acknowledgement."""
+
+    if not callable(delete):
+        raise TypeError("delete must be callable")
+    if (
+        not callable(getattr(acknowledgement_authority, "sign", None))
+        or not callable(getattr(acknowledgement_authority, "verify", None))
+    ):
+        raise TypeError("acknowledgement_authority must provide sign and verify")
+    tombstone = verify_tombstone_request(
+        body, headers, publication_authority, expectation,
     )
     try:
-        signature = acknowledgement_authority.sign(acknowledgement_bytes)
-        signature_mapping = {
-            "algorithm": signature.algorithm,
-            "key_id": signature.key_id,
-            "signature": signature.signature,
-        }
-        normalized_signature = _signature(signature_mapping)
-        verified = acknowledgement_authority.verify(
-            acknowledgement_bytes, normalized_signature,
-        ) is True
+        receipt = delete(tombstone)
     except Exception:
         raise CMSReceiverBlocked(
-            "receiver.acknowledgement_signing", retryable=True, http_status=503,
+            "receiver.delete_failed", retryable=True, http_status=503,
         ) from None
-    if not verified:
-        raise CMSReceiverBlocked(
-            "receiver.acknowledgement_signing", retryable=True, http_status=503,
-        )
-    response = {
-        "schema": _CMS.PUBLICATION_HTTP_RESPONSE_SCHEMA,
-        "acknowledgement": acknowledgement,
-        "signature": signature_mapping,
+    expected_receipt = {
+        "delivery_id": tombstone.delivery_id,
+        "payload_sha256": tombstone.payload_sha256,
+        "status": "deleted",
     }
-    response_body = _canonical_json(response, maximum=MAX_RESPONSE_BYTES)
-    return CMSReceiverHTTPResponse(
-        status=200,
-        headers=(
-            ("Content-Type", "application/json; charset=utf-8"),
-            ("Content-Length", str(len(response_body))),
-            ("Cache-Control", "no-store"),
-        ),
-        body=response_body,
+    if receipt != expected_receipt:
+        raise CMSReceiverBlocked(
+            "receiver.delete_unconfirmed", retryable=True, http_status=503,
+        )
+    return _signed_acknowledgement(
+        delivery_id=tombstone.delivery_id,
+        payload_sha256=tombstone.payload_sha256,
+        acknowledgement_schema=_CMS.TOMBSTONE_ACK_SCHEMA,
+        status="deleted",
+        response_schema=_CMS.TOMBSTONE_HTTP_RESPONSE_SCHEMA,
+        authority=acknowledgement_authority,
     )

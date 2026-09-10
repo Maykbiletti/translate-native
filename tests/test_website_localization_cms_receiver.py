@@ -142,6 +142,51 @@ def expectation(
     )
 
 
+def tombstone_payload():
+    unsigned = {
+        "schema": CMS.TOMBSTONE_DELIVERY_SCHEMA,
+        "tombstone_id": "cms-tombstone-201",
+        "event_id": "cms-event-201",
+        "site_id": "public-site",
+        "website_version": "website-201",
+        "plan_id": "blun-l10n-plan-" + "7" * 64,
+        "source_id": "homepage.pricing",
+        "source_sequence": 201,
+        "publication_delivery_id": "blun-cms-delivery-" + "8" * 64,
+        "publication_payload_sha256": "9" * 64,
+        "locales": ["fi-FI", "mt-MT"],
+    }
+    delivery_id = "blun-cms-tombstone-" + hashlib.sha256(
+        RECEIVER._canonical_json(unsigned, maximum=RECEIVER.MAX_REQUEST_BYTES)
+    ).hexdigest()
+    return {**unsigned, "delivery_id": delivery_id}
+
+
+def rebind_tombstone(payload):
+    unsigned = {key: value for key, value in payload.items() if key != "delivery_id"}
+    payload["delivery_id"] = "blun-cms-tombstone-" + hashlib.sha256(
+        RECEIVER._canonical_json(unsigned, maximum=RECEIVER.MAX_REQUEST_BYTES)
+    ).hexdigest()
+    return payload
+
+
+def tombstone_expectation(payload, **overrides):
+    values = {
+        "tombstone_id": payload["tombstone_id"],
+        "event_id": payload["event_id"],
+        "site_id": payload["site_id"],
+        "website_version": payload["website_version"],
+        "plan_id": payload["plan_id"],
+        "source_id": payload["source_id"],
+        "source_sequence": payload["source_sequence"],
+        "publication_delivery_id": payload["publication_delivery_id"],
+        "publication_payload_sha256": payload["publication_payload_sha256"],
+        "locales": tuple(payload["locales"]),
+    }
+    values.update(overrides)
+    return RECEIVER.TombstoneExpectation(**values)
+
+
 def wire(payload, authority):
     payload_bytes = RECEIVER._canonical_json(
         payload, maximum=RECEIVER.MAX_REQUEST_BYTES,
@@ -169,8 +214,45 @@ def wire(payload, authority):
     return body, headers, payload_sha256, signature
 
 
+def wire_tombstone(payload, authority):
+    payload_bytes = RECEIVER._canonical_json(
+        payload, maximum=RECEIVER.MAX_REQUEST_BYTES,
+    )
+    payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    signature = authority.sign(payload_bytes)
+    envelope = {
+        "schema": CMS.TOMBSTONE_HTTP_REQUEST_SCHEMA,
+        "payload_sha256": payload_sha256,
+        "tombstone": payload,
+        "signature": {
+            "algorithm": signature.algorithm,
+            "key_id": signature.key_id,
+            "signature": signature.signature,
+        },
+    }
+    body = RECEIVER._canonical_json(envelope, maximum=RECEIVER.MAX_REQUEST_BYTES)
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": str(len(body)),
+        "Idempotency-Key": payload["delivery_id"],
+        "X-Localization-Delivery-Id": payload["delivery_id"],
+        "X-Localization-Payload-Sha256": payload_sha256,
+    }
+    return body, headers, payload_sha256, signature
+
+
 def request(payload, authority):
     _, _, payload_sha256, signature = wire(payload, authority)
+    return SimpleNamespace(
+        delivery_id=payload["delivery_id"],
+        payload=payload,
+        payload_sha256=payload_sha256,
+        signature=signature,
+    )
+
+
+def tombstone_request(payload, authority):
+    _, _, payload_sha256, signature = wire_tombstone(payload, authority)
     return SimpleNamespace(
         delivery_id=payload["delivery_id"],
         payload=payload,
@@ -200,6 +282,36 @@ class ReceiverTransport:
                 self.expectation,
                 self.commit,
                 now=1000,
+            )
+            return HTTP.HTTPResult(response.status, response.headers, response.body)
+        except RECEIVER.CMSReceiverBlocked as error:
+            return HTTP.HTTPResult(
+                error.http_status,
+                (("Content-Type", "application/json"),),
+                b"{}",
+            )
+
+
+class TombstoneReceiverTransport:
+    def __init__(
+        self, publication_authority, acknowledgement_authority, expectation, delete,
+    ):
+        self.publication_authority = publication_authority
+        self.acknowledgement_authority = acknowledgement_authority
+        self.expectation = expectation
+        self.delete = delete
+        self.calls = []
+
+    def post(self, url, headers, body, *, timeout):
+        self.calls.append((url, dict(headers), body, timeout))
+        try:
+            response = RECEIVER.receive_tombstone(
+                body,
+                tuple(headers.items()),
+                self.publication_authority,
+                self.acknowledgement_authority,
+                self.expectation,
+                self.delete,
             )
             return HTTP.HTTPResult(response.status, response.headers, response.body)
         except RECEIVER.CMSReceiverBlocked as error:
@@ -498,6 +610,171 @@ class CMSPublicationReceiverTests(unittest.TestCase):
         self.assertEqual(caught.exception.http_status, 503)
         self.assertEqual(len(self.commits), 1)
 
+
+class CMSTombstoneReceiverTests(unittest.TestCase):
+    def setUp(self):
+        self.publication_authority = Authority(b"publication-key", "publication-key-1")
+        self.acknowledgement_authority = Authority(b"ack-key", "ack-key-1")
+        self.deletions = []
+
+    def delete(self, tombstone):
+        self.deletions.append(tombstone)
+        return {
+            "delivery_id": tombstone.delivery_id,
+            "payload_sha256": tombstone.payload_sha256,
+            "status": "deleted",
+        }
+
+    def test_sender_to_receiver_deletes_then_returns_signed_acknowledgement(self):
+        payload = tombstone_payload()
+        transport = TombstoneReceiverTransport(
+            self.publication_authority,
+            self.acknowledgement_authority,
+            tombstone_expectation(payload),
+            self.delete,
+        )
+        publisher = HTTP.HTTPPublisherAdapter(
+            "https://cms.example.test/localizations",
+            lambda: {"Authorization": "Bearer secret"},
+            self.acknowledgement_authority,
+            transport=transport,
+        )
+
+        acknowledgement = publisher.publish(
+            tombstone_request(payload, self.publication_authority),
+        )
+
+        self.assertEqual(acknowledgement, {
+            "schema": CMS.TOMBSTONE_ACK_SCHEMA,
+            "delivery_id": payload["delivery_id"],
+            "payload_sha256": self.deletions[0].payload_sha256,
+            "status": "deleted",
+        })
+        self.assertEqual(len(self.deletions), 1)
+        self.assertEqual(self.deletions[0].payload, payload)
+
+    def test_exact_replay_reuses_the_same_delete_binding(self):
+        payload = tombstone_payload()
+        body, headers, _, _ = wire_tombstone(payload, self.publication_authority)
+        expected = tombstone_expectation(payload)
+
+        first = RECEIVER.receive_tombstone(
+            body, headers, self.publication_authority,
+            self.acknowledgement_authority, expected, self.delete,
+        )
+        second = RECEIVER.receive_tombstone(
+            body, headers, self.publication_authority,
+            self.acknowledgement_authority, expected, self.delete,
+        )
+
+        self.assertEqual(first.body, second.body)
+        self.assertEqual(
+            [(item.delivery_id, item.payload_sha256) for item in self.deletions],
+            [(payload["delivery_id"], self.deletions[0].payload_sha256)] * 2,
+        )
+
+    def test_expected_publication_source_and_complete_locale_set_are_exact(self):
+        original = tombstone_payload()
+        expected = tombstone_expectation(original)
+        mutations = (
+            lambda value: value.update(locales=["fi-FI"]),
+            lambda value: value.update(source_sequence=202),
+            lambda value: value.update(publication_payload_sha256="0" * 64),
+            lambda value: value.update(
+                publication_delivery_id="blun-cms-delivery-" + "1" * 64,
+            ),
+        )
+
+        for mutation in mutations:
+            payload = copy.deepcopy(original)
+            mutation(payload)
+            rebind_tombstone(payload)
+            body, headers, _, _ = wire_tombstone(
+                payload, self.publication_authority,
+            )
+            with self.subTest(mutation=mutation), self.assertRaises(
+                RECEIVER.CMSReceiverBlocked,
+            ) as caught:
+                RECEIVER.receive_tombstone(
+                    body, headers, self.publication_authority,
+                    self.acknowledgement_authority, expected, self.delete,
+                )
+            self.assertEqual(caught.exception.code, "receiver.tombstone_binding")
+        self.assertEqual(self.deletions, [])
+
+    def test_malformed_tombstone_headers_and_signature_never_delete(self):
+        payload = tombstone_payload()
+        expected = tombstone_expectation(payload)
+        body, headers, _, _ = wire_tombstone(payload, self.publication_authority)
+        duplicate_locale = copy.deepcopy(payload)
+        duplicate_locale["locales"].append("mt-MT")
+        duplicate_body, duplicate_headers, _, _ = wire_tombstone(
+            duplicate_locale, self.publication_authority,
+        )
+        bad_header = dict(headers)
+        bad_header["X-Localization-Payload-Sha256"] = "0" * 64
+        bad_signature = json.loads(body)
+        bad_signature["signature"]["signature"] = "0" * 64
+        cases = (
+            (duplicate_body, duplicate_headers),
+            (body, bad_header),
+            (
+                RECEIVER._canonical_json(
+                    bad_signature, maximum=RECEIVER.MAX_REQUEST_BYTES,
+                ),
+                headers,
+            ),
+        )
+
+        for candidate_body, candidate_headers in cases:
+            with self.subTest(), self.assertRaises(RECEIVER.CMSReceiverBlocked):
+                RECEIVER.receive_tombstone(
+                    candidate_body, candidate_headers, self.publication_authority,
+                    self.acknowledgement_authority, expected, self.delete,
+                )
+        self.assertEqual(self.deletions, [])
+
+    def test_delete_must_confirm_exact_binding_before_acknowledgement(self):
+        payload = tombstone_payload()
+        body, headers, _, _ = wire_tombstone(payload, self.publication_authority)
+        calls = []
+
+        def wrong(tombstone):
+            calls.append(tombstone)
+            return {
+                "delivery_id": tombstone.delivery_id,
+                "payload_sha256": "0" * 64,
+                "status": "deleted",
+            }
+
+        with self.assertRaises(RECEIVER.CMSReceiverBlocked) as caught:
+            RECEIVER.receive_tombstone(
+                body, headers, self.publication_authority,
+                self.acknowledgement_authority, tombstone_expectation(payload),
+                wrong,
+            )
+        self.assertEqual(caught.exception.code, "receiver.delete_unconfirmed")
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(caught.exception.http_status, 503)
+        self.assertEqual(len(calls), 1)
+
+    def test_private_delete_failure_is_content_free_and_retryable(self):
+        payload = tombstone_payload()
+        body, headers, _, _ = wire_tombstone(payload, self.publication_authority)
+
+        def failed(_):
+            raise RuntimeError("private CMS deletion detail")
+
+        with self.assertRaises(RECEIVER.CMSReceiverBlocked) as caught:
+            RECEIVER.receive_tombstone(
+                body, headers, self.publication_authority,
+                self.acknowledgement_authority, tombstone_expectation(payload),
+                failed,
+            )
+        self.assertEqual(caught.exception.code, "receiver.delete_failed")
+        self.assertNotIn("private", str(caught.exception))
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(self.deletions, [])
 
 if __name__ == "__main__":
     unittest.main()

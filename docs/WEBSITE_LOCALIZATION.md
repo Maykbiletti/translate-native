@@ -1389,11 +1389,12 @@ bindings and invalid signatures are terminal. No response body, credential or
 exception detail enters the durable status record.
 
 `integrations/website_localization_cms_receiver.py` is the provider-neutral
-reference receiver for the publication side of this contract. Before invoking
-host code, it strictly parses canonical UTF-8 JSON, verifies framing and all
-three protocol headers, recomputes the payload and delivery hashes, verifies
-the publisher signature, validates every locale's approval expiry and release
-evidence, and compares the signed publication with a host-supplied
+reference receiver for the publication and tombstone sides of this contract.
+Before invoking host code, it strictly parses canonical UTF-8 JSON, verifies
+framing and all three protocol headers, recomputes the payload and delivery
+hashes, and verifies the publisher signature. For a publication, it also
+validates every locale's approval expiry and release evidence and compares the
+signed payload with a host-supplied
 `PublicationExpectation`. That expectation binds the exact current event,
 site, website version, plan, source identity, source generation and hash,
 complete sorted required-locale set, content type, and commercial profile.
@@ -1409,6 +1410,15 @@ may invoke the callback again with the same immutable binding. This module does
 not provide the CMS transaction or authentication boundary, and its verified
 payload still contains target prose, so the host must keep it out of logs and
 public status.
+
+For deletion, a `TombstoneExpectation` binds the tombstone to the exact current
+event, site, website version, plan, source generation, complete sorted locale
+set, and the delivery ID and payload hash of the previously acknowledged
+publication. The host's delete callback must remove that complete binding
+atomically and idempotently, then return the exact tombstone delivery ID and
+payload hash with status `deleted`. The receiver signs the CMS `deleted`
+acknowledgement only afterward. A valid signature over a stale publication,
+different locale set, or different source generation never reaches host code.
 
 The same adapter transports a tombstone without changing its security model.
 It uses `blun.cms-localization-tombstone-http.v1`, nests the exact signed
