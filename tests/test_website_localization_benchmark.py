@@ -173,6 +173,16 @@ def candidate_result(payload, text=None):
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
         },
+        "commercial_review": (
+            {
+                "schema": WORKER._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+                "profile": payload["commercial_profile"],
+                "status": "verified",
+                "review_required_dimensions": [],
+                "evidence_sha256": "c" * 64,
+            }
+            if payload["content_type"] == "commercial" else None
+        ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": False,
         "release_required": True,
@@ -808,6 +818,24 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 blinding_key=self.key,
             )
         self.assertEqual(caught.exception.code, "benchmark.candidate.binding_mismatch")
+        self.assertEqual(reviewer.requests, [])
+
+    def test_commercial_routing_summary_tamper_blocks_before_review(self):
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+        result["commercial_review"]["review_required_dimensions"] = [
+            "private offer text",
+        ]
+        reviewer = PreferenceReviewer(result["candidate"])
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline(payload), assets(), policy(), reviewer,
+                blinding_key=self.key,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "benchmark.candidate.commercial_review_invalid",
+        )
         self.assertEqual(reviewer.requests, [])
 
     def test_candidate_policy_mismatch_blocks_before_review(self):

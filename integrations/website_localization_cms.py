@@ -494,10 +494,12 @@ class WebsiteLocalizationCMSBridge:
                 or set(commercial) != {
                     "schema", "profile", "applies_to", "dimensions",
                     "preservation", "rendering", "verification",
-                    "protected_terms", "sha256",
+                    "protected_terms", "review_summary_schema", "sha256",
                 }
                 or commercial["schema"] != _COMMERCIAL.PUBLIC_PROFILE_SCHEMA
                 or commercial["profile"] != _PLANNER.COMMERCIAL_PROFILE
+                or commercial["review_summary_schema"]
+                != _COMMERCIAL.REVIEW_SUMMARY_SCHEMA
                 or commercial["applies_to"] != {
                     "content_type": "commercial",
                     "locales": "all-supported-target-locales",

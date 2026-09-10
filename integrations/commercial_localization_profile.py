@@ -13,6 +13,7 @@ from typing import Any
 
 
 PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v1"
+REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v1"
 
 DIMENSIONS = {
     "amount_currency": "Amounts, currency identity, units and price-to-product association; no conversion or rounding.",
@@ -39,6 +40,7 @@ def public_profile(profile: str) -> dict[str, Any]:
     body = {
         "schema": PUBLIC_PROFILE_SCHEMA,
         "profile": profile,
+        "review_summary_schema": REVIEW_SUMMARY_SCHEMA,
         "applies_to": {
             "content_type": "commercial",
             "locales": "all-supported-target-locales",
@@ -140,8 +142,15 @@ def review_contract(schema: str) -> dict[str, Any]:
     }
 
 
-def validate_review(value: Any, source: str, target: str, schema: str) -> None:
-    """Block missing evidence and uncertainty, without guessing numerical meaning."""
+def validate_review(
+    value: Any,
+    source: str,
+    target: str,
+    schema: str,
+    *,
+    allow_uncertain: bool = False,
+) -> dict[str, Any]:
+    """Validate evidence and return a content-free, hash-bound routing summary."""
     def invalid() -> None:
         raise CommercialReviewBlocked("review.commercial.invalid")
 
@@ -161,10 +170,11 @@ def validate_review(value: Any, source: str, target: str, schema: str) -> None:
     checks = value["checks"]
     if not isinstance(checks, dict) or set(checks) != set(DIMENSIONS):
         invalid()
-    uncertain = value["coverage"] == "uncertain"
+    uncertain_dimensions: set[str] = set()
+    coverage_uncertain = value["coverage"] == "uncertain"
     changed = False
     evidenced = False
-    for check in checks.values():
+    for name, check in checks.items():
         if not isinstance(check, dict) or set(check) != {"status", "items"}:
             invalid()
         status, items = check["status"], check["items"]
@@ -210,19 +220,67 @@ def validate_review(value: Any, source: str, target: str, schema: str) -> None:
             if identity in seen:
                 invalid()
             seen.add(identity)
-        uncertain |= status == "uncertain"
+        if status == "uncertain":
+            uncertain_dimensions.add(name)
         changed |= status == "changed"
         evidenced |= status == "equivalent"
     if changed:
         raise CommercialReviewBlocked("review.commercial.changed")
-    if uncertain or not evidenced:
-        raise CommercialReviewBlocked("review.commercial.independent_review_required")
     # Every evidenced condition must resolve to an explicitly reviewed offer.
     assignment = checks["offer_assignment"]
     if assignment["status"] != "equivalent" or not any(
         check["status"] == "equivalent" for name, check in checks.items() if name != "offer_assignment"
     ):
+        uncertain_dimensions.add("offer_assignment")
+    else:
+        offers = {item["offer"] for item in assignment["items"]}
+        if any(item["offer"] not in offers for check in checks.values() for item in check["items"]):
+            invalid()
+    if coverage_uncertain or not evidenced:
+        uncertain_dimensions.update(DIMENSIONS)
+    summary = {
+        "schema": REVIEW_SUMMARY_SCHEMA,
+        "profile": schema,
+        "status": "review_required" if uncertain_dimensions else "verified",
+        "review_required_dimensions": [
+            name for name in DIMENSIONS if name in uncertain_dimensions
+        ],
+        "evidence_sha256": hashlib.sha256(_canonical_json(value)).hexdigest(),
+    }
+    if uncertain_dimensions and not allow_uncertain:
         raise CommercialReviewBlocked("review.commercial.independent_review_required")
-    offers = {item["offer"] for item in assignment["items"]}
-    if any(item["offer"] not in offers for check in checks.values() for item in check["items"]):
-        invalid()
+    return summary
+
+
+def validate_summary(
+    value: Any,
+    profile: str,
+    *,
+    review_required: bool,
+) -> dict[str, Any]:
+    """Validate a persisted summary without retaining customer or reviewer text."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "profile", "status", "review_required_dimensions",
+            "evidence_sha256",
+        }
+        or value["schema"] != REVIEW_SUMMARY_SCHEMA
+        or value["profile"] != profile
+        or value["status"] not in {"verified", "review_required"}
+        or not isinstance(value["evidence_sha256"], str)
+        or len(value["evidence_sha256"]) != 64
+        or any(character not in "0123456789abcdef" for character in value["evidence_sha256"])
+        or not isinstance(value["review_required_dimensions"], list)
+    ):
+        raise CommercialReviewBlocked("review.commercial.summary_invalid")
+    dimensions = value["review_required_dimensions"]
+    if (
+        len(dimensions) != len(set(dimensions))
+        or any(name not in DIMENSIONS for name in dimensions)
+        or dimensions != [name for name in DIMENSIONS if name in dimensions]
+        or (value["status"] == "verified") != (not dimensions)
+        or (value["status"] == "review_required" and not review_required)
+    ):
+        raise CommercialReviewBlocked("review.commercial.summary_invalid")
+    return json.loads(_canonical_json(value))

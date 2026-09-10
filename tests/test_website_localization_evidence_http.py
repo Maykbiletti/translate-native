@@ -85,6 +85,7 @@ def evidence_request():
         review_confidence={"target_native": "high", "source_fidelity": "high"},
         quality_profile={"locale": "fi-FI", "version": "fi-native-1", "sha256": "c" * 64},
         commercial_profile=None,
+        commercial_review=None,
         human_review_required=False,
         independent_review_required=False,
     )
@@ -264,6 +265,49 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
                     adapter(transport).obtain(BadRequest())
                 self.assertEqual((caught.exception.code, caught.exception.retryable), ("request_invalid", False))
                 self.assertEqual(transport.calls, [])
+
+    def test_commercial_review_scope_is_exact_and_content_free(self):
+        base = evidence_request().as_payload()
+        base["commercial_profile"] = "translate-native.commercial.v2"
+        base["commercial_review"] = {
+            "schema": HTTP.COMMERCIAL_REVIEW_SUMMARY_SCHEMA,
+            "profile": base["commercial_profile"],
+            "status": "review_required",
+            "review_required_dimensions": ["tax_status"],
+            "evidence_sha256": "d" * 64,
+        }
+        base["independent_review_required"] = True
+
+        class CommercialRequest:
+            request_id = base["request_id"]
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def as_payload(self):
+                return self.payload
+
+        transport = FakeTransport(response_for)
+        adapter(transport).obtain(CommercialRequest(base))
+        sent = json.loads(transport.calls[0][2])["request"]["commercial_review"]
+        self.assertEqual(sent["review_required_dimensions"], ["tax_status"])
+        self.assertNotIn("VAT", json.dumps(sent))
+
+        for mutation in (
+            {"review_required_dimensions": ["private VAT 480"]},
+            {"status": "verified"},
+            {"schema": "wrong.schema"},
+            {"evidence_sha256": "not-a-digest"},
+        ):
+            payload = json.loads(json.dumps(base))
+            payload["commercial_review"].update(mutation)
+            invalid_transport = FakeTransport(response_for)
+            with self.subTest(mutation=mutation), self.assertRaises(
+                HTTP.HTTPEvidenceProviderFailed,
+            ) as caught:
+                adapter(invalid_transport).obtain(CommercialRequest(payload))
+            self.assertEqual(caught.exception.code, "request_invalid")
+            self.assertEqual(invalid_transport.calls, [])
 
     def test_response_must_bind_outer_and_inner_evidence(self):
         cases = (

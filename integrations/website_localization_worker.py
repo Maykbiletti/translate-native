@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Protocol
 WORKER_SCHEMA = "blun.website-localization-worker.v4"
 CANDIDATE_SCHEMA = "blun.website-localization-candidate.v1"
 REVIEW_SCHEMA = "blun.website-localization-review.v2"
-RESULT_SCHEMA = "blun.website-localization-result.v4"
+RESULT_SCHEMA = "blun.website-localization-result.v5"
 MAX_TEXT_BYTES = 2_000_000
 MAX_FIELD_LENGTH = 2_000
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -575,6 +575,7 @@ def run_localization_job(
         },
     })
     fidelity_response, request_hash, response_hash = _invoke(provider, fidelity_request)
+    commercial_summary = None
     commercial_escalation_required = False
     if commercial:
         # Hash above binds the complete evidence, even though the ordinary
@@ -582,13 +583,15 @@ def run_localization_job(
         fidelity_response = dict(fidelity_response)
         commercial_review = fidelity_response.pop("commercial_review", None)
         try:
-            _COMMERCIAL.validate_review(
-                commercial_review, job["source"]["text"], candidate, job["commercial_profile"],
+            commercial_summary = _COMMERCIAL.validate_review(
+                commercial_review, job["source"]["text"], candidate,
+                job["commercial_profile"], allow_uncertain=True,
             )
         except _COMMERCIAL.CommercialReviewBlocked as error:
-            if error.code != "review.commercial.independent_review_required":
-                raise LocalizationWorkerBlocked(error.code, retryable=False) from None
-            commercial_escalation_required = True
+            raise LocalizationWorkerBlocked(error.code, retryable=False) from None
+        commercial_escalation_required = (
+            commercial_summary["status"] == "review_required"
+        )
     findings, fidelity_confidence = _review(
         fidelity_response,
         "source_fidelity",
@@ -650,6 +653,7 @@ def run_localization_job(
             "version": job["target"]["quality_profile_version"],
             "sha256": job["target"]["quality_profile_sha256"],
         },
+        "commercial_review": commercial_summary,
         "human_review_required": job["content_type"] == "legal",
         "independent_review_required": (
             job["content_type"] != "legal"

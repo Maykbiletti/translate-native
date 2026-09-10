@@ -22,7 +22,7 @@ from typing import Any, Iterator, Protocol
 
 SCHEMA_VERSION = 1
 APPROVAL_SCHEMA = "blun.website-localization-approval.v3"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v1"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v2"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 MAX_TEXT_BYTES = 2_000_000
 MAX_RECEIPT_LENGTH = 16_384
@@ -226,6 +226,7 @@ def _receipt_binding(
         "review_confidence": result["review_confidence"],
         "quality_profile": result["quality_profile"],
         "commercial_profile": job.get("commercial_profile"),
+        "commercial_review": result["commercial_review"],
         "human_review_required": result["human_review_required"],
         "independent_review_required": result["independent_review_required"],
     }
@@ -299,7 +300,7 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "quality_profile", "human_review_required",
+        "quality_profile", "commercial_review", "human_review_required",
         "independent_review_required", "release_required",
     }
     if set(result) != expected:
@@ -367,6 +368,18 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         or independent_review_required is not expected_independent_review
     ):
         raise LocalizationReleaseBlocked("result.independent_review.invalid")
+    commercial_review = result.get("commercial_review")
+    if job["content_type"] == "commercial":
+        try:
+            _WORKER._COMMERCIAL.validate_summary(
+                commercial_review,
+                job["commercial_profile"],
+                review_required=independent_review_required,
+            )
+        except _WORKER._COMMERCIAL.CommercialReviewBlocked:
+            raise LocalizationReleaseBlocked("result.commercial_review.invalid") from None
+    elif commercial_review is not None:
+        raise LocalizationReleaseBlocked("result.commercial_review.invalid")
     return result
 
 

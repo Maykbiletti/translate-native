@@ -61,6 +61,17 @@ class CommercialLocalizationTests(unittest.TestCase):
         response = review("source_fidelity")
         response["commercial_review"] = evidence()
         self.assertEqual(result["quality_passes"][2]["response_sha256"], WORKER._hash_json(response))
+        summary = result["commercial_review"]
+        self.assertEqual(summary["status"], "verified")
+        self.assertEqual(summary["review_required_dimensions"], [])
+        self.assertEqual(
+            summary["evidence_sha256"],
+            PROFILE.hashlib.sha256(PROFILE._canonical_json(evidence())).hexdigest(),
+        )
+        summary_without_digest = dict(summary)
+        summary_without_digest.pop("evidence_sha256")
+        self.assertNotIn("480", json.dumps(summary_without_digest))
+        self.assertNotIn("VAT", json.dumps(summary_without_digest))
         self.assertTrue(result["release_required"])
 
     def test_all_eu_locales_receive_profile_without_source_language_translation(self):
@@ -122,6 +133,10 @@ class CommercialLocalizationTests(unittest.TestCase):
                 result, _ = self.run_worker(report)
                 self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
                 self.assertTrue(result["independent_review_required"])
+                self.assertEqual(
+                    result["commercial_review"]["review_required_dimensions"],
+                    [dimension],
+                )
 
     def test_malformed_evidence_blocks_while_unresolved_coverage_routes_to_review(self):
         mutations = []
@@ -146,6 +161,10 @@ class CommercialLocalizationTests(unittest.TestCase):
                 result, _ = self.run_worker(report)
                 self.assertTrue(result["independent_review_required"])
                 self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
+                self.assertEqual(
+                    result["commercial_review"]["review_required_dimensions"],
+                    list(PROFILE.DIMENSIONS),
+                )
 
     def test_invalid_offsets_types_and_duplicate_evidence_block(self):
         for offsets in ([True, 2], [-1, 3], [0, 99999], [2, 2], [2, 1], "0:3", [0, 1.5]):
@@ -354,10 +373,34 @@ class CommercialLocalizationTests(unittest.TestCase):
             binding = verifier.calls[0]["binding"]
             self.assertEqual(binding["content_type"], "commercial")
             self.assertEqual(binding["commercial_profile"], SCHEMA)
+            self.assertEqual(
+                binding["commercial_review"]["review_required_dimensions"],
+                ["tax_status"],
+            )
             self.assertEqual(binding["policy_version"], "native-web-1")
             self.assertEqual(
                 binding["review_confidence"]["source_fidelity"], "low",
             )
+
+    def test_release_rejects_tampered_commercial_routing_summary(self):
+        result, _ = self.run_worker()
+        payload = job(SOURCE, "commercial")
+        RELEASE._validate_result(payload, result)
+        for mutation in (
+            lambda value: value["commercial_review"].update(
+                review_required_dimensions=["tax_status"],
+            ),
+            lambda value: value["commercial_review"].update(
+                evidence_sha256="not-a-digest",
+            ),
+            lambda value: value.update(commercial_review=None),
+        ):
+            changed = copy.deepcopy(result)
+            mutation(changed)
+            with self.subTest(changed=changed), self.assertRaises(
+                RELEASE.LocalizationReleaseBlocked,
+            ):
+                RELEASE._validate_result(payload, changed)
 
     def test_many_offer_evidence_items_survive_without_price_bag_matching(self):
         source = "\n".join(f"Offer {i}: €{i + 10} a month, billed annually." for i in range(100))

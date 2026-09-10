@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-quality-evidence-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-quality-evidence-http-response.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v4"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v5"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
@@ -29,13 +29,19 @@ REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
+COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v1"
+COMMERCIAL_DIMENSIONS = (
+    "amount_currency", "discount_basis", "qualifiers", "tax_status",
+    "billing_interval", "commitment", "renewal", "cancellation",
+    "conditions", "offer_assignment",
+)
 REQUEST_FIELDS = {
     "schema", "request_id", "evidence_revision", "event_id", "plan_id",
     "job_id", "result_sha256", "source_sha256", "target_sha256",
     "source_locale", "target_locale", "content_type", "glossary_version",
     "policy_version", "provider", "software_version", "source_text",
     "target_text", "review_confidence", "quality_profile",
-    "commercial_profile", "human_review_required",
+    "commercial_profile", "commercial_review", "human_review_required",
     "independent_review_required",
 }
 EVIDENCE_FIELDS = {
@@ -296,6 +302,7 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
     provider = payload["provider"]
     confidence = payload["review_confidence"]
     profile = payload["quality_profile"]
+    commercial_review = payload["commercial_review"]
     if (
         not isinstance(provider, dict)
         or set(provider) != {"id", "model_id", "model_version"}
@@ -314,6 +321,44 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
         or (
             payload["commercial_profile"] is not None
             and not _token(payload["commercial_profile"])
+        )
+        or ((payload["commercial_profile"] is None) != (commercial_review is None))
+        or (
+            commercial_review is not None
+            and (
+                not isinstance(commercial_review, dict)
+                or set(commercial_review) != {
+                    "schema", "profile", "status",
+                    "review_required_dimensions", "evidence_sha256",
+                }
+                or commercial_review["schema"] != COMMERCIAL_REVIEW_SUMMARY_SCHEMA
+                or commercial_review["profile"] != payload["commercial_profile"]
+                or commercial_review["status"] not in {
+                    "verified", "review_required",
+                }
+                or not isinstance(
+                    commercial_review["review_required_dimensions"], list,
+                )
+                or commercial_review["review_required_dimensions"] != [
+                    name for name in COMMERCIAL_DIMENSIONS
+                    if name in commercial_review["review_required_dimensions"]
+                ]
+                or len(commercial_review["review_required_dimensions"])
+                != len(set(commercial_review["review_required_dimensions"]))
+                or (
+                    commercial_review["status"] == "verified"
+                    and commercial_review["review_required_dimensions"]
+                )
+                or (
+                    commercial_review["status"] == "review_required"
+                    and (
+                        not commercial_review["review_required_dimensions"]
+                        or not payload["independent_review_required"]
+                    )
+                )
+                or not isinstance(commercial_review["evidence_sha256"], str)
+                or SHA256.fullmatch(commercial_review["evidence_sha256"]) is None
+            )
         )
     ):
         raise HTTPEvidenceProviderFailed("request_invalid", retryable=False)

@@ -93,6 +93,16 @@ def completed_result(job, candidate, *, review_confidence=None):
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
         },
+        "commercial_review": (
+            {
+                "schema": WORKER._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+                "profile": payload["commercial_profile"],
+                "status": "verified",
+                "review_required_dimensions": [],
+                "evidence_sha256": "c" * 64,
+            }
+            if payload["content_type"] == "commercial" else None
+        ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": (
             payload["content_type"] != "legal" and "low" in review_confidence.values()

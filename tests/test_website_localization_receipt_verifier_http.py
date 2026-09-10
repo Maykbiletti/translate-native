@@ -71,6 +71,7 @@ def binding(*, kind="quality"):
             "sha256": "2" * 64,
         },
         "commercial_profile": None,
+        "commercial_review": None,
         "human_review_required": False,
         "independent_review_required": False,
     }
@@ -267,6 +268,33 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
                         binding=binding(), receipt="signed-receipt",
                     )
                 self.assertEqual(len(transport.calls), 1)
+
+    def test_commercial_review_scope_is_bound_before_transport(self):
+        value = binding()
+        value["commercial_profile"] = "translate-native.commercial.v2"
+        value["commercial_review"] = {
+            "schema": HTTP.COMMERCIAL_REVIEW_SUMMARY_SCHEMA,
+            "profile": value["commercial_profile"],
+            "status": "review_required",
+            "review_required_dimensions": ["cancellation"],
+            "evidence_sha256": "d" * 64,
+        }
+        value["independent_review_required"] = True
+        transport = Transport(response_for)
+        self.adapter(transport).verify(binding=value, receipt="signed-receipt")
+        sent = json.loads(transport.calls[0][2])["binding"]["commercial_review"]
+        self.assertEqual(sent["review_required_dimensions"], ["cancellation"])
+
+        value["commercial_review"]["review_required_dimensions"] = [
+            "private cancellation text",
+        ]
+        invalid_transport = Transport(response_for)
+        with self.assertRaises(HTTP.HTTPReceiptVerifierFailed) as caught:
+            self.adapter(invalid_transport).verify(
+                binding=value, receipt="signed-receipt",
+            )
+        self.assertEqual(caught.exception.code, "binding_invalid")
+        self.assertEqual(invalid_transport.calls, [])
 
 
 if __name__ == "__main__":

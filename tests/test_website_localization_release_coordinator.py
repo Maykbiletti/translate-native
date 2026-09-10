@@ -222,6 +222,26 @@ def completed_result(job, target_text, *, review_confidence=None):
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
         },
+        "commercial_review": (
+            {
+                "schema": WORKER._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+                "profile": payload["commercial_profile"],
+                "status": (
+                    "review_required"
+                    if payload["content_type"] == "commercial"
+                    and review_confidence["source_fidelity"] == "low"
+                    else "verified"
+                ),
+                "review_required_dimensions": (
+                    ["amount_currency"]
+                    if payload["content_type"] == "commercial"
+                    and review_confidence["source_fidelity"] == "low"
+                    else []
+                ),
+                "evidence_sha256": "c" * 64,
+            }
+            if payload["content_type"] == "commercial" else None
+        ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": (
             payload["content_type"] != "legal" and "low" in review_confidence.values()
@@ -392,6 +412,12 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertEqual(
             commercial_request.as_payload()["commercial_profile"],
             PLANNER.COMMERCIAL_PROFILE,
+        )
+        self.assertEqual(
+            commercial_request.as_payload()["commercial_review"][
+                "review_required_dimensions"
+            ],
+            ["amount_currency"],
         )
 
     def test_outer_operation_guard_blocks_before_evidence_provider_call(self):

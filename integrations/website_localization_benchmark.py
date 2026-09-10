@@ -718,7 +718,7 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "quality_profile", "human_review_required",
+        "quality_profile", "commercial_review", "human_review_required",
         "independent_review_required", "release_required",
     }
     if not isinstance(result, dict) or set(result) != expected_keys:
@@ -754,6 +754,18 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     expected_independent_review = (
         job["content_type"] != "legal" and "low" in review_confidence.values()
     )
+    commercial_review = result["commercial_review"]
+    if job["content_type"] == "commercial":
+        try:
+            _WORKER._COMMERCIAL.validate_summary(
+                commercial_review,
+                job["commercial_profile"],
+                review_required=expected_independent_review,
+            )
+        except _WORKER._COMMERCIAL.CommercialReviewBlocked:
+            raise BenchmarkBlocked("benchmark.candidate.commercial_review_invalid") from None
+    elif commercial_review is not None:
+        raise BenchmarkBlocked("benchmark.candidate.commercial_review_invalid")
     expected_quality_profile = {
         "locale": job["target"]["locale"],
         "version": job["target"]["quality_profile_version"],

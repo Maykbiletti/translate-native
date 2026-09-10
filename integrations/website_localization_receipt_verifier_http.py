@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-receipt-verification-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-receipt-verification-http-response.v1"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v1"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v2"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_TEXT_BYTES = 2_000_000
@@ -28,12 +28,19 @@ HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
+COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v1"
+COMMERCIAL_DIMENSIONS = (
+    "amount_currency", "discount_basis", "qualifiers", "tax_status",
+    "billing_interval", "commitment", "renewal", "cancellation",
+    "conditions", "offer_assignment",
+)
 BINDING_FIELDS = {
     "schema", "review_kind", "job_id", "result_sha256", "source_text",
     "target_text", "source_sha256", "target_sha256", "source_locale",
     "target_locale", "content_type", "glossary_version", "policy_version",
     "primary_provider", "review_provider", "software_version",
     "review_confidence", "quality_profile", "commercial_profile",
+    "commercial_review",
     "human_review_required", "independent_review_required",
 }
 RESERVED_HEADERS = {
@@ -291,6 +298,7 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         _fail("binding_invalid")
     confidence = binding["review_confidence"]
     profile = binding["quality_profile"]
+    commercial_review = binding["commercial_review"]
     if (
         not isinstance(confidence, dict)
         or set(confidence) != {"target_native", "source_fidelity"}
@@ -304,6 +312,44 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         or (
             binding["commercial_profile"] is not None
             and not _token(binding["commercial_profile"])
+        )
+        or ((binding["commercial_profile"] is None) != (commercial_review is None))
+        or (
+            commercial_review is not None
+            and (
+                not isinstance(commercial_review, dict)
+                or set(commercial_review) != {
+                    "schema", "profile", "status",
+                    "review_required_dimensions", "evidence_sha256",
+                }
+                or commercial_review["schema"] != COMMERCIAL_REVIEW_SUMMARY_SCHEMA
+                or commercial_review["profile"] != binding["commercial_profile"]
+                or commercial_review["status"] not in {
+                    "verified", "review_required",
+                }
+                or not isinstance(
+                    commercial_review["review_required_dimensions"], list,
+                )
+                or commercial_review["review_required_dimensions"] != [
+                    name for name in COMMERCIAL_DIMENSIONS
+                    if name in commercial_review["review_required_dimensions"]
+                ]
+                or len(commercial_review["review_required_dimensions"])
+                != len(set(commercial_review["review_required_dimensions"]))
+                or (
+                    commercial_review["status"] == "verified"
+                    and commercial_review["review_required_dimensions"]
+                )
+                or (
+                    commercial_review["status"] == "review_required"
+                    and (
+                        not commercial_review["review_required_dimensions"]
+                        or not binding["independent_review_required"]
+                    )
+                )
+                or not isinstance(commercial_review["evidence_sha256"], str)
+                or SHA256.fullmatch(commercial_review["evidence_sha256"]) is None
+            )
         )
         or type(binding["human_review_required"]) is not bool
         or type(binding["independent_review_required"]) is not bool

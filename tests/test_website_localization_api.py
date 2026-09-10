@@ -437,6 +437,10 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         commercial = capabilities["commercial_profile"]
         self.assertEqual(commercial["profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
         self.assertEqual(
+            commercial["review_summary_schema"],
+            CMS._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+        )
+        self.assertEqual(
             [item["name"] for item in commercial["dimensions"]],
             list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
         )

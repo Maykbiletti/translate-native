@@ -87,6 +87,15 @@ exactly one qualified native/domain review or an independent second-provider
 model receipt bound to the commercial profile and policy. The worker does not
 secretly call an alternative provider.
 
+The worker retains a content-free `commercial_review` summary in result schema
+v5. It contains only the profile, verdict, ordered unresolved dimension names
+and a hash of the complete commercial evidence. Prices, text spans,
+interpretations and reviewer prose do not survive in the summary. The same
+summary is bound into quality-evidence request schema v5 and receipt-binding
+schema v2, so an independent adapter receives the exact targeted scope and
+cannot replace it with a generic approval. Tampered, unknown, reordered or
+contradictory dimensions block before network access or signing.
+
 The validator checks evidence shape and offsets, **not semantic truth**. A model
 can misinterpret text or omit a fact while claiming completeness. The host's
 independent quality-receipt verifier must inspect the complete request/response

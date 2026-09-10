@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 SCHEMA = "blun.website-localization-release-coordinator.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v4"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v5"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 EVIDENCE_STATE_SCHEMA = "blun.localization-quality-evidence-state.v1"
@@ -139,6 +139,7 @@ class QualityEvidenceRequest:
     review_confidence: dict[str, str]
     quality_profile: dict[str, str]
     commercial_profile: str | None
+    commercial_review: dict[str, Any] | None
     human_review_required: bool
     independent_review_required: bool
 
@@ -674,6 +675,7 @@ def _request(
         "review_confidence": json.loads(_canonical_json(result["review_confidence"])),
         "quality_profile": json.loads(_canonical_json(result["quality_profile"])),
         "commercial_profile": job.as_payload().get("commercial_profile"),
+        "commercial_review": json.loads(_canonical_json(result["commercial_review"])),
         "human_review_required": result["human_review_required"],
         "independent_review_required": result["independent_review_required"],
     }
