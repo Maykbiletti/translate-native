@@ -818,6 +818,29 @@ Direct skill address:
 https://github.com/Maykbiletti/translate-native/tree/main/translate-native
 ```
 
+## Connect a website-localization provider
+
+The production-oriented website pipeline plans one job per locale, processes
+each through separate transcreation, source-blind native review, and
+source-aware fidelity review stages, and remains vendor-neutral. A host can now
+connect its own LLM or model gateway through the bundled request-bound HTTP
+adapter. The public protocol, authentication boundary, idempotency rules,
+response schemas, and fail-closed behavior are documented in
+[`docs/WEBSITE_LOCALIZATION_HTTP_PROVIDER.md`](docs/WEBSITE_LOCALIZATION_HTTP_PROVIDER.md).
+
+The same pipeline can connect its independent quality-evidence service through
+the separate request-bound HTTPS adapter documented in
+[`docs/WEBSITE_LOCALIZATION_EVIDENCE_HTTP.md`](docs/WEBSITE_LOCALIZATION_EVIDENCE_HTTP.md).
+It sends exactly one complete source/candidate pair for one leased locale,
+binds request and worker-result hashes end to end, and leaves all retries to the
+durable evidence queue.
+
+The adapter is public and contains no fixed provider, brand, product, price, or
+credential. Passing transport tests does not establish native-language quality
+or superiority over another translation system; those claims require the
+separate review and blinded benchmark evidence described in
+[`docs/WEBSITE_LOCALIZATION.md`](docs/WEBSITE_LOCALIZATION.md).
+
 ## Protect machine-readable content
 
 The zero-dependency guard compares source and target files:

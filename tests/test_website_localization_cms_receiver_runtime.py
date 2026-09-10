@@ -1,0 +1,482 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+HELPERS = load(
+    "blun_test_website_localization_cms_receiver_runtime_helpers",
+    ROOT / "tests" / "test_website_localization_cms_receiver.py",
+)
+RUNTIME = load(
+    "blun_test_website_localization_cms_receiver_runtime",
+    ROOT / "integrations" / "website_localization_cms_receiver_runtime.py",
+)
+CMS = HELPERS.CMS
+HTTP = HELPERS.HTTP
+
+
+class DurableCMSReceiverRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.publication_authority = HELPERS.Authority(
+            b"publication-key", "publication-key-1",
+        )
+        self.acknowledgement_authority = HELPERS.Authority(
+            b"ack-key", "ack-key-1",
+        )
+        self.contract_sha256 = (
+            CMS.WebsiteLocalizationCMSBridge._publication_http_capabilities()[
+                "sha256"
+            ]
+        )
+
+    def open(self, database_path, **overrides):
+        values = {
+            "database": database_path,
+            "publication_authority": self.publication_authority,
+            "acknowledgement_authority": self.acknowledgement_authority,
+            "authenticate": lambda headers: (
+                headers.get("authorization") == "Bearer secret"
+            ),
+            "contract_sha256": self.contract_sha256,
+            "clock": lambda: 1000,
+        }
+        values.update(overrides)
+        return RUNTIME.open_durable_cms_receiver(**values)
+
+    def test_composed_runtime_persists_across_worker_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            first = self.open(path)
+            publication = HELPERS.publication_payload()
+            first.register_source(HELPERS.expectation(publication))
+            request = HELPERS.request(publication, self.publication_authority)
+            publisher = HTTP.HTTPPublisherAdapter(
+                "https://cms.example.test/v1/localization/callback",
+                lambda: {"Authorization": "Bearer secret"},
+                self.acknowledgement_authority,
+                transport=HELPERS.WSGIReceiverTransport(first),
+                probe_id_factory=lambda: "publisher-health-probe-501",
+            )
+
+            accepted = publisher.publish(request)
+            first.close()
+            first.close()
+
+            second = self.open(path)
+            try:
+                restarted_publisher = publisher.__class__(
+                    "https://cms.example.test/v1/localization/callback",
+                    lambda: {"Authorization": "Bearer secret"},
+                    self.acknowledgement_authority,
+                    transport=HELPERS.WSGIReceiverTransport(second),
+                    probe_id_factory=lambda: "publisher-health-probe-502",
+                )
+                replay = restarted_publisher.publish(request)
+                self.assertEqual(replay, accepted)
+                self.assertEqual(
+                    second.read_active_bundle(HELPERS.expectation(publication)),
+                    publication,
+                )
+                self.assertNotIn("secret", repr(second))
+                self.assertNotIn(str(path), repr(second))
+
+                tombstone = HELPERS.tombstone_payload()
+                tombstone.update({
+                    "event_id": publication["event_id"],
+                    "site_id": publication["site_id"],
+                    "website_version": publication["website_version"],
+                    "plan_id": publication["plan_id"],
+                    "source_id": publication["source_id"],
+                    "source_sequence": publication["source_sequence"],
+                    "publication_delivery_id": publication["delivery_id"],
+                    "publication_payload_sha256": request.payload_sha256,
+                    "locales": ["fi-FI"],
+                })
+                HELPERS.rebind_tombstone(tombstone)
+                second.register_tombstone(
+                    HELPERS.tombstone_expectation(tombstone)
+                )
+                deletion = HELPERS.tombstone_request(
+                    tombstone, self.publication_authority,
+                )
+                self.assertEqual(
+                    restarted_publisher.publish(deletion)["status"], "deleted",
+                )
+                self.assertEqual(
+                    restarted_publisher.check(
+                        contract_sha256=self.contract_sha256,
+                    )["status"],
+                    "healthy",
+                )
+                self.assertIsNone(
+                    second.read_active_bundle(HELPERS.expectation(publication))
+                )
+            finally:
+                second.close()
+
+    def test_filesystem_database_is_created_owner_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            runtime = self.open(path)
+            try:
+                database_stat = path.stat()
+                self.assertEqual(database_stat.st_uid, os.geteuid())
+                self.assertEqual(database_stat.st_nlink, 1)
+                self.assertEqual(database_stat.st_mode & 0o777, 0o600)
+            finally:
+                runtime.close()
+
+    def test_unsafe_filesystem_boundaries_block_before_sqlite_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            outside = root / "outside.sqlite3"
+            outside.touch(mode=0o600)
+
+            cases = [Path("relative-receiver.sqlite3")]
+
+            permissive = private / "permissive.sqlite3"
+            permissive.touch(mode=0o600)
+            permissive.chmod(0o640)
+            cases.append(permissive)
+
+            linked = private / "linked.sqlite3"
+            linked.symlink_to(outside)
+            cases.append(linked)
+
+            hard_linked = private / "hard-linked.sqlite3"
+            os.link(outside, hard_linked)
+            cases.append(hard_linked)
+
+            unsafe_parent = root / "shared"
+            unsafe_parent.mkdir(mode=0o770)
+            unsafe_parent.chmod(0o770)
+            cases.append(unsafe_parent / "receiver.sqlite3")
+
+            unsafe_ancestor = root / "shared-ancestor"
+            unsafe_ancestor.mkdir(mode=0o770)
+            unsafe_ancestor.chmod(0o770)
+            nested_private = unsafe_ancestor / "private"
+            nested_private.mkdir(mode=0o700)
+            cases.append(nested_private / "receiver.sqlite3")
+
+            alias_parent = root / "alias"
+            alias_parent.symlink_to(private, target_is_directory=True)
+            cases.append(alias_parent / "receiver.sqlite3")
+
+            for path in cases:
+                with self.subTest(path=path):
+                    with self.assertRaises(
+                        RUNTIME.DurableCMSReceiverRuntimeBlocked
+                    ):
+                        self.open(path)
+
+            self.assertFalse(cases[0].exists())
+            self.assertFalse((unsafe_parent / "receiver.sqlite3").exists())
+            self.assertFalse((nested_private / "receiver.sqlite3").exists())
+            self.assertFalse((private / "receiver.sqlite3").exists())
+
+    def test_runtime_blocks_if_database_permissions_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            runtime = self.open(path)
+            publication = HELPERS.publication_payload()
+            try:
+                path.chmod(0o640)
+                for operation in (
+                    lambda: runtime.register_source(
+                        HELPERS.expectation(publication)
+                    ),
+                    lambda: runtime.read_active_bundle(
+                        HELPERS.expectation(publication)
+                    ),
+                ):
+                    with self.subTest(operation=operation):
+                        with self.assertRaises(
+                            RUNTIME.DurableCMSReceiverRuntimeBlocked
+                        ):
+                            operation()
+            finally:
+                path.chmod(0o600)
+                runtime.close()
+
+    def test_runtime_blocks_if_database_path_identity_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            displaced = Path(directory) / "displaced.sqlite3"
+            runtime = self.open(path)
+            try:
+                os.replace(path, displaced)
+                path.touch(mode=0o600)
+                with self.assertRaises(
+                    RUNTIME.DurableCMSReceiverRuntimeBlocked
+                ):
+                    runtime.register_source(
+                        HELPERS.expectation(HELPERS.publication_payload())
+                    )
+            finally:
+                runtime.close()
+
+    def test_concurrent_first_open_converges_on_private_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                runtimes = list(
+                    executor.map(lambda _index: self.open(path), range(4))
+                )
+            try:
+                database_stat = path.stat()
+                self.assertEqual(database_stat.st_nlink, 1)
+                self.assertEqual(database_stat.st_mode & 0o777, 0o600)
+                publication = HELPERS.publication_payload()
+                expectation = HELPERS.expectation(publication)
+                for runtime in runtimes:
+                    runtime.register_source(expectation)
+            finally:
+                for runtime in runtimes:
+                    runtime.close()
+
+    def test_invalid_configuration_does_not_create_database(self):
+        cases = (
+            {"contract_sha256": "wrong"},
+            {"authenticate": None},
+            {"path": "relative"},
+            {"require_https": "yes"},
+            {"acknowledgement_authority": self.publication_authority},
+        )
+        for index, overrides in enumerate(cases):
+            with self.subTest(overrides=overrides):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / f"receiver-{index}.sqlite3"
+                    with self.assertRaises(
+                        RUNTIME.DurableCMSReceiverRuntimeBlocked
+                    ):
+                        self.open(path, **overrides)
+                    self.assertFalse(path.exists())
+
+    def test_invalid_database_paths_block_before_open(self):
+        for path in (b"receiver.sqlite3", "file:receiver.sqlite3", "", "bad\x00path"):
+            with self.subTest(path=path):
+                with self.assertRaises(
+                    RUNTIME.DurableCMSReceiverRuntimeBlocked
+                ):
+                    self.open(path)
+
+    def test_schema_failure_closes_connection_and_stays_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.execute("PRAGMA user_version = 99")
+            connection.commit()
+            connection.close()
+            path.chmod(0o600)
+
+            with self.assertRaises(
+                RUNTIME.DurableCMSReceiverRuntimeBlocked
+            ):
+                self.open(path)
+
+            check = sqlite3.connect(path)
+            try:
+                self.assertEqual(
+                    check.execute("PRAGMA user_version").fetchone()[0], 99,
+                )
+                tables = check.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+                self.assertEqual(tables, [])
+            finally:
+                check.close()
+
+    def test_closed_runtime_rejects_trusted_host_operations(self):
+        runtime = self.open(":memory:")
+        runtime.close()
+        for operation in (
+            lambda: runtime.register_source(HELPERS.expectation(
+                HELPERS.publication_payload()
+            )),
+            lambda: runtime.register_tombstone({}),
+            lambda: runtime.read_active_bundle({}),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaises(
+                    RUNTIME.DurableCMSReceiverRuntimeBlocked
+                ):
+                    operation()
+
+    def test_concurrent_wsgi_replays_share_one_worker_safely(self):
+        runtime = self.open(":memory:")
+        publication = HELPERS.publication_payload()
+        runtime.register_source(HELPERS.expectation(publication))
+        request = HELPERS.request(publication, self.publication_authority)
+
+        def publish(_index):
+            publisher = HTTP.HTTPPublisherAdapter(
+                "https://cms.example.test/v1/localization/callback",
+                lambda: {"Authorization": "Bearer secret"},
+                self.acknowledgement_authority,
+                transport=HELPERS.WSGIReceiverTransport(runtime),
+            )
+            return publisher.publish(request)
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                receipts = list(executor.map(publish, range(24)))
+
+            self.assertEqual(receipts, [receipts[0]] * 24)
+            self.assertEqual(receipts[0]["status"], "accepted")
+            self.assertEqual(
+                runtime.read_active_bundle(HELPERS.expectation(publication)),
+                publication,
+            )
+        finally:
+            runtime.close()
+
+    def test_separate_worker_connections_converge_on_one_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            first = self.open(path)
+            second = self.open(path)
+            publication = HELPERS.publication_payload()
+            first.register_source(HELPERS.expectation(publication))
+            request = HELPERS.request(publication, self.publication_authority)
+
+            def publish(index):
+                runtime = first if index % 2 == 0 else second
+                publisher = HTTP.HTTPPublisherAdapter(
+                    "https://cms.example.test/v1/localization/callback",
+                    lambda: {"Authorization": "Bearer secret"},
+                    self.acknowledgement_authority,
+                    transport=HELPERS.WSGIReceiverTransport(runtime),
+                )
+                return publisher.publish(request)
+
+            try:
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    receipts = list(executor.map(publish, range(24)))
+
+                self.assertEqual(receipts, [receipts[0]] * 24)
+                self.assertEqual(receipts[0]["status"], "accepted")
+                for runtime in (first, second):
+                    self.assertEqual(
+                        runtime.read_active_bundle(
+                            HELPERS.expectation(publication)
+                        ),
+                        publication,
+                    )
+            finally:
+                first.close()
+                second.close()
+
+    def test_inherited_runtime_blocks_before_lock_or_content_access(self):
+        runtime = self.open(":memory:")
+        publication = HELPERS.publication_payload()
+        runtime.register_source(HELPERS.expectation(publication))
+        request = HELPERS.request(publication, self.publication_authority)
+        publisher = HTTP.HTTPPublisherAdapter(
+            "https://cms.example.test/v1/localization/callback",
+            lambda: {"Authorization": "Bearer secret"},
+            self.acknowledgement_authority,
+            transport=HELPERS.WSGIReceiverTransport(runtime),
+        )
+        foreign_pid = os.getpid() + 1
+
+        try:
+            with mock.patch.object(RUNTIME.os, "getpid", return_value=foreign_pid):
+                self.assertEqual(
+                    repr(runtime),
+                    "DurableCMSReceiverRuntime(state='foreign-process')",
+                )
+                self.assertNotIn(str(foreign_pid), repr(runtime))
+                for operation in (
+                    lambda: runtime.register_source(
+                        HELPERS.expectation(publication)
+                    ),
+                    lambda: runtime.read_active_bundle(
+                        HELPERS.expectation(publication)
+                    ),
+                    runtime.close,
+                ):
+                    with self.subTest(operation=operation):
+                        with self.assertRaises(
+                            RUNTIME.DurableCMSReceiverRuntimeBlocked
+                        ):
+                            operation()
+
+                with self.assertRaises(HTTP.HTTPPublisherFailed) as caught:
+                    publisher.publish(request)
+                self.assertEqual(caught.exception.code, "http_status")
+                self.assertNotIn(
+                    publication["localizations"][0]["target_text"],
+                    str(caught.exception),
+                )
+        finally:
+            runtime.close()
+
+    def test_failed_locked_operation_releases_for_later_health(self):
+        runtime = self.open(":memory:")
+        publication = HELPERS.publication_payload()
+        try:
+            with self.assertRaises(
+                RUNTIME.DurableCMSReceiverRuntimeBlocked
+            ):
+                runtime.register_source({})
+            runtime.register_source(HELPERS.expectation(publication))
+            publisher = HTTP.HTTPPublisherAdapter(
+                "https://cms.example.test/v1/localization/callback",
+                lambda: {"Authorization": "Bearer secret"},
+                self.acknowledgement_authority,
+                transport=HELPERS.WSGIReceiverTransport(runtime),
+                probe_id_factory=lambda: "publisher-health-probe-503",
+            )
+            self.assertEqual(
+                publisher.check(contract_sha256=self.contract_sha256)["status"],
+                "healthy",
+            )
+        finally:
+            runtime.close()
+
+    def test_http_failure_after_close_is_content_free(self):
+        runtime = self.open(":memory:")
+        publication = HELPERS.publication_payload()
+        runtime.register_source(HELPERS.expectation(publication))
+        request = HELPERS.request(publication, self.publication_authority)
+        runtime.close()
+        publisher = HTTP.HTTPPublisherAdapter(
+            "https://cms.example.test/v1/localization/callback",
+            lambda: {"Authorization": "Bearer secret"},
+            self.acknowledgement_authority,
+            transport=HELPERS.WSGIReceiverTransport(runtime),
+        )
+
+        with self.assertRaises(HTTP.HTTPPublisherFailed) as caught:
+            publisher.publish(request)
+
+        self.assertEqual(caught.exception.code, "http_status")
+        self.assertNotIn(publication["localizations"][0]["target_text"], str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

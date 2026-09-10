@@ -68,12 +68,13 @@ def candidate(locale, text):
     }
 
 
-def review(locale, phase, status="PASS", findings=None):
+def review(locale, phase, status="PASS", findings=None, confidence="high"):
     return {
         "schema": WORKER.REVIEW_SCHEMA,
         "phase": phase,
         "locale": locale,
         "status": status,
+        "confidence": confidence,
         "blocking_defects": [] if findings is None else findings,
         "major_defects": [],
     }
@@ -147,6 +148,28 @@ class WebsiteLocalizationRunnerTests(unittest.TestCase):
             "succeeded": 1,
             "failed": 0,
         })
+
+    def test_outer_operation_guard_blocks_before_dependency_or_provider_call(self):
+        current = plan()
+        self.queue.enqueue_plan(current, now=90)
+        resolver_calls = []
+
+        def blocked_guard(_):
+            raise RuntimeError("lost outer lease")
+
+        with self.assertRaises(RUNNER.RunnerOperationGuardFailed):
+            RUNNER.run_next_localization_job(
+                self.queue,
+                "worker-a",
+                lambda payload: resolver_calls.append("provider"),
+                lambda payload: resolver_calls.append("assets"),
+                clock=lambda: 100,
+                lease_seconds=10,
+                operation_guard=blocked_guard,
+            )
+
+        self.assertEqual(resolver_calls, [])
+        self.assertEqual(self.queue.status(current.jobs[0].job_id).status, "leased")
 
     def test_retryable_provider_failure_uses_bounded_exponential_delay(self):
         current = plan()

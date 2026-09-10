@@ -53,8 +53,12 @@ def make_plan(targets=("de-AT", "sv-SE"), **overrides):
     return PLANNER.plan_website_localization(**values)
 
 
-def completed_result(job, candidate):
+def completed_result(job, candidate, *, review_confidence=None):
     payload = job.as_payload()
+    review_confidence = review_confidence or {
+        "target_native": "high",
+        "source_fidelity": "high",
+    }
     target_hash = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
     phases = []
     for index, phase in enumerate(WORKER.PHASES):
@@ -83,7 +87,26 @@ def completed_result(job, candidate):
             "status": "PASS",
             "guard": "translate-native-structure-and-token-gate",
         },
+        "review_confidence": review_confidence,
+        "quality_profile": {
+            "locale": payload["target"]["locale"],
+            "version": payload["target"]["quality_profile_version"],
+            "sha256": payload["target"]["quality_profile_sha256"],
+        },
+        "commercial_review": (
+            {
+                "schema": WORKER._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+                "profile": payload["commercial_profile"],
+                "status": "verified",
+                "review_required_dimensions": [],
+                "evidence_sha256": "c" * 64,
+            }
+            if payload["content_type"] == "commercial" else None
+        ),
         "human_review_required": payload["content_type"] == "legal",
+        "independent_review_required": (
+            payload["content_type"] != "legal" and "low" in review_confidence.values()
+        ),
         "release_required": True,
     }
 
@@ -119,6 +142,38 @@ class ExactReceiptVerifier:
         return values["receipt"] == self.accepted
 
 
+class BoundReceiptVerifier:
+    def __init__(self, key=b"isolated-evidence-key"):
+        self.key = key
+        self.calls = []
+
+    def issue(self, binding):
+        payload = json.dumps(
+            binding,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "bound:" + hmac.new(self.key, payload, hashlib.sha256).hexdigest()
+
+    def verify(self, **values):
+        self.calls.append(values)
+        return hmac.compare_digest(
+            values["receipt"],
+            self.issue(values["binding"]),
+        )
+
+
+class ReceiptVerifierUnavailable(RuntimeError):
+    localization_receipt_verification_failure = True
+
+    def __init__(self, code="network", *, retryable=True):
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+
+
 class WebsiteLocalizationReleaseTests(unittest.TestCase):
     def setUp(self):
         self.queue_connection = sqlite3.connect(":memory:")
@@ -135,7 +190,7 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.release_connection.close()
         self.queue_connection.close()
 
-    def complete(self, plan, translations=None):
+    def complete(self, plan, translations=None, *, review_confidence=None):
         translations = translations or {
             "de-AT": "Baue dein Unternehmen mit BLUN auf.",
             "sv-SE": "Bygg ditt företag med BLUN.",
@@ -144,7 +199,11 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         completed = {}
         for index, job in enumerate(sorted(plan.jobs, key=lambda item: item.as_payload()["target"]["locale"])):
             claim = self.queue.claim("worker", now=100 + index, lease_seconds=30)
-            result = completed_result(job, translations[claim.target_locale])
+            result = completed_result(
+                job,
+                translations[claim.target_locale],
+                review_confidence=review_confidence,
+            )
             self.queue.complete(claim, result, now=101 + index)
             completed[job.job_id] = result
         return completed
@@ -179,8 +238,29 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertEqual(payload["policy_version"], "native-web-1")
         self.assertEqual(payload["provider"]["model_id"], "king")
         self.assertEqual(payload["software_version"], "6.43.0-dev")
+        self.assertEqual(payload["quality_profile"], {
+            "locale": "sv-SE",
+            "version": plan.jobs[0].target.quality_profile_version,
+            "sha256": plan.jobs[0].target.quality_profile_sha256,
+        })
         self.assertNotIn("quality-receipt", row[0])
-        self.assertEqual(self.verifier.calls[0]["target_text"], approved.candidate)
+        receipt_binding = self.verifier.calls[0]["binding"]
+        self.assertEqual(receipt_binding["target_text"], approved.candidate)
+        self.assertEqual(receipt_binding["schema"], RELEASE.RECEIPT_BINDING_SCHEMA)
+        self.assertEqual(receipt_binding["review_kind"], "quality")
+        self.assertEqual(receipt_binding["job_id"], plan.jobs[0].job_id)
+        self.assertEqual(receipt_binding["result_sha256"], payload["result_sha256"])
+        self.assertEqual(receipt_binding["source_sha256"], payload["source_sha256"])
+        self.assertEqual(receipt_binding["target_sha256"], payload["target_sha256"])
+        self.assertEqual(receipt_binding["source_locale"], "en-IE")
+        self.assertEqual(receipt_binding["target_locale"], "sv-SE")
+        self.assertEqual(receipt_binding["content_type"], "headline")
+        self.assertEqual(receipt_binding["glossary_version"], "blun-glossary-3")
+        self.assertEqual(receipt_binding["policy_version"], "native-web-1")
+        self.assertEqual(receipt_binding["primary_provider"], payload["provider"])
+        self.assertEqual(receipt_binding["software_version"], "6.43.0-dev")
+        self.assertEqual(receipt_binding["quality_profile"], payload["quality_profile"])
+        self.assertIsNone(receipt_binding["review_provider"])
 
     def test_translation_memory_reuses_one_job_across_plan_compositions(self):
         single = make_plan(("sv-SE",))
@@ -217,6 +297,95 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
                     self.store.lookup(changed, changed.jobs[0].job_id, self.authority, now=201)
                 self.assertEqual(caught.exception.code, "approval.missing")
+
+    def test_quality_receipt_cannot_be_replayed_after_policy_change(self):
+        original = make_plan(("sv-SE",))
+        self.complete(original)
+        original_result = self.store.validated_result(
+            original,
+            original.jobs[0].job_id,
+        )
+        original_result_sha256 = hashlib.sha256(
+            json.dumps(
+                original_result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        verifier = BoundReceiptVerifier()
+        receipt = verifier.issue(RELEASE._receipt_binding(
+            original.jobs[0].job_id,
+            original.jobs[0].as_payload(),
+            original_result,
+            original_result_sha256,
+            review_kind="quality",
+        ))
+        self.store.approve(
+            original,
+            original.jobs[0].job_id,
+            receipt,
+            verifier,
+            self.authority,
+            now=200,
+        )
+
+        changed = make_plan(("sv-SE",), policy_version="native-web-2")
+        self.complete(changed)
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.store.approve(
+                changed,
+                changed.jobs[0].job_id,
+                receipt,
+                verifier,
+                self.authority,
+                now=201,
+            )
+        self.assertEqual(caught.exception.code, "quality.receipt.rejected")
+        self.assertEqual(self.authority.sign_calls, 1)
+
+    def test_quality_receipt_cannot_satisfy_qualified_human_review(self):
+        plan = make_plan(
+            ("sv-SE",),
+            content_type="legal",
+            source_text="By continuing, you accept the terms.",
+        )
+        self.complete(plan, {
+            "sv-SE": "Genom att fortsätta godkänner du villkoren.",
+        })
+        result = self.store.validated_result(plan, plan.jobs[0].job_id)
+        result_sha256 = hashlib.sha256(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        verifier = BoundReceiptVerifier()
+        quality_receipt = verifier.issue(RELEASE._receipt_binding(
+            plan.jobs[0].job_id,
+            plan.jobs[0].as_payload(),
+            result,
+            result_sha256,
+            review_kind="quality",
+        ))
+
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.store.approve(
+                plan,
+                plan.jobs[0].job_id,
+                quality_receipt,
+                verifier,
+                self.authority,
+                now=200,
+                human_review_receipt=quality_receipt,
+                human_review_verifier=verifier,
+            )
+        self.assertEqual(caught.exception.code, "human.receipt.rejected")
+        self.assertEqual(self.authority.sign_calls, 0)
 
     def test_all_24_eu_locales_are_required_before_readiness(self):
         locales = tuple(profile.locale for profile in PLANNER.EU_OFFICIAL_LOCALES)
@@ -279,6 +448,27 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             0,
         )
 
+    def test_declared_verifier_unavailability_preserves_retryability(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan)
+
+        class UnavailableVerifier:
+            def verify(self, **values):
+                raise ReceiptVerifierUnavailable()
+
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.store.approve(
+                plan,
+                plan.jobs[0].job_id,
+                "quality-receipt",
+                UnavailableVerifier(),
+                self.authority,
+                now=200,
+            )
+        self.assertEqual(caught.exception.code, "quality.verifier.network")
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(self.authority.sign_calls, 0)
+
     def test_legal_result_requires_separate_human_review_receipt(self):
         plan = make_plan(
             ("sv-SE",),
@@ -297,6 +487,188 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             human_review_verifier=human,
         )
         self.assertEqual(approved.target_locale, "sv-SE")
+
+    def test_low_confidence_result_requires_separate_human_review_receipt(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan, review_confidence={
+            "target_native": "low",
+            "source_fidelity": "high",
+        })
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.approve(plan, plan.jobs[0])
+        self.assertEqual(caught.exception.code, "human.receipt.required")
+
+        human = ExactReceiptVerifier("qualified-native-review")
+        approved = self.approve(
+            plan,
+            plan.jobs[0],
+            human_review_receipt="qualified-native-review",
+            human_review_verifier=human,
+        )
+        self.assertEqual(approved.target_locale, "sv-SE")
+
+    def test_low_confidence_accepts_a_bound_independent_model_adapter(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan, review_confidence={
+            "target_native": "low",
+            "source_fidelity": "high",
+        })
+        review = {
+            "schema": RELEASE.INDEPENDENT_MODEL_REVIEW_SCHEMA,
+            "provider": {
+                "id": "second-provider",
+                "model_id": "native-reviewer",
+                "model_version": "2026-09-08",
+            },
+            "receipt": "independent-model-receipt",
+        }
+        verifier = ExactReceiptVerifier("independent-model-receipt")
+        approved = self.approve(
+            plan,
+            plan.jobs[0],
+            independent_model_review=review,
+            independent_model_review_verifier=verifier,
+        )
+        stored = json.loads(self.release_connection.execute(
+            "SELECT approval_json FROM localization_approvals",
+        ).fetchone()[0])
+        self.assertEqual(approved.target_locale, "sv-SE")
+        self.assertEqual(
+            stored["independent_model_review"]["provider"], review["provider"],
+        )
+        self.assertIsNone(stored["human_review_receipt_sha256"])
+        binding = verifier.calls[0]["binding"]
+        self.assertEqual(binding["primary_provider"], {
+            "id": "customer-llm",
+            "model_id": "king",
+            "model_version": "2026-08-29",
+        })
+        self.assertEqual(binding["review_provider"], review["provider"])
+        self.assertEqual(binding["review_kind"], "independent_model")
+        self.assertEqual(binding["content_type"], "headline")
+        self.assertEqual(binding["policy_version"], "native-web-1")
+        self.assertEqual(binding["review_confidence"], {
+            "target_native": "low",
+            "source_fidelity": "high",
+        })
+        self.assertEqual(binding["quality_profile"]["locale"], "sv-SE")
+        self.assertIsNone(binding["commercial_profile"])
+        self.store.lookup(plan, plan.jobs[0].job_id, self.authority, now=201)
+
+    def test_same_provider_is_not_an_independent_model_adapter(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan, review_confidence={
+            "target_native": "high",
+            "source_fidelity": "low",
+        })
+        review = {
+            "schema": RELEASE.INDEPENDENT_MODEL_REVIEW_SCHEMA,
+            "provider": {
+                "id": "customer-llm",
+                "model_id": "different-model",
+                "model_version": "2026-09-08",
+            },
+            "receipt": "same-provider-receipt",
+        }
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.approve(
+                plan,
+                plan.jobs[0],
+                independent_model_review=review,
+                independent_model_review_verifier=ExactReceiptVerifier(
+                    "same-provider-receipt",
+                ),
+            )
+        self.assertEqual(caught.exception.code, "independent_model_review.not_independent")
+        self.assertEqual(self.authority.sign_calls, 0)
+
+    def test_low_confidence_rejects_ambiguous_or_unverified_escalation(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan, review_confidence={
+            "target_native": "low",
+            "source_fidelity": "high",
+        })
+        review = {
+            "schema": RELEASE.INDEPENDENT_MODEL_REVIEW_SCHEMA,
+            "provider": {
+                "id": "second-provider",
+                "model_id": "native-reviewer",
+                "model_version": "2026-09-08",
+            },
+            "receipt": "independent-model-receipt",
+        }
+        cases = (
+            ({
+                "human_review_receipt": "qualified-native-review",
+                "human_review_verifier": ExactReceiptVerifier(
+                    "qualified-native-review",
+                ),
+                "independent_model_review": review,
+                "independent_model_review_verifier": ExactReceiptVerifier(
+                    "independent-model-receipt",
+                ),
+            }, "review.escalation.ambiguous"),
+            ({
+                "independent_model_review": review,
+                "independent_model_review_verifier": ExactReceiptVerifier(
+                    "wrong-receipt",
+                ),
+            }, "independent_model_review.receipt.rejected"),
+        )
+        for values, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                    self.approve(plan, plan.jobs[0], **values)
+                self.assertEqual(caught.exception.code, code)
+        self.assertEqual(self.authority.sign_calls, 0)
+
+    def test_legal_content_cannot_replace_human_review_with_a_model(self):
+        plan = make_plan(
+            ("sv-SE",), content_type="legal",
+            source_text="By continuing, you accept the terms.",
+        )
+        self.complete(plan, {"sv-SE": "Genom att fortsätta godkänner du villkoren."})
+        review = {
+            "schema": RELEASE.INDEPENDENT_MODEL_REVIEW_SCHEMA,
+            "provider": {
+                "id": "second-provider",
+                "model_id": "legal-reviewer",
+                "model_version": "2026-09-08",
+            },
+            "receipt": "model-legal-receipt",
+        }
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.approve(
+                plan,
+                plan.jobs[0],
+                independent_model_review=review,
+                independent_model_review_verifier=ExactReceiptVerifier(
+                    "model-legal-receipt",
+                ),
+            )
+        self.assertEqual(
+            caught.exception.code, "independent_model_review.legal_forbidden",
+        )
+
+    def test_low_confidence_cannot_drop_independent_review_requirement(self):
+        plan = make_plan(("sv-SE",))
+        job = plan.jobs[0]
+        result = completed_result(job, "Bygg ditt företag med BLUN.", review_confidence={
+            "target_native": "high",
+            "source_fidelity": "low",
+        })
+        result["independent_review_required"] = False
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            RELEASE._validate_result(job.as_payload(), result)
+        self.assertEqual(caught.exception.code, "result.independent_review.invalid")
+
+    def test_substituted_quality_profile_cannot_reach_signing(self):
+        plan = make_plan(("sv-SE",))
+        result = completed_result(plan.jobs[0], "Bygg ditt företag med BLUN.")
+        result["quality_profile"]["sha256"] = "0" * 64
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            RELEASE._validate_result(plan.jobs[0].as_payload(), result)
+        self.assertEqual(caught.exception.code, "result.quality_profile.invalid")
 
     def test_tampered_result_payload_or_signature_blocks_lookup(self):
         plan = make_plan(("sv-SE",))

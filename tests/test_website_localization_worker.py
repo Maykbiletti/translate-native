@@ -72,13 +72,20 @@ def candidate(text="Bygg ditt företag med BLUN.", locale="sv-SE"):
     }
 
 
-def review(phase, status="PASS", locale="sv-SE", findings=None):
+def review(
+    phase,
+    status="PASS",
+    locale="sv-SE",
+    findings=None,
+    confidence="high",
+):
     findings = [] if findings is None else findings
     return {
         "schema": WORKER.REVIEW_SCHEMA,
         "phase": phase,
         "locale": locale,
         "status": status,
+        "confidence": confidence,
         "blocking_defects": findings,
         "major_defects": [],
     }
@@ -119,6 +126,14 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
             hashlib.sha256(result["candidate"].encode("utf-8")).hexdigest(),
         )
         self.assertEqual(len(result["quality_passes"]), 3)
+        expected_profile = PLANNER.quality_profile_for("sv-SE")
+        for request in provider.requests:
+            self.assertEqual(request.input["quality_profile"], expected_profile)
+        self.assertEqual(result["quality_profile"], {
+            "locale": "sv-SE",
+            "version": expected_profile["version"],
+            "sha256": expected_profile["sha256"],
+        })
         self.assertTrue(result["release_required"])
 
     def test_progress_callback_follows_only_validated_phase_boundaries(self):
@@ -282,6 +297,20 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "job.binding_mismatch")
         self.assertEqual(provider.requests, [])
 
+    def test_quality_profile_tamper_blocks_before_provider_call(self):
+        for field, value in (
+            ("quality_profile_version", "stale-profile"),
+            ("quality_profile_sha256", "0" * 64),
+        ):
+            with self.subTest(field=field):
+                payload = job()
+                payload["target"][field] = value
+                provider = self.successful_provider()
+                with self.assertRaises(WORKER.LocalizationWorkerBlocked) as caught:
+                    WORKER.run_localization_job(payload, assets(), provider)
+                self.assertEqual(caught.exception.code, "job.binding_mismatch")
+                self.assertEqual(provider.requests, [])
+
     def test_provider_failure_is_content_free_and_preserves_retryability(self):
         provider = ScriptedProvider([
             WORKER.ProviderCallFailed("timeout", retryable=True),
@@ -313,10 +342,54 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
         provider = self.successful_provider("Genom att fortsätta godkänner du villkoren.")
         result = WORKER.run_localization_job(job("By continuing, you accept the terms.", "legal"), assets(), provider)
         self.assertTrue(result["human_review_required"])
+        self.assertFalse(result["independent_review_required"])
+
+    def test_low_review_confidence_requires_independent_review(self):
+        for low_phase in ("target_native", "source_fidelity"):
+            with self.subTest(phase=low_phase):
+                provider = ScriptedProvider([
+                    candidate(),
+                    review(
+                        "target_native",
+                        confidence=(
+                            "low" if low_phase == "target_native" else "high"
+                        ),
+                    ),
+                    review(
+                        "source_fidelity",
+                        confidence=(
+                            "low" if low_phase == "source_fidelity" else "high"
+                        ),
+                    ),
+                ])
+                result = WORKER.run_localization_job(job(), assets(), provider)
+                self.assertFalse(result["human_review_required"])
+                self.assertTrue(result["independent_review_required"])
+                self.assertEqual(result["review_confidence"][low_phase], "low")
+
+    def test_missing_or_unknown_review_confidence_blocks(self):
+        missing = review("target_native")
+        missing.pop("confidence")
+        for response in (
+            missing,
+            review("target_native", confidence="unknown"),
+        ):
+            with self.subTest(response=response):
+                provider = ScriptedProvider([candidate(), response])
+                with self.assertRaises(WORKER.LocalizationWorkerBlocked) as caught:
+                    WORKER.run_localization_job(job(), assets(), provider)
+                self.assertEqual(
+                    caught.exception.code,
+                    "provider.response.invalid",
+                )
 
     def test_pass_result_retains_no_reviewer_prose(self):
         provider = self.successful_provider()
         result = WORKER.run_localization_job(job(), assets(), provider)
+        self.assertEqual(result["review_confidence"], {
+            "target_native": "high",
+            "source_fidelity": "high",
+        })
         serialized = json.dumps(result, ensure_ascii=False)
         self.assertNotIn("reason", serialized)
         self.assertNotIn("excerpt", serialized)

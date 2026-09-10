@@ -71,6 +71,10 @@ class RunnerDependencyFailed(RuntimeError):
         self.retryable = retryable
 
 
+class RunnerOperationGuardFailed(RuntimeError):
+    """An outer service lease could not be renewed before provider work."""
+
+
 @dataclass(frozen=True)
 class RunOutcome:
     """Content-free result of one claim and transition."""
@@ -143,6 +147,8 @@ def run_next_localization_job(
     retry_base_seconds: float | int = 5,
     retry_max_seconds: float | int = 3600,
     result_cache: ResultCache | None = None,
+    eligible_plan_ids: tuple[str, ...] | None = None,
+    operation_guard: Callable[[float], Any] | None = None,
 ) -> RunOutcome | None:
     """Claim and execute at most one locale, then transition it atomically.
 
@@ -150,8 +156,9 @@ def run_next_localization_job(
     make the website version publishable. Failures retain stable codes and
     optional hashes only; provider prose and candidate text never enter status.
     """
-    if not isinstance(queue, _QUEUE.LocalizationQueue):
-        raise TypeError("queue must be LocalizationQueue")
+    required_queue_methods = ("claim", "renew", "complete", "retry", "fail")
+    if any(not callable(getattr(queue, name, None)) for name in required_queue_methods):
+        raise TypeError("queue must provide the LocalizationQueue transition contract")
     if not callable(provider_resolver) or not callable(assets_resolver):
         raise TypeError("provider and asset resolvers must be callable")
     cache_resolve = None if result_cache is None else getattr(result_cache, "resolve", None)
@@ -159,24 +166,36 @@ def run_next_localization_job(
         raise TypeError("result_cache must provide resolve(job_payload, now=...)")
     if not callable(clock):
         raise TypeError("clock must be callable")
+    if operation_guard is not None and not callable(operation_guard):
+        raise TypeError("operation_guard must be callable")
     lease_seconds = _duration("lease_seconds", lease_seconds)
     retry_base_seconds = _duration("retry_base_seconds", retry_base_seconds, allow_zero=True)
     retry_max_seconds = _duration("retry_max_seconds", retry_max_seconds, allow_zero=True)
     if retry_base_seconds > retry_max_seconds:
         raise ValueError("retry_base_seconds cannot exceed retry_max_seconds")
 
-    claim = queue.claim(
-        worker_id,
-        now=_now(clock),
-        lease_seconds=lease_seconds,
-    )
+    claim_arguments = {
+        "now": _now(clock),
+        "lease_seconds": lease_seconds,
+    }
+    if eligible_plan_ids is not None:
+        claim_arguments["eligible_plan_ids"] = eligible_plan_ids
+    claim = queue.claim(worker_id, **claim_arguments)
     if claim is None:
         return None
 
     active_claim = claim
 
+    def guard_operation() -> None:
+        if operation_guard is not None:
+            try:
+                operation_guard(lease_seconds)
+            except Exception:
+                raise RunnerOperationGuardFailed from None
+
     def renew(_: str) -> None:
         nonlocal active_claim
+        guard_operation()
         active_claim = queue.renew(
             active_claim,
             now=_now(clock),
@@ -185,6 +204,7 @@ def run_next_localization_job(
 
     stage = "cache"
     try:
+        guard_operation()
         if cache_resolve is not None:
             cached = cache_resolve(claim.payload, now=_now(clock))
             if cached is not None:
@@ -207,6 +227,8 @@ def run_next_localization_job(
             provider,
             progress_callback=renew,
         )
+    except RunnerOperationGuardFailed:
+        raise
     except RunnerDependencyFailed as error:
         failure_code = "runner.dependency." + error.code
         if len(failure_code) > 128:
