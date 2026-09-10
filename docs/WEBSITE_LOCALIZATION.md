@@ -1612,6 +1612,19 @@ replays the same request instead of inventing a second deletion. Leases,
 bounded backoff, attempt ceilings, collision rejection, content-free status,
 and fail-closed integrity checks match the change outbox.
 
+`integrations/website_localization_cms_lifecycle_monitor.py` then provides the
+durable source-side completion loop. It accepts only the exact successful
+change-dispatch record, binds it to the canonical change hash and full remote
+generation, and polls the signed lifecycle endpoint until a verified terminal
+state. Every attempt obtains a fresh request identity from the secure client;
+only the poll lease—not a short-lived signed read—is replayed after a crash.
+Separate SQLite connections converge through transactional leases. Normal
+processing uses a fixed interval, transient failures use capped backoff with a
+consecutive-failure ceiling, and any response for another event, site, plan,
+version, sequence, or locale count becomes terminally blocked. Status and
+health retain only content-free identifiers, locale state, counts, stable error
+codes, and hashes; no website text or transport detail is persisted.
+
 `POST /v2/localization/changes` accepts only a complete signed
 `blun.cms-content-change.v2` event. Successful intake durably enqueues one exact
 job per locale before returning. Exact replay is idempotent; changed event IDs,

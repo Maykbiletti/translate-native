@@ -81,6 +81,36 @@ expired-lease indicators, never source text, credentials, signatures, or raw
 transport errors. Schema, payload, hash, lease, acknowledgement, and state
 inconsistencies block rather than being repaired optimistically.
 
+### Durable lifecycle monitoring
+
+`DurableCMSLifecycleMonitor` in
+`integrations/website_localization_cms_lifecycle_monitor.py` closes the
+source-side loop after a successful change dispatch. Registration binds the
+original canonical change hash to the returned event, site, plan, website
+version, source sequence, and exact job count in a separate canonical binding
+hash. A changed generation or a
+dispatch that has not succeeded cannot be registered under the same event.
+
+Each leased attempt invokes `CMSLocalizationHTTPClient.lifecycle` without a
+caller-supplied request ID. The secure client therefore creates and signs a
+fresh, purpose-bound request for every poll; an expired read request is never
+stored for replay. Verified nonterminal states are polled again at the fixed
+monitor interval. Retryable transport or service failures use capped
+exponential backoff and a fixed consecutive-failure ceiling, while a successful
+poll resets that failure streak. Permanent errors, malformed or
+generation-mismatched responses, exhausted failures, and corrupted state stop
+the event fail-closed.
+
+Transactional expiring leases coordinate separate process connections and
+recover a poll abandoned by a crashed worker. The monitor stores no source or
+target text, credentials, signatures, or response prose. Its durable snapshot
+contains only identities, locale names, counts, stable error codes, delivery
+state, and the canonical lifecycle-response hash. `status` distinguishes
+ongoing observation from verified terminal states; `health` remains blocked
+for local monitor failure, expired ownership, or terminal localization,
+publication, or deletion failure. A change already acknowledged as cancelled
+or superseded becomes terminal without an unnecessary lifecycle request.
+
 ### Durable cancellation and tombstone dispatch
 
 `DurableCMSRemovalDispatcher` in
