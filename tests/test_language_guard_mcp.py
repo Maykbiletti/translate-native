@@ -195,6 +195,26 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.assertEqual(report["status"], "BLOCK")
         self.assertIn("missing-language-character-profile", {finding["code"] for finding in report["findings"]})
 
+    def test_masked_technical_spans_do_not_make_short_prose_long(self) -> None:
+        report = MODULE.validate_text(
+            "Kort text. https://example.com/" + "path/" * 100,
+            "sv-SE",
+        )
+        self.assertNotIn(
+            "missing-language-character-profile",
+            {finding["code"] for finding in report["findings"]},
+        )
+
+    def test_native_characters_in_complete_text_disprove_wholesale_folding(self) -> None:
+        report = MODULE.validate_text(
+            ("Kort svensk text utan ovanliga tecken. " * 8) + "`värde`",
+            "sv-SE",
+        )
+        self.assertNotIn(
+            "missing-language-character-profile",
+            {finding["code"] for finding in report["findings"]},
+        )
+
     def test_long_page_release_completes_within_one_second(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

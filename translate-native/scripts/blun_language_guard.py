@@ -196,7 +196,13 @@ def validate_text(
     base_language = language.casefold().replace("_", "-").split("-", 1)[0]
     profile = LANGUAGE_CHARACTER_PROFILES.get(base_language)
     profile_prose = DIACRITICS.mask_technical_text(text)
-    if profile and len(profile_prose) >= 200 and not any(character in profile for character in profile_prose):
+    # Masked URLs and code retain their length as spaces, so the threshold must
+    # count real prose characters. Native characters anywhere in the complete
+    # text also disprove the specific hypothesis of wholesale ASCII folding.
+    profile_prose_solid = sum(1 for character in profile_prose if not character.isspace())
+    if (profile and profile_prose_solid >= 200
+            and not any(character in profile for character in profile_prose)
+            and not any(character in profile for character in text)):
         findings.append(Finding(
             "missing-language-character-profile",
             f"Long {base_language} text contains none of the language's characteristic native characters; possible wholesale ASCII folding.",

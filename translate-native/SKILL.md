@@ -61,6 +61,9 @@ any language, read [references/commercial-localization.md](references/commercial
 Preserve each condition's association with its offer, not just the numbers.
 Keep project-specific protected names and slogans configurable; this public
 skill defines no universal brand, product or price list.
+The reference includes a bundled offline evidence checker; it works from this
+skill folder without the repository's `integrations/` directory. Its successful
+exit is not semantic approval and cannot replace the signed release gate.
 
 Read the entire source before drafting. Build an internal meaning map containing:
 

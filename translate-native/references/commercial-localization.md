@@ -57,6 +57,44 @@ a translation to fill a gap. A grammatical target and model confidence alone
 are not publication evidence. Neither average scores nor unrelated successful
 checks override a blocking or major defect.
 
+## Skill-only evidence check
+
+The executable checker and its shared validator ship in this skill's `scripts/`
+directory. No `integrations/` directory, server, model credentials or network is
+needed for this local check. Run from the skill directory:
+
+```bash
+python3 scripts/check_commercial_review.py --contract
+python3 scripts/check_commercial_review.py --source source.txt --target target.txt --review review.json
+```
+
+The contract is a description, not a completed review. First perform the
+source-blind native review, then have the source-aware reviewer produce the
+`commercial_review` object; save that object alone as `review.json`. Do not
+manufacture positive evidence to satisfy the checker. Supply the full unchanged
+source and target, not extracted price fragments. Inputs must be UTF-8 without
+BOM, at most 2,000,000 bytes each. Character spans count Unicode code points, not
+UTF-8 bytes or JavaScript UTF-16 units. Line endings are preserved; do not
+normalize or edit the files after producing the evidence offsets.
+
+Exit 1 and `BLOCK` mean malformed, changed or unresolved evidence. Missing
+arguments exit 2. Exit 0 and `EVIDENCE_VALID` mean only that the evidence meets
+the structural contract, **not that prices are correct or the text is ready**.
+All machine results say `release_allowed: false`; no token is issued. Successful
+checks include hashes of the exact inputs for traceability, not an authenticated
+receipt. The independent quality assessment, structural/orthography guards and
+host-verified signed release remain necessary. Unknown language/domain facts
+must still go to an independent adapter or qualified reviewer.
+
+This helper neither starts nor locates a deployed checking service. The website
+worker uses this same validator through a compatibility module in `integrations/`.
+The ordinary MCP/response guard is not automatically wired to commercial review
+by copying the skill; the trusted host must use the commercial worker path and
+enforce its quality and publication gates. Do not claim coverage for a live
+BLUN agent without testing that actual path. When updating an installation with
+local guard patches, preserve and reconcile those patches; this helper does not
+require replacing `scripts/blun_language_guard.py`.
+
 ## Website worker contract
 
 The trusted CMS/backend selects `content_type: "commercial"` for complete offer
