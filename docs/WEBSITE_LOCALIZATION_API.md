@@ -257,6 +257,17 @@ status response. A WSGI worker owns its store connection; do not share one
 SQLite connection across request threads. Multiple workers may open distinct
 connections to the same file and rely on the transactional writer lock.
 
+`open_durable_cms_receiver` in
+`integrations/website_localization_cms_receiver_runtime.py` is the reference
+composition root. It validates the complete receiver configuration before it
+opens SQLite, requires distinct publication and acknowledgement authority
+objects, rejects SQLite URI configuration, and returns one owner for the store,
+trusted registration and rendering methods, connection lifetime, and WSGI
+callable. A failed preflight creates no database; a later initialization failure
+closes the connection and never returns a partial application. Instantiate it
+once after each WSGI worker starts and call `close` during that worker's orderly
+shutdown.
+
 The separate `api_contract` object lists all six tenant operations with their
 exact path, `POST` method, request schema, response schema, and current
 `enabled` state. A standalone host without approval and publication authorities
