@@ -182,6 +182,48 @@ crash boundaries, restart recovery without resend, operation priority,
 binding tampering, private exception redaction, health, loop delays, and
 pre-schema configuration rejection.
 
+### Durable source-CMS runtime
+
+`open_durable_cms_source` in
+`integrations/website_localization_cms_source_runtime.py` is the production
+composition root for the coordinated source service. The host supplies three
+canonical absolute SQLite paths, one already configured provider-neutral CMS
+HTTP client, and stable worker IDs. The runtime validates the entire service
+configuration in memory before it creates any persistent schema, opens and
+owns three separate connections, and exposes the same `enqueue_change`,
+`enqueue_removal`, `run_once`, `run_forever`, and `health` lifecycle through a
+single process-bound object. It is a context manager and repeated `close` is
+safe; all later work blocks after close.
+
+Each filesystem database must be a regular owner-owned file with exactly one
+link and mode `0600` beneath a private, non-aliased directory chain. URI paths,
+relative paths, path reuse, symlinks, hard links, permissive files or parents,
+and path identity replacement fail closed. The runtime rechecks all three
+identities before and after every state transition, serializes access from
+threads inside one process, and checks process ownership before acquiring its
+lock. A pre-fork copy therefore cannot inherit SQLite connections or a locked
+thread state. Multi-process supervisors instead construct one runtime after
+each fork; independent connections then coordinate through the existing
+transactional leases.
+
+The runtime deliberately does not read environment variables, credentials, or
+configuration files and does not own process signals. Authentication and the
+request-signing authority stay inside the supplied `CMSLocalizationHTTPClient`;
+their values, database paths, website content, and private exception messages
+never enter the runtime representation or stable failure codes. A deployment
+may therefore choose its own secret manager and supervisor without weakening
+the provider-neutral contract.
+
+Premortem: an invalid deployment could create state before discovering a bad
+worker or timeout; two paths could alias one database; a pre-fork service could
+reuse a vanished parent's lock; or a permission change could redirect the next
+operation. In-memory configuration preflight, distinct canonical paths and
+identities, process ownership checks before locking, per-call path guards, and
+durable multi-process leases close those paths. Regression tests cover restart
+persistence, owner-only creation, unsafe paths, changed permissions, close and
+fork behavior, 24 concurrent thread ticks, and two independently constructed
+workers converging on one change dispatch.
+
 ## Create or resume localization work
 
 ```http
