@@ -4,6 +4,7 @@ Assume the Version 6 response-and-translation gateway and automatic updater ship
 
 | Failure | Early warning | Mitigation | Proof required |
 | --- | --- | --- | --- |
+| The public commercial capability drifts from the worker's enforced offer profile or leaks project-specific prices and brands | A CMS preflight accepts different dimensions than the source-fidelity review, or capability output contains customer catalog data | Generate a separately hashed, brand-neutral contract from the same versioned dimension registry and fail the full capability response closed on missing, reordered, renamed, or malformed rules | Signed capability tests assert all ten dimensions, exact amount/currency and term policies, locale-aware rendering, ambiguity escalation, hash integrity, absence of project data, and profile-drift rejection |
 | A receipt survives edited text | Verification accepts a changed source, target, locale, or expired receipt | Sign canonical hashes, version, issue time, expiry, and nonce with HMAC-SHA256 | Tampering and expiry tests fail closed |
 | Agents invent receipt-shaped strings | A token passes based on its prefix or format | Verify the cryptographic signature and exact payload; never trust appearance | Forged-token regression test |
 | Legitimate RTL text is blocked | Balanced isolates in Arabic or Hebrew fail | Block overrides/embeddings; allow only balanced isolates; flag unpaired controls | Balanced/unbalanced RTL tests |

@@ -31,7 +31,7 @@ PUBLICATION_SCHEMA = "blun.cms-localization-publication.v2"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
-CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v2"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v3"
 PUBLICATION_HTTP_CONTRACT_SCHEMA = (
     "blun.cms-localization-publication-http-capabilities.v2"
 )
@@ -102,6 +102,11 @@ _EXPECTED_CONTENT_TYPES = frozenset({
     "headline", "cta", "marketing", "ui", "documentation", "seo", "legal",
     "commercial",
 })
+_EXPECTED_COMMERCIAL_DIMENSIONS = (
+    "amount_currency", "discount_basis", "qualifiers", "tax_status",
+    "billing_interval", "commitment", "renewal", "cancellation",
+    "conditions", "offer_assignment",
+)
 _DEFAULT_TARGET_POLICY = "all-eu-official-locales-except-source-language"
 
 
@@ -119,6 +124,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PLANNER = _load_module(
     "blun_website_localization_cms_planner",
     _ROOT / "integrations" / "website_localization.py",
+)
+_COMMERCIAL = _load_module(
+    "blun_website_localization_cms_commercial_profile",
+    _ROOT / "integrations" / "commercial_localization_profile.py",
 )
 _RELEASE = _load_module(
     "blun_website_localization_cms_release",
@@ -479,6 +488,35 @@ class WebsiteLocalizationCMSBridge:
             ):
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
 
+            commercial = _COMMERCIAL.public_profile(_PLANNER.COMMERCIAL_PROFILE)
+            if (
+                not isinstance(commercial, dict)
+                or set(commercial) != {
+                    "schema", "profile", "applies_to", "dimensions",
+                    "preservation", "rendering", "verification",
+                    "protected_terms", "sha256",
+                }
+                or commercial["schema"] != _COMMERCIAL.PUBLIC_PROFILE_SCHEMA
+                or commercial["profile"] != _PLANNER.COMMERCIAL_PROFILE
+                or commercial["applies_to"] != {
+                    "content_type": "commercial",
+                    "locales": "all-supported-target-locales",
+                }
+                or commercial["protected_terms"] != "project-configuration-only"
+                or [item.get("name") for item in commercial["dimensions"]]
+                != list(_EXPECTED_COMMERCIAL_DIMENSIONS)
+                or tuple(_COMMERCIAL.DIMENSIONS) != _EXPECTED_COMMERCIAL_DIMENSIONS
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+            unsigned_commercial = dict(commercial)
+            commercial_digest = unsigned_commercial.pop("sha256", None)
+            if (
+                not isinstance(commercial_digest, str)
+                or SHA256.fullmatch(commercial_digest) is None
+                or commercial_digest != _hash(_canonical_json(unsigned_commercial))
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+
             locales = []
             seen_locales: set[str] = set()
             seen_languages: set[str] = set()
@@ -559,10 +597,7 @@ class WebsiteLocalizationCMSBridge:
                 "default_target_policy": _DEFAULT_TARGET_POLICY,
                 "content_types": sorted(content_types),
                 "quality_passes": list(quality_passes),
-                "commercial_profile": _token(
-                    _PLANNER.COMMERCIAL_PROFILE,
-                    "cms.capabilities.registry_invalid",
-                ),
+                "commercial_profile": commercial,
                 "publication_http": self._publication_http_capabilities(),
                 "locales": locales,
             }

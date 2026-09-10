@@ -67,6 +67,12 @@ approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
 The planner binds `translate-native.commercial.v2` into the job and plan IDs.
+The authenticated capabilities response publishes the same profile as a
+separately hashed, brand-neutral machine-readable contract. It lists all ten
+semantic dimensions, exact preservation rules, permitted locale-aware
+rendering, the evidence method and the fail-closed route for ambiguity. CMS
+integrations can therefore preflight the implemented offer contract without
+receiving project prices, product lists, protected terms or deployment secrets.
 The worker uses the existing three ordered passes; the source-fidelity response
 additionally requires `commercial_review`. It contains all ten named dimensions,
 coverage and per-offer evidence. Each item declares `matched`, `source_only`, or

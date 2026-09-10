@@ -7,8 +7,12 @@ Only a host-verified quality receipt can authorize subsequent publication.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
+
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v1"
 
 DIMENSIONS = {
     "amount_currency": "Amounts, currency identity, units and price-to-product association; no conversion or rounding.",
@@ -22,6 +26,66 @@ DIMENSIONS = {
     "conditions": "Every remaining eligibility rule, quantity, tier count, limit, deadline and linked footnote.",
     "offer_assignment": "Which offer, tier or product each claim belongs to; never accept swapped prices or conditions.",
 }
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def public_profile(profile: str) -> dict[str, Any]:
+    """Return the public, brand-neutral contract implemented by this module."""
+    body = {
+        "schema": PUBLIC_PROFILE_SCHEMA,
+        "profile": profile,
+        "applies_to": {
+            "content_type": "commercial",
+            "locales": "all-supported-target-locales",
+        },
+        "dimensions": [
+            {"name": name, "requirement": requirement}
+            for name, requirement in DIMENSIONS.items()
+        ],
+        "preservation": {
+            "amounts": "exact-value",
+            "currencies": "same-identity-no-conversion",
+            "discounts": "rate-amount-reference-basis-period-and-eligibility",
+            "qualifiers": "scope-and-limit-per-claim",
+            "taxes": "status-rate-and-scope-without-inference",
+            "billing": "charge-amount-and-frequency",
+            "commitment": "separate-duration-and-minimum-term",
+            "renewal": "mode-price-interval-and-conditions",
+            "cancellation": "deadline-notice-fees-refunds-and-exceptions",
+            "conditions": "eligibility-limits-deadlines-footnotes-and-links",
+            "offer_assignment": "every-claim-bound-to-its-own-offer",
+        },
+        "rendering": {
+            "locale_appropriate": True,
+            "natural_wording": True,
+            "native_digits_allowed": True,
+            "number_words_allowed": True,
+            "written_percentages_allowed": True,
+            "locale_separators_allowed": True,
+            "rounding_allowed": False,
+            "currency_conversion_allowed": False,
+            "exact_characters_only_when_project_configured": True,
+        },
+        "verification": {
+            "method": "semantic-provider-evidence",
+            "deterministic_numeric_regex_is_sufficient": False,
+            "evidence_granularity": "every-proposition-per-offer",
+            "directions": ["matched", "source_only", "target_only"],
+            "ambiguous_values": "unresolved",
+            "unresolved_route": "independent-model-or-qualified-native-domain-review",
+            "automatic_publication_when_unresolved": False,
+        },
+        "protected_terms": "project-configuration-only",
+    }
+    return {
+        **body,
+        "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
+    }
 
 CREATION_GUIDANCE = """Localize prices, offers and subscriptions as natural native commercial copy.
 Preserve every commercial proposition and its association with the correct offer, not merely a bag of numbers.

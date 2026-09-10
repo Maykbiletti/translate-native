@@ -10,6 +10,7 @@ import sys
 import unicodedata
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -433,6 +434,44 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             capabilities["tombstone_delivery_schema"],
             CMS.TOMBSTONE_DELIVERY_SCHEMA,
         )
+        commercial = capabilities["commercial_profile"]
+        self.assertEqual(commercial["profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
+        self.assertEqual(
+            [item["name"] for item in commercial["dimensions"]],
+            list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
+        )
+        self.assertEqual(
+            commercial["applies_to"]["locales"],
+            "all-supported-target-locales",
+        )
+        self.assertEqual(
+            commercial["preservation"]["currencies"],
+            "same-identity-no-conversion",
+        )
+        self.assertEqual(
+            commercial["preservation"]["billing"],
+            "charge-amount-and-frequency",
+        )
+        self.assertEqual(
+            commercial["preservation"]["commitment"],
+            "separate-duration-and-minimum-term",
+        )
+        self.assertTrue(commercial["rendering"]["native_digits_allowed"])
+        self.assertTrue(commercial["rendering"]["number_words_allowed"])
+        self.assertFalse(commercial["rendering"]["rounding_allowed"])
+        self.assertFalse(
+            commercial["verification"]["deterministic_numeric_regex_is_sufficient"],
+        )
+        self.assertEqual(
+            commercial["verification"]["ambiguous_values"], "unresolved",
+        )
+        unsigned_commercial = dict(commercial)
+        commercial_digest = unsigned_commercial.pop("sha256")
+        self.assertEqual(
+            commercial_digest,
+            CMS._hash(CMS._canonical_json(unsigned_commercial)),
+        )
+        self.assertNotIn("blun", json.dumps(commercial).lower())
         publication_http = capabilities["publication_http"]
         self.assertEqual(
             publication_http["schema"], CMS.PUBLICATION_HTTP_CONTRACT_SCHEMA,
@@ -645,6 +684,21 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             (status, payload["error"]),
             ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
         )
+
+    def test_capabilities_block_commercial_profile_drift(self):
+        with patch.object(
+            CMS._COMMERCIAL,
+            "DIMENSIONS",
+            {"amount_currency": "Incomplete drifted profile."},
+        ):
+            status, _, payload = self.capabilities_request(
+                request_id="capabilities-commercial-drift",
+            )
+        self.assertEqual(
+            (status, payload["error"]),
+            ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+        )
+        self.assertNotIn("capabilities", payload)
         self.assertNotIn("locales", payload)
 
     def test_capabilities_block_an_incomplete_http_schema_registry(self):
