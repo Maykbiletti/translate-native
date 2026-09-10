@@ -146,7 +146,7 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
 
         first = publisher.publish(request)
         replay = publisher.publish(request)
-        active = self.store.read_active_bundle("public-site", "homepage.pricing")
+        active = self.store.read_active_bundle(expected)
         tombstone = tombstone_for(publication, request.payload_sha256)
         self.store.register_tombstone(
             HELPERS.tombstone_expectation(tombstone),
@@ -169,7 +169,7 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.assertEqual(registration_replay["status"], "deleted")
         self.assertEqual(healthy["status"], "healthy")
         self.assertIsNone(
-            self.store.read_active_bundle("public-site", "homepage.pricing")
+            self.store.read_active_bundle(expected)
         )
         stored = self.connection.execute(
             "SELECT status, payload_json FROM cms_receiver_publications"
@@ -192,14 +192,18 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.store.register_source(HELPERS.expectation(second))
 
         self.assertEqual(
-            self.store.read_active_bundle("public-site", "homepage.pricing"),
+            self.store.read_active_bundle(HELPERS.expectation(first)),
             first,
         )
+        with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+            self.store.read_active_bundle(HELPERS.expectation(second))
         self.store.commit(HELPERS.request(second, self.publication_authority))
         self.assertEqual(
-            self.store.read_active_bundle("public-site", "homepage.pricing"),
+            self.store.read_active_bundle(HELPERS.expectation(second)),
             second,
         )
+        with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+            self.store.read_active_bundle(HELPERS.expectation(first))
         states = self.connection.execute(
             "SELECT source_sequence, status, payload_json "
             "FROM cms_receiver_publications "
@@ -238,7 +242,7 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
             self.store.commit(HELPERS.request(second, self.publication_authority))
 
         self.assertEqual(
-            self.store.read_active_bundle("public-site", "homepage.pricing"),
+            self.store.read_active_bundle(HELPERS.expectation(first)),
             first,
         )
         rows = self.connection.execute(
@@ -299,7 +303,7 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         with self.assertRaises(STORE.CMSReceiverStoreBlocked):
             self.store.commit(verified)
         self.assertIsNone(
-            self.store.read_active_bundle("public-site", "homepage.pricing")
+            self.store.read_active_bundle(HELPERS.expectation(second))
         )
 
     def test_failed_bundle_write_rolls_back_and_preserves_last_good(self):
@@ -320,7 +324,7 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
             self.store.commit(HELPERS.request(second, self.publication_authority))
 
         self.assertEqual(
-            self.store.read_active_bundle("public-site", "homepage.pricing"),
+            self.store.read_active_bundle(HELPERS.expectation(first)),
             first,
         )
         rows = self.connection.execute(
@@ -348,7 +352,7 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.assertTrue(caught.exception.retryable)
         self.assertEqual(str(caught.exception), "http_status")
         self.assertEqual(
-            self.store.read_active_bundle("public-site", "homepage.pricing"),
+            self.store.read_active_bundle(HELPERS.expectation(publication)),
             publication,
         )
 
@@ -366,7 +370,7 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            self.store.read_active_bundle("public-site", "homepage.pricing"),
+            self.store.read_active_bundle(HELPERS.expectation(publication)),
             publication,
         )
 
@@ -457,7 +461,7 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
                 second_connection, clock=lambda: 1001,
             )
             replay = second.commit(verified)
-            active = second.read_active_bundle("public-site", "homepage.pricing")
+            active = second.read_active_bundle(HELPERS.expectation(publication))
             second_connection.close()
 
         self.assertEqual(replay, receipt)

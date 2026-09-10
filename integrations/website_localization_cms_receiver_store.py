@@ -730,11 +730,12 @@ class DurableCMSReceiverStore:
             "status": "committed",
         }
 
-    def read_active_bundle(self, site_id: str, source_id: str) -> Mapping[str, Any] | None:
-        """Read the last-known-good bundle for trusted CMS rendering code."""
+    def read_active_bundle(self, expectation: Any) -> Mapping[str, Any] | None:
+        """Read only the active bundle for one exact trusted source binding."""
 
-        site_id = _token(site_id, field="site_id")
-        source_id = _token(source_id, field="source_id")
+        expected = _publication_expectation(expectation)
+        site_id = expected["site_id"]
+        source_id = expected["source_id"]
         self._verify_schema()
         source = self.connection.execute(
             "SELECT * FROM cms_receiver_sources "
@@ -760,6 +761,7 @@ class DurableCMSReceiverStore:
         payload = self._validate_publication_row(publication)
         if payload is None:
             raise CMSReceiverStoreBlocked("active publication was deleted")
+        self._assert_publication_binding(payload, expected)
         return payload
 
     def register_tombstone(self, expectation: Any) -> Mapping[str, Any]:

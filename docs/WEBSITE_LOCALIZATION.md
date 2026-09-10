@@ -1479,7 +1479,10 @@ payload and expectation hashes, every locale row, and tombstone state. This
 reference store is not a substitute for an existing CMS authorization model:
 source and tombstone registration remain trusted host operations and its
 content-reading method
-must never be exposed as a public status route. Use one store instance per
+requires the complete trusted publication expectation for the exact page
+generation and must never be exposed as a public status route. Looking up
+localized prose by site and source ID alone is intentionally unsupported. Use
+one store instance per
 SQLite connection and WSGI worker; distinct workers may use distinct
 connections to the same database and coordinate through the write transaction.
 
@@ -1490,7 +1493,12 @@ message authorities, their separation, authentication, callback-contract hash,
 clock, path, and HTTPS policy before opening SQLite or creating a table. It then
 returns one worker-owned object that exposes the WSGI callable plus the three
 trusted CMS operations: source registration, tombstone registration, and
-last-known-good rendering. Initialization closes its connection on every store
+generation-bound last-known-good rendering. The rendering call returns target
+text only when the caller's complete source, plan, website version, locale,
+content-type, and commercial-profile expectation matches the active signed
+bundle. This keeps an explicitly requested old website version available while
+its replacement is pending without allowing a new generation to consume stale
+prose. Initialization closes its connection on every store
 or application failure, and `close` is idempotent. Every resolver, transaction,
 health check, trusted registration, and rendering read uses the same reentrant
 worker lock. A multithreaded WSGI worker may therefore share this composed

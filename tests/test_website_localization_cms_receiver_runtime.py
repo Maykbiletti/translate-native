@@ -95,9 +95,7 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
                 replay = restarted_publisher.publish(request)
                 self.assertEqual(replay, accepted)
                 self.assertEqual(
-                    second.read_active_bundle(
-                        publication["site_id"], publication["source_id"],
-                    ),
+                    second.read_active_bundle(HELPERS.expectation(publication)),
                     publication,
                 )
                 self.assertNotIn("secret", repr(second))
@@ -132,9 +130,7 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
                     "healthy",
                 )
                 self.assertIsNone(
-                    second.read_active_bundle(
-                        publication["site_id"], publication["source_id"],
-                    )
+                    second.read_active_bundle(HELPERS.expectation(publication))
                 )
             finally:
                 second.close()
@@ -214,7 +210,7 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
                         HELPERS.expectation(publication)
                     ),
                     lambda: runtime.read_active_bundle(
-                        publication["site_id"], publication["source_id"],
+                        HELPERS.expectation(publication)
                     ),
                 ):
                     with self.subTest(operation=operation):
@@ -322,7 +318,7 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
                 HELPERS.publication_payload()
             )),
             lambda: runtime.register_tombstone({}),
-            lambda: runtime.read_active_bundle("public-site", "homepage.pricing"),
+            lambda: runtime.read_active_bundle({}),
         ):
             with self.subTest(operation=operation):
                 with self.assertRaises(
@@ -352,9 +348,7 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
             self.assertEqual(receipts, [receipts[0]] * 24)
             self.assertEqual(receipts[0]["status"], "accepted")
             self.assertEqual(
-                runtime.read_active_bundle(
-                    publication["site_id"], publication["source_id"],
-                ),
+                runtime.read_active_bundle(HELPERS.expectation(publication)),
                 publication,
             )
         finally:
@@ -388,7 +382,7 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
                 for runtime in (first, second):
                     self.assertEqual(
                         runtime.read_active_bundle(
-                            publication["site_id"], publication["source_id"],
+                            HELPERS.expectation(publication)
                         ),
                         publication,
                     )
@@ -421,7 +415,7 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
                         HELPERS.expectation(publication)
                     ),
                     lambda: runtime.read_active_bundle(
-                        publication["site_id"], publication["source_id"],
+                        HELPERS.expectation(publication)
                     ),
                     runtime.close,
                 ):

@@ -241,10 +241,8 @@ class _SynchronizedStore:
     def register_tombstone(self, value: Any) -> Mapping[str, Any]:
         return self._call("register_tombstone", value)
 
-    def read_active_bundle(
-        self, site_id: str, source_id: str,
-    ) -> Mapping[str, Any] | None:
-        return self._call("read_active_bundle", site_id, source_id)
+    def read_active_bundle(self, expectation: Any) -> Mapping[str, Any] | None:
+        return self._call("read_active_bundle", expectation)
 
     def close(self) -> None:
         self._assert_owner()
@@ -335,12 +333,10 @@ class DurableCMSReceiverRuntime:
 
         return self._store.register_tombstone(expectation)
 
-    def read_active_bundle(
-        self, site_id: str, source_id: str,
-    ) -> Mapping[str, Any] | None:
-        """Return target prose only to trusted CMS rendering code."""
+    def read_active_bundle(self, expectation: Any) -> Mapping[str, Any] | None:
+        """Return target prose only for an exact trusted source binding."""
 
-        return self._store.read_active_bundle(site_id, source_id)
+        return self._store.read_active_bundle(expectation)
 
     def close(self) -> None:
         """Close the worker-owned connection; repeated close is harmless."""

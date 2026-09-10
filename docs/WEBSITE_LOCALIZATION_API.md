@@ -254,8 +254,13 @@ health callback validates schema, SQLite integrity, canonical payloads, locale r
 tombstone state before confirming the probe. Source and tombstone expectations
 carry separate canonical hashes, so a syntactically valid field substitution
 also blocks. `read_active_bundle` is for trusted
-CMS rendering code only; it contains target text and is not part of any public
-status response. A WSGI worker process owns its store connection; request
+CMS rendering code only. It requires the complete trusted publication
+expectation and returns text only when the active signed payload matches its
+event, website version, plan, source revision, sequence and hash, exact locale
+set, content type, and commercial profile. Site/source-only lookup is rejected,
+so a retained last-known-good bundle cannot be attached to a newer generation.
+The method contains target text and is not part of any public status response.
+A WSGI worker process owns its store connection; request
 threads may share it only through the composed runtime's serialized boundary.
 Multiple worker processes may open distinct
 connections to the same file and rely on the transactional writer lock.

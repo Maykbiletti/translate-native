@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Generation-bound CMS rendering (10 September 2026)
+
+Assume the CMS safely retained its last-known-good localization while a new
+source generation was being processed, but rendered that old bundle as though
+it belonged to the new page or policy.
+
+- Looking up by only site and source ID cannot distinguish the previous source
+  revision from the newly registered one.
+- A glossary, policy, locale set, content type, commercial profile, or website
+  version change could therefore inherit target prose approved for another
+  binding.
+- Removing the old bundle immediately would also be wrong: a failed replacement
+  must not destroy the last-known-good website version.
+
+Trusted rendering now supplies the complete publication expectation used for
+that page generation. The store validates its source hash, sequence, revision,
+event, plan, website version, exact locale set, content type, and commercial
+profile against the active signed payload before returning any target text. A
+new expectation cannot read the retained old bundle, while the explicitly old
+expectation can still render it until a complete replacement commits. After
+the atomic switch, the old expectation fails closed and its superseded prose is
+already scrubbed.
+
 ## Durable CMS database path confinement (10 September 2026)
 
 Assume a correctly signed localization was exposed or written to an unintended
