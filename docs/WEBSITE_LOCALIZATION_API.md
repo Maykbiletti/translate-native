@@ -81,6 +81,34 @@ expired-lease indicators, never source text, credentials, signatures, or raw
 transport errors. Schema, payload, hash, lease, acknowledgement, and state
 inconsistencies block rather than being repaired optimistically.
 
+### Durable cancellation and tombstone dispatch
+
+`DurableCMSRemovalDispatcher` in
+`integrations/website_localization_cms_removal_dispatch.py` is the persistent
+source-side outbox for removal. Enqueue the complete cancellation when content
+must stop before publication, or the complete tombstone only when an
+acknowledged publication must be deleted. The dispatcher preserves these as
+distinct operations and invokes `CMSLocalizationHTTPClient.cancel` or
+`request_tombstone` accordingly; it never guesses which removal phase applies.
+
+The durable identity is `(operation, cancellation_id)` or
+`(operation, tombstone_id)`, bound to the event, complete canonical request
+bytes, SHA-256, and fixed attempt ceiling. Exact replay is idempotent; changed
+website version, event, source ID, sequence, payload, or retry policy under that
+identity is rejected. Transactional leases coordinate separate worker
+connections. A lost lease after remote acceptance repeats the same immutable
+request, so the service's cancellation or tombstone ledger converges without a
+second logical deletion.
+
+One `run_once` performs exactly one secure client operation. Retryable failures
+enter capped exponential backoff, permanent failures and exhausted attempts
+become terminal, and malformed acknowledgements fail closed. Content-free
+status and health retain only operation/request/event IDs, hashes, attempt
+state, stable errors, remote delivery identity and status, counts, and lease
+times. They retain no website text, credentials, signatures, or private error
+detail. Database, payload, claim, or response inconsistency blocks before a
+network call.
+
 ## Create or resume localization work
 
 ```http

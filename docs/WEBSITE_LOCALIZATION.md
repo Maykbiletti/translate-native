@@ -1600,6 +1600,18 @@ not. Status and health expose no source text or transport detail. Each process
 must open its own SQLite connection; the transactional lease coordinates those
 connections.
 
+`integrations/website_localization_cms_removal_dispatch.py` provides the
+matching durable removal root. One outbox accepts both exact source-side
+objects without merging their semantics: `cancellation` stops an unpublished
+localization, while `tombstone` requests deletion only after publication. The
+composite primary identity is the operation plus its cancellation or tombstone
+ID; the original event and source-generation bindings remain inside immutable
+canonical bytes. Workers call only `cancel` or `request_tombstone` for the
+claimed operation. Remote acceptance followed by a local crash therefore
+replays the same request instead of inventing a second deletion. Leases,
+bounded backoff, attempt ceilings, collision rejection, content-free status,
+and fail-closed integrity checks match the change outbox.
+
 `POST /v2/localization/changes` accepts only a complete signed
 `blun.cms-content-change.v2` event. Successful intake durably enqueues one exact
 job per locale before returning. Exact replay is idempotent; changed event IDs,

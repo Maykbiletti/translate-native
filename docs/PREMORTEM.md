@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Durable source-side removal outbox (10 September 2026)
+
+Assume a website backend removed content but an unpublished localization kept
+running or an acknowledged publication remained in the CMS.
+
+- A cancellation or tombstone could be accepted remotely just before the
+  source process stopped, leaving the local sender uncertain and unscheduled.
+- Cancellation and published-content deletion could be conflated even though
+  they have different identities, eligibility rules, and acknowledgements.
+- Concurrent source workers could both claim one removal, or a caller could
+  reuse an ID with changed source-generation bindings.
+- A transient transport failure could retry forever, while source identifiers
+  or private exception detail could escape through operational status.
+
+The shared removal outbox stores canonical cancellation and tombstone bytes
+before dispatch while retaining their separate operation and request IDs. A
+transactional lease permits one exact client method call per attempt; expired
+leases replay the same bytes against the server's idempotency ledger. Changed
+bindings collide, retryable failures use capped backoff and a fixed attempt
+ceiling, and permanent failures stop. Status and health expose only stable
+identifiers, counts, codes, times, and hashes. Payload, schema, response, or
+lease inconsistencies block before another network call.
+
 ## Durable source-side change outbox (10 September 2026)
 
 Assume a website backend detected changed content but the localization service
