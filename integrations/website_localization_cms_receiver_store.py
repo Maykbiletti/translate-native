@@ -227,6 +227,9 @@ class DurableCMSReceiverStore:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
+        self.connection.execute("PRAGMA secure_delete = ON")
+        if int(self.connection.execute("PRAGMA secure_delete").fetchone()[0]) != 1:
+            raise CMSReceiverStoreBlocked("secure deletion is unavailable")
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
         if version not in {0, SCHEMA_VERSION}:
             raise CMSReceiverStoreBlocked("unsupported CMS receiver store schema")
@@ -319,6 +322,8 @@ class DurableCMSReceiverStore:
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _verify_schema(self) -> None:
+        if int(self.connection.execute("PRAGMA secure_delete").fetchone()[0]) != 1:
+            raise CMSReceiverStoreBlocked("secure deletion was disabled")
         expected = {
             "cms_receiver_sources": (
                 "site_id", "source_id", "event_id", "website_version", "plan_id",
@@ -413,11 +418,25 @@ class DurableCMSReceiverStore:
             FROM cms_receiver_localizations
             WHERE delivery_id = ? ORDER BY locale
         """, (delivery_id,)).fetchall()
-        if row["status"] == "deleted":
+        if row["status"] in {"deleted", "superseded"}:
             if (
                 row["payload_json"] is not None
                 or localizations
-                or _token(
+            ):
+                raise CMSReceiverStoreBlocked(
+                    "inactive publication retained localized content"
+                )
+            if row["status"] == "superseded":
+                if (
+                    row["tombstone_delivery_id"] is not None
+                    or row["tombstone_payload_sha256"] is not None
+                ):
+                    raise CMSReceiverStoreBlocked(
+                        "superseded publication is invalid"
+                    )
+                return None
+            if (
+                _token(
                     row["tombstone_delivery_id"], field="tombstone_delivery_id",
                 ) != row["tombstone_delivery_id"]
                 or _sha256(
@@ -428,7 +447,7 @@ class DurableCMSReceiverStore:
                 raise CMSReceiverStoreBlocked("deleted publication is invalid")
             return None
         if (
-            row["status"] not in {"active", "superseded"}
+            row["status"] != "active"
             or row["tombstone_delivery_id"] is not None
             or row["tombstone_payload_sha256"] is not None
         ):
@@ -594,7 +613,7 @@ class DurableCMSReceiverStore:
         return self._source_from_row(row)
 
     def commit(self, publication: Any) -> Mapping[str, Any]:
-        """Atomically install one complete verified bundle, preserving its predecessor."""
+        """Install a complete bundle, then atomically scrub its predecessor."""
 
         delivery_id, payload_sha256, payload, payload_json = _verified(
             publication, kind="publication",
@@ -681,6 +700,25 @@ class DurableCMSReceiverStore:
             )).rowcount
             if changed != 1:
                 raise CMSReceiverStoreBlocked("source changed during publication")
+            if old_delivery_id is not None:
+                try:
+                    self.connection.execute(
+                        "DELETE FROM cms_receiver_localizations WHERE delivery_id = ?",
+                        (old_delivery_id,),
+                    )
+                    changed = self.connection.execute("""
+                        UPDATE cms_receiver_publications
+                        SET payload_json = NULL, updated_at = ?
+                        WHERE delivery_id = ? AND status = 'superseded'
+                    """, (now, old_delivery_id)).rowcount
+                except sqlite3.Error as error:
+                    raise CMSReceiverStoreBlocked(
+                        "superseded publication cleanup failed"
+                    ) from error
+                if changed != 1:
+                    raise CMSReceiverStoreBlocked(
+                        "superseded publication cleanup was not atomic"
+                    )
         return {
             "delivery_id": delivery_id,
             "payload_sha256": payload_sha256,

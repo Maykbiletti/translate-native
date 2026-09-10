@@ -246,9 +246,11 @@ exact active publication before deletion. Commit and delete recheck those
 bindings inside `BEGIN IMMEDIATE`, so the earlier resolver lookup cannot race a
 source change. Replays are bound to immutable delivery and payload hashes, a
 replacement preserves the last-known-good bundle until its complete locale set
-commits, and deletion removes target prose atomically while retaining only
-content-free replay evidence. The store's health callback validates schema,
-SQLite integrity, canonical payloads, locale rows, active pointers, and
+commits. The successful replacement transaction then securely deletes the
+superseded payload and locale rows while retaining only content-free replay
+evidence; any cleanup failure rolls the switch back to the previous active
+bundle. Explicit deletion follows the same content-minimizing rule. The store's
+health callback validates schema, SQLite integrity, canonical payloads, locale rows, active pointers, and
 tombstone state before confirming the probe. Source and tombstone expectations
 carry separate canonical hashes, so a syntactically valid field substitution
 also blocks. `read_active_bundle` is for trusted

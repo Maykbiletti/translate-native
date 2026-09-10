@@ -1464,8 +1464,13 @@ Publication commit repeats the complete source, locale, content-type, and
 commercial-profile comparison inside one `BEGIN IMMEDIATE` transaction. A
 newer registered source leaves the previous active bundle readable as the
 last-known-good value until the full replacement commits. Exact retries return
-the same receipt; reused generations, IDs, or hashes block. For deletion, the
-trusted host must separately call `register_tombstone` with the exact active
+the same receipt; reused generations, IDs, or hashes block. Once the new bundle
+is fully stored and selected, that same transaction removes the predecessor's
+target prose and release evidence and retains only its content-free replay
+binding. SQLite secure deletion is mandatory for these removals. A cleanup
+failure rolls back the replacement, so the previous bundle remains active.
+Backups and filesystem-level retention remain the host's responsibility. For
+deletion, the trusted host must separately call `register_tombstone` with the exact active
 publication ID, payload hash, generation, and locale set. A successful delete
 atomically clears the active pointer, removes localized prose, and retains only
 content-free publication and tombstone bindings for replay detection. Startup

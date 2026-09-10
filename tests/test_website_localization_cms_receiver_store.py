@@ -92,6 +92,9 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.store = STORE.DurableCMSReceiverStore(
             self.connection, clock=lambda: 1000,
         )
+        self.assertEqual(
+            self.connection.execute("PRAGMA secure_delete").fetchone()[0], 1,
+        )
         self.publication_authority = HELPERS.Authority(
             b"publication-key", "publication-key-1",
         )
@@ -198,12 +201,90 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
             second,
         )
         states = self.connection.execute(
-            "SELECT source_sequence, status FROM cms_receiver_publications "
+            "SELECT source_sequence, status, payload_json "
+            "FROM cms_receiver_publications "
             "ORDER BY source_sequence"
         ).fetchall()
-        self.assertEqual([tuple(row) for row in states], [
-            (201, "superseded"), (202, "active"),
-        ])
+        self.assertEqual(states[0]["source_sequence"], 201)
+        self.assertEqual(states[0]["status"], "superseded")
+        self.assertIsNone(states[0]["payload_json"])
+        self.assertEqual(states[1]["source_sequence"], 202)
+        self.assertEqual(states[1]["status"], "active")
+        self.assertIsNotNone(states[1]["payload_json"])
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM cms_receiver_localizations "
+                "WHERE delivery_id = ?",
+                (first["delivery_id"],),
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_superseded_cleanup_failure_rolls_back_to_last_good(self):
+        first = HELPERS.publication_payload()
+        self.store.register_source(HELPERS.expectation(first))
+        self.store.commit(HELPERS.request(first, self.publication_authority))
+        second = next_publication(first)
+        self.store.register_source(HELPERS.expectation(second))
+        self.connection.execute("""
+            CREATE TRIGGER reject_superseded_cleanup
+            BEFORE DELETE ON cms_receiver_localizations
+            BEGIN
+                SELECT RAISE(ABORT, 'private simulated cleanup failure');
+            END
+        """)
+
+        with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+            self.store.commit(HELPERS.request(second, self.publication_authority))
+
+        self.assertEqual(
+            self.store.read_active_bundle("public-site", "homepage.pricing"),
+            first,
+        )
+        rows = self.connection.execute(
+            "SELECT source_sequence, status, payload_json "
+            "FROM cms_receiver_publications"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(tuple(rows[0][:2]), (201, "active"))
+        self.assertIsNotNone(rows[0]["payload_json"])
+
+    def test_health_rejects_content_restored_to_superseded_record(self):
+        first = HELPERS.publication_payload()
+        self.store.register_source(HELPERS.expectation(first))
+        self.store.commit(HELPERS.request(first, self.publication_authority))
+        second = next_publication(first)
+        self.store.register_source(HELPERS.expectation(second))
+        self.store.commit(HELPERS.request(second, self.publication_authority))
+        self.connection.execute(
+            "UPDATE cms_receiver_publications SET payload_json = ? "
+            "WHERE delivery_id = ?",
+            (STORE._canonical_json(first), first["delivery_id"]),
+        )
+
+        with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+            self.store.check(SimpleNamespace(
+                probe_id="receiver-store-health-restore-1",
+                contract_sha256=self.contract_sha256,
+            ))
+
+    def test_operations_block_if_secure_deletion_is_disabled(self):
+        publication = HELPERS.publication_payload()
+        self.store.register_source(HELPERS.expectation(publication))
+        self.connection.execute("PRAGMA secure_delete = OFF")
+
+        for operation in (
+            lambda: self.store.commit(
+                HELPERS.request(publication, self.publication_authority)
+            ),
+            lambda: self.store.check(SimpleNamespace(
+                probe_id="receiver-store-health-secure-delete-1",
+                contract_sha256=self.contract_sha256,
+            )),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                    operation()
 
     def test_source_advance_between_resolution_and_commit_blocks(self):
         first = HELPERS.publication_payload()
