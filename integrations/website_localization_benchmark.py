@@ -32,8 +32,11 @@ NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-re
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v2"
 COMMERCIAL_REVIEW_SCHEMA = "translate-native.commercial-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v7"
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v11"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v8"
+COMMERCIAL_CASE_EVALUATION_SCHEMA = (
+    "translate-native.commercial-benchmark-case-evaluation.v1"
+)
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v12"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -1058,7 +1061,7 @@ def _validate_commercial_evaluation(
     dimensions: Sequence[str],
     variants: dict[str, dict[str, tuple[str, ...]]],
     preferred: str,
-) -> None:
+) -> list[dict[str, Any]]:
     if not isinstance(value, dict) or set(value) != {"schema", "dimensions"}:
         raise BenchmarkBlocked("benchmark.review.invalid")
     items = value["dimensions"]
@@ -1068,6 +1071,7 @@ def _validate_commercial_evaluation(
         or len(items) != len(dimensions)
     ):
         raise BenchmarkBlocked("benchmark.review.invalid")
+    parsed: list[dict[str, Any]] = []
     for expected_dimension, item in zip(dimensions, items):
         if (
             not isinstance(item, dict)
@@ -1077,6 +1081,7 @@ def _validate_commercial_evaluation(
             or set(item["variants"]) != set(VARIANTS)
         ):
             raise BenchmarkBlocked("benchmark.review.invalid")
+        parsed_item = {"dimension": expected_dimension, "variants": {}}
         for label in VARIANTS:
             decision = item["variants"][label]
             if (
@@ -1087,6 +1092,7 @@ def _validate_commercial_evaluation(
             ):
                 raise BenchmarkBlocked("benchmark.review.invalid")
             status = decision["status"]
+            parsed_item["variants"][label] = status
             index = decision["defect_index"]
             if status == "uncertain":
                 if index is not None:
@@ -1101,6 +1107,8 @@ def _validate_commercial_evaluation(
                 raise BenchmarkBlocked("benchmark.review.invalid")
             if preferred == label:
                 raise BenchmarkBlocked("benchmark.review.invalid")
+        parsed.append(parsed_item)
+    return parsed
 
 
 def _validate_review(
@@ -1138,13 +1146,40 @@ def _validate_review(
     if commercial_dimensions is not None:
         if commercial_dimensions != list(_WORKER._COMMERCIAL.DIMENSIONS):
             raise BenchmarkBlocked("benchmark.review.invalid")
-        _validate_commercial_evaluation(
+        parsed["commercial_evaluation"] = _validate_commercial_evaluation(
             response["commercial_evaluation"],
             dimensions=commercial_dimensions,
             variants=parsed["variants"],
             preferred=preferred,
         )
     return parsed
+
+
+def _unblind_commercial_evaluation(
+    items: Sequence[Mapping[str, Any]],
+    origins: Mapping[str, str],
+    response_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "schema": COMMERCIAL_CASE_EVALUATION_SCHEMA,
+        "review_response_sha256": response_sha256,
+        "dimensions": [
+            {
+                "dimension": item["dimension"],
+                "candidate_status": next(
+                    item["variants"][label]
+                    for label, origin in origins.items()
+                    if origin == "candidate"
+                ),
+                "baseline_status": next(
+                    item["variants"][label]
+                    for label, origin in origins.items()
+                    if origin == "baseline"
+                ),
+            }
+            for item in items
+        ],
+    }
 
 
 def _unblind(label: str, origins: dict[str, str]) -> str:
@@ -1220,6 +1255,7 @@ def run_blind_benchmark_case(
         "baseline": {"blocking": 0, "major": 0},
     }
     preferences: list[str] = []
+    commercial_evaluation = None
     for phase in PHASES:
         if progress_callback is not None:
             progress_callback(phase)
@@ -1242,6 +1278,10 @@ def run_blind_benchmark_case(
         for label, origin in origins.items():
             defect_counts[origin]["blocking"] += len(parsed["variants"][label]["blocking"])
             defect_counts[origin]["major"] += len(parsed["variants"][label]["major"])
+        if "commercial_evaluation" in parsed:
+            commercial_evaluation = _unblind_commercial_evaluation(
+                parsed["commercial_evaluation"], origins, response_hash,
+            )
         passes.append({
             "phase": phase,
             "preference": preference,
@@ -1299,6 +1339,7 @@ def run_blind_benchmark_case(
             "baseline": {"status": "PASS" if not integrity["baseline"] else "FAIL", "finding_hashes": list(integrity["baseline"])},
         },
         "defect_counts": defect_counts,
+        "commercial_evaluation": commercial_evaluation,
         "winner": winner,
     }
     return _attest(result, policy, evidence_authority)
@@ -1373,6 +1414,7 @@ def _performance_report(
     axes = [
         _axis_report(phase, cases, policy, minimum_cases) for phase in PHASES
     ]
+    commercial_dimensions = _commercial_dimension_reports(cases)
     passed = (
         len(cases) >= minimum_cases
         and decisive_rate >= policy.minimum_decisive_rate
@@ -1380,6 +1422,7 @@ def _performance_report(
         and p_value <= policy.maximum_one_sided_p
         and candidate_defect_cases == 0
         and all(axis["status"] == "PASS" for axis in axes)
+        and all(item["status"] == "PASS" for item in commercial_dimensions)
     )
     return {
         "status": "PASS" if passed else "BLOCK",
@@ -1392,7 +1435,51 @@ def _performance_report(
         "one_sided_sign_p": p_value,
         "candidate_defect_cases": candidate_defect_cases,
         "axes": axes,
+        "commercial_dimensions": commercial_dimensions,
     }
+
+
+def _commercial_dimension_reports(
+    cases: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    commercial_cases = [
+        item for item in cases if item["commercial_evaluation"] is not None
+    ]
+    if not commercial_cases:
+        return []
+    reports = []
+    for index, dimension in enumerate(_WORKER._COMMERCIAL.DIMENSIONS):
+        candidate_statuses = [
+            item["commercial_evaluation"]["dimensions"][index][
+                "candidate_status"
+            ]
+            for item in commercial_cases
+        ]
+        baseline_statuses = [
+            item["commercial_evaluation"]["dimensions"][index][
+                "baseline_status"
+            ]
+            for item in commercial_cases
+        ]
+        candidate_counts = {
+            status: candidate_statuses.count(status)
+            for status in ("equivalent", "not_present", "major", "blocking")
+        }
+        baseline_counts = {
+            status: baseline_statuses.count(status)
+            for status in ("equivalent", "not_present", "major", "blocking")
+        }
+        candidate_defect_cases = (
+            candidate_counts["major"] + candidate_counts["blocking"]
+        )
+        reports.append({
+            "dimension": dimension,
+            "status": "PASS" if candidate_defect_cases == 0 else "BLOCK",
+            "case_count": len(commercial_cases),
+            "candidate": candidate_counts,
+            "baseline": baseline_counts,
+        })
+    return reports
 
 
 def _validated_case_result(
@@ -1409,6 +1496,7 @@ def _validated_case_result(
         "candidate", "candidate_sha256", "quality_profile", "native_reference",
         "baseline", "reviewer", "blind_commitment_sha256", "passes", "integrity",
         "defect_counts", "winner",
+        "commercial_evaluation",
     }
     if set(result) != required or result["schema"] != CASE_RESULT_SCHEMA:
         raise BenchmarkBlocked("benchmark.results.invalid")
@@ -1537,6 +1625,50 @@ def _validated_case_result(
         for count in defect_item.values():
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise BenchmarkBlocked("benchmark.results.invalid")
+    commercial_evaluation = result["commercial_evaluation"]
+    if result["content_type"] == "commercial":
+        if (
+            not isinstance(commercial_evaluation, dict)
+            or set(commercial_evaluation) != {
+                "schema", "review_response_sha256", "dimensions",
+            }
+            or commercial_evaluation["schema"]
+            != COMMERCIAL_CASE_EVALUATION_SCHEMA
+        ):
+            raise BenchmarkBlocked("benchmark.results.invalid")
+        fidelity_response_sha256 = next(
+            item["response_sha256"] for item in passes
+            if item["phase"] == "source_fidelity"
+        )
+        if commercial_evaluation["review_response_sha256"] != fidelity_response_sha256:
+            raise BenchmarkBlocked("benchmark.results.invalid")
+        dimensions = commercial_evaluation["dimensions"]
+        if (
+            not isinstance(dimensions, list)
+            or len(dimensions) != len(_WORKER._COMMERCIAL.DIMENSIONS)
+        ):
+            raise BenchmarkBlocked("benchmark.results.invalid")
+        for expected_dimension, item in zip(
+            _WORKER._COMMERCIAL.DIMENSIONS, dimensions,
+        ):
+            if (
+                not isinstance(item, dict)
+                or set(item) != {
+                    "dimension", "candidate_status", "baseline_status",
+                }
+                or item["dimension"] != expected_dimension
+            ):
+                raise BenchmarkBlocked("benchmark.results.invalid")
+            for origin in ("candidate", "baseline"):
+                status = item[origin + "_status"]
+                if status not in {
+                    "equivalent", "not_present", "major", "blocking",
+                }:
+                    raise BenchmarkBlocked("benchmark.results.invalid")
+                if status in {"major", "blocking"} and defects[origin][status] == 0:
+                    raise BenchmarkBlocked("benchmark.results.invalid")
+    elif commercial_evaluation is not None:
+        raise BenchmarkBlocked("benchmark.results.invalid")
     expected_winner = "inconclusive"
     targets_differ = result["candidate_sha256"] != baseline["target_sha256"]
     if targets_differ and preferences == ["candidate", "candidate"]:

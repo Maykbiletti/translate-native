@@ -704,6 +704,101 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(outcome["winner"], "candidate")
         self.assertEqual(outcome["defect_counts"]["baseline"]["major"], 1)
+        evaluation = outcome["commercial_evaluation"]
+        self.assertEqual(
+            evaluation["schema"],
+            BENCHMARK.COMMERCIAL_CASE_EVALUATION_SCHEMA,
+        )
+        self.assertEqual(
+            evaluation["review_response_sha256"],
+            next(
+                item["response_sha256"] for item in outcome["passes"]
+                if item["phase"] == "source_fidelity"
+            ),
+        )
+        self.assertEqual(
+            evaluation["dimensions"][-1],
+            {
+                "dimension": list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)[-1],
+                "candidate_status": "equivalent",
+                "baseline_status": "major",
+            },
+        )
+
+    def test_commercial_dimension_audit_is_signed_aggregated_and_fail_closed(self):
+        benchmark_policy = policy(
+            required_content_types=("commercial",),
+        )
+        dimension = list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)[-1]
+        results = []
+        for index in range(8):
+            payload = job("mt-MT", index + 7)
+            candidate = candidate_result(payload)
+
+            class AuditedReviewer(PreferenceReviewer):
+                def review(self, request):
+                    value = super().review(request)
+                    if request.phase != "source_fidelity" or index != 0:
+                        return value
+                    by_text = {
+                        item["text"]: item["label"]
+                        for item in request.input["variants"]
+                    }
+                    candidate_label = by_text[candidate["candidate"]]
+                    value["variants"][candidate_label]["major_defects"] = [{
+                        "class": "commercial_fidelity",
+                        "excerpt": "cancellation condition",
+                        "reason": "The cancellation condition changed.",
+                    }]
+                    value["commercial_evaluation"]["dimensions"][-1][
+                        "variants"
+                    ][candidate_label] = {"status": "major", "defect_index": 0}
+                    return value
+
+            reviewer = AuditedReviewer(
+                candidate["candidate"],
+                prefer="other" if index == 0 else "preferred",
+            )
+            results.append(self.run_benchmark(
+                payload,
+                candidate,
+                baseline(payload, benchmark_policy=benchmark_policy),
+                assets(),
+                benchmark_policy,
+                reviewer,
+                blinding_key=self.key,
+            ))
+
+        report = self.summarize(benchmark_policy, results)
+        locale_report = next(
+            item for item in report["locales"] if item["locale"] == "mt-MT"
+        )
+        lane = locale_report["content_type_lanes"][0]
+        audit = next(
+            item for item in lane["commercial_dimensions"]
+            if item["dimension"] == dimension
+        )
+        self.assertEqual(audit["status"], "BLOCK")
+        self.assertEqual(audit["case_count"], 8)
+        self.assertEqual(audit["candidate"], {
+            "equivalent": 7, "not_present": 0, "major": 1, "blocking": 0,
+        })
+        self.assertEqual(audit["baseline"], {
+            "equivalent": 8, "not_present": 0, "major": 0, "blocking": 0,
+        })
+        self.assertEqual(lane["status"], "BLOCK")
+        self.assertEqual(locale_report["status"], "BLOCK")
+        self.assertFalse(report["superiority_claim_allowed"])
+
+        unsigned = copy.deepcopy(results[-1])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["review_response_sha256"] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [*results[:-1], rebound])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
 
     def test_commercial_scope_drift_blocks_before_benchmark_review(self):
         payload = job(suffix="commercial-7")

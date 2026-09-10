@@ -658,6 +658,16 @@ external review. It exposes the dimensions only to the source-aware fidelity
 pass; the first native-language pass remains source-blind. Missing, additional,
 or reordered dimensions block the case instead of silently narrowing review.
 
+After a valid source-fidelity response, the runner removes defect indexes and
+reviewer prose, resolves anonymous A/B labels back to candidate and baseline,
+and writes only `equivalent`, `not_present`, `major`, or `blocking` for each
+ordered dimension into the signed case result. That summary is bound to the
+exact source-fidelity response SHA-256. The final signed report aggregates the
+four status counts separately for every dimension and locale. Any candidate
+`major` or `blocking` status blocks that dimension and the containing lane;
+an overall win rate cannot hide it. Non-commercial cases carry no commercial
+evaluation, and neither cases nor reports expose offer values or reviewer text.
+
 The policy also requires `valid_until`, an absolute positive integer Unix
 timestamp chosen by the trusted host for that exact candidate, baseline,
 reviewer, reference, suite, and decision configuration. It is included in the
