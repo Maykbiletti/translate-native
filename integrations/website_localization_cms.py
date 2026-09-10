@@ -31,7 +31,19 @@ PUBLICATION_SCHEMA = "blun.cms-localization-publication.v2"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
-CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v1"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v2"
+PUBLICATION_HTTP_CONTRACT_SCHEMA = (
+    "blun.cms-localization-publication-http-capabilities.v1"
+)
+PUBLICATION_HTTP_REQUEST_SCHEMA = "blun.cms-localization-publication-http.v1"
+PUBLICATION_HTTP_RESPONSE_SCHEMA = "blun.cms-localization-publication-http-ack.v1"
+TOMBSTONE_HTTP_REQUEST_SCHEMA = "blun.cms-localization-tombstone-http.v1"
+TOMBSTONE_HTTP_RESPONSE_SCHEMA = "blun.cms-localization-tombstone-http-ack.v1"
+PUBLICATION_HTTP_BINDING_HEADERS = (
+    ("Idempotency-Key", "delivery_id"),
+    ("X-Localization-Delivery-Id", "delivery_id"),
+    ("X-Localization-Payload-Sha256", "payload_sha256"),
+)
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
@@ -538,10 +550,92 @@ class WebsiteLocalizationCMSBridge:
                     _PLANNER.COMMERCIAL_PROFILE,
                     "cms.capabilities.registry_invalid",
                 ),
+                "publication_http": self._publication_http_capabilities(),
                 "locales": locales,
             }
             canonical = _canonical_json(body)
             return {**body, "sha256": _hash(canonical)}
+        except CMSBridgeBlocked:
+            raise
+        except Exception:
+            raise CMSBridgeBlocked("cms.capabilities.registry_invalid") from None
+
+    @staticmethod
+    def _publication_http_capabilities() -> dict[str, Any]:
+        """Describe the built-in outbound adapter without deployment secrets."""
+        try:
+            operations = [
+                {
+                    "name": "publication",
+                    "payload_schema": _token(
+                        PUBLICATION_SCHEMA, "cms.capabilities.registry_invalid",
+                    ),
+                    "request_schema": _token(
+                        PUBLICATION_HTTP_REQUEST_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "acknowledgement_schema": _token(
+                        ACK_SCHEMA, "cms.capabilities.registry_invalid",
+                    ),
+                    "response_schema": _token(
+                        PUBLICATION_HTTP_RESPONSE_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "acknowledgement_status": "accepted",
+                },
+                {
+                    "name": "tombstone",
+                    "payload_schema": _token(
+                        TOMBSTONE_DELIVERY_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "request_schema": _token(
+                        TOMBSTONE_HTTP_REQUEST_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "acknowledgement_schema": _token(
+                        TOMBSTONE_ACK_SCHEMA, "cms.capabilities.registry_invalid",
+                    ),
+                    "response_schema": _token(
+                        TOMBSTONE_HTTP_RESPONSE_SCHEMA,
+                        "cms.capabilities.registry_invalid",
+                    ),
+                    "acknowledgement_status": "deleted",
+                },
+            ]
+            headers = []
+            seen_headers: set[str] = set()
+            for name, binding in PUBLICATION_HTTP_BINDING_HEADERS:
+                if (
+                    not isinstance(name, str)
+                    or not name.isascii()
+                    or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", name)
+                    or binding not in {"delivery_id", "payload_sha256"}
+                    or name.lower() in seen_headers
+                ):
+                    raise ValueError
+                seen_headers.add(name.lower())
+                headers.append({
+                    "name": name,
+                    "binding": _token(
+                        binding, "cms.capabilities.registry_invalid",
+                    ),
+                })
+            body = {
+                "schema": _token(
+                    PUBLICATION_HTTP_CONTRACT_SCHEMA,
+                    "cms.capabilities.registry_invalid",
+                ),
+                "method": "POST",
+                "request_content_type": "application/json; charset=utf-8",
+                "response_content_types": [
+                    "application/json", "application/json; charset=utf-8",
+                ],
+                "delivery_semantics": "at-least-once",
+                "binding_headers": headers,
+                "operations": operations,
+            }
+            return {**body, "sha256": _hash(_canonical_json(body))}
         except CMSBridgeBlocked:
             raise
         except Exception:

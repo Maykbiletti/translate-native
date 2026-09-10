@@ -184,6 +184,18 @@ script, direction, quality-profile version, and quality-profile SHA-256 digest.
 It does not expose the full profile instructions, credentials, customer text,
 provider data, or mutable service state.
 
+The nested `publication_http` object is the separately hashed, machine-readable
+contract for the built-in outbound CMS adapter. It declares publication and
+tombstone payload, request, acknowledgement, and response schemas; exact
+success values; accepted JSON content types; at-least-once delivery; and the
+three headers that bind every attempt to its delivery ID and payload hash. It
+does not advertise an active endpoint, credential, or claim that a custom host
+publisher uses this adapter. A receiver can therefore implement and test the
+supported callback protocol without copying prose from the integration guide.
+The transport and discovery manifest use the same constants, so schema or
+header drift changes the digest or blocks discovery rather than producing a
+partial contract.
+
 The separate `api_contract` object lists all six tenant operations with their
 exact path, `POST` method, request schema, response schema, and current
 `enabled` state. A standalone host without approval and publication authorities
@@ -193,7 +205,7 @@ disabled, so a CMS can fail closed before submitting work. The object uses
 over every other canonical field. Paths and schemas come from the same runtime
 constants used for routing; they are not copied into a second configuration.
 
-The nested `blun.website-localization-capabilities.v1` object carries a
+The nested `blun.website-localization-capabilities.v2` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
 runtime rebuilds and validates the complete registry on every read; duplicate,
@@ -221,9 +233,30 @@ without a partial locale list.
       "script": "Latn"
     }],
     "plan_schema": "blun.website-localization-plan.v2",
+    "publication_http": {
+      "binding_headers": [
+        {"binding": "delivery_id", "name": "Idempotency-Key"},
+        {"binding": "delivery_id", "name": "X-Localization-Delivery-Id"},
+        {"binding": "payload_sha256", "name": "X-Localization-Payload-Sha256"}
+      ],
+      "delivery_semantics": "at-least-once",
+      "method": "POST",
+      "operations": [{
+        "acknowledgement_schema": "blun.cms-localization-publication-ack.v1",
+        "acknowledgement_status": "accepted",
+        "name": "publication",
+        "payload_schema": "blun.cms-localization-publication.v2",
+        "request_schema": "blun.cms-localization-publication-http.v1",
+        "response_schema": "blun.cms-localization-publication-http-ack.v1"
+      }],
+      "request_content_type": "application/json; charset=utf-8",
+      "response_content_types": ["application/json", "application/json; charset=utf-8"],
+      "schema": "blun.cms-localization-publication-http-capabilities.v1",
+      "sha256": "<sha256>"
+    },
     "publication_schema": "blun.cms-localization-publication.v2",
     "quality_passes": ["target_native", "source_fidelity"],
-    "schema": "blun.website-localization-capabilities.v1",
+    "schema": "blun.website-localization-capabilities.v2",
     "sha256": "<sha256>"
   },
   "api_contract": {
@@ -246,9 +279,10 @@ without a partial locale list.
 }
 ```
 
-The abbreviated example shows one locale and one operation only; a successful
-real response always contains all 24 locales and all six operations, and
-otherwise blocks.
+The abbreviated example shows one locale, one inbound operation, and one of the
+two outbound adapter operations only; a successful real response always
+contains all 24 locales, all six inbound operations, and both outbound
+operations, and otherwise blocks.
 
 ## Read per-locale progress
 

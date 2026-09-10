@@ -183,6 +183,21 @@ class HTTPPublisherAdapterTests(unittest.TestCase):
         return caught.exception
 
     def test_posts_exact_signed_bundle_and_accepts_only_signed_bound_ack(self):
+        capabilities = CMS.WebsiteLocalizationCMSBridge._publication_http_capabilities()
+        operations = {item["name"]: item for item in capabilities["operations"]}
+        self.assertEqual(
+            operations["publication"]["request_schema"], HTTP.REQUEST_SCHEMA,
+        )
+        self.assertEqual(
+            operations["publication"]["response_schema"], HTTP.RESPONSE_SCHEMA,
+        )
+        self.assertEqual(
+            operations["tombstone"]["request_schema"], HTTP.TOMBSTONE_REQUEST_SCHEMA,
+        )
+        self.assertEqual(
+            operations["tombstone"]["response_schema"], HTTP.TOMBSTONE_RESPONSE_SCHEMA,
+        )
+
         acknowledgement = self.adapter.publish(self.request)
         self.assertEqual(acknowledgement["status"], "accepted")
         self.assertEqual(len(self.transport.calls), 1)

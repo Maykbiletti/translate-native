@@ -433,6 +433,68 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             capabilities["tombstone_delivery_schema"],
             CMS.TOMBSTONE_DELIVERY_SCHEMA,
         )
+        publication_http = capabilities["publication_http"]
+        self.assertEqual(
+            publication_http["schema"], CMS.PUBLICATION_HTTP_CONTRACT_SCHEMA,
+        )
+        self.assertEqual(set(publication_http), {
+            "schema", "method", "request_content_type", "response_content_types",
+            "delivery_semantics", "binding_headers", "operations", "sha256",
+        })
+        unsigned_publication_http = dict(publication_http)
+        publication_http_digest = unsigned_publication_http.pop("sha256")
+        self.assertEqual(
+            publication_http_digest,
+            CMS._hash(CMS._canonical_json(unsigned_publication_http)),
+        )
+        publication_operations = {
+            item["name"]: item for item in publication_http["operations"]
+        }
+        self.assertEqual(set(publication_operations), {"publication", "tombstone"})
+        self.assertTrue(all(set(item) == {
+            "name", "payload_schema", "request_schema",
+            "acknowledgement_schema", "response_schema",
+            "acknowledgement_status",
+        } for item in publication_operations.values()))
+        self.assertEqual(
+            publication_operations["publication"]["request_schema"],
+            CMS.PUBLICATION_HTTP_REQUEST_SCHEMA,
+        )
+        self.assertEqual(
+            publication_operations["publication"]["payload_schema"],
+            CMS.PUBLICATION_SCHEMA,
+        )
+        self.assertEqual(
+            publication_operations["publication"]["acknowledgement_schema"],
+            CMS.ACK_SCHEMA,
+        )
+        self.assertEqual(
+            publication_operations["publication"]["acknowledgement_status"],
+            "accepted",
+        )
+        self.assertEqual(
+            publication_operations["tombstone"]["response_schema"],
+            CMS.TOMBSTONE_HTTP_RESPONSE_SCHEMA,
+        )
+        self.assertEqual(
+            publication_operations["tombstone"]["acknowledgement_status"],
+            "deleted",
+        )
+        self.assertEqual(publication_http["delivery_semantics"], "at-least-once")
+        self.assertEqual(publication_http["method"], "POST")
+        self.assertEqual(
+            publication_http["response_content_types"],
+            ["application/json", "application/json; charset=utf-8"],
+        )
+        self.assertEqual(
+            publication_http["binding_headers"],
+            [
+                {"name": name, "binding": binding}
+                for name, binding in CMS.PUBLICATION_HTTP_BINDING_HEADERS
+            ],
+        )
+        self.assertNotIn("endpoint", json.dumps(publication_http))
+        self.assertNotIn("credential", json.dumps(publication_http))
         contract = payload["api_contract"]
         self.assertEqual(contract["schema"], API.API_CAPABILITIES_SCHEMA)
         unsigned_contract = dict(contract)
@@ -588,6 +650,34 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
         )
         self.assertNotIn("api_contract", payload)
+        self.assertNotIn("capabilities", payload)
+
+        original_headers = CMS.PUBLICATION_HTTP_BINDING_HEADERS
+        CMS.PUBLICATION_HTTP_BINDING_HEADERS = (("Idempotency-Key", "other"),)
+        try:
+            status, _, payload = self.capabilities_request(
+                request_id="capabilities-invalid-publication-headers",
+            )
+        finally:
+            CMS.PUBLICATION_HTTP_BINDING_HEADERS = original_headers
+        self.assertEqual(
+            (status, payload["error"]),
+            ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+        )
+        self.assertNotIn("capabilities", payload)
+
+        original = CMS.PUBLICATION_HTTP_REQUEST_SCHEMA
+        CMS.PUBLICATION_HTTP_REQUEST_SCHEMA = ""
+        try:
+            status, _, payload = self.capabilities_request(
+                request_id="capabilities-invalid-publication-http",
+            )
+        finally:
+            CMS.PUBLICATION_HTTP_REQUEST_SCHEMA = original
+        self.assertEqual(
+            (status, payload["error"]),
+            ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+        )
         self.assertNotIn("capabilities", payload)
 
     def test_signature_idempotency_and_source_sequence_collisions_fail_closed(self):

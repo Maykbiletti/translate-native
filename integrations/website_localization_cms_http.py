@@ -17,10 +17,6 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
-REQUEST_SCHEMA = "blun.cms-localization-publication-http.v1"
-RESPONSE_SCHEMA = "blun.cms-localization-publication-http-ack.v1"
-TOMBSTONE_REQUEST_SCHEMA = "blun.cms-localization-tombstone-http.v1"
-TOMBSTONE_RESPONSE_SCHEMA = "blun.cms-localization-tombstone-http-ack.v1"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_RESPONSE_BYTES = 65_536
@@ -59,6 +55,13 @@ _ROOT = Path(__file__).resolve().parents[1]
 _CMS = _load_module(
     "blun_website_localization_http_publisher_cms",
     _ROOT / "integrations" / "website_localization_cms.py",
+)
+REQUEST_SCHEMA = _CMS.PUBLICATION_HTTP_REQUEST_SCHEMA
+RESPONSE_SCHEMA = _CMS.PUBLICATION_HTTP_RESPONSE_SCHEMA
+TOMBSTONE_REQUEST_SCHEMA = _CMS.TOMBSTONE_HTTP_REQUEST_SCHEMA
+TOMBSTONE_RESPONSE_SCHEMA = _CMS.TOMBSTONE_HTTP_RESPONSE_SCHEMA
+RESERVED_HEADERS.update(
+    name.lower() for name, _ in _CMS.PUBLICATION_HTTP_BINDING_HEADERS
 )
 
 
@@ -376,13 +379,22 @@ class HTTPPublisherAdapter:
             maximum=MAX_REQUEST_BYTES,
         )
         headers = _authentication_headers(self.authentication_headers)
+        binding_values = {
+            "delivery_id": delivery_id,
+            "payload_sha256": payload_sha256,
+        }
+        try:
+            protocol_headers = {
+                name: binding_values[binding]
+                for name, binding in _CMS.PUBLICATION_HTTP_BINDING_HEADERS
+            }
+        except (KeyError, TypeError, ValueError):
+            raise HTTPPublisherFailed("request_invalid", retryable=False) from None
         headers.update({
             "Accept": "application/json",
             "Accept-Encoding": "identity",
             "Content-Type": "application/json; charset=utf-8",
-            "Idempotency-Key": delivery_id,
-            "X-Localization-Delivery-Id": delivery_id,
-            "X-Localization-Payload-Sha256": payload_sha256,
+            **protocol_headers,
         })
         try:
             result = self.transport.post(
