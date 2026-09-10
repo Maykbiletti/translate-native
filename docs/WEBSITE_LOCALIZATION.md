@@ -1389,7 +1389,8 @@ bindings and invalid signatures are terminal. No response body, credential or
 exception detail enters the durable status record.
 
 `integrations/website_localization_cms_receiver.py` is the provider-neutral
-reference receiver for the publication and tombstone sides of this contract.
+reference receiver for the publication, tombstone, and health sides of this
+contract.
 Before invoking host code, it strictly parses canonical UTF-8 JSON, verifies
 framing and all three protocol headers, recomputes the payload and delivery
 hashes, and verifies the publisher signature. For a publication, it also
@@ -1419,6 +1420,20 @@ atomically and idempotently, then return the exact tombstone delivery ID and
 payload hash with status `deleted`. The receiver signs the CMS `deleted`
 acknowledgement only afterward. A valid signature over a stale publication,
 different locale set, or different source generation never reaches host code.
+
+For publisher health, the same receiver accepts only the canonical content-free
+probe and the three advertised probe-binding headers. Because this request does
+not contain the signed publication object, the host must provide a dedicated
+authentication callback; its exception becomes a stable retryable error and a
+negative result becomes an unauthorized response. Parsing and header binding
+finish before authentication, while the expected callback-contract digest and
+host health are checked only after authentication. The host health callback
+must return the exact probe ID and contract digest with status `healthy`; only
+then does the receiver sign the protocol acknowledgement. A repeated request
+reaches the host with the same immutable binding, while the sender's fresh probe
+ID prevents an acknowledgement for an older challenge from satisfying a newer
+one. The receiver never adds site, locale, publication, customer, or diagnostic
+content to this path.
 
 The same adapter transports a tombstone without changing its security model.
 It uses `blun.cms-localization-tombstone-http.v1`, nests the exact signed

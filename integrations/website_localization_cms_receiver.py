@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed reference receiver for signed CMS localization publications.
+"""Fail-closed reference receiver for CMS localization callbacks.
 
-The host owns authentication, the publication verifier, the acknowledgement
-authority, and the atomic CMS write. This module parses one exact callback,
-verifies it before invoking the host write, and signs an acknowledgement only
-after the host confirms the same idempotency binding.
+The host owns authentication, message authorities, and atomic CMS operations.
+This module parses each exact callback, verifies it before invoking the host,
+and signs an acknowledgement only after the host confirms the same binding.
 """
 
 from __future__ import annotations
@@ -122,6 +121,12 @@ class TombstoneExpectation:
 
 
 @dataclass(frozen=True)
+class VerifiedHealthProbe:
+    probe_id: str
+    contract_sha256: str
+
+
+@dataclass(frozen=True)
 class CMSReceiverHTTPResponse:
     status: int
     headers: tuple[tuple[str, str], ...]
@@ -139,6 +144,14 @@ class PublicationCommitter(Protocol):
 
 class TombstoneCommitter(Protocol):
     def __call__(self, tombstone: VerifiedTombstone) -> Mapping[str, Any]: ...
+
+
+class HealthAuthenticator(Protocol):
+    def __call__(self, headers: Mapping[str, str]) -> bool: ...
+
+
+class HealthChecker(Protocol):
+    def __call__(self, probe: VerifiedHealthProbe) -> Mapping[str, Any]: ...
 
 
 def _canonical_json(value: Any, *, maximum: int) -> bytes:
@@ -668,6 +681,81 @@ def verify_tombstone_request(
     )
 
 
+def verify_health_request(
+    body: bytes,
+    headers: Any,
+    authenticate: Callable[[Mapping[str, str]], bool],
+    *,
+    contract_sha256: str,
+) -> VerifiedHealthProbe:
+    """Authenticate and verify one content-free publisher health challenge."""
+
+    if not callable(authenticate):
+        raise TypeError("authenticate must be callable")
+    if (
+        not isinstance(contract_sha256, str)
+        or SHA256.fullmatch(contract_sha256) is None
+    ):
+        raise ValueError("contract_sha256 is invalid")
+    envelope, _ = _parse_body(body)
+    parsed_headers = _headers(headers)
+    if set(envelope) != {"schema", "probe"}:
+        raise CMSReceiverBlocked(
+            "receiver.health_request_invalid", retryable=False, http_status=400,
+        )
+    probe = envelope.get("probe")
+    if (
+        envelope.get("schema") != _CMS.PUBLICATION_HEALTH_HTTP_REQUEST_SCHEMA
+        or not isinstance(probe, dict)
+        or set(probe) != {"schema", "probe_id", "contract_sha256"}
+        or probe.get("schema") != _CMS.PUBLICATION_HEALTH_SCHEMA
+        or not isinstance(probe.get("probe_id"), str)
+        or not 16 <= len(probe["probe_id"]) <= 256
+        or TOKEN.fullmatch(probe["probe_id"]) is None
+        or not isinstance(probe.get("contract_sha256"), str)
+        or SHA256.fullmatch(probe["contract_sha256"]) is None
+    ):
+        raise CMSReceiverBlocked(
+            "receiver.health_request_invalid", retryable=False, http_status=400,
+        )
+    bindings = {
+        "probe_id": probe["probe_id"],
+        "contract_sha256": probe["contract_sha256"],
+    }
+    for name, binding in _CMS.PUBLICATION_HEALTH_HTTP_BINDING_HEADERS:
+        if parsed_headers.get(name.lower()) != bindings.get(binding):
+            raise CMSReceiverBlocked(
+                "receiver.health_header_binding", retryable=False, http_status=409,
+            )
+    declared_length = parsed_headers.get("content-length")
+    if declared_length is not None and (
+        not declared_length.isascii()
+        or not declared_length.isdecimal()
+        or int(declared_length) != len(body)
+    ):
+        raise CMSReceiverBlocked(
+            "receiver.framing_invalid", retryable=False, http_status=400,
+        )
+    try:
+        authenticated = authenticate(dict(parsed_headers)) is True
+    except Exception:
+        raise CMSReceiverBlocked(
+            "receiver.authentication_failed", retryable=True, http_status=503,
+        ) from None
+    if not authenticated:
+        raise CMSReceiverBlocked(
+            "receiver.authentication_invalid", retryable=False, http_status=401,
+        )
+    if probe["contract_sha256"] != contract_sha256:
+        raise CMSReceiverBlocked(
+            "receiver.health_contract_binding", retryable=False, http_status=409,
+        )
+    return VerifiedHealthProbe(
+        probe_id=probe["probe_id"],
+        contract_sha256=probe["contract_sha256"],
+    )
+
+
 def _signed_acknowledgement(
     *,
     delivery_id: str,
@@ -707,6 +795,55 @@ def _signed_acknowledgement(
         )
     response = {
         "schema": response_schema,
+        "acknowledgement": acknowledgement,
+        "signature": signature_mapping,
+    }
+    response_body = _canonical_json(response, maximum=MAX_RESPONSE_BYTES)
+    return CMSReceiverHTTPResponse(
+        status=200,
+        headers=(
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(response_body))),
+            ("Cache-Control", "no-store"),
+        ),
+        body=response_body,
+    )
+
+
+def _signed_health_acknowledgement(
+    probe: VerifiedHealthProbe,
+    authority: CMSMessageAuthority,
+) -> CMSReceiverHTTPResponse:
+    acknowledgement = {
+        "schema": _CMS.PUBLICATION_HEALTH_ACK_SCHEMA,
+        "probe_id": probe.probe_id,
+        "contract_sha256": probe.contract_sha256,
+        "status": "healthy",
+    }
+    acknowledgement_bytes = _canonical_json(
+        acknowledgement, maximum=MAX_RESPONSE_BYTES,
+    )
+    try:
+        signature = authority.sign(acknowledgement_bytes)
+        signature_mapping = {
+            "algorithm": signature.algorithm,
+            "key_id": signature.key_id,
+            "signature": signature.signature,
+        }
+        normalized_signature = _signature(signature_mapping)
+        verified = authority.verify(
+            acknowledgement_bytes, normalized_signature,
+        ) is True
+    except Exception:
+        raise CMSReceiverBlocked(
+            "receiver.acknowledgement_signing", retryable=True, http_status=503,
+        ) from None
+    if not verified:
+        raise CMSReceiverBlocked(
+            "receiver.acknowledgement_signing", retryable=True, http_status=503,
+        )
+    response = {
+        "schema": _CMS.PUBLICATION_HEALTH_HTTP_RESPONSE_SCHEMA,
         "acknowledgement": acknowledgement,
         "signature": signature_mapping,
     }
@@ -812,3 +949,42 @@ def receive_tombstone(
         response_schema=_CMS.TOMBSTONE_HTTP_RESPONSE_SCHEMA,
         authority=acknowledgement_authority,
     )
+
+
+def receive_health(
+    body: bytes,
+    headers: Any,
+    authenticate: Callable[[Mapping[str, str]], bool],
+    acknowledgement_authority: CMSMessageAuthority,
+    check: Callable[[VerifiedHealthProbe], Mapping[str, Any]],
+    *,
+    contract_sha256: str,
+) -> CMSReceiverHTTPResponse:
+    """Authenticate, check the host, then sign one content-free health reply."""
+
+    if not callable(check):
+        raise TypeError("check must be callable")
+    if (
+        not callable(getattr(acknowledgement_authority, "sign", None))
+        or not callable(getattr(acknowledgement_authority, "verify", None))
+    ):
+        raise TypeError("acknowledgement_authority must provide sign and verify")
+    probe = verify_health_request(
+        body, headers, authenticate, contract_sha256=contract_sha256,
+    )
+    try:
+        receipt = check(probe)
+    except Exception:
+        raise CMSReceiverBlocked(
+            "receiver.health_check_failed", retryable=True, http_status=503,
+        ) from None
+    expected_receipt = {
+        "probe_id": probe.probe_id,
+        "contract_sha256": probe.contract_sha256,
+        "status": "healthy",
+    }
+    if receipt != expected_receipt:
+        raise CMSReceiverBlocked(
+            "receiver.health_unconfirmed", retryable=True, http_status=503,
+        )
+    return _signed_health_acknowledgement(probe, acknowledgement_authority)

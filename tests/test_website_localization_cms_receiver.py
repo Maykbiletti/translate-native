@@ -241,6 +241,26 @@ def wire_tombstone(payload, authority):
     return body, headers, payload_sha256, signature
 
 
+def wire_health(probe_id, contract_sha256, *, authorization="Bearer secret"):
+    body = RECEIVER._canonical_json({
+        "schema": CMS.PUBLICATION_HEALTH_HTTP_REQUEST_SCHEMA,
+        "probe": {
+            "schema": CMS.PUBLICATION_HEALTH_SCHEMA,
+            "probe_id": probe_id,
+            "contract_sha256": contract_sha256,
+        },
+    }, maximum=RECEIVER.MAX_REQUEST_BYTES)
+    headers = {
+        "Authorization": authorization,
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": str(len(body)),
+        "Idempotency-Key": probe_id,
+        "X-Localization-Probe-Id": probe_id,
+        "X-Localization-Contract-Sha256": contract_sha256,
+    }
+    return body, headers
+
+
 def request(payload, authority):
     _, _, payload_sha256, signature = wire(payload, authority)
     return SimpleNamespace(
@@ -312,6 +332,37 @@ class TombstoneReceiverTransport:
                 self.acknowledgement_authority,
                 self.expectation,
                 self.delete,
+            )
+            return HTTP.HTTPResult(response.status, response.headers, response.body)
+        except RECEIVER.CMSReceiverBlocked as error:
+            return HTTP.HTTPResult(
+                error.http_status,
+                (("Content-Type", "application/json"),),
+                b"{}",
+            )
+
+
+class HealthReceiverTransport:
+    def __init__(self, acknowledgement_authority, contract_sha256, check):
+        self.acknowledgement_authority = acknowledgement_authority
+        self.contract_sha256 = contract_sha256
+        self.check = check
+        self.calls = []
+
+    @staticmethod
+    def authenticate(headers):
+        return headers.get("authorization") == "Bearer secret"
+
+    def post(self, url, headers, body, *, timeout):
+        self.calls.append((url, dict(headers), body, timeout))
+        try:
+            response = RECEIVER.receive_health(
+                body,
+                tuple(headers.items()),
+                self.authenticate,
+                self.acknowledgement_authority,
+                self.check,
+                contract_sha256=self.contract_sha256,
             )
             return HTTP.HTTPResult(response.status, response.headers, response.body)
         except RECEIVER.CMSReceiverBlocked as error:
@@ -775,6 +826,200 @@ class CMSTombstoneReceiverTests(unittest.TestCase):
         self.assertNotIn("private", str(caught.exception))
         self.assertTrue(caught.exception.retryable)
         self.assertEqual(self.deletions, [])
+
+
+class CMSHealthReceiverTests(unittest.TestCase):
+    def setUp(self):
+        self.acknowledgement_authority = Authority(b"ack-key", "ack-key-1")
+        self.contract_sha256 = (
+            CMS.WebsiteLocalizationCMSBridge._publication_http_capabilities()[
+                "sha256"
+            ]
+        )
+        self.checks = []
+
+    def check(self, probe):
+        self.checks.append(probe)
+        return {
+            "probe_id": probe.probe_id,
+            "contract_sha256": probe.contract_sha256,
+            "status": "healthy",
+        }
+
+    @staticmethod
+    def authenticate(headers):
+        return headers.get("authorization") == "Bearer secret"
+
+    def test_sender_to_receiver_health_round_trip_is_content_free(self):
+        transport = HealthReceiverTransport(
+            self.acknowledgement_authority,
+            self.contract_sha256,
+            self.check,
+        )
+        publisher = HTTP.HTTPPublisherAdapter(
+            "https://cms.example.test/localizations",
+            lambda: {"Authorization": "Bearer secret"},
+            self.acknowledgement_authority,
+            transport=transport,
+            probe_id_factory=lambda: "publisher-health-probe-201",
+        )
+
+        acknowledgement = publisher.check(contract_sha256=self.contract_sha256)
+
+        self.assertEqual(acknowledgement, {
+            "schema": CMS.PUBLICATION_HEALTH_ACK_SCHEMA,
+            "probe_id": "publisher-health-probe-201",
+            "contract_sha256": self.contract_sha256,
+            "status": "healthy",
+        })
+        self.assertEqual(len(self.checks), 1)
+        self.assertEqual(self.checks[0], RECEIVER.VerifiedHealthProbe(
+            probe_id="publisher-health-probe-201",
+            contract_sha256=self.contract_sha256,
+        ))
+        sent = json.loads(transport.calls[0][2])
+        self.assertEqual(set(sent), {"schema", "probe"})
+        self.assertEqual(
+            set(sent["probe"]), {"schema", "probe_id", "contract_sha256"},
+        )
+
+    def test_authentication_precedes_contract_check_and_host_health(self):
+        body, headers = wire_health(
+            "publisher-health-probe-201", "0" * 64,
+        )
+        authentications = []
+
+        def authenticate(parsed_headers):
+            authentications.append(parsed_headers.get("authorization"))
+            return True
+
+        with self.assertRaises(RECEIVER.CMSReceiverBlocked) as caught:
+            RECEIVER.receive_health(
+                body, headers, authenticate, self.acknowledgement_authority,
+                self.check, contract_sha256=self.contract_sha256,
+            )
+        self.assertEqual(caught.exception.code, "receiver.health_contract_binding")
+        self.assertEqual(authentications, ["Bearer secret"])
+        self.assertEqual(self.checks, [])
+
+    def test_bad_or_unavailable_authentication_never_checks_host(self):
+        body, headers = wire_health(
+            "publisher-health-probe-201", self.contract_sha256,
+        )
+
+        def unavailable(_):
+            raise RuntimeError("private identity-provider detail")
+
+        cases = (
+            (lambda _: False, "receiver.authentication_invalid", False, 401),
+            (unavailable, "receiver.authentication_failed", True, 503),
+        )
+        for authenticate, code, retryable, status in cases:
+            with self.subTest(code=code), self.assertRaises(
+                RECEIVER.CMSReceiverBlocked,
+            ) as caught:
+                RECEIVER.receive_health(
+                    body, headers, authenticate, self.acknowledgement_authority,
+                    self.check, contract_sha256=self.contract_sha256,
+                )
+            self.assertEqual(caught.exception.code, code)
+            self.assertEqual(caught.exception.retryable, retryable)
+            self.assertEqual(caught.exception.http_status, status)
+            self.assertNotIn("private", str(caught.exception))
+        self.assertEqual(self.checks, [])
+
+    def test_malformed_probe_or_binding_never_authenticates_or_checks(self):
+        body, headers = wire_health(
+            "publisher-health-probe-201", self.contract_sha256,
+        )
+        malformed = json.loads(body)
+        malformed["probe"]["site_id"] = "must-not-be-sent"
+        malformed_body = RECEIVER._canonical_json(
+            malformed, maximum=RECEIVER.MAX_REQUEST_BYTES,
+        )
+        malformed_headers = dict(headers)
+        malformed_headers["Content-Length"] = str(len(malformed_body))
+        wrong_binding = dict(headers)
+        wrong_binding["X-Localization-Probe-Id"] = "publisher-health-probe-999"
+        authentications = []
+
+        for candidate_body, candidate_headers in (
+            (malformed_body, malformed_headers),
+            (body, wrong_binding),
+        ):
+            with self.subTest(), self.assertRaises(RECEIVER.CMSReceiverBlocked):
+                RECEIVER.receive_health(
+                    candidate_body,
+                    candidate_headers,
+                    lambda _: authentications.append(True) or True,
+                    self.acknowledgement_authority,
+                    self.check,
+                    contract_sha256=self.contract_sha256,
+                )
+        self.assertEqual(authentications, [])
+        self.assertEqual(self.checks, [])
+
+    def test_host_health_must_confirm_the_exact_probe_binding(self):
+        body, headers = wire_health(
+            "publisher-health-probe-201", self.contract_sha256,
+        )
+
+        def wrong(probe):
+            self.checks.append(probe)
+            return {
+                "probe_id": "publisher-health-probe-999",
+                "contract_sha256": probe.contract_sha256,
+                "status": "healthy",
+            }
+
+        with self.assertRaises(RECEIVER.CMSReceiverBlocked) as caught:
+            RECEIVER.receive_health(
+                body, headers, self.authenticate, self.acknowledgement_authority,
+                wrong, contract_sha256=self.contract_sha256,
+            )
+        self.assertEqual(caught.exception.code, "receiver.health_unconfirmed")
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(caught.exception.http_status, 503)
+        self.assertEqual(len(self.checks), 1)
+
+    def test_private_host_failure_is_content_free_and_retryable(self):
+        body, headers = wire_health(
+            "publisher-health-probe-201", self.contract_sha256,
+        )
+
+        def failed(_):
+            raise RuntimeError("private CMS health detail")
+
+        with self.assertRaises(RECEIVER.CMSReceiverBlocked) as caught:
+            RECEIVER.receive_health(
+                body, headers, self.authenticate, self.acknowledgement_authority,
+                failed, contract_sha256=self.contract_sha256,
+            )
+        self.assertEqual(caught.exception.code, "receiver.health_check_failed")
+        self.assertNotIn("private", str(caught.exception))
+        self.assertTrue(caught.exception.retryable)
+
+    def test_acknowledgement_is_signed_only_after_confirmed_health(self):
+        class BrokenAuthority:
+            def sign(self, _):
+                raise RuntimeError("private signing detail")
+
+            def verify(self, *_):
+                return False
+
+        body, headers = wire_health(
+            "publisher-health-probe-201", self.contract_sha256,
+        )
+
+        with self.assertRaises(RECEIVER.CMSReceiverBlocked) as caught:
+            RECEIVER.receive_health(
+                body, headers, self.authenticate, BrokenAuthority(), self.check,
+                contract_sha256=self.contract_sha256,
+            )
+        self.assertEqual(caught.exception.code, "receiver.acknowledgement_signing")
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(len(self.checks), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
