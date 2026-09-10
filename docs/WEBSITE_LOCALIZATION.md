@@ -1388,6 +1388,28 @@ under the existing bounded outbox policy; other non-200 statuses, wrong
 bindings and invalid signatures are terminal. No response body, credential or
 exception detail enters the durable status record.
 
+`integrations/website_localization_cms_receiver.py` is the provider-neutral
+reference receiver for the publication side of this contract. Before invoking
+host code, it strictly parses canonical UTF-8 JSON, verifies framing and all
+three protocol headers, recomputes the payload and delivery hashes, verifies
+the publisher signature, validates every locale's approval expiry and release
+evidence, and compares the signed publication with a host-supplied
+`PublicationExpectation`. That expectation binds the exact current event,
+site, website version, plan, source identity, source generation and hash,
+complete sorted required-locale set, content type, and commercial profile.
+A correctly signed but partial, stale, or differently scoped publication is
+therefore rejected before any CMS write.
+
+The host supplies one commit callback. It must atomically and idempotently bind
+the stable `(delivery_id, payload_sha256)` pair to the expected source revision,
+write the complete locale bundle, and return that exact binding with status
+`committed`. The receiver signs `accepted` only after this receipt. A missing,
+different, or private-error receipt returns a stable retryable failure; a retry
+may invoke the callback again with the same immutable binding. This module does
+not provide the CMS transaction or authentication boundary, and its verified
+payload still contains target prose, so the host must keep it out of logs and
+public status.
+
 The same adapter transports a tombstone without changing its security model.
 It uses `blun.cms-localization-tombstone-http.v1`, nests the exact signed
 object under `tombstone`, and accepts only a signed
