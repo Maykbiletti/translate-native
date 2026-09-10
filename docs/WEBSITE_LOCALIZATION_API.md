@@ -237,6 +237,26 @@ retry decision. A TLS terminator must set `wsgi.url_scheme` from trusted proxy
 configuration, and the host must keep authorization headers and verified target
 text out of access logs.
 
+`DurableCMSReceiverStore` in
+`integrations/website_localization_cms_receiver_store.py` supplies a complete
+SQLite reference implementation for the five stateful host callbacks. It uses
+one dedicated host-owned connection. The CMS registers each monotonic current
+source before delivery and explicitly pre-registers a tombstone against the
+exact active publication before deletion. Commit and delete recheck those
+bindings inside `BEGIN IMMEDIATE`, so the earlier resolver lookup cannot race a
+source change. Replays are bound to immutable delivery and payload hashes, a
+replacement preserves the last-known-good bundle until its complete locale set
+commits, and deletion removes target prose atomically while retaining only
+content-free replay evidence. The store's health callback validates schema,
+SQLite integrity, canonical payloads, locale rows, active pointers, and
+tombstone state before confirming the probe. Source and tombstone expectations
+carry separate canonical hashes, so a syntactically valid field substitution
+also blocks. `read_active_bundle` is for trusted
+CMS rendering code only; it contains target text and is not part of any public
+status response. A WSGI worker owns its store connection; do not share one
+SQLite connection across request threads. Multiple workers may open distinct
+connections to the same file and rely on the transactional writer lock.
+
 The separate `api_contract` object lists all six tenant operations with their
 exact path, `POST` method, request schema, response schema, and current
 `enabled` state. A standalone host without approval and publication authorities

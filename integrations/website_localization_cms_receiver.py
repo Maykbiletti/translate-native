@@ -157,11 +157,15 @@ class HealthChecker(Protocol):
 
 
 class PublicationExpectationResolver(Protocol):
-    def __call__(self, publication: VerifiedPublication) -> PublicationExpectation: ...
+    def __call__(
+        self, publication: VerifiedPublication,
+    ) -> PublicationExpectation | Mapping[str, Any]: ...
 
 
 class TombstoneExpectationResolver(Protocol):
-    def __call__(self, tombstone: VerifiedTombstone) -> TombstoneExpectation: ...
+    def __call__(
+        self, tombstone: VerifiedTombstone,
+    ) -> TombstoneExpectation | Mapping[str, Any]: ...
 
 
 def _canonical_json(value: Any, *, maximum: int) -> bytes:
@@ -394,10 +398,18 @@ def _verify_publication(value: Any, payload_sha256: str, *, now: float) -> bytes
 
 def _verify_expectation(
     publication: dict[str, Any],
-    expectation: PublicationExpectation,
+    expectation: PublicationExpectation | Mapping[str, Any],
 ) -> None:
+    if isinstance(expectation, Mapping):
+        fields = tuple(PublicationExpectation.__dataclass_fields__)
+        if set(expectation) != set(fields):
+            raise ValueError("expectation is invalid")
+        try:
+            expectation = PublicationExpectation(**dict(expectation))
+        except TypeError:
+            raise ValueError("expectation is invalid") from None
     if not isinstance(expectation, PublicationExpectation):
-        raise TypeError("expectation must be PublicationExpectation")
+        raise TypeError("expectation must be PublicationExpectation or an exact mapping")
     token_fields = (
         "event_id", "site_id", "website_version", "plan_id", "source_id",
         "source_revision", "content_type",
@@ -514,10 +526,20 @@ def _verify_tombstone(value: Any, payload_sha256: str) -> bytes:
 
 def _verify_tombstone_expectation(
     tombstone: dict[str, Any],
-    expectation: TombstoneExpectation,
+    expectation: TombstoneExpectation | Mapping[str, Any],
 ) -> None:
+    if isinstance(expectation, Mapping):
+        fields = tuple(TombstoneExpectation.__dataclass_fields__)
+        if set(expectation) != set(fields):
+            raise ValueError("expectation is invalid")
+        try:
+            expectation = TombstoneExpectation(**dict(expectation))
+        except TypeError:
+            raise ValueError("expectation is invalid") from None
     if not isinstance(expectation, TombstoneExpectation):
-        raise TypeError("expectation must be TombstoneExpectation")
+        raise TypeError(
+            "expectation must be TombstoneExpectation or an exact mapping"
+        )
     token_fields = (
         "tombstone_id", "event_id", "site_id", "website_version", "plan_id",
         "source_id", "publication_delivery_id",
@@ -1010,7 +1032,9 @@ def receive_publication_resolved(
     headers: Any,
     publication_authority: CMSMessageAuthority,
     acknowledgement_authority: CMSMessageAuthority,
-    resolve_expectation: Callable[[VerifiedPublication], PublicationExpectation],
+    resolve_expectation: Callable[
+        [VerifiedPublication], PublicationExpectation | Mapping[str, Any]
+    ],
     commit: Callable[[VerifiedPublication], Mapping[str, Any]],
     *,
     now: float | int,
@@ -1045,7 +1069,7 @@ def receive_publication_resolved(
         ) from None
     try:
         _verify_expectation(publication.payload, expectation)
-    except ValueError:
+    except (TypeError, ValueError):
         raise CMSReceiverBlocked(
             "receiver.expectation_invalid", retryable=True, http_status=503,
         ) from None
@@ -1059,7 +1083,9 @@ def receive_tombstone_resolved(
     headers: Any,
     publication_authority: CMSMessageAuthority,
     acknowledgement_authority: CMSMessageAuthority,
-    resolve_expectation: Callable[[VerifiedTombstone], TombstoneExpectation],
+    resolve_expectation: Callable[
+        [VerifiedTombstone], TombstoneExpectation | Mapping[str, Any]
+    ],
     delete: Callable[[VerifiedTombstone], Mapping[str, Any]],
 ) -> CMSReceiverHTTPResponse:
     """Verify a tombstone before resolving its current host expectation."""
@@ -1092,7 +1118,7 @@ def receive_tombstone_resolved(
         ) from None
     try:
         _verify_tombstone_expectation(tombstone.payload, expectation)
-    except ValueError:
+    except (TypeError, ValueError):
         raise CMSReceiverBlocked(
             "receiver.expectation_invalid", retryable=True, http_status=503,
         ) from None
@@ -1149,11 +1175,11 @@ class CMSReceiverApplication:
         acknowledgement_authority: CMSMessageAuthority,
         authenticate: Callable[[Mapping[str, str]], bool],
         resolve_publication_expectation: Callable[
-            [VerifiedPublication], PublicationExpectation
+            [VerifiedPublication], PublicationExpectation | Mapping[str, Any]
         ],
         commit: Callable[[VerifiedPublication], Mapping[str, Any]],
         resolve_tombstone_expectation: Callable[
-            [VerifiedTombstone], TombstoneExpectation
+            [VerifiedTombstone], TombstoneExpectation | Mapping[str, Any]
         ],
         delete: Callable[[VerifiedTombstone], Mapping[str, Any]],
         check: Callable[[VerifiedHealthProbe], Mapping[str, Any]],

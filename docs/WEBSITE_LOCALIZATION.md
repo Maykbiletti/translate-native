@@ -1450,6 +1450,34 @@ diagnostic prose. The application does not terminate TLS or configure a proxy;
 the WSGI host must derive `wsgi.url_scheme` only from its trusted ingress and
 must redact authorization headers and verified target text from logs.
 
+Deployments without an existing atomic CMS transaction can use
+`integrations/website_localization_cms_receiver_store.py` as the durable
+reference host behind that WSGI application. Give `DurableCMSReceiverStore` a
+dedicated host-owned SQLite connection. The trusted CMS first calls
+`register_source` with its exact current source expectation, then wires the
+store's publication resolver, commit, tombstone resolver, delete, and health
+methods directly into `CMSReceiverApplication`. Resolver results are exact
+field mappings accepted by the same receiver validation as the public
+dataclasses.
+
+Publication commit repeats the complete source, locale, content-type, and
+commercial-profile comparison inside one `BEGIN IMMEDIATE` transaction. A
+newer registered source leaves the previous active bundle readable as the
+last-known-good value until the full replacement commits. Exact retries return
+the same receipt; reused generations, IDs, or hashes block. For deletion, the
+trusted host must separately call `register_tombstone` with the exact active
+publication ID, payload hash, generation, and locale set. A successful delete
+atomically clears the active pointer, removes localized prose, and retains only
+content-free publication and tombstone bindings for replay detection. Startup
+and health verify the schema, SQLite integrity, active pointers, canonical
+payload and expectation hashes, every locale row, and tombstone state. This
+reference store is not a substitute for an existing CMS authorization model:
+source and tombstone registration remain trusted host operations and its
+content-reading method
+must never be exposed as a public status route. Use one store instance per
+SQLite connection and WSGI worker; distinct workers may use distinct
+connections to the same database and coordinate through the write transaction.
+
 The same adapter transports a tombstone without changing its security model.
 It uses `blun.cms-localization-tombstone-http.v1`, nests the exact signed
 object under `tombstone`, and accepts only a signed
