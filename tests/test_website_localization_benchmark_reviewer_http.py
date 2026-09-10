@@ -30,7 +30,7 @@ BENCHMARK = load(
 )
 
 
-def review_request(*, phase="target_native", suffix="1"):
+def review_request(*, phase="target_native", suffix="1", content_type="marketing"):
     digest = hashlib.sha256(f"{phase}:{suffix}".encode()).hexdigest()
     blind_id = "blind-" + digest
     review_input = {
@@ -42,7 +42,7 @@ def review_request(*, phase="target_native", suffix="1"):
             "case_key_sha256": "b" * 64,
         },
         "target": {"language": "mt", "locale": "mt-MT", "script": "Latn"},
-        "content_type": "marketing",
+        "content_type": content_type,
         "audience": "small businesses",
         "tone_profile": "clear and contemporary",
         "policy_version": "native-web-2",
@@ -75,12 +75,21 @@ def review_request(*, phase="target_native", suffix="1"):
             "glossary": [],
             "protected_terms": [],
         })
+        if content_type == "commercial":
+            dimensions = list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)
+            review_input["benchmark_suite"]["commercial_dimensions"] = dimensions
+            review_input["response_schema"]["commercial_evaluation"] = (
+                BENCHMARK._commercial_response_contract(dimensions)
+            )
     else:
         review_input["target_terms"] = []
     system = (
         BENCHMARK._NATIVE_SYSTEM
         if phase == "target_native"
-        else BENCHMARK._FIDELITY_SYSTEM
+        else BENCHMARK._FIDELITY_SYSTEM + (
+            "\n" + BENCHMARK._COMMERCIAL_BENCHMARK_FIDELITY_SYSTEM
+            if content_type == "commercial" else ""
+        )
     )
     return BENCHMARK.BenchmarkReviewRequest(
         schema=BENCHMARK.BENCHMARK_SCHEMA,
@@ -104,6 +113,21 @@ def review_response(request, *, preference="A", **overrides):
             "B": {"blocking_defects": [], "major_defects": []},
         },
     }
+    contract = request.input["response_schema"].get("commercial_evaluation")
+    if contract is not None:
+        value["commercial_evaluation"] = {
+            "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
+            "dimensions": [
+                {
+                    "dimension": item["dimension"],
+                    "variants": {
+                        label: {"status": "equivalent", "defect_index": None}
+                        for label in ("A", "B")
+                    },
+                }
+                for item in contract["dimensions"]
+            ],
+        }
     value.update(overrides)
     return value
 
@@ -187,6 +211,59 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
             self.assertTrue(
                 {"candidate_provider_id", "baseline_id", "origin"}.isdisjoint(keys(envelope))
             )
+
+    def test_commercial_fidelity_scope_and_acknowledgement_cross_https(self):
+        request = review_request(
+            phase="source_fidelity", content_type="commercial",
+        )
+        self.transport.results = [http_response(request)]
+
+        response = self.adapter.review(request)
+
+        sent = json.loads(self.transport.calls[0][2])["review"]
+        dimensions = list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)
+        self.assertEqual(
+            sent["input"]["benchmark_suite"]["commercial_dimensions"],
+            dimensions,
+        )
+        self.assertEqual(
+            [
+                item["dimension"]
+                for item in response["commercial_evaluation"]["dimensions"]
+            ],
+            dimensions,
+        )
+        self.assertIn(
+            "Use uncertain rather than guessing", sent["system_instruction"],
+        )
+
+    def test_commercial_https_blocks_scope_drift_and_incomplete_acknowledgement(self):
+        authentication_calls = []
+        adapter = HTTP.HTTPBenchmarkReviewerAdapter(
+            "https://review.example.test/v1/blind-reviews",
+            lambda: authentication_calls.append(True) or {
+                "Authorization": "Bearer reviewer-secret",
+            },
+            transport=self.transport,
+        )
+        drifted = review_request(
+            phase="source_fidelity", content_type="commercial", suffix="drift",
+        )
+        drifted.input["benchmark_suite"]["commercial_dimensions"].pop()
+        error = self.failure(lambda: adapter.review(drifted))
+        self.assertEqual((error.code, error.retryable), ("request_invalid", False))
+        self.assertEqual(authentication_calls, [])
+
+        request = review_request(
+            phase="source_fidelity", content_type="commercial", suffix="ack",
+        )
+        incomplete = review_response(request)
+        incomplete["commercial_evaluation"]["dimensions"].pop()
+        self.transport.results = [http_response(
+            request, commercial_evaluation=incomplete["commercial_evaluation"],
+        )]
+        error = self.failure(lambda: adapter.review(request))
+        self.assertEqual((error.code, error.retryable), ("response_invalid", False))
 
     def test_headers_bind_authentication_idempotency_and_request_hash(self):
         request = review_request()

@@ -259,8 +259,18 @@ def _blind_input(value: dict[str, Any], *, phase: str, locale: str) -> None:
         raise HTTPBenchmarkReviewerFailed(code, retryable=False)
     variants = value["variants"]
     response_schema = value["response_schema"]
+    benchmark_suite = value["benchmark_suite"]
+    commercial_fidelity = (
+        phase == "source_fidelity" and value["content_type"] == "commercial"
+    )
+    commercial_dimensions = (
+        benchmark_suite.get("commercial_dimensions")
+        if isinstance(benchmark_suite, dict)
+        and commercial_fidelity
+        else None
+    )
     if (
-        not isinstance(value["benchmark_suite"], dict)
+        not isinstance(benchmark_suite, dict)
         or not isinstance(value["target"], dict)
         or value["target"].get("locale") != locale
         or not isinstance(variants, list)
@@ -280,6 +290,22 @@ def _blind_input(value: dict[str, Any], *, phase: str, locale: str) -> None:
         or response_schema.get("blind_id") != value["blind_id"]
     ):
         raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False)
+    if commercial_fidelity and commercial_dimensions != list(
+        _BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS
+    ):
+        raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False)
+    expected_response_schema = _BENCHMARK._review_response_contract(
+        phase=phase,
+        locale=locale,
+        blind_id=value["blind_id"],
+        commercial_dimensions=(
+            commercial_dimensions if commercial_fidelity else None
+        ),
+    )
+    if response_schema != expected_response_schema:
+        raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False)
+    if not commercial_fidelity and "commercial_dimensions" in benchmark_suite:
+        raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False)
 
 
 def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
@@ -292,9 +318,17 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
         review_input = request.input
     except Exception:
         raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False) from None
+    input_value = review_input if isinstance(review_input, dict) else {}
+    commercial_fidelity = (
+        phase == "source_fidelity"
+        and input_value.get("content_type") == "commercial"
+    )
     expected_system = {
         "target_native": _BENCHMARK._NATIVE_SYSTEM,
-        "source_fidelity": _BENCHMARK._FIDELITY_SYSTEM,
+        "source_fidelity": _BENCHMARK._FIDELITY_SYSTEM + (
+            "\n" + _BENCHMARK._COMMERCIAL_BENCHMARK_FIDELITY_SYSTEM
+            if commercial_fidelity else ""
+        ),
     }
     if (
         not isinstance(payload, dict)
@@ -451,6 +485,14 @@ class HTTPBenchmarkReviewerAdapter:
                 phase=payload["phase"],
                 locale=payload["target_locale"],
                 blind_id=payload["input"]["blind_id"],
+                commercial_dimensions=(
+                    payload["input"]["benchmark_suite"].get(
+                        "commercial_dimensions",
+                    )
+                    if payload["phase"] == "source_fidelity"
+                    and payload["input"]["content_type"] == "commercial"
+                    else None
+                ),
             )
         except Exception:
             raise HTTPBenchmarkReviewerFailed("response_invalid", retryable=False) from None

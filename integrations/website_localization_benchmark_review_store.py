@@ -177,11 +177,25 @@ def _request_payload(value: Any) -> dict[str, Any]:
             "review.store.request_invalid", retryable=False,
         )
     phase = payload.get("phase")
+    input_value = payload.get("input")
+    commercial_fidelity = (
+        phase == "source_fidelity"
+        and isinstance(input_value, dict)
+        and input_value.get("content_type") == "commercial"
+    )
     expected_system = {
         "target_native": _BENCHMARK._NATIVE_SYSTEM,
-        "source_fidelity": _BENCHMARK._FIDELITY_SYSTEM,
+        "source_fidelity": _BENCHMARK._FIDELITY_SYSTEM + (
+            "\n" + _BENCHMARK._COMMERCIAL_BENCHMARK_FIDELITY_SYSTEM
+            if commercial_fidelity else ""
+        ),
     }.get(phase)
-    input_value = payload.get("input")
+    commercial_dimensions = (
+        input_value.get("benchmark_suite", {}).get("commercial_dimensions")
+        if commercial_fidelity
+        and isinstance(input_value.get("benchmark_suite"), dict)
+        else None
+    )
     if (
         payload.get("schema") != _BENCHMARK.BENCHMARK_SCHEMA
         or REVIEW_ID.fullmatch(payload.get("review_id", "")) is None
@@ -190,6 +204,11 @@ def _request_payload(value: Any) -> dict[str, Any]:
         or not isinstance(payload.get("target_locale"), str)
         or not isinstance(input_value, dict)
         or input_value.get("blind_id") is None
+        or (
+            commercial_fidelity
+            and commercial_dimensions
+            != list(_BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)
+        )
     ):
         raise BenchmarkReviewEvidenceFailed(
             "review.store.request_invalid", retryable=False,
@@ -261,6 +280,15 @@ def _response(value: Any, request: dict[str, Any]) -> dict[str, Any]:
             phase=request["phase"],
             locale=request["target_locale"],
             blind_id=request["input"]["blind_id"],
+            commercial_dimensions=(
+                request["input"].get("benchmark_suite", {}).get(
+                    "commercial_dimensions",
+                )
+                if request["phase"] == "source_fidelity"
+                and request["input"].get("content_type") == "commercial"
+                and isinstance(request["input"].get("benchmark_suite"), dict)
+                else None
+            ),
         )
     except BenchmarkReviewEvidenceFailed:
         raise

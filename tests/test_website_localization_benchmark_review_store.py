@@ -91,25 +91,40 @@ def policy(**overrides):
     return BENCHMARK.BenchmarkPolicy(**values)
 
 
-def request(*, phase="target_native", locale="mt-MT", suffix="1"):
+def request(*, phase="target_native", locale="mt-MT", suffix="1", commercial=False):
     system = (
         BENCHMARK._NATIVE_SYSTEM
         if phase == "target_native"
-        else BENCHMARK._FIDELITY_SYSTEM
+        else BENCHMARK._FIDELITY_SYSTEM + (
+            "\n" + BENCHMARK._COMMERCIAL_BENCHMARK_FIDELITY_SYSTEM
+            if commercial else ""
+        )
     )
-    digest = hashlib.sha256(f"{phase}:{locale}:{suffix}".encode()).hexdigest()
+    digest = hashlib.sha256(
+        f"{phase}:{locale}:{suffix}:{commercial}".encode()
+    ).hexdigest()
+    review_input = {"blind_id": "blind-" + digest, "variants": []}
+    if commercial:
+        review_input.update({
+            "content_type": "commercial",
+            "benchmark_suite": {
+                "commercial_dimensions": list(
+                    BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS
+                ),
+            },
+        })
     return BENCHMARK.BenchmarkReviewRequest(
         schema=BENCHMARK.BENCHMARK_SCHEMA,
         review_id="benchmark-review-" + digest,
         phase=phase,
         target_locale=locale,
         system_instruction=system,
-        input={"blind_id": "blind-" + digest, "variants": []},
+        input=review_input,
     )
 
 
 def response(review_request, preference="A"):
-    return {
+    value = {
         "schema": BENCHMARK.REVIEW_SCHEMA,
         "phase": review_request.phase,
         "target_locale": review_request.target_locale,
@@ -120,6 +135,27 @@ def response(review_request, preference="A"):
             "B": {"blocking_defects": [], "major_defects": []},
         },
     }
+    if (
+        review_request.phase == "source_fidelity"
+        and review_request.input.get("content_type") == "commercial"
+    ):
+        dimensions = review_request.input["benchmark_suite"][
+            "commercial_dimensions"
+        ]
+        value["commercial_evaluation"] = {
+            "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
+            "dimensions": [
+                {
+                    "dimension": dimension,
+                    "variants": {
+                        label: {"status": "equivalent", "defect_index": None}
+                        for label in ("A", "B")
+                    },
+                }
+                for dimension in dimensions
+            ],
+        }
+    return value
 
 
 class Reviewer:
@@ -185,6 +221,39 @@ class BenchmarkReviewEvidenceStoreTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(len(rows), 2)
         self.assertEqual(len({tuple(row) for row in rows}), 2)
+
+    def test_commercial_fidelity_acknowledgement_is_validated_before_storage(self):
+        commercial_request = request(
+            phase="source_fidelity", commercial=True,
+        )
+        reviewer = Reviewer()
+        first = self.durable(reviewer).review(commercial_request)
+        self.assertEqual(
+            len(first["commercial_evaluation"]["dimensions"]), 10,
+        )
+
+        uncertain_request = request(
+            phase="source_fidelity", commercial=True, suffix="uncertain",
+        )
+
+        class UncertainReviewer(Reviewer):
+            def review(self, review_request):
+                value = super().review(review_request)
+                value["commercial_evaluation"]["dimensions"][0]["variants"][
+                    "A"
+                ]["status"] = "uncertain"
+                return value
+
+        with self.assertRaises(STORE.BenchmarkReviewEvidenceFailed) as caught:
+            self.durable(UncertainReviewer()).review(uncertain_request)
+        self.assertEqual(caught.exception.code, "review.store.response_invalid")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM benchmark_review_evidence"
+            ).fetchone()[0],
+            1,
+        )
 
     def test_digest_and_attestation_tampering_block_before_reviewer(self):
         self.durable(Reviewer()).review(self.request)

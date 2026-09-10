@@ -238,7 +238,7 @@ def review_response(request, preference, defects=None):
             "blocking_defects": defects.get(label, {}).get("blocking", []),
             "major_defects": defects.get(label, {}).get("major", []),
         }
-    return {
+    value = {
         "schema": BENCHMARK.REVIEW_SCHEMA,
         "phase": request.phase,
         "target_locale": request.target_locale,
@@ -246,6 +246,22 @@ def review_response(request, preference, defects=None):
         "preference": preference,
         "variants": variants,
     }
+    contract = request.input["response_schema"].get("commercial_evaluation")
+    if contract is not None:
+        value["commercial_evaluation"] = {
+            "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
+            "dimensions": [
+                {
+                    "dimension": item["dimension"],
+                    "variants": {
+                        label: {"status": "equivalent", "defect_index": None}
+                        for label in ("A", "B")
+                    },
+                }
+                for item in contract["dimensions"]
+            ],
+        }
+    return value
 
 
 class PreferenceReviewer:
@@ -580,14 +596,114 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         outcome, reviewer = self.run_case(suffix="commercial-7")
         native, fidelity = reviewer.requests
         self.assertNotIn("commercial_dimensions", native.input["benchmark_suite"])
+        self.assertNotIn(
+            "commercial_evaluation", native.input["response_schema"],
+        )
         self.assertEqual(
             fidelity.input["benchmark_suite"]["commercial_dimensions"],
+            list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS),
+        )
+        contract = fidelity.input["response_schema"]["commercial_evaluation"]
+        self.assertEqual(contract["schema"], BENCHMARK.COMMERCIAL_REVIEW_SCHEMA)
+        self.assertEqual(
+            [item["dimension"] for item in contract["dimensions"]],
             list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS),
         )
         self.assertIn(
             "not digit strings", fidelity.system_instruction,
         )
         self.assertEqual(outcome["winner"], "candidate")
+
+    def test_commercial_review_requires_exact_ordered_dimension_acknowledgement(self):
+        mutations = {
+            "missing": lambda value: value["dimensions"].pop(),
+            "reordered": lambda value: value["dimensions"].reverse(),
+            "additional": lambda value: value["dimensions"].append(
+                copy.deepcopy(value["dimensions"][0])
+            ),
+        }
+        for label, mutation in mutations.items():
+            class MutatingReviewer(PreferenceReviewer):
+                def review(self, request):
+                    value = super().review(request)
+                    if request.phase == "source_fidelity":
+                        mutation(value["commercial_evaluation"])
+                    return value
+
+            payload = job(suffix="commercial-7")
+            result = candidate_result(payload)
+            reviewer = MutatingReviewer(result["candidate"])
+            with self.subTest(label=label), self.assertRaises(
+                BENCHMARK.BenchmarkBlocked,
+            ) as caught:
+                self.run_benchmark(
+                    payload, result, baseline(payload), assets(), policy(),
+                    reviewer, blinding_key=self.key,
+                )
+            self.assertEqual(caught.exception.code, "benchmark.review.invalid")
+            self.assertEqual(len(reviewer.requests), 2)
+
+    def test_commercial_uncertainty_and_unbound_defects_fail_closed(self):
+        cases = {
+            "uncertain": (
+                lambda evaluation, response: evaluation["dimensions"][0]
+                ["variants"]["A"].update(status="uncertain"),
+                "benchmark.review.commercial_uncertain",
+            ),
+            "unbound-major": (
+                lambda evaluation, response: evaluation["dimensions"][0]
+                ["variants"]["A"].update(status="major", defect_index=0),
+                "benchmark.review.invalid",
+            ),
+        }
+        for label, (mutation, expected) in cases.items():
+            class MutatingReviewer(PreferenceReviewer):
+                def review(self, request):
+                    value = super().review(request)
+                    if request.phase == "source_fidelity":
+                        mutation(value["commercial_evaluation"], value)
+                    return value
+
+            payload = job(suffix="commercial-7")
+            result = candidate_result(payload)
+            reviewer = MutatingReviewer(result["candidate"])
+            with self.subTest(label=label), self.assertRaises(
+                BENCHMARK.BenchmarkBlocked,
+            ) as caught:
+                self.run_benchmark(
+                    payload, result, baseline(payload), assets(), policy(),
+                    reviewer, blinding_key=self.key,
+                )
+            self.assertEqual(caught.exception.code, expected)
+
+    def test_commercial_dimension_defect_references_nonpreferred_finding(self):
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+
+        class DimensionDefectReviewer(PreferenceReviewer):
+            def review(self, request):
+                value = super().review(request)
+                if request.phase != "source_fidelity":
+                    return value
+                preferred = value["preference"]
+                other = "B" if preferred == "A" else "A"
+                value["variants"][other]["major_defects"] = [{
+                    "class": "commercial_fidelity",
+                    "excerpt": "offer condition",
+                    "reason": "The condition is attached to the wrong offer.",
+                }]
+                value["commercial_evaluation"]["dimensions"][-1]["variants"][
+                    other
+                ] = {"status": "major", "defect_index": 0}
+                return value
+
+        reviewer = DimensionDefectReviewer(result["candidate"])
+        outcome = self.run_benchmark(
+            payload, result, baseline(payload), assets(), policy(), reviewer,
+            blinding_key=self.key,
+        )
+        self.assertEqual(outcome["winner"], "candidate")
+        self.assertEqual(outcome["defect_counts"]["baseline"]["major"], 1)
 
     def test_commercial_scope_drift_blocks_before_benchmark_review(self):
         payload = job(suffix="commercial-7")

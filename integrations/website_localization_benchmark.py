@@ -24,12 +24,13 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v6"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v7"
 BASELINE_SCHEMA = "blun.website-localization-baseline.v2"
 BASELINE_PROVENANCE_SCHEMA = "blun.website-localization-baseline-provenance.v1"
 NATIVE_REFERENCE_SCHEMA = "blun.website-localization-native-reference.v1"
 NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-request.v1"
-REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v1"
+REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v2"
+COMMERCIAL_REVIEW_SCHEMA = "translate-native.commercial-benchmark-review.v1"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
 CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v7"
 REPORT_SCHEMA = "blun.website-localization-benchmark-report.v11"
@@ -72,7 +73,12 @@ commercial dimension as mandatory source-fidelity scope, including dimensions ab
 added target claim as well as an omission or changed relationship. Compare semantic values and offer associations,
 not digit strings. Native digits, number words, written percentages, locale separators and equivalent time units may
 be faithful. Never guess an ambiguous amount, basis, tax status, billing interval, commitment, renewal, cancellation
-term or condition; record the affected variant as having a blocking or major defect."""
+term or condition; record the affected variant as having a blocking or major defect. Return one ordered commercial
+evaluation item for every listed dimension and both anonymous variants. Use uncertain rather than guessing."""
+
+_COMMERCIAL_STATUSES = frozenset((
+    "equivalent", "not_present", "major", "blocking", "uncertain",
+))
 
 EU_BENCHMARK_CONTENT_TYPES = tuple(sorted(_PLANNER.CONTENT_TYPES))
 _SUITE_SOURCE_LANGUAGES = tuple(sorted({
@@ -897,15 +903,34 @@ def _blinding(
     return case_id, origins, "blind-" + digest
 
 
-def _review_request(
-    *, phase: str, case_id: str, blind_id: str, job: dict[str, Any],
-    benchmark_case: dict[str, Any], assets: Any,
-    variants: dict[str, str], policy: BenchmarkPolicy,
-) -> BenchmarkReviewRequest:
-    response_schema = {
+def _commercial_response_contract(dimensions: Sequence[str]) -> dict[str, Any]:
+    status = "equivalent, not_present, major, blocking, or uncertain"
+    return {
+        "schema": COMMERCIAL_REVIEW_SCHEMA,
+        "dimensions": [
+            {
+                "dimension": dimension,
+                "variants": {
+                    label: {
+                        "status": status,
+                        "defect_index": "null or zero-based matching severity array",
+                    }
+                    for label in VARIANTS
+                },
+            }
+            for dimension in dimensions
+        ],
+    }
+
+
+def _review_response_contract(
+    *, phase: str, locale: str, blind_id: str,
+    commercial_dimensions: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    value = {
         "schema": REVIEW_SCHEMA,
         "phase": phase,
-        "target_locale": job["target"]["locale"],
+        "target_locale": locale,
         "blind_id": blind_id,
         "preference": "A, B, or tie",
         "variants": {
@@ -913,6 +938,28 @@ def _review_request(
             "B": {"blocking_defects": [], "major_defects": []},
         },
     }
+    if commercial_dimensions is not None:
+        value["commercial_evaluation"] = _commercial_response_contract(
+            commercial_dimensions,
+        )
+    return value
+
+
+def _review_request(
+    *, phase: str, case_id: str, blind_id: str, job: dict[str, Any],
+    benchmark_case: dict[str, Any], assets: Any,
+    variants: dict[str, str], policy: BenchmarkPolicy,
+) -> BenchmarkReviewRequest:
+    response_schema = _review_response_contract(
+        phase=phase,
+        locale=job["target"]["locale"],
+        blind_id=blind_id,
+        commercial_dimensions=(
+            benchmark_case["commercial_dimensions"]
+            if phase == "source_fidelity" and job["content_type"] == "commercial"
+            else None
+        ),
+    )
     common = {
         "blind_id": blind_id,
         "benchmark_version": policy.benchmark_version,
@@ -1005,10 +1052,64 @@ def _defect_hashes(items: Any, *, phase: str, label: str, severity: str) -> tupl
     return tuple(hashes)
 
 
+def _validate_commercial_evaluation(
+    value: Any,
+    *,
+    dimensions: Sequence[str],
+    variants: dict[str, dict[str, tuple[str, ...]]],
+    preferred: str,
+) -> None:
+    if not isinstance(value, dict) or set(value) != {"schema", "dimensions"}:
+        raise BenchmarkBlocked("benchmark.review.invalid")
+    items = value["dimensions"]
+    if (
+        value["schema"] != COMMERCIAL_REVIEW_SCHEMA
+        or not isinstance(items, list)
+        or len(items) != len(dimensions)
+    ):
+        raise BenchmarkBlocked("benchmark.review.invalid")
+    for expected_dimension, item in zip(dimensions, items):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"dimension", "variants"}
+            or item["dimension"] != expected_dimension
+            or not isinstance(item["variants"], dict)
+            or set(item["variants"]) != set(VARIANTS)
+        ):
+            raise BenchmarkBlocked("benchmark.review.invalid")
+        for label in VARIANTS:
+            decision = item["variants"][label]
+            if (
+                not isinstance(decision, dict)
+                or set(decision) != {"status", "defect_index"}
+                or not isinstance(decision["status"], str)
+                or decision["status"] not in _COMMERCIAL_STATUSES
+            ):
+                raise BenchmarkBlocked("benchmark.review.invalid")
+            status = decision["status"]
+            index = decision["defect_index"]
+            if status == "uncertain":
+                if index is not None:
+                    raise BenchmarkBlocked("benchmark.review.invalid")
+                raise BenchmarkBlocked("benchmark.review.commercial_uncertain")
+            if status in {"equivalent", "not_present"}:
+                if index is not None:
+                    raise BenchmarkBlocked("benchmark.review.invalid")
+                continue
+            severity = "blocking" if status == "blocking" else "major"
+            if type(index) is not int or not 0 <= index < len(variants[label][severity]):
+                raise BenchmarkBlocked("benchmark.review.invalid")
+            if preferred == label:
+                raise BenchmarkBlocked("benchmark.review.invalid")
+
+
 def _validate_review(
     response: dict[str, Any], *, phase: str, locale: str, blind_id: str,
+    commercial_dimensions: Any = None,
 ) -> dict[str, Any]:
     expected = {"schema", "phase", "target_locale", "blind_id", "preference", "variants"}
+    if commercial_dimensions is not None:
+        expected.add("commercial_evaluation")
     if set(response) != expected:
         raise BenchmarkBlocked("benchmark.review.invalid")
     if (
@@ -1034,6 +1135,15 @@ def _validate_review(
         defects = parsed["variants"][preferred]
         if defects["blocking"] or defects["major"]:
             raise BenchmarkBlocked("benchmark.review.invalid")
+    if commercial_dimensions is not None:
+        if commercial_dimensions != list(_WORKER._COMMERCIAL.DIMENSIONS):
+            raise BenchmarkBlocked("benchmark.review.invalid")
+        _validate_commercial_evaluation(
+            response["commercial_evaluation"],
+            dimensions=commercial_dimensions,
+            variants=parsed["variants"],
+            preferred=preferred,
+        )
     return parsed
 
 
@@ -1121,6 +1231,11 @@ def run_blind_benchmark_case(
         response, request_hash, response_hash = _invoke(reviewer, request)
         parsed = _validate_review(
             response, phase=phase, locale=job["target"]["locale"], blind_id=blind_id,
+            commercial_dimensions=(
+                benchmark_case["commercial_dimensions"]
+                if phase == "source_fidelity" and job["content_type"] == "commercial"
+                else None
+            ),
         )
         preference = _unblind(parsed["preference"], origins)
         preferences.append(preference)

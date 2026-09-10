@@ -757,6 +757,15 @@ campaign status and final case results still expose only response hashes,
 preferences, defect counts and finding hashes—not reviewer reasons, excerpts,
 source text or either target.
 
+For a commercial `source_fidelity` response, persistence additionally requires
+the complete `translate-native.commercial-benchmark-review.v1` acknowledgement.
+It lists all ten dimensions in profile order and records a status for both
+anonymous variants. `major` and `blocking` statuses must reference the matching
+variant's zero-based defect entry; `equivalent` and `not_present` cannot carry a
+defect reference. `uncertain` blocks the case instead of becoming durable PASS
+evidence. The `target_native` response has no commercial acknowledgement and
+therefore remains source-blind.
+
 The review store also exposes a strictly read-only, content-free health view
 for one exact reviewer route and benchmark policy. It rechecks canonical rows,
 digests, phases, locale and blind-variant bindings, and every host attestation;
@@ -778,8 +787,10 @@ owners of retry limits, backoff, leases, and reuse.
 
 Each `POST` body uses
 `blun.website-localization-benchmark-review-http-request.v1` and contains the
-exact anonymous `BenchmarkReviewRequest`, its deterministic `review_id`, and
-the SHA-256 digest of its canonical UTF-8 JSON. The same values are bound in
+exact anonymous `blun.website-localization-benchmark.v7`
+`BenchmarkReviewRequest`, its deterministic `review_id`, and the SHA-256 digest
+of its canonical UTF-8 JSON. Its expected review object uses
+`blun.website-localization-benchmark-review.v2`. The same values are bound in
 `Idempotency-Key`, `X-Benchmark-Review-Id`,
 `X-Benchmark-Review-Phase`, and
 `X-Benchmark-Review-Request-Sha256`. Authentication headers are obtained for
@@ -790,15 +801,20 @@ evidence.
 The source-blind request is accepted only with the exact `target_native`
 instruction and input field set; `source`, `glossary`, and `protected_terms`
 are forbidden. The later `source_fidelity` request has a different exact field
-set and instruction and carries the source. Both retain only anonymous `A` and
-`B` variants. Candidate provider, baseline identity, acquisition provenance,
-and unblinding data are absent from the transport contract.
+set and instruction and carries the source. Commercial fidelity requests also
+carry the ten ordered dimensions and exact acknowledgement schema; other
+content types do not. Both retain only anonymous `A` and `B` variants.
+Candidate provider, baseline identity, acquisition provenance, and unblinding
+data are absent from the transport contract.
 
 The service must return
 `blun.website-localization-benchmark-review-http-response.v1` with the same
 `review_id` and request digest plus one exact benchmark-review object. The
 adapter rejects wrong phase, locale or blind ID, unknown fields, malformed
-defects, and a preferred variant that still has a blocking or major defect.
+defects, and a preferred variant that still has a blocking or major defect. For
+commercial fidelity it also rejects missing, additional, reordered, uncertain,
+or improperly defect-linked dimension decisions. The HTTPS adapter and durable
+review store enforce the same conditional contract.
 Responses are strict UTF-8 JSON with duplicate keys, BOMs, non-finite numbers,
 wrong media types, inconsistent lengths, redirects, and oversized bodies
 rejected. Only `408`, `425`, `429`, network failures, and `5xx` responses are

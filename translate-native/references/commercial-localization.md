@@ -127,3 +127,13 @@ conditions. The runner validates the exact list before either external pass and
 provides it only to source-fidelity review. Source-blind native review receives
 neither the source nor this semantic scope. Missing, additional, or reordered
 dimensions fail closed before a reviewer is called.
+
+The fidelity reviewer must return
+`translate-native.commercial-benchmark-review.v1`: one ordered item for every
+dimension and a decision for each anonymous variant. `equivalent` and
+`not_present` carry no defect reference. `major` and `blocking` point to the
+matching variant's zero-based defect entry, so a generic preference cannot hide
+which commercial check failed. `uncertain`, incomplete, reordered, additional,
+or contradictory acknowledgements fail closed. Only canonical response hashes,
+defect counts, and finding hashes survive in case evidence; reviewer prose does
+not.
