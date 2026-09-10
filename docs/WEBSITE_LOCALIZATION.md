@@ -637,7 +637,7 @@ and cannot weaken the receipt, attestation, or immutable-store checks.
 
 Every benchmark policy must bind the exact version and SHA-256 digest of the
 output-free source manifest in
-`integrations/website_localization_benchmark_suite.py`. Suite v3 contains 64
+`integrations/website_localization_benchmark_suite.py`. Suite v4 contains 64
 cases: eight independently bound cases from eight distinct domains for each of
 `headline`, `cta`, `marketing`, `ui`, `documentation`, `seo`, `legal`, and
 `commercial`. Eighteen cases are connected long-form pages across commercial,
@@ -649,6 +649,14 @@ refunds, proration, tiered prices, and offer assignment. The suite contains no
 target, candidate, baseline, or supposed reference translation. Actual targets
 must still come from the attached candidate and lawfully acquired baseline so
 unreviewed prose cannot silently become a gold standard.
+
+The hashed manifest also binds the exact commercial evaluation scope from the
+public, brand-neutral offer profile. Every commercial case carries all ten
+ordered dimensions, including dimensions absent from its source so an invented
+target-only claim is still in scope. The runner validates this scope before any
+external review. It exposes the dimensions only to the source-aware fidelity
+pass; the first native-language pass remains source-blind. Missing, additional,
+or reordered dimensions block the case instead of silently narrowing review.
 
 The policy also requires `valid_until`, an absolute positive integer Unix
 timestamp chosen by the trusted host for that exact candidate, baseline,
@@ -909,7 +917,7 @@ attested report. Joint case winners remain an additional conservative metric,
 but discarded cross-axis disagreements can no longer make a weak axis appear
 statistically convincing.
 
-Suite v3 predeclares all eight content types as required statistical lanes with
+Suite v4 predeclares all eight content types as required statistical lanes with
 a minimum of eight cases per type and locale. For every lane, the report repeats
 the joint and independent `target_native` and `source_fidelity` statistics. A
 weak headline, CTA, marketing, UI, documentation, SEO, legal, or price/offer

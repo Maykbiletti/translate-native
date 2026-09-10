@@ -67,6 +67,13 @@ _SUITE = _load_module(
     _ROOT / "integrations" / "website_localization_benchmark_suite.py",
 )
 
+_COMMERCIAL_BENCHMARK_FIDELITY_SYSTEM = """For a commercial benchmark case, treat every listed
+commercial dimension as mandatory source-fidelity scope, including dimensions absent from the source: reject an
+added target claim as well as an omission or changed relationship. Compare semantic values and offer associations,
+not digit strings. Native digits, number words, written percentages, locale separators and equivalent time units may
+be faithful. Never guess an ambiguous amount, basis, tax status, billing interval, commitment, renewal, cancellation
+term or condition; record the affected variant as having a blocking or major defect."""
+
 EU_BENCHMARK_CONTENT_TYPES = tuple(sorted(_PLANNER.CONTENT_TYPES))
 _SUITE_SOURCE_LANGUAGES = tuple(sorted({
     item["source_locale"].split("-", 1)[0]
@@ -933,10 +940,16 @@ def _review_request(
             "long_form": benchmark_case["long_form"],
             "adversarial_tags": benchmark_case["adversarial_tags"],
         })
+        if job["content_type"] == "commercial":
+            common["benchmark_suite"]["commercial_dimensions"] = (
+                benchmark_case["commercial_dimensions"]
+            )
         common["source"] = job["source"]
         common["glossary"] = [asdict(term) for term in assets.glossary]
         common["protected_terms"] = list(assets.protected_terms)
         system = _FIDELITY_SYSTEM
+        if job["content_type"] == "commercial":
+            system += "\n" + _COMMERCIAL_BENCHMARK_FIDELITY_SYSTEM
     binding = {"case_id": case_id, "phase": phase, "input_sha256": _hash_json(common)}
     return BenchmarkReviewRequest(
         schema=BENCHMARK_SCHEMA,
@@ -1028,6 +1041,17 @@ def _unblind(label: str, origins: dict[str, str]) -> str:
     return "tie" if label == "tie" else origins[label]
 
 
+def _validate_commercial_benchmark_scope(
+    job: dict[str, Any], benchmark_case: dict[str, Any],
+) -> None:
+    dimensions = benchmark_case.get("commercial_dimensions")
+    if job["content_type"] == "commercial":
+        if dimensions != list(_WORKER._COMMERCIAL.DIMENSIONS):
+            raise BenchmarkBlocked("benchmark.suite.commercial_scope_mismatch")
+    elif dimensions is not None:
+        raise BenchmarkBlocked("benchmark.suite.commercial_scope_mismatch")
+
+
 def run_blind_benchmark_case(
     job_payload: Any,
     candidate_result: Any,
@@ -1058,6 +1082,7 @@ def run_blind_benchmark_case(
         benchmark_case = _SUITE.case_for_job(job)
     except ValueError as error:
         raise BenchmarkBlocked("benchmark.suite.case_mismatch") from error
+    _validate_commercial_benchmark_scope(job, benchmark_case)
     candidate_result = _validate_worker_result(job, candidate_result)
     baseline = _validate_baseline(
         job, baseline_artifact, policy, evidence_authority,

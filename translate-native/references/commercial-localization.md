@@ -111,7 +111,7 @@ remain mandatory. No live provider or native-editor quality is established by
 scripted adapter tests. Profile changes require a new profile version, and
 project condition/glossary/prompt changes require new bound policy versions.
 
-The website benchmark suite v3 treats commercial localization as one of eight
+The website benchmark suite v4 treats commercial localization as one of eight
 separately gated content-type lanes. Each locale needs all eight brand-neutral
 commercial cases and must pass the predeclared joint, target-native, and
 source-fidelity statistics inside that lane. Wins on headlines, UI, or other
@@ -119,3 +119,11 @@ content cannot compensate for a weak pricing lane, just as commercial wins
 cannot hide another weak content type. These gates prove only the integrity of
 recorded blind evidence; they do not manufacture native review or establish
 superiority without real qualified reviewers and a lawful baseline.
+
+Its hashed manifest binds the same ten ordered dimensions as this profile to
+every commercial case. This includes dimensions absent from the source, because
+the target must also be checked for invented prices, discounts, terms, or
+conditions. The runner validates the exact list before either external pass and
+provides it only to source-fidelity review. Source-blind native review receives
+neither the source nor this semantic scope. Missing, additional, or reordered
+dimensions fail closed before a reviewer is called.

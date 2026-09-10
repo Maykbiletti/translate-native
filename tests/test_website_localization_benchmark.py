@@ -576,6 +576,51 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(outcome["winner"], "candidate")
 
+    def test_commercial_scope_is_complete_and_only_source_fidelity_receives_it(self):
+        outcome, reviewer = self.run_case(suffix="commercial-7")
+        native, fidelity = reviewer.requests
+        self.assertNotIn("commercial_dimensions", native.input["benchmark_suite"])
+        self.assertEqual(
+            fidelity.input["benchmark_suite"]["commercial_dimensions"],
+            list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS),
+        )
+        self.assertIn(
+            "not digit strings", fidelity.system_instruction,
+        )
+        self.assertEqual(outcome["winner"], "candidate")
+
+    def test_commercial_scope_drift_blocks_before_benchmark_review(self):
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+        benchmark_policy = policy()
+        baseline_artifact = baseline(payload, benchmark_policy=benchmark_policy)
+        original = BENCHMARK._SUITE.case_for_job
+
+        mutations = {
+            "missing": lambda dimensions: dimensions.pop(),
+            "reordered": lambda dimensions: dimensions.reverse(),
+            "unknown": lambda dimensions: dimensions.append("invented_dimension"),
+        }
+        for label, mutation in mutations.items():
+            def drifted(value, mutation=mutation):
+                case = original(value)
+                mutation(case["commercial_dimensions"])
+                return case
+
+            reviewer = PreferenceReviewer(result["candidate"])
+            with self.subTest(label=label), mock.patch.object(
+                BENCHMARK._SUITE, "case_for_job", drifted,
+            ), self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+                self.run_benchmark(
+                    payload, result, baseline_artifact, assets(),
+                    benchmark_policy, reviewer, blinding_key=self.key,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.suite.commercial_scope_mismatch",
+            )
+            self.assertEqual(reviewer.requests, [])
+
     def test_qualified_native_reference_is_verified_bound_and_text_free(self):
         payload = job()
         benchmark_policy = policy()

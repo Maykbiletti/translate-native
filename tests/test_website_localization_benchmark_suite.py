@@ -26,6 +26,10 @@ SUITE = load(
     "blun_test_website_localization_benchmark_suite",
     ROOT / "integrations" / "website_localization_benchmark_suite.py",
 )
+COMMERCIAL = load(
+    "blun_test_benchmark_commercial_profile",
+    ROOT / "integrations" / "commercial_localization_profile.py",
+)
 
 
 class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
@@ -51,6 +55,39 @@ class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
         self.assertEqual(len(commercial), 8)
         self.assertGreaterEqual(len({case["domain"] for case in commercial}), 8)
         self.assertGreaterEqual(sum(case["long_form"] for case in commercial), 5)
+        commercial_evaluation = manifest["commercial_evaluation"]
+        self.assertEqual(
+            commercial_evaluation["schema"],
+            SUITE.COMMERCIAL_EVALUATION_SCHEMA,
+        )
+        self.assertEqual(
+            commercial_evaluation["review_summary_schema"],
+            COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+        )
+        self.assertEqual(
+            commercial_evaluation["dimensions"], list(COMMERCIAL.DIMENSIONS),
+        )
+        self.assertEqual(
+            commercial_evaluation["case_keys"],
+            [case["key"] for case in commercial],
+        )
+        self.assertEqual(
+            commercial_evaluation["cases_per_dimension"], len(commercial),
+        )
+        self.assertEqual(
+            commercial_evaluation["source_blind_native_exposure"], "none",
+        )
+        self.assertEqual(
+            commercial_evaluation["source_fidelity_scope"],
+            "all-dimensions-every-commercial-case",
+        )
+        for case in manifest["cases"]:
+            if case["content_type"] == "commercial":
+                self.assertEqual(
+                    case["commercial_dimensions"], list(COMMERCIAL.DIMENSIONS),
+                )
+            else:
+                self.assertNotIn("commercial_dimensions", case)
         serialized = json.dumps(manifest, ensure_ascii=False).lower()
         for forbidden in ("target_text", "candidate_text", "baseline_text", "reference_translation"):
             self.assertNotIn(forbidden, serialized)

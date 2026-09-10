@@ -4,14 +4,47 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import sys
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "blun.website-localization-benchmark-suite.v3"
-VERSION = "eu-web-content-lanes-2026-09-3"
+SCHEMA = "blun.website-localization-benchmark-suite.v4"
+VERSION = "eu-web-content-lanes-2026-09-4"
 LONG_FORM_MINIMUM_CHARACTERS = 400
+COMMERCIAL_EVALUATION_SCHEMA = (
+    "translate-native.commercial-benchmark-scope.v1"
+)
+
+
+def _load_commercial_profile():
+    path = Path(__file__).with_name("commercial_localization_profile.py")
+    spec = importlib.util.spec_from_file_location(
+        "blun_website_benchmark_commercial_profile", path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load commercial benchmark profile")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_COMMERCIAL = _load_commercial_profile()
+
+
+def _commercial_dimensions() -> tuple[str, ...]:
+    dimensions = tuple(_COMMERCIAL.DIMENSIONS)
+    if (
+        len(dimensions) != 10
+        or len(set(dimensions)) != len(dimensions)
+        or any(not isinstance(name, str) or not name for name in dimensions)
+    ):
+        raise RuntimeError("invalid commercial benchmark dimension registry")
+    return dimensions
 
 
 @dataclass(frozen=True)
@@ -23,7 +56,7 @@ class SourceCase:
     adversarial_tags: tuple[str, ...]
 
     def as_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             **asdict(self),
             "source_id": f"benchmark.{self.key}",
             "source_revision": VERSION,
@@ -31,6 +64,9 @@ class SourceCase:
             "source_sha256": hashlib.sha256(self.source_text.encode("utf-8")).hexdigest(),
             "long_form": len(self.source_text) >= LONG_FORM_MINIMUM_CHARACTERS,
         }
+        if self.content_type == "commercial":
+            payload["commercial_dimensions"] = list(_commercial_dimensions())
+        return payload
 
 
 SOURCE_CASES: tuple[SourceCase, ...] = (
@@ -365,11 +401,34 @@ def _canonical_json(value: Any) -> bytes:
 
 
 def manifest() -> dict[str, Any]:
+    cases = [case.as_payload() for case in SOURCE_CASES]
+    commercial_cases = [
+        case for case in cases if case["content_type"] == "commercial"
+    ]
+    dimensions = list(_commercial_dimensions())
+    if (
+        len(commercial_cases) != 8
+        or any(case.get("commercial_dimensions") != dimensions for case in commercial_cases)
+        or any(
+            "commercial_dimensions" in case
+            for case in cases if case["content_type"] != "commercial"
+        )
+    ):
+        raise RuntimeError("invalid commercial benchmark coverage")
     body = {
         "schema": SCHEMA,
         "version": VERSION,
         "long_form_minimum_characters": LONG_FORM_MINIMUM_CHARACTERS,
-        "cases": [case.as_payload() for case in SOURCE_CASES],
+        "commercial_evaluation": {
+            "schema": COMMERCIAL_EVALUATION_SCHEMA,
+            "review_summary_schema": _COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+            "source_blind_native_exposure": "none",
+            "source_fidelity_scope": "all-dimensions-every-commercial-case",
+            "dimensions": dimensions,
+            "case_keys": [case["key"] for case in commercial_cases],
+            "cases_per_dimension": len(commercial_cases),
+        },
+        "cases": cases,
     }
     body["sha256"] = hashlib.sha256(_canonical_json(body)).hexdigest()
     return json.loads(_canonical_json(body))
