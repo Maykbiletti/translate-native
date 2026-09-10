@@ -187,7 +187,7 @@ provider data, or mutable service state.
 The nested `publication_http` object is the separately hashed, machine-readable
 contract for the built-in outbound CMS adapter. It declares publication,
 tombstone, and content-free health payload, request, acknowledgement, and
-response schemas; exact
+response schemas; the nested release-evidence schema; exact
 success values; accepted JSON content types; at-least-once delivery; and the
 three headers that bind every attempt to its delivery ID and payload hash. It
 also declares the three health headers that bind a fresh probe ID and this
@@ -278,16 +278,17 @@ response rather than advertising a partial contract.
         "acknowledgement_schema": "blun.cms-localization-publication-ack.v1",
         "acknowledgement_status": "accepted",
         "name": "publication",
-        "payload_schema": "blun.cms-localization-publication.v2",
+        "payload_schema": "blun.cms-localization-publication.v3",
         "request_schema": "blun.cms-localization-publication-http.v1",
         "response_schema": "blun.cms-localization-publication-http-ack.v1"
       }],
       "request_content_type": "application/json; charset=utf-8",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v1",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v2",
       "sha256": "<sha256>"
     },
-    "publication_schema": "blun.cms-localization-publication.v2",
+    "publication_schema": "blun.cms-localization-publication.v3",
     "quality_passes": ["target_native", "source_fidelity"],
     "schema": "blun.website-localization-capabilities.v3",
     "sha256": "<sha256>"

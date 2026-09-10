@@ -169,6 +169,15 @@ def tombstone_event(event=None, **overrides):
 
 def completed_result(job, candidate):
     payload = job.as_payload()
+    commercial_review = None
+    if payload["content_type"] == "commercial":
+        commercial_review = {
+            "schema": WORKER._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
+            "profile": payload["commercial_profile"],
+            "status": "verified",
+            "review_required_dimensions": [],
+            "evidence_sha256": "a" * 64,
+        }
     return {
         "schema": WORKER.RESULT_SCHEMA,
         "worker_schema": WORKER.WORKER_SCHEMA,
@@ -202,7 +211,7 @@ def completed_result(job, candidate):
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
         },
-        "commercial_review": None,
+        "commercial_review": commercial_review,
         "human_review_required": False,
         "independent_review_required": False,
         "release_required": True,
@@ -427,6 +436,26 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             [item["locale"] for item in first.payload["localizations"]],
             ["de-AT", "sv-SE"],
         )
+        approval_rows = {
+            row["target_locale"]: row
+            for row in self.release_connection.execute(
+                "SELECT * FROM localization_approvals"
+            ).fetchall()
+        }
+        for item in first.payload["localizations"]:
+            evidence = item["release_evidence"]
+            row = approval_rows[item["locale"]]
+            self.assertEqual(
+                evidence["schema"], RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+            )
+            self.assertEqual(evidence["result_sha256"], row["result_sha256"])
+            self.assertEqual(evidence["approval_sha256"], row["approval_sha256"])
+            self.assertEqual(
+                evidence["quality_receipt_sha256"],
+                hashlib.sha256(b"quality-receipt").hexdigest(),
+            )
+            self.assertIsNone(evidence["commercial_profile"])
+            self.assertIsNone(evidence["commercial_review"])
         self.assertTrue(self.publication_authority.verify(
             CMS._canonical_json(first.payload).encode("utf-8"),
             first.signature,
@@ -435,6 +464,31 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.cms_connection.execute("SELECT COUNT(*) FROM cms_publication_deliveries").fetchone()[0],
             1,
         )
+
+    def test_commercial_delivery_carries_content_free_review_evidence(self):
+        event = change_event(
+            source_id="homepage.pricing",
+            source_text="Save up to €480 a year. All prices exclude VAT.",
+            content_type="commercial",
+        )
+        self.ingest(event)
+        self.release_all(event)
+        request = self.prepare(event)
+
+        for item in request.payload["localizations"]:
+            evidence = item["release_evidence"]
+            self.assertEqual(
+                evidence["commercial_profile"], PLANNER.COMMERCIAL_PROFILE,
+            )
+            self.assertEqual(evidence["commercial_review"]["status"], "verified")
+            self.assertEqual(
+                evidence["commercial_review"]["review_required_dimensions"], [],
+            )
+        serialized = json.dumps(
+            [item["release_evidence"] for item in request.payload["localizations"]]
+        )
+        self.assertNotIn("480", serialized)
+        self.assertNotIn("VAT", serialized)
 
     def test_success_requires_exact_ack_and_sends_one_complete_request(self):
         self.ingest()
@@ -641,6 +695,39 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         )
         self.cms_connection.commit()
         publisher = Publisher()
+        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
+            self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(260),
+            )
+        self.assertEqual(caught.exception.code, "cms.delivery.tampered")
+        self.assertEqual(publisher.requests, [])
+
+    def test_malformed_release_evidence_blocks_even_when_resigned(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare()
+        payload = json.loads(CMS._canonical_json(request.payload))
+        payload["localizations"][0]["release_evidence"][
+            "commercial_profile"
+        ] = PLANNER.COMMERCIAL_PROFILE
+        payload_json = CMS._canonical_json(payload)
+        signature = self.publication_authority.sign(payload_json.encode("utf-8"))
+        self.cms_connection.execute("""
+            UPDATE cms_publication_deliveries
+            SET payload_json = ?, payload_sha256 = ?, signature = ?
+            WHERE delivery_id = ?
+        """, (
+            payload_json,
+            hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+            signature.signature,
+            request.delivery_id,
+        ))
+        self.cms_connection.commit()
+        publisher = Publisher()
+
         with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
             self.bridge.run_delivery(
                 publisher,

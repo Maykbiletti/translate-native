@@ -1300,10 +1300,18 @@ publication remains immutable history. Schema-v1 databases migrate these
 generations and supersessions transactionally before normal operation resumes.
 
 After every required locale has a valid signed approval, `prepare_delivery`
-creates one `blun.cms-localization-publication.v2` payload for the complete
+creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
-and, for each locale, the exact target text and hash, approval ID, and expiry.
+and, for each locale, the exact target text and hash, approval ID, expiry, and
+a `blun.website-localization-release-evidence.v1` object. That content-free
+object binds the signed approval and worker-result hashes, quality-receipt
+hash, and either a null commercial scope or the exact commercial-profile ID
+and validated review summary. It contains no source text, target text, amount,
+currency, tax wording, brand, or reviewer explanation. A CMS can therefore
+pin the advertised profile and reject missing, malformed, or drifted evidence
+before replacing its current content, without treating a cross-language regex
+as semantic proof.
 Its deterministic `delivery_id` is an idempotency key over those immutable
 bytes. The host-owned publication authority signs and immediately verifies the
 payload before the durable outbox accepts it. A partial, changed, expired, or
@@ -1338,7 +1346,7 @@ translation format:
 {
   "schema": "blun.cms-localization-publication-http.v1",
   "payload_sha256": "…",
-  "publication": { "schema": "blun.cms-localization-publication.v2" },
+  "publication": { "schema": "blun.cms-localization-publication.v3" },
   "signature": {
     "algorithm": "ed25519",
     "key_id": "publisher-2026-09",

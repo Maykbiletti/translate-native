@@ -533,7 +533,7 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(set(publication_http), {
             "schema", "method", "request_content_type", "response_content_types",
             "delivery_semantics", "binding_headers", "health_binding_headers",
-            "operations", "sha256",
+            "release_evidence_schema", "operations", "sha256",
         })
         unsigned_publication_http = dict(publication_http)
         publication_http_digest = unsigned_publication_http.pop("sha256")
@@ -559,6 +559,10 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(
             publication_operations["publication"]["payload_schema"],
             CMS.PUBLICATION_SCHEMA,
+        )
+        self.assertEqual(
+            publication_http["release_evidence_schema"],
+            CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
         )
         self.assertEqual(
             publication_operations["publication"]["acknowledgement_schema"],

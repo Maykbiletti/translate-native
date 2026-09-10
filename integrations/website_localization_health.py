@@ -632,12 +632,19 @@ class LocalizationHealthMonitor:
                 for item in localizations:
                     if not isinstance(item, dict) or set(item) != {
                         "locale", "target_text", "target_sha256", "approval_id",
-                        "approval_expires_at",
+                        "approval_expires_at", "release_evidence",
                     }:
                         raise ValueError
                     if not isinstance(item["locale"], str) or not isinstance(item["target_text"], str):
                         raise ValueError
                     if _hash(item["target_text"]) != item["target_sha256"]:
+                        raise ValueError
+                    if not _CMS._valid_release_evidence(
+                        item["release_evidence"],
+                        locale=item["locale"],
+                        target_sha256=item["target_sha256"],
+                        approval_id=item["approval_id"],
+                    ):
                         raise ValueError
                     locales.append(item["locale"])
                 if locales != sorted(set(locales)):

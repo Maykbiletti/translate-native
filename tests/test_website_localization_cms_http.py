@@ -82,6 +82,19 @@ def publication_request(authority=None):
             "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
             "approval_id": "blun-l10n-approval-" + "d" * 64,
             "approval_expires_at": 2000,
+            "release_evidence": {
+                "schema": CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+                "job_id": "blun-l10n-job-" + "4" * 64,
+                "target_locale": "fi-FI",
+                "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
+                "approval_id": "blun-l10n-approval-" + "d" * 64,
+                "content_type": "cta",
+                "result_sha256": "1" * 64,
+                "approval_sha256": "2" * 64,
+                "quality_receipt_sha256": "3" * 64,
+                "commercial_profile": None,
+                "commercial_review": None,
+            },
         }],
     }
     payload_bytes = HTTP._canonical_json(

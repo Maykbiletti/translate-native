@@ -27,7 +27,7 @@ SCHEMA_VERSION = 4
 CHANGE_SCHEMA = "blun.cms-content-change.v2"
 CANCELLATION_SCHEMA = "blun.cms-content-cancellation.v1"
 TOMBSTONE_SCHEMA = "blun.cms-content-tombstone.v1"
-PUBLICATION_SCHEMA = "blun.cms-localization-publication.v2"
+PUBLICATION_SCHEMA = "blun.cms-localization-publication.v3"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
@@ -374,6 +374,24 @@ def _timestamp(value: Any, code: str) -> float:
     if value < 0 or value != value or value in {float("inf"), float("-inf")}:
         raise CMSBridgeBlocked(code)
     return value
+
+
+def _valid_release_evidence(
+    value: Any,
+    *,
+    locale: Any,
+    target_sha256: Any,
+    approval_id: Any,
+) -> bool:
+    try:
+        evidence = _RELEASE.validate_publication_evidence(value)
+    except _RELEASE.LocalizationReleaseBlocked:
+        return False
+    return (
+        evidence["target_locale"] == locale
+        and evidence["target_sha256"] == target_sha256
+        and evidence["approval_id"] == approval_id
+    )
 
 
 def _positive_integer(value: Any, code: str) -> int:
@@ -761,6 +779,10 @@ class WebsiteLocalizationCMSBridge:
                     "application/json", "application/json; charset=utf-8",
                 ],
                 "delivery_semantics": "at-least-once",
+                "release_evidence_schema": _token(
+                    _RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+                    "cms.capabilities.registry_invalid",
+                ),
                 "binding_headers": headers,
                 "health_binding_headers": [
                     {
@@ -1894,7 +1916,7 @@ class WebsiteLocalizationCMSBridge:
             }
             expected_localization_keys = {
                 "locale", "target_text", "target_sha256", "approval_id",
-                "approval_expires_at",
+                "approval_expires_at", "release_evidence",
             }
             localizations = payload.get("localizations")
             if (
@@ -1930,6 +1952,12 @@ class WebsiteLocalizationCMSBridge:
                     or _timestamp(
                         item["approval_expires_at"], "cms.delivery.tampered",
                     ) <= 0
+                    or not _valid_release_evidence(
+                        item["release_evidence"],
+                        locale=item["locale"],
+                        target_sha256=item["target_sha256"],
+                        approval_id=item["approval_id"],
+                    )
                     for item in localizations
                 )
             ):
@@ -2221,6 +2249,7 @@ class WebsiteLocalizationCMSBridge:
                     "target_sha256": item.target_sha256,
                     "approval_id": item.approval_id,
                     "approval_expires_at": item.expires_at,
+                    "release_evidence": item.release_evidence,
                 }
                 for item in bundle
             ],
@@ -2298,6 +2327,23 @@ class WebsiteLocalizationCMSBridge:
         validated_expiries = tuple(
             _timestamp(expiry, "cms.delivery.tampered") for expiry in expiries
         )
+        try:
+            for item in localizations:
+                if not isinstance(item, dict):
+                    raise _RELEASE.LocalizationReleaseBlocked(
+                        "publication.evidence.invalid"
+                    )
+                if not _valid_release_evidence(
+                    item.get("release_evidence"),
+                    locale=item.get("locale"),
+                    target_sha256=item.get("target_sha256"),
+                    approval_id=item.get("approval_id"),
+                ):
+                    raise _RELEASE.LocalizationReleaseBlocked(
+                        "publication.evidence.invalid"
+                    )
+        except _RELEASE.LocalizationReleaseBlocked:
+            raise CMSBridgeBlocked("cms.delivery.tampered") from None
         if require_current_approvals and any(
             expiry <= now for expiry in validated_expiries
         ):
