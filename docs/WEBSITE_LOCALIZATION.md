@@ -1572,9 +1572,20 @@ bounded retries, opaque failures, and crash recovery.
 ### Authenticated CMS webhook API
 
 `integrations/website_localization_api.py` exposes the current signed CMS
-change contract and content-free per-locale progress through two strict
-HTTPS-only WSGI routes. The composed runtime publishes the same callable as
-`runtime.cms_api`; no second bridge, queue, or database is constructed.
+change, cancellation, tombstone, status, lifecycle, and capability contracts
+through six strict HTTPS-only WSGI routes. The composed runtime publishes the
+same callable as `runtime.cms_api`; no second bridge, queue, or database is
+constructed.
+
+`integrations/website_localization_cms_client.py` is the matching source-side
+reference client for CMS and website backends. One fixed HTTPS origin and one
+host-owned signing authority cover all six operations. The client canonicalizes
+and copies native-Unicode requests before signing, performs exactly one network
+attempt, never follows redirects, and leaves retries to the caller's durable
+policy. Status and lifecycle replies must match their request ID, event, and
+site; mutation replies must match their immutable event identities. Capability
+and API-contract hashes plus the six exact ordered route definitions are
+revalidated before use. Failures expose only stable codes and retryability.
 
 `POST /v2/localization/changes` accepts only a complete signed
 `blun.cms-content-change.v2` event. Successful intake durably enqueues one exact
@@ -1586,7 +1597,7 @@ state, stable errors, and hashes. The signed site and original event credential
 must match, preventing cross-site status access even when a verifier recognizes
 multiple credentials.
 
-Both routes reject plaintext transport, query strings, transfer encoding,
+All routes reject plaintext transport, query strings, transfer encoding,
 ambiguous or oversized JSON, and invalid framing. Status revalidates the stored
 event signature, current source generation, exact plan/job/locale identities,
 and every successful result before returning a complete response. Superseded,

@@ -1,5 +1,29 @@
 # Version 6 premortem
 
+## Source-side CMS HTTPS client (10 September 2026)
+
+Assume a website backend implemented the documented six-operation API but
+still leaked a signed request or accepted another event's state.
+
+- A general HTTP library could follow a redirect and forward host credentials
+  plus signed source content to a different authority.
+- Library-level retries could repeat a mutation outside the CMS event's durable
+  retry and idempotency policy.
+- A syntactically valid response could carry another request ID, event, site,
+  or a substituted capability contract.
+- Signing mutable caller data could let the transmitted bytes diverge from the
+  event the CMS intended to submit.
+
+The source-side reference client now accepts one fixed HTTPS origin, refuses
+credentials in URLs and redirects, performs exactly one transport attempt, and
+leaves retry scheduling to the host. It first copies each request into canonical
+native-Unicode JSON, signs those exact bytes, and binds every response to the
+operation plus request, event, site, and request ID. Capability and API-contract
+hashes are recomputed, while the exact six ordered operation definitions are
+checked independently so rehashing a substituted route cannot make it valid.
+Authentication, parser, transport, server, and binding failures remain
+content-free with an explicit retry decision.
+
 ## Generation-bound CMS rendering (10 September 2026)
 
 Assume the CMS safely retained its last-known-good localization while a new

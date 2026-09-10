@@ -28,6 +28,33 @@ invalid UTF-8, a UTF-8 BOM, non-finite numbers, unknown fields, missing or
 truncated lengths, and bodies over 4,000,000 bytes. The front server remains
 responsible for unambiguous HTTP framing and request-smuggling protection.
 
+## Source-side reference client
+
+`CMSLocalizationHTTPClient` in
+`integrations/website_localization_cms_client.py` implements the sending side
+for all six routes. Configure one origin containing only an HTTPS scheme and
+authority, a callback that supplies host-owned authentication headers, and an
+authority whose `sign(bytes)` method signs the exact canonical request bytes.
+Credentials in the URL, base paths, query strings, fragments, redirects, and
+authentication headers that collide with protocol headers are rejected.
+
+Each method performs one HTTP attempt. The client does not retry: the CMS host
+must decide whether and when to repeat an immutable event, cancellation,
+tombstone, or short-lived read request. `submit_change`, `cancel`, and
+`request_tombstone` accept complete versioned objects; `status`, `lifecycle`,
+and `capabilities` create fresh signed read requests from the configured clock
+and request-ID source. Caller mappings are copied through canonical
+native-Unicode JSON before signing and are never mutated.
+
+Successful responses require canonical bounded JSON, an allowed status code,
+the exact response schema, and the originating request, event, and site
+bindings. Capability responses additionally recompute both advertised hashes
+and verify the exact ordered operation names, methods, paths, request schemas,
+response schemas, and enabled booleans. Rehashing a substituted endpoint is
+therefore insufficient. Stable server failures retain their content-free error
+code and derive retryability from HTTP status; redirects and invalid bindings
+fail closed.
+
 ## Create or resume localization work
 
 ```http
