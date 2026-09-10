@@ -1587,6 +1587,19 @@ site; mutation replies must match their immutable event identities. Capability
 and API-contract hashes plus the six exact ordered route definitions are
 revalidated before use. Failures expose only stable codes and retryability.
 
+`integrations/website_localization_cms_dispatch.py` adds the durable sending
+root for changed content. A host first enqueues one complete immutable change
+event in its SQLite outbox, then lets workers run one leased dispatch at a
+time. Canonical event bytes and their hash survive restart; exact re-enqueue is
+idempotent and changed content under the same event ID is rejected. A worker
+performs one client call per attempt. Retryable failures enter bounded capped
+backoff, permanent failures become terminal, and an expired crash lease replays
+the exact event. This gives remote event idempotency enough information to
+converge even when acceptance succeeded but the local completion commit did
+not. Status and health expose no source text or transport detail. Each process
+must open its own SQLite connection; the transactional lease coordinates those
+connections.
+
 `POST /v2/localization/changes` accepts only a complete signed
 `blun.cms-content-change.v2` event. Successful intake durably enqueues one exact
 job per locale before returning. Exact replay is idempotent; changed event IDs,

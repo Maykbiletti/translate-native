@@ -1,5 +1,29 @@
 # Version 6 premortem
 
+## Durable source-side change outbox (10 September 2026)
+
+Assume a website backend detected changed content but the localization service
+never received it exactly and durably.
+
+- A process could stop after remote acceptance but before recording success,
+  or before a volatile retry was scheduled.
+- Two source workers could send different bytes under one event identity or
+  concurrently treat one due event as theirs.
+- A temporary transport failure could loop without a bound, while a permanent
+  contract failure could be retried indefinitely.
+- Source text or private exception detail could escape through status, health,
+  or worker logs.
+
+The source-side change dispatcher persists canonical native-Unicode event bytes
+and their SHA-256 before dispatch, rejects identity collisions, and leases one
+due event transactionally across SQLite connections. Each lease invokes the
+secure HTTP client once. Retryable failures use capped exponential backoff and
+the stored attempt ceiling; permanent failures stop. Expired leases replay the
+same immutable event, so a crash after remote acceptance converges through the
+server's event idempotency. Status, health, and outcomes contain only IDs,
+counts, stable codes, timestamps, and hashes; payload or database tampering
+blocks before a network call.
+
 ## Source-side CMS HTTPS client (10 September 2026)
 
 Assume a website backend implemented the documented six-operation API but

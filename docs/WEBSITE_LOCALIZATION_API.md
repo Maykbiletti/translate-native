@@ -55,6 +55,32 @@ therefore insufficient. Stable server failures retain their content-free error
 code and derive retryability from HTTP status; redirects and invalid bindings
 fail closed.
 
+### Durable change dispatch
+
+`DurableCMSChangeDispatcher` in
+`integrations/website_localization_cms_dispatch.py` is the optional persistent
+outbox in front of `CMSLocalizationHTTPClient.submit_change`. The host supplies
+and secures a SQLite connection, enqueues the complete versioned change before
+returning from its content-change handler, and runs `run_once` from a supervised
+worker. Different worker processes must use different connections to the same
+database.
+
+The outbox binds `event_id` to canonical native-Unicode payload bytes, their
+SHA-256, and a fixed attempt ceiling. An exact enqueue is idempotent; changing
+the event, payload, or attempt policy under the same ID is a collision. Claiming
+is transactional, carries an expiring worker token, and permits one HTTPS call.
+The lease must outlive the configured client timeout. Retryable client failures
+use capped exponential backoff; permanent failures and the attempt ceiling are
+terminal. A lease lost after remote acceptance replays the same event after
+expiry, relying on the server's existing exact event idempotency instead of
+inventing a second identity.
+
+`status` and `health` are content-free. They return event and payload hashes,
+attempt state, stable error codes, remote acknowledgement metadata, counts, and
+expired-lease indicators, never source text, credentials, signatures, or raw
+transport errors. Schema, payload, hash, lease, acknowledgement, and state
+inconsistencies block rather than being repaired optimistically.
+
 ## Create or resume localization work
 
 ```http
