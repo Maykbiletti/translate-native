@@ -139,6 +139,49 @@ times. They retain no website text, credentials, signatures, or private error
 detail. Database, payload, claim, or response inconsistency blocks before a
 network call.
 
+### Coordinated source-CMS service
+
+`CMSLocalizationSourceService` in
+`integrations/website_localization_cms_source_service.py` composes the change
+outbox, removal outbox, and lifecycle monitor into the complete source-side
+worker. The host supplies three distinct durable SQLite connections, one
+configured `CMSLocalizationHTTPClient`, stable worker identities, and a clock.
+`enqueue_change` and `enqueue_removal` persist an immutable request before the
+host acknowledges its own content change. `run_once` advances at most one
+network operation; `run_forever` adds bounded active, idle, and blocked sleeps
+without taking ownership of process signals or database connections.
+
+The order is deliberate: due cancellations and tombstones run first, then a
+locally missing lifecycle registration is repaired, then one new change is
+sent, and only then is one lifecycle read performed. After a successful change
+response, the service registers its exact event, plan, job count, website
+generation, and canonical payload hash immediately. If the process exits after
+remote acceptance or after the separate registration commit, the next tick
+reconciles the two durable stores idempotently before any further change or
+lifecycle network call. It never invents a new event identity or treats an
+unregistered acknowledgement as completed monitoring.
+
+The three underlying token-bound leases remain the concurrency authority, so
+multiple supervised processes may use separate connections to the same three
+database files. The service validates all dependencies, lease/timeout ordering,
+worker IDs, connections, and delays before creating schemas. A conflicting
+dispatch-to-lifecycle binding blocks the whole tick before network access.
+`health` verifies all three stores plus every successful dispatch registration
+and returns only counts, stable codes, and a pending-registration count. An
+acknowledged change awaiting that local handoff is explicitly `degraded`; a
+store failure or conflicting binding is `blocked`. Tick and health payloads
+never contain website text, provider responses,
+credentials, signatures, or exception messages.
+
+Premortem: an acknowledgement can be lost between two local commits, a removal
+can be starved by ordinary changes, a retry can duplicate logical work, or an
+exception can leak customer prose. Registration reconciliation, removal-first
+scheduling, the existing immutable IDs and leases, one external operation per
+tick, and stable error reduction close those paths. Regression tests cover both
+crash boundaries, restart recovery without resend, operation priority,
+binding tampering, private exception redaction, health, loop delays, and
+pre-schema configuration rejection.
+
 ## Create or resume localization work
 
 ```http
