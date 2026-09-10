@@ -1435,6 +1435,21 @@ ID prevents an acknowledgement for an older challenge from satisfying a newer
 one. The receiver never adds site, locale, publication, customer, or diagnostic
 content to this path.
 
+For deployment, `CMSReceiverApplication` composes all three callbacks into one
+HTTPS-only WSGI boundary at `/v1/localization/callback` by default. This is one
+endpoint because the built-in publisher uses the same configured URL for
+publication, tombstone, and health. Before host code runs, the application
+requires an exact query-free `POST`, bounded explicit framing, canonical UTF-8
+JSON, and host authentication. It dispatches only the three exact outer
+schemas. Publication and tombstone expectation resolvers receive only fully
+signature-verified messages, then the existing current-source and complete-set
+checks run before commit or deletion. All transport, authentication, resolver,
+and private callback failures become a small
+`blun.cms-localization-receiver-error.v1` response containing no website or
+diagnostic prose. The application does not terminate TLS or configure a proxy;
+the WSGI host must derive `wsgi.url_scheme` only from its trusted ingress and
+must redact authorization headers and verified target text from logs.
+
 The same adapter transports a tombstone without changing its security model.
 It uses `blun.cms-localization-tombstone-http.v1`, nests the exact signed
 object under `tombstone`, and accepts only a signed

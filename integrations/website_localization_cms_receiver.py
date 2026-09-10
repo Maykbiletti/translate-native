@@ -21,6 +21,8 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 MAX_REQUEST_BYTES = 4_000_000
 MAX_RESPONSE_BYTES = 65_536
+RECEIVER_PATH = "/v1/localization/callback"
+RECEIVER_ERROR_SCHEMA = "blun.cms-localization-receiver-error.v1"
 HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -152,6 +154,14 @@ class HealthAuthenticator(Protocol):
 
 class HealthChecker(Protocol):
     def __call__(self, probe: VerifiedHealthProbe) -> Mapping[str, Any]: ...
+
+
+class PublicationExpectationResolver(Protocol):
+    def __call__(self, publication: VerifiedPublication) -> PublicationExpectation: ...
+
+
+class TombstoneExpectationResolver(Protocol):
+    def __call__(self, tombstone: VerifiedTombstone) -> TombstoneExpectation: ...
 
 
 def _canonical_json(value: Any, *, maximum: int) -> bytes:
@@ -550,16 +560,13 @@ def _verify_tombstone_expectation(
         )
 
 
-def verify_publication_request(
+def _verify_publication_transport(
     body: bytes,
     headers: Any,
     publication_authority: CMSMessageAuthority,
-    expectation: PublicationExpectation,
     *,
     now: float | int,
 ) -> VerifiedPublication:
-    """Verify one exact publication callback without performing a write."""
-
     if not callable(getattr(publication_authority, "verify", None)):
         raise TypeError("publication_authority must provide verify")
     now = _timestamp(now)
@@ -582,7 +589,6 @@ def verify_publication_request(
         envelope.get("publication"), payload_sha256, now=now,
     )
     publication = envelope["publication"]
-    _verify_expectation(publication, expectation)
     bindings = {
         "delivery_id": publication["delivery_id"],
         "payload_sha256": payload_sha256,
@@ -618,14 +624,28 @@ def verify_publication_request(
     )
 
 
-def verify_tombstone_request(
+def verify_publication_request(
     body: bytes,
     headers: Any,
     publication_authority: CMSMessageAuthority,
-    expectation: TombstoneExpectation,
-) -> VerifiedTombstone:
-    """Verify one exact tombstone callback without deleting CMS content."""
+    expectation: PublicationExpectation,
+    *,
+    now: float | int,
+) -> VerifiedPublication:
+    """Verify one exact publication callback without performing a write."""
 
+    publication = _verify_publication_transport(
+        body, headers, publication_authority, now=now,
+    )
+    _verify_expectation(publication.payload, expectation)
+    return publication
+
+
+def _verify_tombstone_transport(
+    body: bytes,
+    headers: Any,
+    publication_authority: CMSMessageAuthority,
+) -> VerifiedTombstone:
     if not callable(getattr(publication_authority, "verify", None)):
         raise TypeError("publication_authority must provide verify")
     envelope, _ = _parse_body(body)
@@ -645,7 +665,6 @@ def verify_tombstone_request(
         )
     payload_bytes = _verify_tombstone(envelope.get("tombstone"), payload_sha256)
     tombstone = envelope["tombstone"]
-    _verify_tombstone_expectation(tombstone, expectation)
     bindings = {
         "delivery_id": tombstone["delivery_id"],
         "payload_sha256": payload_sha256,
@@ -679,6 +698,21 @@ def verify_tombstone_request(
         payload=json.loads(payload_bytes.decode("utf-8")),
         signature=signature,
     )
+
+
+def verify_tombstone_request(
+    body: bytes,
+    headers: Any,
+    publication_authority: CMSMessageAuthority,
+    expectation: TombstoneExpectation,
+) -> VerifiedTombstone:
+    """Verify one exact tombstone callback without deleting CMS content."""
+
+    tombstone = _verify_tombstone_transport(
+        body, headers, publication_authority,
+    )
+    _verify_tombstone_expectation(tombstone.payload, expectation)
+    return tombstone
 
 
 def verify_health_request(
@@ -859,28 +893,11 @@ def _signed_health_acknowledgement(
     )
 
 
-def receive_publication(
-    body: bytes,
-    headers: Any,
-    publication_authority: CMSMessageAuthority,
+def _receive_verified_publication(
+    publication: VerifiedPublication,
     acknowledgement_authority: CMSMessageAuthority,
-    expectation: PublicationExpectation,
     commit: Callable[[VerifiedPublication], Mapping[str, Any]],
-    *,
-    now: float | int,
 ) -> CMSReceiverHTTPResponse:
-    """Verify, commit through the host, then return one signed acknowledgement."""
-
-    if not callable(commit):
-        raise TypeError("commit must be callable")
-    if (
-        not callable(getattr(acknowledgement_authority, "sign", None))
-        or not callable(getattr(acknowledgement_authority, "verify", None))
-    ):
-        raise TypeError("acknowledgement_authority must provide sign and verify")
-    publication = verify_publication_request(
-        body, headers, publication_authority, expectation, now=now,
-    )
     try:
         receipt = commit(publication)
     except Exception:
@@ -906,26 +923,11 @@ def receive_publication(
     )
 
 
-def receive_tombstone(
-    body: bytes,
-    headers: Any,
-    publication_authority: CMSMessageAuthority,
+def _receive_verified_tombstone(
+    tombstone: VerifiedTombstone,
     acknowledgement_authority: CMSMessageAuthority,
-    expectation: TombstoneExpectation,
     delete: Callable[[VerifiedTombstone], Mapping[str, Any]],
 ) -> CMSReceiverHTTPResponse:
-    """Verify, delete through the host, then return one signed acknowledgement."""
-
-    if not callable(delete):
-        raise TypeError("delete must be callable")
-    if (
-        not callable(getattr(acknowledgement_authority, "sign", None))
-        or not callable(getattr(acknowledgement_authority, "verify", None))
-    ):
-        raise TypeError("acknowledgement_authority must provide sign and verify")
-    tombstone = verify_tombstone_request(
-        body, headers, publication_authority, expectation,
-    )
     try:
         receipt = delete(tombstone)
     except Exception:
@@ -948,6 +950,154 @@ def receive_tombstone(
         status="deleted",
         response_schema=_CMS.TOMBSTONE_HTTP_RESPONSE_SCHEMA,
         authority=acknowledgement_authority,
+    )
+
+
+def receive_publication(
+    body: bytes,
+    headers: Any,
+    publication_authority: CMSMessageAuthority,
+    acknowledgement_authority: CMSMessageAuthority,
+    expectation: PublicationExpectation,
+    commit: Callable[[VerifiedPublication], Mapping[str, Any]],
+    *,
+    now: float | int,
+) -> CMSReceiverHTTPResponse:
+    """Verify, commit through the host, then return one signed acknowledgement."""
+
+    if not callable(commit):
+        raise TypeError("commit must be callable")
+    if (
+        not callable(getattr(acknowledgement_authority, "sign", None))
+        or not callable(getattr(acknowledgement_authority, "verify", None))
+    ):
+        raise TypeError("acknowledgement_authority must provide sign and verify")
+    publication = verify_publication_request(
+        body, headers, publication_authority, expectation, now=now,
+    )
+    return _receive_verified_publication(
+        publication, acknowledgement_authority, commit,
+    )
+
+
+def receive_tombstone(
+    body: bytes,
+    headers: Any,
+    publication_authority: CMSMessageAuthority,
+    acknowledgement_authority: CMSMessageAuthority,
+    expectation: TombstoneExpectation,
+    delete: Callable[[VerifiedTombstone], Mapping[str, Any]],
+) -> CMSReceiverHTTPResponse:
+    """Verify, delete through the host, then return one signed acknowledgement."""
+
+    if not callable(delete):
+        raise TypeError("delete must be callable")
+    if (
+        not callable(getattr(acknowledgement_authority, "sign", None))
+        or not callable(getattr(acknowledgement_authority, "verify", None))
+    ):
+        raise TypeError("acknowledgement_authority must provide sign and verify")
+    tombstone = verify_tombstone_request(
+        body, headers, publication_authority, expectation,
+    )
+    return _receive_verified_tombstone(
+        tombstone, acknowledgement_authority, delete,
+    )
+
+
+def receive_publication_resolved(
+    body: bytes,
+    headers: Any,
+    publication_authority: CMSMessageAuthority,
+    acknowledgement_authority: CMSMessageAuthority,
+    resolve_expectation: Callable[[VerifiedPublication], PublicationExpectation],
+    commit: Callable[[VerifiedPublication], Mapping[str, Any]],
+    *,
+    now: float | int,
+) -> CMSReceiverHTTPResponse:
+    """Verify a publication before resolving its current host expectation."""
+
+    if not callable(resolve_expectation):
+        raise TypeError("resolve_expectation must be callable")
+    if not callable(commit):
+        raise TypeError("commit must be callable")
+    if (
+        not callable(getattr(acknowledgement_authority, "sign", None))
+        or not callable(getattr(acknowledgement_authority, "verify", None))
+    ):
+        raise TypeError("acknowledgement_authority must provide sign and verify")
+    publication = _verify_publication_transport(
+        body, headers, publication_authority, now=now,
+    )
+    resolver_input = VerifiedPublication(
+        delivery_id=publication.delivery_id,
+        payload_sha256=publication.payload_sha256,
+        payload=json.loads(_canonical_json(
+            publication.payload, maximum=MAX_REQUEST_BYTES,
+        ).decode("utf-8")),
+        signature=publication.signature,
+    )
+    try:
+        expectation = resolve_expectation(resolver_input)
+    except Exception:
+        raise CMSReceiverBlocked(
+            "receiver.expectation_failed", retryable=True, http_status=503,
+        ) from None
+    try:
+        _verify_expectation(publication.payload, expectation)
+    except ValueError:
+        raise CMSReceiverBlocked(
+            "receiver.expectation_invalid", retryable=True, http_status=503,
+        ) from None
+    return _receive_verified_publication(
+        publication, acknowledgement_authority, commit,
+    )
+
+
+def receive_tombstone_resolved(
+    body: bytes,
+    headers: Any,
+    publication_authority: CMSMessageAuthority,
+    acknowledgement_authority: CMSMessageAuthority,
+    resolve_expectation: Callable[[VerifiedTombstone], TombstoneExpectation],
+    delete: Callable[[VerifiedTombstone], Mapping[str, Any]],
+) -> CMSReceiverHTTPResponse:
+    """Verify a tombstone before resolving its current host expectation."""
+
+    if not callable(resolve_expectation):
+        raise TypeError("resolve_expectation must be callable")
+    if not callable(delete):
+        raise TypeError("delete must be callable")
+    if (
+        not callable(getattr(acknowledgement_authority, "sign", None))
+        or not callable(getattr(acknowledgement_authority, "verify", None))
+    ):
+        raise TypeError("acknowledgement_authority must provide sign and verify")
+    tombstone = _verify_tombstone_transport(
+        body, headers, publication_authority,
+    )
+    resolver_input = VerifiedTombstone(
+        delivery_id=tombstone.delivery_id,
+        payload_sha256=tombstone.payload_sha256,
+        payload=json.loads(_canonical_json(
+            tombstone.payload, maximum=MAX_REQUEST_BYTES,
+        ).decode("utf-8")),
+        signature=tombstone.signature,
+    )
+    try:
+        expectation = resolve_expectation(resolver_input)
+    except Exception:
+        raise CMSReceiverBlocked(
+            "receiver.expectation_failed", retryable=True, http_status=503,
+        ) from None
+    try:
+        _verify_tombstone_expectation(tombstone.payload, expectation)
+    except ValueError:
+        raise CMSReceiverBlocked(
+            "receiver.expectation_invalid", retryable=True, http_status=503,
+        ) from None
+    return _receive_verified_tombstone(
+        tombstone, acknowledgement_authority, delete,
     )
 
 
@@ -988,3 +1138,278 @@ def receive_health(
             "receiver.health_unconfirmed", retryable=True, http_status=503,
         )
     return _signed_health_acknowledgement(probe, acknowledgement_authority)
+
+
+class CMSReceiverApplication:
+    """HTTPS-only WSGI boundary for the complete reference receiver."""
+
+    def __init__(
+        self,
+        publication_authority: CMSMessageAuthority,
+        acknowledgement_authority: CMSMessageAuthority,
+        authenticate: Callable[[Mapping[str, str]], bool],
+        resolve_publication_expectation: Callable[
+            [VerifiedPublication], PublicationExpectation
+        ],
+        commit: Callable[[VerifiedPublication], Mapping[str, Any]],
+        resolve_tombstone_expectation: Callable[
+            [VerifiedTombstone], TombstoneExpectation
+        ],
+        delete: Callable[[VerifiedTombstone], Mapping[str, Any]],
+        check: Callable[[VerifiedHealthProbe], Mapping[str, Any]],
+        *,
+        contract_sha256: str,
+        clock: Callable[[], float | int],
+        path: str = RECEIVER_PATH,
+        require_https: bool = True,
+    ):
+        callbacks = {
+            "authenticate": authenticate,
+            "resolve_publication_expectation": resolve_publication_expectation,
+            "commit": commit,
+            "resolve_tombstone_expectation": resolve_tombstone_expectation,
+            "delete": delete,
+            "check": check,
+            "clock": clock,
+        }
+        for name, callback in callbacks.items():
+            if not callable(callback):
+                raise TypeError(f"{name} must be callable")
+        if not callable(getattr(publication_authority, "verify", None)):
+            raise TypeError("publication_authority must provide verify")
+        if (
+            not callable(getattr(acknowledgement_authority, "sign", None))
+            or not callable(getattr(acknowledgement_authority, "verify", None))
+        ):
+            raise TypeError("acknowledgement_authority must provide sign and verify")
+        if (
+            not isinstance(contract_sha256, str)
+            or SHA256.fullmatch(contract_sha256) is None
+        ):
+            raise ValueError("contract_sha256 is invalid")
+        if (
+            not isinstance(path, str)
+            or not path.isascii()
+            or not path.startswith("/")
+            or not 2 <= len(path) <= 256
+            or any(character in path for character in "?#\r\n")
+        ):
+            raise ValueError("path is invalid")
+        if not isinstance(require_https, bool):
+            raise TypeError("require_https must be boolean")
+        self.publication_authority = publication_authority
+        self.acknowledgement_authority = acknowledgement_authority
+        self.authenticate = authenticate
+        self.resolve_publication_expectation = resolve_publication_expectation
+        self.commit = commit
+        self.resolve_tombstone_expectation = resolve_tombstone_expectation
+        self.delete = delete
+        self.check = check
+        self.contract_sha256 = contract_sha256
+        self.clock = clock
+        self.path = path
+        self.require_https = require_https
+
+    @staticmethod
+    def _wsgi_headers(environ: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+        items = []
+        for key, value in environ.items():
+            if key == "CONTENT_TYPE":
+                name = "Content-Type"
+            elif key == "CONTENT_LENGTH":
+                name = "Content-Length"
+            elif isinstance(key, str) and key.startswith("HTTP_"):
+                name = key[5:].replace("_", "-")
+            else:
+                continue
+            items.append((name, value))
+        if len(items) > 64 or any(
+            not isinstance(name, str)
+            or not isinstance(value, str)
+            or len(name) + len(value) > 16_384
+            for name, value in items
+        ):
+            raise CMSReceiverBlocked(
+                "receiver.headers_invalid", retryable=False, http_status=400,
+            )
+        return tuple(items)
+
+    @staticmethod
+    def _send(
+        start_response: Callable[..., Any],
+        response: CMSReceiverHTTPResponse,
+    ) -> list[bytes]:
+        phrases = {200: "OK"}
+        headers = list(response.headers)
+        headers.extend((
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+        ))
+        start_response(
+            f"{response.status} {phrases.get(response.status, 'Error')}", headers,
+        )
+        return [response.body]
+
+    @staticmethod
+    def _blocked(
+        start_response: Callable[..., Any],
+        status: int,
+        code: str,
+        *,
+        retryable: bool,
+    ) -> list[bytes]:
+        phrases = {
+            400: "Bad Request",
+            401: "Unauthorized",
+            404: "Not Found",
+            405: "Method Not Allowed",
+            409: "Conflict",
+            411: "Length Required",
+            413: "Content Too Large",
+            415: "Unsupported Media Type",
+            500: "Internal Server Error",
+            503: "Service Unavailable",
+        }
+        body = _canonical_json({
+            "schema": RECEIVER_ERROR_SCHEMA,
+            "status": "BLOCK",
+            "error": code,
+            "retryable": retryable,
+        }, maximum=MAX_RESPONSE_BYTES)
+        start_response(f"{status} {phrases[status]}", (
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(body))),
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+        ))
+        return [body]
+
+    def __call__(
+        self,
+        environ: Mapping[str, Any],
+        start_response: Callable[..., Any],
+    ) -> list[bytes]:
+        if not isinstance(environ, dict):
+            return self._blocked(
+                start_response, 500, "receiver.environment_invalid", retryable=True,
+            )
+        if environ.get("PATH_INFO") != self.path:
+            return self._blocked(
+                start_response, 404, "receiver.path_not_found", retryable=False,
+            )
+        if environ.get("REQUEST_METHOD") != "POST":
+            return self._blocked(
+                start_response, 405, "receiver.method_not_allowed", retryable=False,
+            )
+        if self.require_https and environ.get("wsgi.url_scheme") != "https":
+            return self._blocked(
+                start_response, 400, "receiver.https_required", retryable=False,
+            )
+        if environ.get("QUERY_STRING") not in {None, ""}:
+            return self._blocked(
+                start_response, 400, "receiver.query_rejected", retryable=False,
+            )
+        if environ.get("HTTP_TRANSFER_ENCODING"):
+            return self._blocked(
+                start_response, 400, "receiver.framing_invalid", retryable=False,
+            )
+        content_type = environ.get("CONTENT_TYPE")
+        if not isinstance(content_type, str) or (
+            content_type.lower().replace(" ", "")
+            != "application/json;charset=utf-8"
+        ):
+            return self._blocked(
+                start_response, 415, "receiver.content_type", retryable=False,
+            )
+        length = environ.get("CONTENT_LENGTH")
+        if (
+            not isinstance(length, str)
+            or not length.isascii()
+            or not length.isdecimal()
+        ):
+            return self._blocked(
+                start_response, 411, "receiver.content_length_required",
+                retryable=False,
+            )
+        size = int(length)
+        if size <= 0:
+            return self._blocked(
+                start_response, 400, "receiver.message_size", retryable=False,
+            )
+        if size > MAX_REQUEST_BYTES:
+            return self._blocked(
+                start_response, 413, "receiver.message_size", retryable=False,
+            )
+        stream = environ.get("wsgi.input")
+        try:
+            body = stream.read(size)
+        except Exception:
+            body = None
+        if not isinstance(body, bytes) or len(body) != size:
+            return self._blocked(
+                start_response, 400, "receiver.body_invalid", retryable=False,
+            )
+        try:
+            raw_headers = self._wsgi_headers(environ)
+            parsed_headers = _headers(raw_headers)
+            try:
+                authenticated = self.authenticate(dict(parsed_headers)) is True
+            except Exception:
+                raise CMSReceiverBlocked(
+                    "receiver.authentication_failed",
+                    retryable=True,
+                    http_status=503,
+                ) from None
+            if not authenticated:
+                raise CMSReceiverBlocked(
+                    "receiver.authentication_invalid",
+                    retryable=False,
+                    http_status=401,
+                )
+            envelope, _ = _parse_body(body)
+            schema = envelope.get("schema")
+            if schema == _CMS.PUBLICATION_HTTP_REQUEST_SCHEMA:
+                response = receive_publication_resolved(
+                    body,
+                    raw_headers,
+                    self.publication_authority,
+                    self.acknowledgement_authority,
+                    self.resolve_publication_expectation,
+                    self.commit,
+                    now=self.clock(),
+                )
+            elif schema == _CMS.TOMBSTONE_HTTP_REQUEST_SCHEMA:
+                response = receive_tombstone_resolved(
+                    body,
+                    raw_headers,
+                    self.publication_authority,
+                    self.acknowledgement_authority,
+                    self.resolve_tombstone_expectation,
+                    self.delete,
+                )
+            elif schema == _CMS.PUBLICATION_HEALTH_HTTP_REQUEST_SCHEMA:
+                response = receive_health(
+                    body,
+                    raw_headers,
+                    lambda _: True,
+                    self.acknowledgement_authority,
+                    self.check,
+                    contract_sha256=self.contract_sha256,
+                )
+            else:
+                raise CMSReceiverBlocked(
+                    "receiver.operation_invalid", retryable=False, http_status=400,
+                )
+            return self._send(start_response, response)
+        except CMSReceiverBlocked as error:
+            return self._blocked(
+                start_response,
+                error.http_status,
+                error.code,
+                retryable=error.retryable,
+            )
+        except Exception:
+            return self._blocked(
+                start_response, 500, "receiver.internal", retryable=True,
+            )

@@ -222,6 +222,21 @@ binding only after the host confirms health. Authentication outages, wrong
 contracts, malformed transport, private health errors, false receipts, and
 signing failures cannot produce a healthy acknowledgement.
 
+`CMSReceiverApplication` exposes these three receiver operations through one
+provider-neutral WSGI callable. Its default mount is
+`/v1/localization/callback`, matching the built-in publisher's one configured
+endpoint for publication, tombstone, and health requests. The application
+requires an exact query-free HTTPS `POST`, canonical UTF-8 JSON, explicit
+bounded `Content-Length`, non-chunked framing, and host authentication. It then
+dispatches only the three published outer schemas. Publication and tombstone
+expectation resolvers see a request only after its payload, binding headers,
+hashes, and publisher signature have passed verification; host writes retain
+the later exact-receipt requirement. WSGI errors use the content-free
+`blun.cms-localization-receiver-error.v1` envelope with only a stable code and
+retry decision. A TLS terminator must set `wsgi.url_scheme` from trusted proxy
+configuration, and the host must keep authorization headers and verified target
+text out of access logs.
+
 The separate `api_contract` object lists all six tenant operations with their
 exact path, `POST` method, request schema, response schema, and current
 `enabled` state. A standalone host without approval and publication authorities

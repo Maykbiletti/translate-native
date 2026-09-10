@@ -4,12 +4,14 @@ import copy
 import hashlib
 import hmac
 import importlib.util
+import io
 import json
 import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -371,6 +373,67 @@ class HealthReceiverTransport:
                 (("Content-Type", "application/json"),),
                 b"{}",
             )
+
+
+def wsgi_environ(
+    body,
+    headers,
+    *,
+    path=RECEIVER.RECEIVER_PATH,
+    method="POST",
+    scheme="https",
+    query="",
+):
+    environ = {
+        "PATH_INFO": path,
+        "REQUEST_METHOD": method,
+        "QUERY_STRING": query,
+        "CONTENT_LENGTH": str(len(body)),
+        "wsgi.url_scheme": scheme,
+        "wsgi.input": io.BytesIO(body),
+    }
+    for name, value in headers.items():
+        normalized = name.upper().replace("-", "_")
+        if normalized == "CONTENT_TYPE":
+            environ["CONTENT_TYPE"] = value
+        elif normalized == "CONTENT_LENGTH":
+            environ["CONTENT_LENGTH"] = value
+        else:
+            environ["HTTP_" + normalized] = value
+    return environ
+
+
+def call_wsgi(application, environ):
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = tuple(headers)
+
+    chunks = application(environ, start_response)
+    return captured["status"], dict(captured["headers"]), b"".join(chunks)
+
+
+class WSGIReceiverTransport:
+    def __init__(self, application):
+        self.application = application
+        self.calls = []
+
+    def post(self, url, headers, body, *, timeout):
+        self.calls.append((url, dict(headers), body, timeout))
+        parsed = urlsplit(url)
+        environ = wsgi_environ(
+            body, dict(headers), path=parsed.path, scheme=parsed.scheme,
+            query=parsed.query,
+        )
+        status, response_headers, response_body = call_wsgi(
+            self.application, environ,
+        )
+        return HTTP.HTTPResult(
+            int(status.split(" ", 1)[0]),
+            tuple(response_headers.items()),
+            response_body,
+        )
 
 
 class CMSPublicationReceiverTests(unittest.TestCase):
@@ -1019,6 +1082,275 @@ class CMSHealthReceiverTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "receiver.acknowledgement_signing")
         self.assertTrue(caught.exception.retryable)
         self.assertEqual(len(self.checks), 1)
+
+
+class CMSReceiverApplicationTests(unittest.TestCase):
+    def setUp(self):
+        self.publication_authority = Authority(b"publication-key", "publication-key-1")
+        self.acknowledgement_authority = Authority(b"ack-key", "ack-key-1")
+        self.contract_sha256 = (
+            CMS.WebsiteLocalizationCMSBridge._publication_http_capabilities()[
+                "sha256"
+            ]
+        )
+        self.authentications = []
+        self.publication_resolutions = []
+        self.tombstone_resolutions = []
+        self.commits = []
+        self.deletions = []
+        self.checks = []
+
+    def authenticate(self, headers):
+        self.authentications.append(headers.get("authorization"))
+        return headers.get("authorization") == "Bearer secret"
+
+    def resolve_publication(self, publication):
+        self.publication_resolutions.append(publication)
+        return expectation(publication.payload)
+
+    def commit(self, publication):
+        self.commits.append(publication)
+        return {
+            "delivery_id": publication.delivery_id,
+            "payload_sha256": publication.payload_sha256,
+            "status": "committed",
+        }
+
+    def resolve_tombstone(self, tombstone):
+        self.tombstone_resolutions.append(tombstone)
+        return tombstone_expectation(tombstone.payload)
+
+    def delete(self, tombstone):
+        self.deletions.append(tombstone)
+        return {
+            "delivery_id": tombstone.delivery_id,
+            "payload_sha256": tombstone.payload_sha256,
+            "status": "deleted",
+        }
+
+    def check(self, probe):
+        self.checks.append(probe)
+        return {
+            "probe_id": probe.probe_id,
+            "contract_sha256": probe.contract_sha256,
+            "status": "healthy",
+        }
+
+    def application(self, **overrides):
+        values = {
+            "publication_authority": self.publication_authority,
+            "acknowledgement_authority": self.acknowledgement_authority,
+            "authenticate": self.authenticate,
+            "resolve_publication_expectation": self.resolve_publication,
+            "commit": self.commit,
+            "resolve_tombstone_expectation": self.resolve_tombstone,
+            "delete": self.delete,
+            "check": self.check,
+            "contract_sha256": self.contract_sha256,
+            "clock": lambda: 1000,
+        }
+        values.update(overrides)
+        return RECEIVER.CMSReceiverApplication(**values)
+
+    def test_one_https_endpoint_completes_all_three_callback_operations(self):
+        application = self.application()
+        transport = WSGIReceiverTransport(application)
+        publisher = HTTP.HTTPPublisherAdapter(
+            "https://cms.example.test" + RECEIVER.RECEIVER_PATH,
+            lambda: {"Authorization": "Bearer secret"},
+            self.acknowledgement_authority,
+            transport=transport,
+            probe_id_factory=lambda: "publisher-health-probe-301",
+        )
+        publication = publication_payload()
+        tombstone = tombstone_payload()
+
+        accepted = publisher.publish(
+            request(publication, self.publication_authority),
+        )
+        deleted = publisher.publish(
+            tombstone_request(tombstone, self.publication_authority),
+        )
+        healthy = publisher.check(contract_sha256=self.contract_sha256)
+
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertEqual(healthy["status"], "healthy")
+        self.assertEqual(self.authentications, ["Bearer secret"] * 3)
+        self.assertEqual(len(self.publication_resolutions), 1)
+        self.assertEqual(len(self.tombstone_resolutions), 1)
+        self.assertEqual(len(self.commits), 1)
+        self.assertEqual(len(self.deletions), 1)
+        self.assertEqual(len(self.checks), 1)
+
+    def test_authentication_failure_precedes_json_and_host_callbacks(self):
+        application = self.application(authenticate=lambda _: False)
+        body = b"not-json"
+        headers = {
+            "Authorization": "Bearer wrong",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+
+        status, _, response = call_wsgi(
+            application, wsgi_environ(body, headers),
+        )
+
+        self.assertEqual(status, "401 Unauthorized")
+        self.assertEqual(json.loads(response)["error"], "receiver.authentication_invalid")
+        self.assertNotIn(b"not-json", response)
+        self.assertEqual(self.publication_resolutions, [])
+        self.assertEqual(self.tombstone_resolutions, [])
+        self.assertEqual(self.commits, [])
+
+    def test_signature_verification_precedes_expectation_resolution(self):
+        application = self.application()
+        payload = publication_payload()
+        body, headers, _, _ = wire(payload, self.publication_authority)
+        envelope = json.loads(body)
+        envelope["signature"]["signature"] = "0" * 64
+        body = RECEIVER._canonical_json(
+            envelope, maximum=RECEIVER.MAX_REQUEST_BYTES,
+        )
+        headers["Content-Length"] = str(len(body))
+        headers["Authorization"] = "Bearer secret"
+
+        status, _, response = call_wsgi(
+            application, wsgi_environ(body, headers),
+        )
+
+        self.assertEqual(status, "401 Unauthorized")
+        self.assertEqual(json.loads(response)["error"], "receiver.signature_invalid")
+        self.assertEqual(self.publication_resolutions, [])
+        self.assertEqual(self.commits, [])
+
+    def test_wrong_current_expectation_blocks_before_commit(self):
+        def stale(publication):
+            self.publication_resolutions.append(publication)
+            return replace(
+                expectation(publication.payload), source_sequence=999,
+            )
+
+        application = self.application(resolve_publication_expectation=stale)
+        payload = publication_payload()
+        body, headers, _, _ = wire(payload, self.publication_authority)
+        headers["Authorization"] = "Bearer secret"
+
+        status, _, response = call_wsgi(
+            application, wsgi_environ(body, headers),
+        )
+
+        self.assertEqual(status, "409 Conflict")
+        self.assertEqual(json.loads(response)["error"], "receiver.source_binding")
+        self.assertEqual(len(self.publication_resolutions), 1)
+        self.assertEqual(self.commits, [])
+
+    def test_expectation_resolver_cannot_mutate_verified_publication(self):
+        def mutating(publication):
+            self.publication_resolutions.append(publication)
+            publication.payload["source_sequence"] = 999
+            return expectation(publication.payload)
+
+        application = self.application(
+            resolve_publication_expectation=mutating,
+        )
+        payload = publication_payload()
+        body, headers, _, _ = wire(payload, self.publication_authority)
+        headers["Authorization"] = "Bearer secret"
+
+        status, _, response = call_wsgi(
+            application, wsgi_environ(body, headers),
+        )
+
+        self.assertEqual(status, "409 Conflict")
+        self.assertEqual(json.loads(response)["error"], "receiver.source_binding")
+        self.assertEqual(payload["source_sequence"], 201)
+        self.assertEqual(self.commits, [])
+
+    def test_private_resolver_failure_is_content_free_and_retryable(self):
+        def failed(_):
+            raise RuntimeError("private CMS lookup detail")
+
+        application = self.application(resolve_publication_expectation=failed)
+        payload = publication_payload()
+        body, headers, _, _ = wire(payload, self.publication_authority)
+        headers["Authorization"] = "Bearer secret"
+
+        status, _, response = call_wsgi(
+            application, wsgi_environ(body, headers),
+        )
+        result = json.loads(response)
+
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertEqual(result["error"], "receiver.expectation_failed")
+        self.assertTrue(result["retryable"])
+        self.assertNotIn(b"private", response)
+        self.assertNotIn(payload["localizations"][0]["target_text"].encode(), response)
+        self.assertEqual(self.commits, [])
+
+    def test_unknown_authenticated_operation_is_content_free(self):
+        application = self.application()
+        body = RECEIVER._canonical_json(
+            {"schema": "unknown.callback.v1", "secret": "do-not-return"},
+            maximum=RECEIVER.MAX_REQUEST_BYTES,
+        )
+        headers = {
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+
+        status, _, response = call_wsgi(
+            application, wsgi_environ(body, headers),
+        )
+
+        self.assertEqual(status, "400 Bad Request")
+        self.assertEqual(json.loads(response)["error"], "receiver.operation_invalid")
+        self.assertNotIn(b"do-not-return", response)
+        self.assertEqual(self.commits, [])
+        self.assertEqual(self.deletions, [])
+        self.assertEqual(self.checks, [])
+
+    def test_transport_rejections_happen_before_authentication(self):
+        body, headers = wire_health(
+            "publisher-health-probe-301", self.contract_sha256,
+        )
+        cases = (
+            ({"PATH_INFO": "/wrong"}, "404 Not Found"),
+            ({"REQUEST_METHOD": "GET"}, "405 Method Not Allowed"),
+            ({"wsgi.url_scheme": "http"}, "400 Bad Request"),
+            ({"QUERY_STRING": "debug=1"}, "400 Bad Request"),
+            ({"HTTP_TRANSFER_ENCODING": "chunked"}, "400 Bad Request"),
+            ({"CONTENT_TYPE": "text/plain"}, "415 Unsupported Media Type"),
+            ({"CONTENT_LENGTH": ""}, "411 Length Required"),
+        )
+
+        for changes, expected_status in cases:
+            environ = wsgi_environ(body, headers)
+            environ.update(changes)
+            with self.subTest(changes=changes):
+                status, _, response = call_wsgi(self.application(), environ)
+                self.assertEqual(status, expected_status)
+                self.assertEqual(json.loads(response)["status"], "BLOCK")
+                self.assertNotIn(b"publisher-health-probe-301", response)
+        self.assertEqual(self.authentications, [])
+        self.assertEqual(self.checks, [])
+
+    def test_truncated_and_oversized_bodies_fail_without_authentication(self):
+        application = self.application()
+        body, headers = wire_health(
+            "publisher-health-probe-301", self.contract_sha256,
+        )
+        truncated = wsgi_environ(body, headers)
+        truncated["CONTENT_LENGTH"] = str(len(body) + 1)
+        oversized = wsgi_environ(body, headers)
+        oversized["CONTENT_LENGTH"] = str(RECEIVER.MAX_REQUEST_BYTES + 1)
+
+        first = call_wsgi(application, truncated)
+        second = call_wsgi(application, oversized)
+
+        self.assertEqual(first[0], "400 Bad Request")
+        self.assertEqual(second[0], "413 Content Too Large")
+        self.assertEqual(self.authentications, [])
+        self.assertEqual(self.checks, [])
 
 
 if __name__ == "__main__":
