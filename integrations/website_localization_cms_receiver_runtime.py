@@ -3,8 +3,8 @@
 
 The factory validates the complete receiver boundary before opening SQLite, then
 owns exactly one connection, durable store, and WSGI application. Deployments
-must construct one runtime per WSGI worker rather than sharing it across worker
-processes or request threads.
+must construct one runtime per WSGI worker process; request threads inside that
+process may share the runtime through its serialized store boundary.
 """
 
 from __future__ import annotations
@@ -73,8 +73,18 @@ class _SynchronizedStore:
         self._store = store
         self._lock = threading.RLock()
         self._closed = False
+        self._owner_pid = os.getpid()
+
+    def _assert_owner(self) -> None:
+        # This check must precede lock acquisition. After fork, an inherited
+        # RLock may have been held by a parent thread that no longer exists.
+        if os.getpid() != self._owner_pid:
+            raise DurableCMSReceiverRuntimeBlocked(
+                "CMS receiver runtime belongs to another process"
+            )
 
     def _call(self, name: str, *args: Any) -> Any:
+        self._assert_owner()
         with self._lock:
             if self._closed:
                 raise DurableCMSReceiverRuntimeBlocked(
@@ -114,6 +124,7 @@ class _SynchronizedStore:
         return self._call("read_active_bundle", site_id, source_id)
 
     def close(self) -> None:
+        self._assert_owner()
         with self._lock:
             if not self._closed:
                 self._connection.close()
@@ -121,8 +132,16 @@ class _SynchronizedStore:
 
     @property
     def closed(self) -> bool:
+        self._assert_owner()
         with self._lock:
             return self._closed
+
+    @property
+    def state(self) -> str:
+        if os.getpid() != self._owner_pid:
+            return "foreign-process"
+        with self._lock:
+            return "closed" if self._closed else "open"
 
 
 def _preflight_receiver(
@@ -170,8 +189,7 @@ class DurableCMSReceiverRuntime:
         self.application = application
 
     def __repr__(self) -> str:
-        state = "closed" if self._store.closed else "open"
-        return f"DurableCMSReceiverRuntime(state={state!r})"
+        return f"DurableCMSReceiverRuntime(state={self._store.state!r})"
 
     def __enter__(self) -> "DurableCMSReceiverRuntime":
         if self._store.closed:

@@ -1491,7 +1491,9 @@ health check, trusted registration, and rendering read uses the same reentrant
 worker lock. A multithreaded WSGI worker may therefore share this composed
 runtime without concurrent use of its SQLite connection; failures release the
 lock before later work. Construct the runtime after each worker process starts
-and never before a process fork. Separate worker processes still require
+and never before a process fork. The runtime records its creator process and
+blocks every inherited store operation before attempting to acquire a possibly
+orphaned thread lock. Separate worker processes still require
 separate runtime instances and SQLite connections. The database URI form is
 intentionally rejected so connection flags cannot be smuggled through
 deployment configuration.

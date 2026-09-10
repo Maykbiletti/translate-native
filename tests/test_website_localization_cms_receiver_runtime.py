@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -231,6 +233,87 @@ class DurableCMSReceiverRuntimeTests(unittest.TestCase):
                 ),
                 publication,
             )
+        finally:
+            runtime.close()
+
+    def test_separate_worker_connections_converge_on_one_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receiver.sqlite3"
+            first = self.open(path)
+            second = self.open(path)
+            publication = HELPERS.publication_payload()
+            first.register_source(HELPERS.expectation(publication))
+            request = HELPERS.request(publication, self.publication_authority)
+
+            def publish(index):
+                runtime = first if index % 2 == 0 else second
+                publisher = HTTP.HTTPPublisherAdapter(
+                    "https://cms.example.test/v1/localization/callback",
+                    lambda: {"Authorization": "Bearer secret"},
+                    self.acknowledgement_authority,
+                    transport=HELPERS.WSGIReceiverTransport(runtime),
+                )
+                return publisher.publish(request)
+
+            try:
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    receipts = list(executor.map(publish, range(24)))
+
+                self.assertEqual(receipts, [receipts[0]] * 24)
+                self.assertEqual(receipts[0]["status"], "accepted")
+                for runtime in (first, second):
+                    self.assertEqual(
+                        runtime.read_active_bundle(
+                            publication["site_id"], publication["source_id"],
+                        ),
+                        publication,
+                    )
+            finally:
+                first.close()
+                second.close()
+
+    def test_inherited_runtime_blocks_before_lock_or_content_access(self):
+        runtime = self.open(":memory:")
+        publication = HELPERS.publication_payload()
+        runtime.register_source(HELPERS.expectation(publication))
+        request = HELPERS.request(publication, self.publication_authority)
+        publisher = HTTP.HTTPPublisherAdapter(
+            "https://cms.example.test/v1/localization/callback",
+            lambda: {"Authorization": "Bearer secret"},
+            self.acknowledgement_authority,
+            transport=HELPERS.WSGIReceiverTransport(runtime),
+        )
+        foreign_pid = os.getpid() + 1
+
+        try:
+            with mock.patch.object(RUNTIME.os, "getpid", return_value=foreign_pid):
+                self.assertEqual(
+                    repr(runtime),
+                    "DurableCMSReceiverRuntime(state='foreign-process')",
+                )
+                self.assertNotIn(str(foreign_pid), repr(runtime))
+                for operation in (
+                    lambda: runtime.register_source(
+                        HELPERS.expectation(publication)
+                    ),
+                    lambda: runtime.read_active_bundle(
+                        publication["site_id"], publication["source_id"],
+                    ),
+                    runtime.close,
+                ):
+                    with self.subTest(operation=operation):
+                        with self.assertRaises(
+                            RUNTIME.DurableCMSReceiverRuntimeBlocked
+                        ):
+                            operation()
+
+                with self.assertRaises(HTTP.HTTPPublisherFailed) as caught:
+                    publisher.publish(request)
+                self.assertEqual(caught.exception.code, "http_status")
+                self.assertNotIn(
+                    publication["localizations"][0]["target_text"],
+                    str(caught.exception),
+                )
         finally:
             runtime.close()
 

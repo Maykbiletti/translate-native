@@ -253,8 +253,9 @@ tombstone state before confirming the probe. Source and tombstone expectations
 carry separate canonical hashes, so a syntactically valid field substitution
 also blocks. `read_active_bundle` is for trusted
 CMS rendering code only; it contains target text and is not part of any public
-status response. A WSGI worker owns its store connection; do not share one
-SQLite connection across request threads. Multiple workers may open distinct
+status response. A WSGI worker process owns its store connection; request
+threads may share it only through the composed runtime's serialized boundary.
+Multiple worker processes may open distinct
 connections to the same file and rely on the transactional writer lock.
 
 `open_durable_cms_receiver` in
@@ -270,8 +271,10 @@ shutdown. Inside one worker, a shared reentrant lock serializes all eight store
 paths: both expectation resolvers, commit, delete, health, trusted registration,
 and rendering. The composition root opens SQLite for cross-thread access only
 behind that lock, so a multithreaded worker can share the WSGI callable without
-racing transactions or reads. This does not make a pre-fork connection safe;
-each worker process must construct and own its own runtime.
+racing transactions or reads. This does not make a pre-fork connection safe.
+The runtime binds itself to its creator process and rejects inherited callbacks
+and trusted host operations before lock acquisition; each worker process must
+construct and own its own runtime after forking.
 
 The separate `api_contract` object lists all six tenant operations with their
 exact path, `POST` method, request schema, response schema, and current
