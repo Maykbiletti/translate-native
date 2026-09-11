@@ -872,6 +872,49 @@ failure, which the sidecar maps to retryable HTTP `503` without accepting the
 request. Multiple credential generations may be configured simultaneously for
 a bounded rotation window; removing a generation retires it immediately.
 
+#### Protected authenticated sidecar runtime
+
+`integrations/website_localization_cms_source_delivery_auth_runtime.py`
+provides the production composition for the V6.67 proof. Call
+`open_hosted_hmac_authenticated_cms_source_delivery()` with distinct absolute
+outbox and replay-database paths, the provider-neutral source client, one or
+more explicit `HMACCredential` generations, worker identity, fixed HTTPS
+origin, and both trusted capability digests. The returned object owns the
+supervised delivery worker, sidecar WSGI application, outbox connection,
+authentication verifier, and replay connection as one lifecycle.
+
+Import the server-side `HMACCredential` alias from this runtime module so the
+credential values and verifier share the exact validated contract type. The
+secret still enters only as host-owned in-memory bytes and is never written to
+either database.
+
+The factory validates the complete authentication time window, credential
+scope, endpoint, contract pins, worker, retry policy, loop delays, SQLite
+timeouts, and distinct paths in memory before it opens either database. Each
+missing database is created exclusively with mode `0600`. Every later proof or
+authentication-health read rechecks the replay file's owner, type, link count,
+mode, device and inode, plus its safe parent chain. The runtime checks its
+creating process before entering a lock, serializes all connection use, and
+therefore rejects inherited pre-fork instances before SQLite or protected
+website state is touched.
+
+`authentication_health()` returns only schema, status, runtime state,
+consumed-nonce count, and stable error code. A local failure produces a
+`blocked` snapshot with no count. It never includes a path, site, credential, key, request
+body, source text, target text, or provider output. A missing, replaced,
+linked, permission-weakened, corrupt, closed, or foreign-process replay store
+makes the sidecar return retryable HTTP `503` during authentication, before
+the delivery runtime parses or persists protected content.
+
+Call `close()` only after the external HTTP server has stopped accepting new
+requests. The composite first signals and joins the delivery worker and closes
+the outbox, then closes the replay connection. If a provider call exceeds the
+configured worker-stop bound, the replay runtime deliberately remains open;
+the caller must resolve the still-running worker and retry shutdown rather
+than invalidating authentication underneath it. Credential rotation remains a
+trusted deployment restart: overlap only the explicitly accepted generations,
+then remove the retired generation from the next runtime configuration.
+
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could
 reuse a vanished parent's lock; or a permission change could redirect the next
