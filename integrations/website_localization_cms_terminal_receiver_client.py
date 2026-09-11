@@ -365,12 +365,16 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
                 "schema", "status", "runtime_state", "worker_state",
                 "inbox_status", "received", "processing_counts",
                 "processing_due", "expired_leases", "failed", "error_code",
+                "capabilities_sha256",
             ],
         ),
         "readiness": _operation(
             "readiness", "GET", READINESS_PATH,
             "terminal-notification-readiness:read", None, [], READINESS_SCHEMA,
-            ["schema", "status", "worker_state", "inbox_status", "error_code"],
+            [
+                "schema", "status", "worker_state", "inbox_status",
+                "error_code", "capabilities_sha256",
+            ],
         ),
         "status": _operation(
             "status", "POST", STATUS_PATH, "terminal-notification-status:read",
@@ -382,6 +386,7 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
                 "attempts", "max_attempts", "next_attempt_at",
                 "lease_expires_at", "lease_expired", "last_error_code",
                 "processed_at",
+                "capabilities_sha256",
             ],
         ),
     }
@@ -535,16 +540,20 @@ class HTTPTerminalReceiverClient:
             _fail("status_binding")
         return response
 
-    @staticmethod
-    def _valid_readiness(value: Mapping[str, Any], http_status: int) -> bool:
+    def _valid_readiness(
+        self, value: Mapping[str, Any], http_status: int,
+    ) -> bool:
         if set(value) != {
             "schema", "status", "worker_state", "inbox_status", "error_code",
+            "capabilities_sha256",
         }:
             return False
         ready = value.get("status") == "ready"
         error = value.get("error_code")
         return (
             value.get("schema") == READINESS_SCHEMA
+            and value.get("capabilities_sha256")
+            == self.expected_capabilities_sha256
             and value.get("status") in {"ready", "not_ready"}
             and value.get("worker_state") in WORKER_STATES | {"closed"}
             and value.get("inbox_status") in {None, "ok", "blocked"}
@@ -557,12 +566,14 @@ class HTTPTerminalReceiverClient:
             )
         )
 
-    @staticmethod
-    def _valid_health(value: Mapping[str, Any], http_status: int) -> bool:
+    def _valid_health(
+        self, value: Mapping[str, Any], http_status: int,
+    ) -> bool:
         fields = {
             "schema", "status", "runtime_state", "worker_state", "inbox_status",
             "received", "processing_counts", "processing_due", "expired_leases",
             "failed", "error_code",
+            "capabilities_sha256",
         }
         if set(value) != fields:
             return False
@@ -582,6 +593,8 @@ class HTTPTerminalReceiverClient:
         error = value.get("error_code")
         return (
             value.get("schema") == HEALTH_SCHEMA
+            and value.get("capabilities_sha256")
+            == self.expected_capabilities_sha256
             and value.get("status") in {"ok", "blocked"}
             and value.get("runtime_state") == "open"
             and value.get("worker_state") in WORKER_STATES
@@ -612,18 +625,22 @@ class HTTPTerminalReceiverClient:
             )
         )
 
-    @staticmethod
-    def _valid_status(value: Mapping[str, Any], event_id: str, site_id: str) -> bool:
+    def _valid_status(
+        self, value: Mapping[str, Any], event_id: str, site_id: str,
+    ) -> bool:
         fields = {
             "schema", "notification_id", "event_id", "site_id",
             "terminal_status", "notification_sha256", "processing_status",
             "attempts", "max_attempts", "next_attempt_at", "lease_expires_at",
             "lease_expired", "last_error_code", "processed_at",
+            "capabilities_sha256",
         }
         error = value.get("last_error_code")
         return (
             set(value) == fields
             and value.get("schema") == STATUS_RESPONSE_SCHEMA
+            and value.get("capabilities_sha256")
+            == self.expected_capabilities_sha256
             and isinstance(value.get("notification_id"), str)
             and NOTIFICATION_ID.fullmatch(value["notification_id"]) is not None
             and value.get("event_id") == event_id

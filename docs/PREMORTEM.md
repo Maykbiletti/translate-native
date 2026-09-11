@@ -1,5 +1,22 @@
 # Version 6 premortem
 
+## Response-bound terminal-receiver contract (11 September 2026)
+
+Assume capability discovery passed but the subsequent operational response came
+from a stale, switched, or differently configured receiver.
+
+- A load balancer could route discovery and health to deployments with different
+  notification paths or contract versions.
+- A cached health response could predate a contract change while still matching
+  the expected health schema.
+- A status response could omit the contract identity, leaving the client unable
+  to prove that its event and site were read under the pinned interface.
+
+Every operational response now carries the live canonical capability SHA-256,
+and the advertised response field sets include that binding. The client checks
+it against its trusted pin after the fresh discovery preflight; missing, stale,
+or mismatched bindings block rather than accepting ambiguous evidence.
+
 ## Contract-pinned terminal-receiver operator client (11 September 2026)
 
 Assume an operator accepted a terminal-receiver control response from the wrong,

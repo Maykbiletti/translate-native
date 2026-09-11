@@ -221,6 +221,7 @@ class TerminalReceiverClientTests(unittest.TestCase):
         response = self.client.readiness()
 
         self.assertEqual(response, {
+            "capabilities_sha256": self.digest,
             "schema": RECEIVER.READINESS_RESPONSE_SCHEMA,
             "status": "not_ready",
             "worker_state": "unmanaged",
@@ -235,6 +236,7 @@ class TerminalReceiverClientTests(unittest.TestCase):
             "capabilities": RECEIVER.capabilities_payload(),
         }
         blocked = {
+            "capabilities_sha256": self.digest,
             "schema": RECEIVER.HEALTH_RESPONSE_SCHEMA,
             "status": "blocked",
             "runtime_state": "open",
@@ -329,6 +331,32 @@ class TerminalReceiverClientTests(unittest.TestCase):
         self.assertFalse(caught.exception.retryable)
         self.assertEqual(len(transport.calls), 1)
 
+    def test_stale_operational_response_blocks_after_live_contract_passes(self):
+        capabilities = {
+            "schema": RECEIVER.CAPABILITIES_RESPONSE_SCHEMA,
+            "capabilities": RECEIVER.capabilities_payload(),
+        }
+        health = {
+            **self.runtime.worker_health(),
+            "capabilities_sha256": "0" * 64,
+        }
+        transport = FakeTransport([
+            json_result(200, capabilities), json_result(200, health),
+        ])
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", self.digest,
+            lambda _request: {"Authorization": "x"},
+            transport=transport,
+        )
+
+        with self.assertRaises(CLIENT.TerminalReceiverClientBlocked) as caught:
+            client.health()
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.health_binding"
+        ))
+        self.assertEqual(len(transport.calls), 2)
+
     def test_semantically_altered_contract_blocks_even_with_rehashed_digest(self):
         capabilities = RECEIVER.capabilities_payload()
         capabilities.pop("sha256")
@@ -360,8 +388,10 @@ class TerminalReceiverClientTests(unittest.TestCase):
             "capabilities": RECEIVER.capabilities_payload(),
         }
         bad_health = self.runtime.worker_health()
+        bad_health["capabilities_sha256"] = self.digest
         bad_health["received"] = 1
         bad_status = {
+            "capabilities_sha256": self.digest,
             "schema": RECEIVER.STATUS_RESPONSE_SCHEMA,
             "notification_id": "terminal-" + "a" * 64,
             "event_id": "other-event",

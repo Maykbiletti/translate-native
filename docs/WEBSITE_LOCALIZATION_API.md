@@ -497,6 +497,10 @@ Health and readiness accept both their documented `200` and `503` states, then
 validate exact fields and cross-field invariants before returning the
 content-free snapshot. Status binds the canonical request body and its SHA-256
 to the event and site, then rejects a response for any other tenant or identity.
+All three operational responses also contain `capabilities_sha256`, derived
+from the receiver's live configured contract. The client requires this value to
+equal its trusted pin after discovery, preventing an endpoint switch or stale
+response between the two requests from passing as current evidence.
 Malformed JSON, duplicate keys, unexpected fields, inconsistent counts,
 rehashed semantic contract drift, redirects, and private transport failures
 raise `TerminalReceiverClientBlocked` with only a stable code and retryability.

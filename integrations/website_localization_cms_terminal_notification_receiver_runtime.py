@@ -431,7 +431,12 @@ class DurableTerminalNotificationReceiverRuntime:
         self._authenticate_control(
             request, headers, None, _RECEIVER.READINESS_SCOPE,
         )
-        report = self.worker_readiness()
+        report = {
+            **self.worker_readiness(),
+            "capabilities_sha256": _RECEIVER.capabilities_payload(
+                self.application.path
+            )["sha256"],
+        }
         status = 200 if report["status"] == "ready" else 503
         return self.application._send(start_response, status, report)
 
@@ -537,8 +542,14 @@ class DurableTerminalNotificationReceiverRuntime:
             )
         ):
             _RECEIVER._blocked("health_invalid", 503)
+        response = {
+            **report,
+            "capabilities_sha256": _RECEIVER.capabilities_payload(
+                self.application.path
+            )["sha256"],
+        }
         status = 200 if report["status"] == "ok" else 503
-        return self.application._send(start_response, status, report)
+        return self.application._send(start_response, status, response)
 
     def _status_request(
         self,
@@ -628,6 +639,9 @@ class DurableTerminalNotificationReceiverRuntime:
             "lease_expired": processing.lease_expired,
             "last_error_code": processing.last_error_code,
             "processed_at": processing.processed_at,
+            "capabilities_sha256": _RECEIVER.capabilities_payload(
+                self.application.path
+            )["sha256"],
         }
         return self.application._send(start_response, 200, response)
 

@@ -354,7 +354,9 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
             "request_schema": None,
             "request_fields": [],
             "response_schema": HEALTH_RESPONSE_SCHEMA,
-            "response_fields": list(HEALTH_RESPONSE_FIELDS),
+            "response_fields": [
+                *HEALTH_RESPONSE_FIELDS, "capabilities_sha256",
+            ],
             "success_status": 200,
         },
         "readiness": {
@@ -366,7 +368,7 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
             "response_schema": READINESS_RESPONSE_SCHEMA,
             "response_fields": [
                 "schema", "status", "worker_state", "inbox_status",
-                "error_code",
+                "error_code", "capabilities_sha256",
             ],
             "success_status": 200,
         },
@@ -383,6 +385,7 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
                 "processing_status", "attempts", "max_attempts",
                 "next_attempt_at", "lease_expires_at", "lease_expired",
                 "last_error_code", "processed_at",
+                "capabilities_sha256",
             ],
             "success_status": 200,
         },

@@ -405,6 +405,9 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         pending = json.loads(pending_result.body)
         self.assertEqual(pending_result.status, 200)
         self.assertEqual(pending, {
+            "capabilities_sha256": RUNTIME._RECEIVER.capabilities_payload()[
+                "sha256"
+            ],
             "schema": RUNTIME._RECEIVER.STATUS_RESPONSE_SCHEMA,
             "notification_id": payload["notification_id"],
             "event_id": payload["event_id"],
@@ -607,7 +610,12 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         self.wait_for(lambda: runtime.worker_state == "running")
         ready = control_request(runtime, RUNTIME._RECEIVER.READINESS_PATH)
         self.assertEqual(ready.status, 200)
-        self.assertEqual(json.loads(ready.body), runtime.worker_readiness())
+        self.assertEqual(json.loads(ready.body), {
+            **runtime.worker_readiness(),
+            "capabilities_sha256": RUNTIME._RECEIVER.capabilities_payload()[
+                "sha256"
+            ],
+        })
         self.assertNotIn("received", ready.body.decode("utf-8"))
         runtime.stop_worker(timeout_seconds=1)
         stopped = control_request(runtime, RUNTIME._RECEIVER.READINESS_PATH)
@@ -627,6 +635,9 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         healthy = json.loads(healthy_result.body)
         self.assertEqual(healthy_result.status, 200)
         self.assertEqual(healthy, {
+            "capabilities_sha256": RUNTIME._RECEIVER.capabilities_payload()[
+                "sha256"
+            ],
             "schema": RUNTIME._RECEIVER.HEALTH_RESPONSE_SCHEMA,
             "status": "ok",
             "runtime_state": "open",
@@ -705,6 +716,9 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         unavailable = json.loads(unavailable_result.body)
         self.assertEqual(unavailable_result.status, 503)
         self.assertEqual(unavailable, {
+            "capabilities_sha256": RUNTIME._RECEIVER.capabilities_payload()[
+                "sha256"
+            ],
             "schema": RUNTIME._RECEIVER.HEALTH_RESPONSE_SCHEMA,
             "status": "blocked",
             "runtime_state": "open",
