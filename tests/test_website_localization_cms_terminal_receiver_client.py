@@ -77,6 +77,8 @@ def principal(request):
         RECEIVER.READINESS_PATH: RECEIVER.READINESS_SCOPE,
         RECEIVER.STATUS_PATH: RECEIVER.STATUS_SCOPE,
     }
+    if request["path"] not in scopes:
+        scopes[request["path"]] = RECEIVER.WRITE_SCOPE
     return {
         "schema": RECEIVER.PRINCIPAL_SCHEMA,
         "principal_id": "operator",
@@ -308,6 +310,145 @@ class TerminalReceiverClientTests(unittest.TestCase):
             response["capabilities"]["operations"]["notification"]["path"],
             custom,
         )
+
+    def test_notifies_through_freshly_pinned_custom_contract(self):
+        self.runtime.close()
+        custom = "/receiver/v2/terminal"
+        self.runtime = RUNTIME.open_durable_terminal_notification_receiver(
+            ":memory:", server_authentication,
+            origin="https://cms.example.test", path=custom,
+        )
+        digest = RECEIVER.capabilities_payload(custom)["sha256"]
+        transport = WSGITransport(self.runtime)
+        authentication_requests = []
+
+        def authenticate(request):
+            authentication_requests.append(dict(request))
+            return {"Authorization": "Bearer operator-secret"}
+
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", digest, authenticate,
+            transport=transport,
+        )
+        payload = notification()
+
+        acknowledgement = client(payload)
+
+        self.assertEqual(acknowledgement["notification_id"], (
+            payload["notification_id"]
+        ))
+        self.assertEqual([call[0] for call in transport.calls], ["GET", "POST"])
+        method, url, headers, body, _timeout = transport.calls[1]
+        body_sha256 = hashlib.sha256(body).hexdigest()
+        self.assertEqual((method, url), (
+            "POST", "https://cms.example.test" + custom,
+        ))
+        self.assertEqual(headers["Idempotency-Key"], payload["notification_id"])
+        self.assertEqual(
+            headers["X-Localization-Terminal-Notification-Sha256"],
+            body_sha256,
+        )
+        self.assertEqual(authentication_requests[1], {
+            "schema": RECEIVER.AUTH_SCHEMA,
+            "method": "POST",
+            "origin": "https://cms.example.test",
+            "path": custom,
+            "body_sha256": body_sha256,
+            "notification_id": payload["notification_id"],
+            "event_id": payload["event_id"],
+            "site_id": payload["site_id"],
+        })
+        stored = self.runtime.inbox.status(payload["event_id"])
+        self.assertEqual(stored.payload_sha256, body_sha256)
+
+    def test_notification_contract_drift_blocks_before_write(self):
+        payload = notification()
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", "0" * 64,
+            lambda _request: {"Authorization": "Bearer operator-secret"},
+            transport=self.transport,
+        )
+
+        with self.assertRaises(CLIENT.TerminalReceiverClientBlocked) as caught:
+            client.notify(payload)
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.capabilities_binding"
+        ))
+        self.assertFalse(caught.exception.retryable)
+        self.assertTrue(caught.exception.cms_notification_failure)
+        self.assertEqual(len(self.transport.calls), 1)
+        with self.assertRaises(RECEIVER.TerminalNotificationReceiverBlocked):
+            self.runtime.inbox.status(payload["event_id"])
+
+    def test_invalid_notification_blocks_before_discovery(self):
+        payload = notification()
+        payload["job_count"] = 0
+
+        with self.assertRaises(CLIENT.TerminalReceiverClientBlocked) as caught:
+            self.client.notify(payload)
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.request_invalid"
+        ))
+        self.assertEqual(self.transport.calls, [])
+
+    def test_notification_acknowledgement_must_bind_exact_payload(self):
+        capabilities = {
+            "schema": RECEIVER.CAPABILITIES_RESPONSE_SCHEMA,
+            "capabilities": RECEIVER.capabilities_payload(),
+        }
+        payload = notification()
+        bad_acknowledgement = {
+            "schema": RECEIVER.ACK_SCHEMA,
+            "notification_id": payload["notification_id"],
+            "event_id": payload["event_id"],
+            "site_id": "other-site",
+            "status": "accepted",
+            "notification_sha256": "0" * 64,
+        }
+        transport = FakeTransport([
+            json_result(200, capabilities), json_result(200, bad_acknowledgement),
+        ])
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", self.digest,
+            lambda _request: {"Authorization": "x"},
+            transport=transport,
+        )
+
+        with self.assertRaises(CLIENT.TerminalReceiverClientBlocked) as caught:
+            client.notify(payload)
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.notification_binding"
+        ))
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(transport.calls), 2)
+
+    def test_notification_network_failure_is_left_to_durable_outbox(self):
+        capabilities = {
+            "schema": RECEIVER.CAPABILITIES_RESPONSE_SCHEMA,
+            "capabilities": RECEIVER.capabilities_payload(),
+        }
+        transport = FakeTransport([
+            json_result(200, capabilities), RuntimeError("private failure"),
+        ])
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", self.digest,
+            lambda _request: {"Authorization": "x"},
+            transport=transport,
+        )
+
+        with self.assertRaises(CLIENT.TerminalReceiverClientBlocked) as caught:
+            client.notify(notification())
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.network"
+        ))
+        self.assertTrue(caught.exception.retryable)
+        self.assertTrue(caught.exception.cms_notification_failure)
+        self.assertEqual(len(transport.calls), 2)
+        self.assertNotIn("private failure", str(caught.exception))
 
     def test_contract_drift_blocks_before_operational_read(self):
         capabilities = RECEIVER.capabilities_payload()

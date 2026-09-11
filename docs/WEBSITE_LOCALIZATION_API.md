@@ -478,7 +478,7 @@ or private authenticator failure returns a content-free fail-closed response.
 #### Contract-pinned operator client
 
 `integrations/website_localization_cms_terminal_receiver_client.py` provides a
-provider-neutral HTTPS client for the four control routes. Construct
+provider-neutral HTTPS client for the complete receiver contract. Construct
 `HTTPTerminalReceiverClient` with the receiver's exact origin, an
 `expected_capabilities_sha256` obtained through trusted deployment
 configuration, and a callback that supplies authentication headers for the
@@ -493,6 +493,20 @@ operational read until the deployment deliberately updates its pin. Every HTTP
 request is separately authenticated and uses exactly one bounded transport
 attempt with no redirects.
 
+`notify()` validates the complete immutable terminal notification before any
+network call, repeats the pinned discovery, and sends the canonical bytes to
+the notification path taken from that verified live contract. The client is
+callable, so the same instance can be passed directly as `terminal_notifier` to
+`open_durable_cms_source` or `open_hosted_cms_source`; no separately configured
+write adapter or path is required. Its authentication context binds the exact
+method, origin, verified path, body SHA-256, notification ID, event, and site.
+The client owns no retry loop: `TerminalReceiverClientBlocked` advertises
+`cms_notification_failure` plus stable retryability, allowing only the durable
+source notification outbox to schedule another attempt. A malformed payload or
+capability mismatch blocks before the write request, while an acknowledgement
+must exactly match its notification, event, site, acceptance state, and payload
+hash.
+
 Health and readiness accept both their documented `200` and `503` states, then
 validate exact fields and cross-field invariants before returning the
 content-free snapshot. Status binds the canonical request body and its SHA-256
@@ -504,8 +518,9 @@ response between the two requests from passing as current evidence.
 Malformed JSON, duplicate keys, unexpected fields, inconsistent counts,
 rehashed semantic contract drift, redirects, and private transport failures
 raise `TerminalReceiverClientBlocked` with only a stable code and retryability.
-No method claims work, mutates receiver state, processes a notification, or
-contains website text.
+The three read methods never claim work, mutate receiver state, process a
+notification, or contain website text. `notify()` performs only the documented
+durable intake operation and returns its content-free acknowledgement.
 
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,

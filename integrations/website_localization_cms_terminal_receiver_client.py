@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract-pinned HTTPS operator client for one terminal receiver."""
+"""Contract-pinned HTTPS client for one terminal receiver."""
 
 from __future__ import annotations
 
@@ -53,12 +53,26 @@ WORKER_STATES = {
 }
 RESERVED_HEADERS = {
     "accept", "connection", "content-length", "content-type", "host",
-    "transfer-encoding", "x-localization-terminal-status-sha256",
+    "idempotency-key", "transfer-encoding",
+    "x-localization-terminal-notification-id",
+    "x-localization-terminal-notification-sha256",
+    "x-localization-terminal-status-sha256",
+}
+NOTIFICATION_FIELDS = {
+    "schema", "notification_id", "event_id", "site_id", "plan_id",
+    "website_version", "source_sequence", "job_count", "change_sha256",
+    "lifecycle_binding_sha256", "terminal_status", "lifecycle_sha256",
+}
+ACK_FIELDS = {
+    "schema", "notification_id", "event_id", "site_id", "status",
+    "notification_sha256",
 }
 
 
 class TerminalReceiverClientBlocked(RuntimeError):
     """Stable, content-free control-plane failure."""
+
+    cms_notification_failure = True
 
     def __init__(self, code: str, *, retryable: bool):
         if ERROR_CODE.fullmatch(code) is None or not isinstance(retryable, bool):
@@ -153,6 +167,60 @@ def _constant(_value: str) -> None:
 
 def _token(value: Any) -> bool:
     return isinstance(value, str) and TOKEN.fullmatch(value) is not None
+
+
+def _validated_notification(value: Any) -> tuple[dict[str, Any], bytes, str]:
+    if not isinstance(value, Mapping):
+        _fail("request_invalid")
+    try:
+        copied = json.loads(_canonical(dict(value)).decode("utf-8"))
+    except TerminalReceiverClientBlocked:
+        raise
+    except Exception:
+        _fail("request_invalid")
+    lifecycle_sha = copied.get("lifecycle_sha256")
+    terminal_status = copied.get("terminal_status")
+    semantic = (
+        copied.get("schema") == NOTIFICATION_SCHEMA
+        and set(copied) == NOTIFICATION_FIELDS
+        and all(
+            _token(copied.get(name))
+            for name in ("event_id", "site_id", "plan_id", "website_version")
+        )
+        and all(
+            isinstance(copied.get(name), int)
+            and not isinstance(copied.get(name), bool)
+            and copied[name] > 0
+            for name in ("source_sequence", "job_count")
+        )
+        and all(
+            isinstance(copied.get(name), str)
+            and SHA256.fullmatch(copied[name]) is not None
+            for name in ("change_sha256", "lifecycle_binding_sha256")
+        )
+        and terminal_status in TERMINAL_STATUSES
+        and (
+            terminal_status in {"cancelled", "superseded"}
+            and lifecycle_sha is None
+            or terminal_status not in {"cancelled", "superseded"}
+            and isinstance(lifecycle_sha, str)
+            and SHA256.fullmatch(lifecycle_sha) is not None
+        )
+    )
+    identity_source = dict(copied)
+    notification_id = identity_source.pop("notification_id", None)
+    expected_id = "terminal-" + hashlib.sha256(
+        _canonical(identity_source),
+    ).hexdigest()
+    if (
+        not semantic
+        or not isinstance(notification_id, str)
+        or NOTIFICATION_ID.fullmatch(notification_id) is None
+        or notification_id != expected_id
+    ):
+        _fail("request_invalid")
+    body = _canonical(copied)
+    return copied, body, hashlib.sha256(body).hexdigest()
 
 
 def _number(value: Any, *, nullable: bool = False) -> bool:
@@ -419,7 +487,7 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
 
 
 class HTTPTerminalReceiverClient:
-    """Read one receiver only after verifying its pinned live contract."""
+    """Operate one receiver only after verifying its pinned live contract."""
 
     def __init__(
         self,
@@ -503,6 +571,64 @@ class HTTPTerminalReceiverClient:
 
     def _verify_contract(self) -> None:
         self.capabilities()
+
+    def notify(self, notification: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Send one immutable notification through its freshly pinned route."""
+
+        payload, body, body_sha256 = _validated_notification(notification)
+        capabilities = self.capabilities()["capabilities"]
+        path = capabilities["operations"]["notification"]["path"]
+        context = {
+            "notification_id": payload["notification_id"],
+            "event_id": payload["event_id"],
+            "site_id": payload["site_id"],
+        }
+        authentication = {
+            "schema": AUTH_SCHEMA,
+            "method": "POST",
+            "origin": self.origin,
+            "path": path,
+            "body_sha256": body_sha256,
+            **context,
+        }
+        headers = _authentication_headers(
+            self.authentication_headers, authentication,
+        )
+        headers.update({
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+            "Idempotency-Key": payload["notification_id"],
+            "X-Localization-Terminal-Notification-Id": (
+                payload["notification_id"]
+            ),
+            "X-Localization-Terminal-Notification-Sha256": body_sha256,
+        })
+        try:
+            result = self.transport.request(
+                "POST", self.origin + path, headers, body,
+                timeout=self.timeout,
+            )
+        except TerminalReceiverClientBlocked:
+            raise
+        except Exception:
+            _fail("network", retryable=True)
+        acknowledgement = _json_response(result, {200})
+        expected = {
+            "schema": ACK_SCHEMA,
+            "notification_id": payload["notification_id"],
+            "event_id": payload["event_id"],
+            "site_id": payload["site_id"],
+            "status": "accepted",
+            "notification_sha256": body_sha256,
+        }
+        if set(acknowledgement) != ACK_FIELDS or acknowledgement != expected:
+            _fail("notification_binding")
+        return acknowledgement
+
+    def __call__(self, notification: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Allow direct use as a durable source-service terminal notifier."""
+
+        return self.notify(notification)
 
     def readiness(self) -> Mapping[str, Any]:
         self._verify_contract()
