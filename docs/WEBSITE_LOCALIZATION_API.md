@@ -683,6 +683,40 @@ fields, cross-tenant evidence, payload mismatches, and invalid requests are
 not. The client never returns website text through a status or health method
 and never treats a failed or ambiguous response as accepted work.
 
+#### Durable website-source delivery
+
+`integrations/website_localization_cms_source_delivery.py` supplies the durable
+retry policy for website and CMS hosts. Construct
+`DurableCMSSourceDeliveryOutbox` with a caller-owned SQLite connection and one
+already configured `CMSLocalizationSourceHTTPClient`. Enqueue the complete
+change with `enqueue_change()` or a cancellation/tombstone with
+`enqueue_removal()` before allowing the originating transaction to be treated
+as handed off. Each stored item binds its canonical payload SHA-256, immutable
+request and event IDs, site, source-service retry ceiling, delivery retry
+ceiling, and the client's trusted capability digest.
+
+`run_once()` claims at most one due item under an unpredictable token-bound
+lease and performs exactly one client operation. Removal work is selected
+before change work. A retryable client failure schedules durable exponential
+backoff up to the delivery ceiling; a permanent failure or exhausted ceiling
+becomes terminal. The independent `source_max_attempts` value is sent to the
+remote source service and is never multiplied into the local delivery limit.
+
+If the website process exits after remote acceptance but before the local
+success commit, lease expiry makes the same canonical payload and idempotency
+identity eligible again. The source service decides that replay idempotently.
+A stale worker cannot complete or fail a lease after another worker has taken
+it over. Choose `lease_seconds` greater than the configured client timeout,
+run one tick at a time from a supervised worker, and keep the SQLite database
+on durable private storage.
+
+`status()` returns one content-free binding and attempt snapshot. `health()`
+reports aggregate queue states, due work, expired leases, terminal failures,
+and active rows pinned to another capability digest. SQLite schema or row
+tampering blocks before client access. Contract drift does not silently move
+queued writes to a newly advertised endpoint: the deployment must explicitly
+resolve or migrate those immutable records first.
+
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could
 reuse a vanished parent's lock; or a permission change could redirect the next
