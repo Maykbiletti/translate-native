@@ -409,6 +409,40 @@ If the configured join timeout expires, close fails while durable state remains
 open; the supervisor must resolve or terminate the stuck callback before trying
 again. Construct the hosted runtime after every process fork.
 
+#### Terminal-receiver status and readiness
+
+The durable runtime also serves two authenticated, content-free control routes
+on the same exact HTTPS origin:
+
+| Method | Path | Required scope | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/v1/localization/terminal-notifications/status` | `terminal-notification-status:read` | Read one site's durable processing state |
+| `GET` | `/v1/localization/terminal-notifications/readiness` | `terminal-notification-readiness:read` | Check the managed worker and verified inbox |
+
+Status accepts only canonical UTF-8 JSON and requires
+`X-Localization-Terminal-Status-SHA256` to equal the exact body hash:
+
+```json
+{"event_id":"cms-event-184","schema":"blun.cms-terminal-receiver-status-request.v1","site_id":"public-site"}
+```
+
+Authentication receives the method, origin, path, event, site, and exact body
+hash. The returned principal must use
+`blun.cms-source-terminal-notification-principal.v1`, the dedicated status
+scope, and the same `site_id`. A valid response uses
+`blun.cms-terminal-receiver-status-response.v1` and contains only immutable
+notification bindings plus processing status, attempt limits, lease timing,
+stable error code, and completion time. It never includes the stored payload or
+website text. A missing event and another site's event return the same
+content-free `404` response.
+
+Readiness is strictly `GET`, body-free, query-free, and separately scoped. Its
+`blun.cms-terminal-receiver-readiness.v1` response contains only `status`,
+`worker_state`, `inbox_status`, and `error_code`. HTTP `200` requires a running
+managed worker and verified `ok` inbox; all other states return `503`. Neither
+control route claims a lease, invokes the host handler, changes retry state, or
+performs a model call.
+
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,
 uses interruptible state-specific waits, and joins that worker before closing

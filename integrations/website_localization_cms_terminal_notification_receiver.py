@@ -31,7 +31,14 @@ AUTH_SCHEMA = "blun.cms-source-terminal-notification-http-auth.v1"
 PRINCIPAL_SCHEMA = "blun.cms-source-terminal-notification-principal.v1"
 ERROR_SCHEMA = "blun.cms-source-terminal-notification-http-error.v1"
 WRITE_SCOPE = "terminal-notification:write"
+STATUS_SCOPE = "terminal-notification-status:read"
+READINESS_SCOPE = "terminal-notification-readiness:read"
 DEFAULT_PATH = "/v1/localization/terminal-notifications"
+STATUS_PATH = DEFAULT_PATH + "/status"
+READINESS_PATH = DEFAULT_PATH + "/readiness"
+STATUS_REQUEST_SCHEMA = "blun.cms-terminal-receiver-status-request.v1"
+STATUS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-status-response.v1"
+READINESS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-readiness.v1"
 MAX_BODY_BYTES = 16_384
 MAX_HEADERS = 64
 MAX_HEADER_VALUE_LENGTH = 4_096
@@ -289,13 +296,17 @@ def _parse_notification(body: bytes) -> tuple[dict[str, Any], str]:
     return value, hashlib.sha256(body).hexdigest()
 
 
-def _principal(value: Any, site_id: str) -> dict[str, str]:
+def _principal(
+    value: Any,
+    site_id: str | None,
+    scope: str = WRITE_SCOPE,
+) -> dict[str, str]:
     if not isinstance(value, Mapping) or set(value) != PRINCIPAL_FIELDS:
         _blocked("authentication_failed", 401)
     if not (
         value.get("schema") == PRINCIPAL_SCHEMA
-        and value.get("scope") == WRITE_SCOPE
-        and value.get("site_id") == site_id
+        and value.get("scope") == scope
+        and (site_id is None or value.get("site_id") == site_id)
         and all(
             _token(value.get(name))
             for name in (

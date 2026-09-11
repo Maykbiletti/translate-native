@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import math
@@ -310,10 +311,183 @@ class DurableTerminalNotificationReceiverRuntime:
             self._assert_owner()
             with self._lock:
                 self._require_open()
+                if isinstance(environ, Mapping) and environ.get("PATH_INFO") in {
+                    _RECEIVER.STATUS_PATH, _RECEIVER.READINESS_PATH,
+                }:
+                    return self._control_request(environ, start_response)
                 self.require_worker_ready()
                 return self.application(environ, start_response)
         except Exception:
             return self._unavailable(start_response)
+
+    def _control_request(
+        self,
+        environ: Mapping[str, Any],
+        start_response: Callable[..., Any],
+    ):
+        """Serve authenticated, content-free status and readiness routes."""
+
+        try:
+            path = environ.get("PATH_INFO")
+            if not isinstance(environ, Mapping):
+                _RECEIVER._blocked("environment_invalid", 400)
+            if self.application.require_https and (
+                environ.get("wsgi.url_scheme") != "https"
+            ):
+                _RECEIVER._blocked("https_required", 400)
+            if environ.get("QUERY_STRING") not in {None, ""}:
+                _RECEIVER._blocked("query_rejected", 400)
+            if environ.get("HTTP_TRANSFER_ENCODING") not in {None, ""}:
+                _RECEIVER._blocked("framing_invalid", 400)
+            headers = self.application._headers(environ)
+            if path == _RECEIVER.READINESS_PATH:
+                return self._readiness_request(
+                    environ, headers, start_response,
+                )
+            if path == _RECEIVER.STATUS_PATH:
+                return self._status_request(environ, headers, start_response)
+            _RECEIVER._blocked("path_not_found", 404)
+        except _RECEIVER.TerminalNotificationReceiverBlocked as failure:
+            return self.application._send(start_response, failure.status, {
+                "schema": _RECEIVER.ERROR_SCHEMA,
+                "status": "BLOCK",
+                "error_code": failure.code,
+            })
+        except Exception:
+            return self._unavailable(start_response)
+
+    def _authenticate_control(
+        self,
+        request: dict[str, Any],
+        headers: dict[str, str],
+        site_id: str | None,
+        scope: str,
+    ) -> None:
+        try:
+            principal = self.application.authenticate(
+                dict(request), dict(headers)
+            )
+        except Exception:
+            _RECEIVER._blocked("authentication_unavailable", 503)
+        _RECEIVER._principal(principal, site_id, scope)
+
+    def _readiness_request(
+        self,
+        environ: Mapping[str, Any],
+        headers: dict[str, str],
+        start_response: Callable[..., Any],
+    ):
+        if environ.get("REQUEST_METHOD") != "GET":
+            _RECEIVER._blocked("method_not_allowed", 405)
+        if headers.get("content-length") not in {None, "0"}:
+            _RECEIVER._blocked("body_invalid", 400)
+        if "content-type" in headers:
+            _RECEIVER._blocked("content_type", 415)
+        body_sha256 = hashlib.sha256(b"").hexdigest()
+        request = {
+            "schema": _RECEIVER.AUTH_SCHEMA,
+            "method": "GET",
+            "origin": self.application.origin,
+            "path": _RECEIVER.READINESS_PATH,
+            "body_sha256": body_sha256,
+        }
+        self._authenticate_control(
+            request, headers, None, _RECEIVER.READINESS_SCOPE,
+        )
+        report = self.worker_readiness()
+        status = 200 if report["status"] == "ready" else 503
+        return self.application._send(start_response, status, report)
+
+    def _status_request(
+        self,
+        environ: Mapping[str, Any],
+        headers: dict[str, str],
+        start_response: Callable[..., Any],
+    ):
+        if environ.get("REQUEST_METHOD") != "POST":
+            _RECEIVER._blocked("method_not_allowed", 405)
+        if headers.get("content-type", "").lower().replace(" ", "") != (
+            "application/json;charset=utf-8"
+        ):
+            _RECEIVER._blocked("content_type", 415)
+        length = headers.get("content-length")
+        if (
+            not isinstance(length, str)
+            or not length.isascii()
+            or not length.isdecimal()
+        ):
+            _RECEIVER._blocked("content_length_required", 411)
+        size = int(length)
+        if size <= 0:
+            _RECEIVER._blocked("body_invalid", 400)
+        if size > _RECEIVER.MAX_BODY_BYTES:
+            _RECEIVER._blocked("body_too_large", 413)
+        try:
+            body = environ["wsgi.input"].read(size)
+        except Exception:
+            body = None
+        if not isinstance(body, bytes) or len(body) != size:
+            _RECEIVER._blocked("body_invalid", 400)
+        try:
+            text = body.decode("utf-8")
+            if text.startswith("\ufeff"):
+                raise ValueError("BOM rejected")
+            value = json.loads(
+                text,
+                object_pairs_hook=_RECEIVER._pairs,
+                parse_constant=_RECEIVER._constant,
+            )
+        except (
+            UnicodeDecodeError, json.JSONDecodeError, ValueError,
+            RecursionError,
+        ):
+            _RECEIVER._blocked("json_invalid", 400)
+        if not (
+            isinstance(value, dict)
+            and set(value) == {"schema", "event_id", "site_id"}
+            and value.get("schema") == _RECEIVER.STATUS_REQUEST_SCHEMA
+            and _RECEIVER._token(value.get("event_id"))
+            and _RECEIVER._token(value.get("site_id"))
+            and _RECEIVER._canonical(value) == body
+        ):
+            _RECEIVER._blocked("request_invalid", 400)
+        body_sha256 = hashlib.sha256(body).hexdigest()
+        if headers.get("x-localization-terminal-status-sha256") != body_sha256:
+            _RECEIVER._blocked("header_binding_invalid", 400)
+        request = {
+            "schema": _RECEIVER.AUTH_SCHEMA,
+            "method": "POST",
+            "origin": self.application.origin,
+            "path": _RECEIVER.STATUS_PATH,
+            "event_id": value["event_id"],
+            "site_id": value["site_id"],
+            "body_sha256": body_sha256,
+        }
+        self._authenticate_control(
+            request, headers, value["site_id"], _RECEIVER.STATUS_SCOPE,
+        )
+        processing = self.inbox.processing_status(
+            value["event_id"], now=self._clock(),
+        )
+        if processing.site_id != value["site_id"]:
+            _RECEIVER._blocked("not_found", 404)
+        response = {
+            "schema": _RECEIVER.STATUS_RESPONSE_SCHEMA,
+            "notification_id": processing.notification_id,
+            "event_id": processing.event_id,
+            "site_id": processing.site_id,
+            "terminal_status": processing.terminal_status,
+            "notification_sha256": processing.payload_sha256,
+            "processing_status": processing.status,
+            "attempts": processing.attempts,
+            "max_attempts": processing.max_attempts,
+            "next_attempt_at": processing.next_attempt_at,
+            "lease_expires_at": processing.lease_expires_at,
+            "lease_expired": processing.lease_expired,
+            "last_error_code": processing.last_error_code,
+            "processed_at": processing.processed_at,
+        }
+        return self.application._send(start_response, 200, response)
 
     def status(self, event_id: str):
         self._assert_owner()

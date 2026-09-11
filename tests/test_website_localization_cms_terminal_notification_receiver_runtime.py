@@ -76,13 +76,13 @@ def notification(**overrides):
     return json.loads(raw)
 
 
-def principal(site_id="public-site"):
+def principal(site_id="public-site", scope=None):
     return {
         "schema": RUNTIME._RECEIVER.PRINCIPAL_SCHEMA,
         "principal_id": "website-cms",
         "credential_id": "cms-key",
         "credential_version": "v1",
-        "scope": RUNTIME._RECEIVER.WRITE_SCOPE,
+        "scope": scope or RUNTIME._RECEIVER.WRITE_SCOPE,
         "site_id": site_id,
     }
 
@@ -90,7 +90,12 @@ def principal(site_id="public-site"):
 def authenticate(request, headers):
     if headers.get("authorization") != "Bearer exact":
         raise RuntimeError("private credential failure")
-    return principal(request["site_id"])
+    scopes = {
+        RUNTIME._RECEIVER.DEFAULT_PATH: RUNTIME._RECEIVER.WRITE_SCOPE,
+        RUNTIME._RECEIVER.STATUS_PATH: RUNTIME._RECEIVER.STATUS_SCOPE,
+        RUNTIME._RECEIVER.READINESS_PATH: RUNTIME._RECEIVER.READINESS_SCOPE,
+    }
+    return principal(request.get("site_id", "public-site"), scopes[request["path"]])
 
 
 class WSGITransport:
@@ -99,16 +104,23 @@ class WSGITransport:
 
     def post(self, url, headers, body, *, timeout):
         del timeout
+        request_headers = dict(headers)
+        request_headers["Content-Length"] = str(len(body))
+        return self.request("POST", url, request_headers, body)
+
+    def request(self, method, url, headers, body=b""):
         parsed = urllib.parse.urlsplit(url)
         environ = {
-            "REQUEST_METHOD": "POST",
+            "REQUEST_METHOD": method,
             "PATH_INFO": parsed.path,
             "QUERY_STRING": parsed.query,
             "wsgi.url_scheme": parsed.scheme,
-            "CONTENT_TYPE": headers["Content-Type"],
-            "CONTENT_LENGTH": str(len(body)),
             "wsgi.input": io.BytesIO(body),
         }
+        if "Content-Type" in headers:
+            environ["CONTENT_TYPE"] = headers["Content-Type"]
+        if "Content-Length" in headers:
+            environ["CONTENT_LENGTH"] = headers["Content-Length"]
         for name, value in headers.items():
             if name.lower() not in {"content-type", "content-length"}:
                 environ["HTTP_" + name.upper().replace("-", "_")] = value
@@ -122,6 +134,24 @@ class WSGITransport:
         return HTTP.HTTPResult(
             captured["status"], captured["headers"], b"".join(result),
         )
+
+
+def control_request(runtime, path, *, method="GET", value=None, headers=None):
+    body = b"" if value is None else RUNTIME._RECEIVER._canonical(value)
+    request_headers = {"Authorization": "Bearer exact"}
+    if value is not None:
+        request_headers.update({
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(body)),
+            "X-Localization-Terminal-Status-SHA256": hashlib.sha256(
+                body
+            ).hexdigest(),
+        })
+    if headers:
+        request_headers.update(headers)
+    return WSGITransport(runtime).request(
+        method, "https://cms.example.test" + path, request_headers, body,
+    )
 
 
 def adapter(application):
@@ -348,6 +378,204 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         health = runtime.health()
         self.assertEqual((health.status, health.processing_due), ("ok", 0))
         self.assertEqual(health.processing_counts["succeeded"], 1)
+        runtime.close()
+
+    def test_authenticated_status_reports_exact_processing_lifecycle(self):
+        runtime = open_runtime(":memory:")
+        payload = notification()
+        adapter(runtime)(payload)
+        request = {
+            "schema": RUNTIME._RECEIVER.STATUS_REQUEST_SCHEMA,
+            "event_id": payload["event_id"],
+            "site_id": payload["site_id"],
+        }
+
+        pending_result = control_request(
+            runtime, RUNTIME._RECEIVER.STATUS_PATH,
+            method="POST", value=request,
+        )
+        pending = json.loads(pending_result.body)
+        self.assertEqual(pending_result.status, 200)
+        self.assertEqual(pending, {
+            "schema": RUNTIME._RECEIVER.STATUS_RESPONSE_SCHEMA,
+            "notification_id": payload["notification_id"],
+            "event_id": payload["event_id"],
+            "site_id": payload["site_id"],
+            "terminal_status": payload["terminal_status"],
+            "notification_sha256": hashlib.sha256(
+                RUNTIME._RECEIVER._canonical(payload)
+            ).hexdigest(),
+            "processing_status": "pending",
+            "attempts": 0,
+            "max_attempts": 5,
+            "next_attempt_at": 123.5,
+            "lease_expires_at": None,
+            "lease_expired": False,
+            "last_error_code": None,
+            "processed_at": None,
+        })
+        runtime.process_next(
+            processing_ack, "cms-consumer", now=124, lease_seconds=30,
+        )
+        succeeded = json.loads(control_request(
+            runtime, RUNTIME._RECEIVER.STATUS_PATH,
+            method="POST", value=request,
+        ).body)
+        self.assertEqual((
+            succeeded["processing_status"],
+            succeeded["attempts"],
+            succeeded["processed_at"],
+        ), ("succeeded", 1, 124.0))
+        self.assertNotIn("payload", repr(succeeded))
+        runtime.close()
+
+    def test_status_is_read_only_and_cross_site_matches_missing_event(self):
+        runtime = open_runtime(":memory:")
+        payload = notification()
+        adapter(runtime)(payload)
+        changes = runtime._connection.total_changes
+
+        def status(event_id, site_id):
+            return control_request(
+                runtime,
+                RUNTIME._RECEIVER.STATUS_PATH,
+                method="POST",
+                value={
+                    "schema": RUNTIME._RECEIVER.STATUS_REQUEST_SCHEMA,
+                    "event_id": event_id,
+                    "site_id": site_id,
+                },
+            )
+
+        foreign = status(payload["event_id"], "another-site")
+        missing = status("missing-event", "public-site")
+        self.assertEqual((foreign.status, foreign.body), (
+            missing.status, missing.body,
+        ))
+        self.assertEqual(foreign.status, 404)
+        self.assertEqual(runtime._connection.total_changes, changes)
+        runtime.close()
+
+    def test_readiness_route_tracks_managed_worker_without_counts(self):
+        runtime = open_runtime(":memory:")
+        unmanaged = control_request(
+            runtime, RUNTIME._RECEIVER.READINESS_PATH,
+        )
+        self.assertEqual(unmanaged.status, 503)
+        self.assertEqual(json.loads(unmanaged.body)["worker_state"], "unmanaged")
+        runtime.start_worker(
+            processing_ack,
+            "cms-consumer",
+            active_delay_seconds=0.01,
+            idle_delay_seconds=60,
+            blocked_delay_seconds=60,
+        )
+        self.wait_for(lambda: runtime.worker_state == "running")
+        ready = control_request(runtime, RUNTIME._RECEIVER.READINESS_PATH)
+        self.assertEqual(ready.status, 200)
+        self.assertEqual(json.loads(ready.body), runtime.worker_readiness())
+        self.assertNotIn("received", ready.body.decode("utf-8"))
+        runtime.stop_worker(timeout_seconds=1)
+        stopped = control_request(runtime, RUNTIME._RECEIVER.READINESS_PATH)
+        self.assertEqual(stopped.status, 503)
+        self.assertEqual(json.loads(stopped.body)["worker_state"], "stopped")
+        runtime.close()
+
+    def test_control_routes_require_separate_scopes_before_store_access(self):
+        def write_only(request, _headers):
+            return principal(request.get("site_id", "public-site"))
+
+        runtime = RUNTIME.open_durable_terminal_notification_receiver(
+            ":memory:",
+            write_only,
+            origin="https://cms.example.test",
+            clock=lambda: 123.5,
+        )
+        runtime.inbox.processing_status = mock.Mock()
+        status = control_request(
+            runtime,
+            RUNTIME._RECEIVER.STATUS_PATH,
+            method="POST",
+            value={
+                "schema": RUNTIME._RECEIVER.STATUS_REQUEST_SCHEMA,
+                "event_id": "cms-event-184",
+                "site_id": "public-site",
+            },
+        )
+        readiness = control_request(
+            runtime, RUNTIME._RECEIVER.READINESS_PATH,
+        )
+        self.assertEqual((status.status, readiness.status), (403, 403))
+        runtime.inbox.processing_status.assert_not_called()
+        runtime.close()
+
+    def test_control_transport_and_body_bindings_fail_closed(self):
+        runtime = open_runtime(":memory:")
+        value = {
+            "schema": RUNTIME._RECEIVER.STATUS_REQUEST_SCHEMA,
+            "event_id": "cms-event-184",
+            "site_id": "public-site",
+        }
+        body = RUNTIME._RECEIVER._canonical(value)
+        transport = WSGITransport(runtime)
+        cases = (
+            transport.request(
+                "POST",
+                "https://cms.example.test" + RUNTIME._RECEIVER.STATUS_PATH,
+                {
+                    "Authorization": "Bearer exact",
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Content-Length": str(len(body)),
+                    "X-Localization-Terminal-Status-SHA256": "0" * 64,
+                },
+                body,
+            ),
+            transport.request(
+                "GET",
+                "http://cms.example.test" + RUNTIME._RECEIVER.READINESS_PATH,
+                {"Authorization": "Bearer exact"},
+            ),
+            transport.request(
+                "POST",
+                "https://cms.example.test"
+                + RUNTIME._RECEIVER.READINESS_PATH,
+                {"Authorization": "Bearer exact"},
+            ),
+            transport.request(
+                "GET",
+                "https://cms.example.test"
+                + RUNTIME._RECEIVER.READINESS_PATH,
+                {
+                    "Authorization": "Bearer exact",
+                    "Content-Length": "1",
+                },
+                b"x",
+            ),
+        )
+        self.assertEqual(tuple(result.status for result in cases), (
+            400, 400, 405, 400,
+        ))
+        runtime.close()
+
+    def test_private_control_authentication_failure_is_redacted(self):
+        secret = "private credential and customer detail"
+
+        def broken_authenticate(_request, _headers):
+            raise RuntimeError(secret)
+
+        runtime = RUNTIME.open_durable_terminal_notification_receiver(
+            ":memory:",
+            broken_authenticate,
+            origin="https://cms.example.test",
+        )
+        response = control_request(
+            runtime, RUNTIME._RECEIVER.READINESS_PATH,
+        )
+        self.assertEqual(response.status, 503)
+        self.assertEqual(json.loads(response.body)["error_code"], (
+            "notification_receiver.authentication_unavailable"
+        ))
+        self.assertNotIn(secret, response.body.decode("utf-8"))
         runtime.close()
 
     def test_hosted_runtime_processes_notification_and_reports_readiness(self):
