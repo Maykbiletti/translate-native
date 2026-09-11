@@ -409,15 +409,16 @@ If the configured join timeout expires, close fails while durable state remains
 open; the supervisor must resolve or terminate the stuck callback before trying
 again. Construct the hosted runtime after every process fork.
 
-#### Terminal-receiver status and readiness
+#### Terminal-receiver status, readiness, and capabilities
 
-The durable runtime also serves two authenticated, content-free control routes
+The durable runtime also serves three authenticated, content-free control routes
 on the same exact HTTPS origin:
 
 | Method | Path | Required scope | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/v1/localization/terminal-notifications/status` | `terminal-notification-status:read` | Read one site's durable processing state |
 | `GET` | `/v1/localization/terminal-notifications/readiness` | `terminal-notification-readiness:read` | Check the managed worker and verified inbox |
+| `GET` | `/v1/localization/terminal-notifications/capabilities` | `terminal-notification-capabilities:read` | Discover the exact active receiver contract |
 
 Status accepts only canonical UTF-8 JSON and requires
 `X-Localization-Terminal-Status-SHA256` to equal the exact body hash:
@@ -439,9 +440,25 @@ content-free `404` response.
 Readiness is strictly `GET`, body-free, query-free, and separately scoped. Its
 `blun.cms-terminal-receiver-readiness.v1` response contains only `status`,
 `worker_state`, `inbox_status`, and `error_code`. HTTP `200` requires a running
-managed worker and verified `ok` inbox; all other states return `503`. Neither
-control route claims a lease, invokes the host handler, changes retry state, or
-performs a model call.
+managed worker and verified `ok` inbox; all other states return `503`. None
+of these control routes claims a lease, invokes the host handler, changes retry
+state, or performs a model call.
+
+Discovery is also strictly `GET`, body-free, query-free, and separately scoped.
+Its `blun.cms-terminal-receiver-capabilities-response.v1` envelope contains a
+`blun.cms-terminal-receiver-capabilities.v1` contract and canonical SHA-256.
+The digest covers all active operations, including the runtime's configured
+notification intake path, plus methods, scopes, request and response schemas,
+required fields, success statuses, transport limits, processing states, and
+terminal outcomes. It contains no site, endpoint origin, notification,
+credential, website text, provider response, or private error detail.
+
+The capability request authenticates the exact empty-body hash before the
+contract is built. It never reads the inbox, checks worker readiness, claims a
+lease, or calls a handler. A custom intake path that collides with any control
+route is rejected before SQLite is created. Missing or altered notification
+schema fields, reused scopes, a request body, content type, query, wrong method,
+or private authenticator failure returns a content-free fail-closed response.
 
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,

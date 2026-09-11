@@ -313,6 +313,7 @@ class DurableTerminalNotificationReceiverRuntime:
                 self._require_open()
                 if isinstance(environ, Mapping) and environ.get("PATH_INFO") in {
                     _RECEIVER.STATUS_PATH, _RECEIVER.READINESS_PATH,
+                    _RECEIVER.CAPABILITIES_PATH,
                 }:
                     return self._control_request(environ, start_response)
                 self.require_worker_ready()
@@ -340,6 +341,10 @@ class DurableTerminalNotificationReceiverRuntime:
             if environ.get("HTTP_TRANSFER_ENCODING") not in {None, ""}:
                 _RECEIVER._blocked("framing_invalid", 400)
             headers = self.application._headers(environ)
+            if path == _RECEIVER.CAPABILITIES_PATH:
+                return self._capabilities_request(
+                    environ, headers, start_response,
+                )
             if path == _RECEIVER.READINESS_PATH:
                 return self._readiness_request(
                     environ, headers, start_response,
@@ -370,6 +375,36 @@ class DurableTerminalNotificationReceiverRuntime:
         except Exception:
             _RECEIVER._blocked("authentication_unavailable", 503)
         _RECEIVER._principal(principal, site_id, scope)
+
+    def _capabilities_request(
+        self,
+        environ: Mapping[str, Any],
+        headers: dict[str, str],
+        start_response: Callable[..., Any],
+    ):
+        if environ.get("REQUEST_METHOD") != "GET":
+            _RECEIVER._blocked("method_not_allowed", 405)
+        if headers.get("content-length") not in {None, "0"}:
+            _RECEIVER._blocked("body_invalid", 400)
+        if "content-type" in headers:
+            _RECEIVER._blocked("content_type", 415)
+        body_sha256 = hashlib.sha256(b"").hexdigest()
+        request = {
+            "schema": _RECEIVER.AUTH_SCHEMA,
+            "method": "GET",
+            "origin": self.application.origin,
+            "path": _RECEIVER.CAPABILITIES_PATH,
+            "body_sha256": body_sha256,
+        }
+        self._authenticate_control(
+            request, headers, None, _RECEIVER.CAPABILITIES_SCOPE,
+        )
+        return self.application._send(start_response, 200, {
+            "schema": _RECEIVER.CAPABILITIES_RESPONSE_SCHEMA,
+            "capabilities": _RECEIVER.capabilities_payload(
+                self.application.path
+            ),
+        })
 
     def _readiness_request(
         self,

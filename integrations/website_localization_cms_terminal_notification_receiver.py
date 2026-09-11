@@ -30,12 +30,19 @@ PROCESSING_ACK_SCHEMA = "blun.cms-terminal-notification-processing-ack.v1"
 AUTH_SCHEMA = "blun.cms-source-terminal-notification-http-auth.v1"
 PRINCIPAL_SCHEMA = "blun.cms-source-terminal-notification-principal.v1"
 ERROR_SCHEMA = "blun.cms-source-terminal-notification-http-error.v1"
+API_SCHEMA = "blun.cms-terminal-receiver-api.v1"
+CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v1"
+CAPABILITIES_RESPONSE_SCHEMA = (
+    "blun.cms-terminal-receiver-capabilities-response.v1"
+)
 WRITE_SCOPE = "terminal-notification:write"
 STATUS_SCOPE = "terminal-notification-status:read"
 READINESS_SCOPE = "terminal-notification-readiness:read"
+CAPABILITIES_SCOPE = "terminal-notification-capabilities:read"
 DEFAULT_PATH = "/v1/localization/terminal-notifications"
 STATUS_PATH = DEFAULT_PATH + "/status"
 READINESS_PATH = DEFAULT_PATH + "/readiness"
+CAPABILITIES_PATH = DEFAULT_PATH + "/capabilities"
 STATUS_REQUEST_SCHEMA = "blun.cms-terminal-receiver-status-request.v1"
 STATUS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-status-response.v1"
 READINESS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-readiness.v1"
@@ -316,6 +323,121 @@ def _principal(
     ):
         _blocked("authorization_failed", 403)
     return dict(value)
+
+
+def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any]:
+    """Return the exact, content-free receiver contract for integrations."""
+
+    expected_controls = {
+        "capabilities": {
+            "method": "GET",
+            "path": CAPABILITIES_PATH,
+            "scope": CAPABILITIES_SCOPE,
+            "request_schema": None,
+            "request_fields": [],
+            "response_schema": CAPABILITIES_RESPONSE_SCHEMA,
+            "response_fields": ["schema", "capabilities"],
+            "success_status": 200,
+        },
+        "readiness": {
+            "method": "GET",
+            "path": READINESS_PATH,
+            "scope": READINESS_SCOPE,
+            "request_schema": None,
+            "request_fields": [],
+            "response_schema": READINESS_RESPONSE_SCHEMA,
+            "response_fields": [
+                "schema", "status", "worker_state", "inbox_status",
+                "error_code",
+            ],
+            "success_status": 200,
+        },
+        "status": {
+            "method": "POST",
+            "path": STATUS_PATH,
+            "scope": STATUS_SCOPE,
+            "request_schema": STATUS_REQUEST_SCHEMA,
+            "request_fields": ["schema", "event_id", "site_id"],
+            "response_schema": STATUS_RESPONSE_SCHEMA,
+            "response_fields": [
+                "schema", "notification_id", "event_id", "site_id",
+                "terminal_status", "notification_sha256",
+                "processing_status", "attempts", "max_attempts",
+                "next_attempt_at", "lease_expires_at", "lease_expired",
+                "last_error_code", "processed_at",
+            ],
+            "success_status": 200,
+        },
+    }
+    if (
+        not isinstance(notification_path, str)
+        or notification_path in {
+            STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH,
+        }
+        or len({
+            WRITE_SCOPE, STATUS_SCOPE, READINESS_SCOPE, CAPABILITIES_SCOPE,
+        }) != 4
+    ):
+        _blocked("capabilities_invalid", 503)
+    operations = {
+        **expected_controls,
+        "notification": {
+            "method": "POST",
+            "path": notification_path,
+            "scope": WRITE_SCOPE,
+            "request_schema": NOTIFICATION_SCHEMA,
+            "request_fields": [
+                "schema", "notification_id", "event_id", "site_id",
+                "plan_id", "website_version", "source_sequence",
+                "job_count", "change_sha256", "lifecycle_binding_sha256",
+                "terminal_status", "lifecycle_sha256",
+            ],
+            "response_schema": ACK_SCHEMA,
+            "response_fields": [
+                "schema", "notification_id", "event_id", "site_id",
+                "status", "notification_sha256",
+            ],
+            "success_status": 200,
+        },
+    }
+    capabilities = {
+        "schema": CAPABILITIES_SCHEMA,
+        "api_schema": API_SCHEMA,
+        "authentication_request_schema": AUTH_SCHEMA,
+        "principal_schema": PRINCIPAL_SCHEMA,
+        "error_schema": ERROR_SCHEMA,
+        "limits": {
+            "max_body_bytes": MAX_BODY_BYTES,
+            "max_headers": MAX_HEADERS,
+            "max_header_value_bytes": MAX_HEADER_VALUE_LENGTH,
+            "processing_max_attempts_min": 1,
+            "processing_max_attempts_max": 20,
+        },
+        "processing_statuses": list(PROCESSING_STATUSES),
+        "terminal_statuses": sorted(TERMINAL_STATUSES),
+        "operations": operations,
+    }
+    try:
+        if set(operations) != {
+            "capabilities", "notification", "readiness", "status",
+        }:
+            raise ValueError
+        if set(NOTIFICATION_FIELDS) != set(
+            operations["notification"]["request_fields"]
+        ):
+            raise ValueError
+        encoded = json.dumps(
+            capabilities, ensure_ascii=False, allow_nan=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if not encoded or len(encoded) > MAX_BODY_BYTES:
+            raise ValueError
+    except (TypeError, ValueError, RecursionError):
+        _blocked("capabilities_invalid", 503)
+    return {
+        **capabilities,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
 
 
 @contextmanager
@@ -1193,6 +1315,7 @@ class CMSTerminalNotificationReceiverApplication:
             or "?" in path
             or "#" in path
             or len(path) > 256
+            or path in {STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH}
         ):
             raise ValueError("path is invalid")
         if not isinstance(require_https, bool):
