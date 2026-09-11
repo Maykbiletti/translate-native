@@ -72,6 +72,12 @@ class ReceivedTerminalNotification:
     received_at: float
 
 
+@dataclass(frozen=True)
+class TerminalNotificationInboxHealth:
+    status: str
+    received: int
+
+
 def _blocked(code: str, status: int) -> None:
     raise TerminalNotificationReceiverBlocked("notification_receiver." + code, status)
 
@@ -237,13 +243,21 @@ def _transaction(connection: sqlite3.Connection) -> Iterator[None]:
 class DurableCMSTerminalNotificationInbox:
     """One process-owned, serialized SQLite terminal-notification ledger."""
 
-    def __init__(self, connection: sqlite3.Connection):
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        database_guard: Callable[[], None] | None = None,
+    ):
         if not isinstance(connection, sqlite3.Connection):
             raise TypeError("connection must be sqlite3.Connection")
+        if database_guard is not None and not callable(database_guard):
+            raise TypeError("database_guard must be callable")
         self.connection = connection
         self.connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._owner_pid = os.getpid()
+        self._database_guard = database_guard or (lambda: None)
         self._initialize()
 
     def _owner(self) -> None:
@@ -251,29 +265,42 @@ class DurableCMSTerminalNotificationInbox:
             _blocked("foreign_process", 503)
 
     def _initialize(self) -> None:
-        with self._lock, _transaction(self.connection):
-            self.connection.execute("""
-                CREATE TABLE IF NOT EXISTS cms_terminal_notification_inbox_meta (
-                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                    schema_version INTEGER NOT NULL CHECK (schema_version = 1)
-                )
-            """)
-            self.connection.execute("""
-                INSERT OR IGNORE INTO cms_terminal_notification_inbox_meta
-                VALUES (1, 1)
-            """)
-            self.connection.execute("""
-                CREATE TABLE IF NOT EXISTS cms_terminal_notification_inbox (
-                    notification_id TEXT PRIMARY KEY,
-                    event_id TEXT NOT NULL UNIQUE,
-                    site_id TEXT NOT NULL,
-                    terminal_status TEXT NOT NULL,
-                    payload_sha256 TEXT NOT NULL UNIQUE,
-                    payload_json TEXT NOT NULL,
-                    received_at REAL NOT NULL
-                )
-            """)
-        self._validate_schema()
+        with self._lock:
+            self._guard()
+            with _transaction(self.connection):
+                self._create_schema()
+            self._validate_schema()
+
+    def _guard(self) -> None:
+        try:
+            self._database_guard()
+        except TerminalNotificationReceiverBlocked:
+            raise
+        except Exception:
+            _blocked("database_unsafe", 503)
+
+    def _create_schema(self) -> None:
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS cms_terminal_notification_inbox_meta (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+            )
+        """)
+        self.connection.execute("""
+            INSERT OR IGNORE INTO cms_terminal_notification_inbox_meta
+            VALUES (1, 1)
+        """)
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS cms_terminal_notification_inbox (
+                notification_id TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL UNIQUE,
+                site_id TEXT NOT NULL,
+                terminal_status TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL UNIQUE,
+                payload_json TEXT NOT NULL,
+                received_at REAL NOT NULL
+            )
+        """)
 
     def _validate_schema(self) -> None:
         meta_columns = tuple(row["name"] for row in self.connection.execute(
@@ -305,6 +332,33 @@ class DurableCMSTerminalNotificationInbox:
             "notification_sha256": payload_sha256,
         }
 
+    @staticmethod
+    def _validated_row(row: sqlite3.Row) -> ReceivedTerminalNotification:
+        try:
+            parsed, payload_sha256 = _parse_notification(
+                row["payload_json"].encode("utf-8")
+            )
+            if not all(
+                row[name] == expected
+                for name, expected in {
+                    "notification_id": parsed["notification_id"],
+                    "event_id": parsed["event_id"],
+                    "site_id": parsed["site_id"],
+                    "terminal_status": parsed["terminal_status"],
+                    "payload_sha256": payload_sha256,
+                }.items()
+            ):
+                raise ValueError("binding mismatch")
+            received_at = _time(row["received_at"])
+        except TerminalNotificationReceiverBlocked:
+            _blocked("stored_binding_invalid", 503)
+        except Exception:
+            _blocked("stored_binding_invalid", 503)
+        return ReceivedTerminalNotification(
+            row["notification_id"], row["event_id"], row["site_id"],
+            row["terminal_status"], row["payload_sha256"], received_at,
+        )
+
     def accept(
         self,
         payload: Mapping[str, Any],
@@ -330,6 +384,7 @@ class DurableCMSTerminalNotificationInbox:
             _blocked("binding_invalid", 400)
         rendered = body.decode("utf-8")
         with self._lock:
+            self._guard()
             self._validate_schema()
             try:
                 with _transaction(self.connection):
@@ -375,6 +430,7 @@ class DurableCMSTerminalNotificationInbox:
         if not _token(event_id):
             _blocked("request_invalid", 400)
         with self._lock:
+            self._guard()
             self._validate_schema()
             try:
                 row = self.connection.execute(
@@ -385,25 +441,31 @@ class DurableCMSTerminalNotificationInbox:
                 _blocked("storage_unavailable", 503)
             if row is None:
                 _blocked("not_found", 404)
-            parsed, payload_sha256 = _parse_notification(
-                row["payload_json"].encode("utf-8")
-            )
-            if not all(
-                row[name] == expected
-                for name, expected in {
-                    "notification_id": parsed["notification_id"],
-                    "event_id": parsed["event_id"],
-                    "site_id": parsed["site_id"],
-                    "terminal_status": parsed["terminal_status"],
-                    "payload_sha256": payload_sha256,
-                }.items()
-            ):
-                _blocked("stored_binding_invalid", 503)
-            return ReceivedTerminalNotification(
-                row["notification_id"], row["event_id"], row["site_id"],
-                row["terminal_status"], row["payload_sha256"],
-                _time(row["received_at"]),
-            )
+            return self._validated_row(row)
+
+    def health(self) -> TerminalNotificationInboxHealth:
+        self._owner()
+        with self._lock:
+            self._guard()
+            self._validate_schema()
+            try:
+                integrity = self.connection.execute(
+                    "PRAGMA integrity_check"
+                ).fetchall()
+                foreign_keys = self.connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchall()
+                rows = self.connection.execute(
+                    "SELECT * FROM cms_terminal_notification_inbox "
+                    "ORDER BY received_at, event_id"
+                ).fetchall()
+            except sqlite3.Error:
+                _blocked("storage_unavailable", 503)
+            if [tuple(row) for row in integrity] != [("ok",)] or foreign_keys:
+                _blocked("integrity_failed", 503)
+            for row in rows:
+                self._validated_row(row)
+            return TerminalNotificationInboxHealth("ok", len(rows))
 
 
 class CMSTerminalNotificationReceiverApplication:

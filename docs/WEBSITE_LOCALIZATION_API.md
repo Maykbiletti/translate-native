@@ -337,6 +337,25 @@ HTTP `409`; malformed or wrongly bound requests are permanent `4xx` failures,
 while unavailable authentication, damaged storage, and unexpected internal
 failures return retryable `503`. Every error body is content free.
 
+For deployment, prefer
+`integrations/website_localization_cms_terminal_notification_receiver_runtime.py`.
+Its `open_durable_terminal_notification_receiver` factory takes a canonical
+absolute database path, the host verifier, exact HTTPS origin, and optional path
+and clock. It validates the full HTTP boundary before opening SQLite, creates a
+missing file exclusively with mode `0600`, and rejects unsafe parents, symlinks,
+hard links, special files, permissive modes, and path replacement. Construct one
+runtime after each WSGI worker forks; inherited runtimes report
+`foreign-process` and block without entering a possibly inherited lock.
+
+The runtime itself is the WSGI application. It serializes request execution with
+close, rechecks the pinned database identity before every operation, and owns the
+connection until `close()` or context-manager exit. `status(event_id)` returns
+only the verified content-free receipt binding. `health()` checks SQLite
+integrity and every stored notification, then returns only `status`, runtime
+`state`, and the number of received notifications. Closed, exchanged, damaged,
+or foreign-process runtimes return content-free HTTP `503` and require a new
+worker runtime; they never attempt repair or invent acknowledgement state.
+
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,
 uses interruptible state-specific waits, and joins that worker before closing

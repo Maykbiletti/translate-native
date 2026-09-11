@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Protected terminal-receiver runtime (11 September 2026)
+
+Assume the durable callback receiver validated every request correctly but wrote
+its evidence through an unsafe or stale SQLite connection.
+
+- A symlink, hard link, permissive file, shared writable directory, or exchanged
+  path could redirect or expose the terminal-notification ledger.
+- A runtime constructed before a worker fork could reuse a connection and lock
+  whose process ownership is no longer valid.
+- Shutdown could close SQLite during a request, while a damaged database could
+  continue returning superficially healthy counts.
+- Invalid origin, route, authenticator, or HTTPS policy could be discovered only
+  after an unwanted database file had already been created.
+
+The composition root preflights the complete HTTP configuration before touching
+the database, reserves a missing regular file exclusively with mode `0600`, and
+pins its device/inode identity. Parent ownership, permissions, link count, file
+mode, and identity are rechecked under one process-owned runtime lock before
+every request, status read, and health check. Close shares that lock and is
+idempotent. Health verifies SQLite integrity plus every stored semantic binding;
+configuration, path, process, lifecycle, and storage failures remain fail closed.
+
 ## Durable terminal-notification receiver (11 September 2026)
 
 Assume the source localization service reported a verified terminal result but
