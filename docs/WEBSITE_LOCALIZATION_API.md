@@ -475,6 +475,34 @@ route is rejected before SQLite is created. Missing or altered notification
 schema fields, reused scopes, a request body, content type, query, wrong method,
 or private authenticator failure returns a content-free fail-closed response.
 
+#### Contract-pinned operator client
+
+`integrations/website_localization_cms_terminal_receiver_client.py` provides a
+provider-neutral HTTPS client for the four control routes. Construct
+`HTTPTerminalReceiverClient` with the receiver's exact origin, an
+`expected_capabilities_sha256` obtained through trusted deployment
+configuration, and a callback that supplies authentication headers for the
+provided canonical request context. Do not learn and trust the digest from the
+same untrusted connection that it is intended to authenticate.
+
+`capabilities()` verifies the response envelope, the canonical digest, every
+schema and limit, all five operation definitions, distinct scopes, and the
+configured notification path. `health()`, `readiness()`, and `status()` first
+repeat that live contract verification; a contract change therefore blocks the
+operational read until the deployment deliberately updates its pin. Every HTTP
+request is separately authenticated and uses exactly one bounded transport
+attempt with no redirects.
+
+Health and readiness accept both their documented `200` and `503` states, then
+validate exact fields and cross-field invariants before returning the
+content-free snapshot. Status binds the canonical request body and its SHA-256
+to the event and site, then rejects a response for any other tenant or identity.
+Malformed JSON, duplicate keys, unexpected fields, inconsistent counts,
+rehashed semantic contract drift, redirects, and private transport failures
+raise `TerminalReceiverClientBlocked` with only a stable code and retryability.
+No method claims work, mutates receiver state, processes a notification, or
+contains website text.
+
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,
 uses interruptible state-specific waits, and joins that worker before closing

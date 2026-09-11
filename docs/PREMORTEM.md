@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Contract-pinned terminal-receiver operator client (11 September 2026)
+
+Assume an operator accepted a terminal-receiver control response from the wrong,
+changed, or semantically weakened endpoint.
+
+- A redirect could carry credentials to another origin, or a transport wrapper
+  could silently repeat a supposedly read-only request.
+- A validly rehashed contract could reuse write authority for health, change a
+  route or schema, or advertise a partial interface under the expected product.
+- Status could be returned for another event or site, while inconsistent health
+  counts or a truncated response could still be labeled healthy.
+- A deployment could pin the contract once but omit checking whether it changed
+  before a later operational read.
+
+The new operator client requires an out-of-band capability digest and verifies
+the live canonical contract, exact operation semantics, distinct scopes, and
+schemas before every health, readiness, or status request. Requests bind fresh
+authentication to method, exact origin, path, body hash, event, and site; the
+transport performs one bounded attempt without redirects. Exact response fields
+and cross-field invariants distinguish valid blocked state from malformed
+evidence, while every local failure exposes only a stable content-free code.
+
 ## Terminal-receiver operational health API (11 September 2026)
 
 Assume the hosted terminal receiver accepted work while its operational health
