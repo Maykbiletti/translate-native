@@ -44,6 +44,10 @@ class DurableTerminalReceiverRuntimeHealth:
     status: str
     state: str
     received: int
+    processing_counts: dict[str, int]
+    processing_due: int
+    expired_leases: int
+    failed: int
 
 
 def _database_path(value: Any) -> str:
@@ -204,6 +208,36 @@ def _preflight_application(
         ) from error
 
 
+def _preflight_processing(
+    max_attempts: int,
+    base_delay_seconds: float | int,
+    max_delay_seconds: float | int,
+) -> None:
+    if (
+        isinstance(max_attempts, bool)
+        or not isinstance(max_attempts, int)
+        or not 1 <= max_attempts <= 20
+    ):
+        raise DurableTerminalReceiverRuntimeBlocked(
+            "terminal processing attempts are invalid"
+        )
+    try:
+        base_delay = _RECEIVER._duration(
+            base_delay_seconds, "processing_delay_invalid"
+        )
+        max_delay = _RECEIVER._duration(
+            max_delay_seconds, "processing_delay_invalid"
+        )
+    except Exception as error:
+        raise DurableTerminalReceiverRuntimeBlocked(
+            "terminal processing delay is invalid"
+        ) from error
+    if base_delay > max_delay:
+        raise DurableTerminalReceiverRuntimeBlocked(
+            "terminal processing delay range is invalid"
+        )
+
+
 class DurableTerminalNotificationReceiverRuntime:
     """Own one protected SQLite connection and its complete WSGI boundary."""
 
@@ -213,11 +247,13 @@ class DurableTerminalNotificationReceiverRuntime:
         inbox: Any,
         application: Any,
         database_guard: Callable[[], None],
+        clock: Callable[[], float | int],
     ):
         self._connection = connection
         self.inbox = inbox
         self.application = application
         self._database_guard = database_guard
+        self._clock = clock
         self._lock = threading.RLock()
         self._owner_pid = os.getpid()
         self._closed = False
@@ -289,18 +325,66 @@ class DurableTerminalNotificationReceiverRuntime:
         with self._lock:
             self._require_open()
             try:
-                health = self.inbox.health()
+                health = self.inbox.health(now=self._clock())
             except Exception as error:
                 raise DurableTerminalReceiverRuntimeBlocked(
                     "terminal receiver health is unavailable"
                 ) from error
-            if health.status != "ok" or not isinstance(health.received, int):
+            if (
+                health.status not in {"ok", "blocked"}
+                or not isinstance(health.received, int)
+                or not isinstance(health.counts, dict)
+                or set(health.counts) != set(_RECEIVER.PROCESSING_STATUSES)
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    or value < 0
+                    for value in health.counts.values()
+                )
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    or value < 0
+                    for value in (
+                        health.due, health.expired_leases, health.failed,
+                    )
+                )
+            ):
                 raise DurableTerminalReceiverRuntimeBlocked(
                     "terminal receiver health is invalid"
                 )
             return DurableTerminalReceiverRuntimeHealth(
-                "ok", "open", health.received,
+                health.status,
+                "open",
+                health.received,
+                dict(health.counts),
+                health.due,
+                health.expired_leases,
+                health.failed,
             )
+
+    def process_next(
+        self,
+        callback: Callable[[Mapping[str, Any]], Any],
+        worker_id: str,
+        *,
+        now: float | int | None = None,
+        lease_seconds: float | int = 600,
+    ):
+        """Run at most one lease-bound host processing callback."""
+
+        self._assert_owner()
+        with self._lock:
+            self._require_open()
+            try:
+                return self.inbox.run_next_processing(
+                    callback,
+                    worker_id,
+                    now=self._clock() if now is None else now,
+                    lease_seconds=lease_seconds,
+                )
+            except Exception as error:
+                raise DurableTerminalReceiverRuntimeBlocked(
+                    "terminal receiver processing is unavailable"
+                ) from error
 
     def close(self) -> None:
         self._assert_owner()
@@ -332,6 +416,9 @@ def open_durable_terminal_notification_receiver(
     clock: Callable[[], float | int] = time.time,
     path: str = _RECEIVER.DEFAULT_PATH,
     require_https: bool = True,
+    processing_max_attempts: int = 5,
+    processing_base_delay_seconds: float | int = 5,
+    processing_max_delay_seconds: float | int = 300,
 ) -> DurableTerminalNotificationReceiverRuntime:
     """Validate all configuration before opening one protected SQLite worker."""
 
@@ -342,6 +429,11 @@ def open_durable_terminal_notification_receiver(
         clock=clock,
         path=path,
         require_https=require_https,
+    )
+    _preflight_processing(
+        processing_max_attempts,
+        processing_base_delay_seconds,
+        processing_max_delay_seconds,
     )
     database_guard = _prepare_database_file(database_path)
     try:
@@ -365,7 +457,11 @@ def open_durable_terminal_notification_receiver(
             raise sqlite3.DatabaseError("secure deletion unavailable")
         database_guard()
         inbox = _RECEIVER.DurableCMSTerminalNotificationInbox(
-            connection, database_guard=database_guard,
+            connection,
+            database_guard=database_guard,
+            processing_max_attempts=processing_max_attempts,
+            processing_base_delay_seconds=processing_base_delay_seconds,
+            processing_max_delay_seconds=processing_max_delay_seconds,
         )
         application = _RECEIVER.CMSTerminalNotificationReceiverApplication(
             inbox,
@@ -381,5 +477,5 @@ def open_durable_terminal_notification_receiver(
             "terminal receiver runtime initialization failed"
         ) from error
     return DurableTerminalNotificationReceiverRuntime(
-        connection, inbox, application, database_guard,
+        connection, inbox, application, database_guard, clock,
     )

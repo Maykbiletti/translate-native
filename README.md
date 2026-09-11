@@ -107,6 +107,28 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.53.0: durable terminal-notification processing
+
+Version 6.53.0 closes the CMS-side callback loop after durable receipt. The
+receiver now creates one processing record in the same transaction that stores
+and acknowledges a terminal notification. A host worker claims one due record
+at a time and receives the exact content-free notification only after the
+claim's owner, random token, attempt, deadline, and immutable payload binding
+have been committed.
+
+The host returns a bound `processed` acknowledgement. Retryable failures use a
+persisted bounded exponential delay; permanent failures and exhausted attempts
+remain visible and block health. Expired leases recover after restart, while a
+stale worker cannot complete a replacement claim. Unknown callback exceptions
+become one stable content-free failure code instead of stored private prose.
+
+Existing V6.51/V6.52 databases migrate transactionally from schema V1 to V2.
+Every old receipt is validated before one pending processing record is
+backfilled; any altered table or stored binding rolls the whole migration back.
+CMS handlers must apply their own side effect idempotently by
+`notification_id`, because a crash after that side effect but before the local
+completion commit intentionally causes a safe replay.
+
 ### Version 6.52.0: protected terminal-receiver runtime
 
 Version 6.52.0 gives the reference terminal receiver a production-oriented
@@ -857,7 +879,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.52.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.53.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

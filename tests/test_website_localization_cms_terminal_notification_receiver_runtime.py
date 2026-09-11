@@ -130,6 +130,18 @@ def adapter(application):
     )
 
 
+def processing_ack(payload):
+    body = HTTP._canonical(payload)
+    return {
+        "schema": RUNTIME._RECEIVER.PROCESSING_ACK_SCHEMA,
+        "notification_id": payload["notification_id"],
+        "event_id": payload["event_id"],
+        "site_id": payload["site_id"],
+        "status": "processed",
+        "notification_sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+
 def open_runtime(path):
     return RUNTIME.open_durable_terminal_notification_receiver(
         path,
@@ -157,7 +169,21 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
                 "public-site", 123.5,
             ))
             self.assertEqual(runtime.health(), (
-                RUNTIME.DurableTerminalReceiverRuntimeHealth("ok", "open", 1)
+                RUNTIME.DurableTerminalReceiverRuntimeHealth(
+                    "ok",
+                    "open",
+                    1,
+                    {
+                        "pending": 1,
+                        "leased": 0,
+                        "retry_wait": 0,
+                        "succeeded": 0,
+                        "failed": 0,
+                    },
+                    1,
+                    0,
+                    0,
+                )
             ))
             runtime.close()
 
@@ -184,6 +210,11 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
                 {"origin": "http://cms.example.test"},
                 {"path": "//ambiguous"},
                 {"authenticate": None},
+                {"processing_max_attempts": 0},
+                {
+                    "processing_base_delay_seconds": 10,
+                    "processing_max_delay_seconds": 5,
+                },
             ):
                 with self.subTest(changes=changes), self.assertRaises(
                     RUNTIME.DurableTerminalReceiverRuntimeBlocked
@@ -288,6 +319,24 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
 
         self.assertEqual(statuses, ["accepted"] * 24)
         self.assertEqual(runtime.health().received, 1)
+        runtime.close()
+
+    def test_runtime_runs_one_durable_host_processing_callback(self):
+        runtime = open_runtime(":memory:")
+        payload = notification()
+        adapter(runtime)(payload)
+
+        outcome = runtime.process_next(
+            processing_ack,
+            "cms-consumer",
+            now=124,
+            lease_seconds=30,
+        )
+
+        self.assertEqual((outcome.status, outcome.attempt), ("succeeded", 1))
+        health = runtime.health()
+        self.assertEqual((health.status, health.processing_due), ("ok", 0))
+        self.assertEqual(health.processing_counts["succeeded"], 1)
         runtime.close()
 
     def test_health_detects_semantically_tampered_storage(self):

@@ -1,5 +1,29 @@
 # Version 6 premortem
 
+## Durable terminal-notification processing (11 September 2026)
+
+Assume the CMS accepted and stored a verified terminal notification but never
+applied it safely to its own local state.
+
+- A crash between the HTTP acknowledgement and processing registration could
+  leave a durable receipt that no worker can discover.
+- Two CMS workers could process the same notification concurrently, or an old
+  worker could finish after its lease expired and a replacement took over.
+- A callback could fail forever, persist private exception prose, or return an
+  acknowledgement for a different event or payload.
+- Migrating a V6.51/V6.52 inbox could backfill altered evidence or partially
+  upgrade the schema before failure.
+
+The receive transaction now inserts both the immutable inbox row and its
+processing record before acknowledging. Claims bind worker, random token,
+attempt, deadline, notification identity, and exact payload hash; completion
+rechecks every field, and expired ownership cannot finish. Retry state and a
+bounded attempt ceiling are durable, while only validated stable error codes
+are stored. The V1-to-V2 migration validates the old schema and every receipt
+inside one transaction before backfill, so any discrepancy rolls back without
+partial state. Host side effects remain idempotent by notification ID because
+an acknowledgement lost after the side effect must be replayed safely.
+
 ## Protected terminal-receiver runtime (11 September 2026)
 
 Assume the durable callback receiver validated every request correctly but wrote

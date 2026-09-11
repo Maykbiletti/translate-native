@@ -351,10 +351,46 @@ The runtime itself is the WSGI application. It serializes request execution with
 close, rechecks the pinned database identity before every operation, and owns the
 connection until `close()` or context-manager exit. `status(event_id)` returns
 only the verified content-free receipt binding. `health()` checks SQLite
-integrity and every stored notification, then returns only `status`, runtime
-`state`, and the number of received notifications. Closed, exchanged, damaged,
-or foreign-process runtimes return content-free HTTP `503` and require a new
-worker runtime; they never attempt repair or invent acknowledgement state.
+integrity and every stored notification and processing row, then returns only
+content-free status, runtime state, counts, due work, expired leases, and
+terminal failures. Closed, exchanged, damaged, or foreign-process runtimes
+return content-free HTTP `503` and require a new worker runtime; they never
+attempt repair or invent acknowledgement state.
+
+#### Durable CMS-side processing
+
+Schema V2 of the receiver inbox creates one processing row in the same
+transaction as every newly received notification. The HTTP acknowledgement is
+therefore impossible unless both the immutable receipt and its discoverable
+host work item have committed. When a V1 database opens, the receiver validates
+the exact old schema and every stored notification, creates the processing
+ledger, backfills one pending row per receipt, and advances the schema version
+inside one transaction. Any altered input rolls the migration back.
+
+Call `runtime.process_next(callback, worker_id)` to advance at most one due
+notification. The callback receives a fresh mapping of the exact content-free
+terminal notification and must return:
+
+```json
+{"event_id":"cms-event-184","notification_id":"terminal-…","notification_sha256":"…","schema":"blun.cms-terminal-notification-processing-ack.v1","site_id":"public-site","status":"processed"}
+```
+
+The claim binds the worker ID, random lease token, attempt number, deadline,
+notification identity, event, site, terminal status, and exact payload hash.
+Completion revalidates those bindings and rejects expired or replaced claims.
+A host may raise `TerminalNotificationProcessingFailure` with one stable error
+code and an explicit retry decision. Retryable failures wait using the
+configured bounded exponential delay; permanent failures and exhausted attempts
+remain durably failed and make health `blocked`. Unexpected exceptions are
+reduced to `processing_callback_failure`; their messages are never stored.
+
+The runtime serializes processing with request handling and shutdown. A crash
+leaves the lease durable; the next worker recovers it after expiry and a stale
+owner cannot complete it. Consequently, the host callback must apply its own
+state change idempotently under `notification_id`: a crash after the host commit
+but before the processing completion commit deliberately repeats the same exact
+notification. Runtime health now includes content-free processing counts, due
+work, expired leases, and terminal failures.
 
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,
