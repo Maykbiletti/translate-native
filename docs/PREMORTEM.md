@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Durable terminal-notification receiver (11 September 2026)
+
+Assume the source localization service reported a verified terminal result but
+the website CMS recorded it twice, acknowledged it too early, or accepted it for
+the wrong tenant.
+
+- The CMS could commit a notification and lose its response, then repeat a host
+  side effect when the durable sender replays the same bytes.
+- A reused event or notification ID could carry a changed terminal state, source
+  generation, lifecycle binding, or payload hash.
+- Generic authentication could validate a credential without binding the exact
+  method, origin, path, site, event, notification, and request bytes.
+- The receiver could acknowledge before its local transaction commits, or expose
+  verifier, database, or credential detail when a dependency fails.
+
+The reference receiver requires canonical request bytes and exact reserved
+headers, gives a host verifier the sender's complete content-free authentication
+context, and requires a principal scoped to the same site. A serialized,
+process-bound SQLite transaction stores one immutable notification before the
+acknowledgement is constructed. Exact replays preserve the first receipt;
+identity collisions, altered rows or schemas, invalid framing, and unavailable
+authentication or storage fail closed through stable content-free responses.
+
 ## Durable source-side removal outbox (10 September 2026)
 
 Assume a website backend removed content but an unpublished localization kept

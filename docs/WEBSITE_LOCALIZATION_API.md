@@ -300,6 +300,43 @@ failures are retryable by the outbox. Other statuses and malformed or
 cross-bound successful responses are permanent protocol failures. Response
 bodies and private exceptions are never copied into durable error state.
 
+#### Reference terminal-notification receiver
+
+`integrations/website_localization_cms_terminal_notification_receiver.py`
+provides the matching provider-neutral WSGI endpoint. Construct one
+`DurableCMSTerminalNotificationInbox` around a worker-owned SQLite connection,
+then mount `CMSTerminalNotificationReceiverApplication` at the configured path.
+For a multithreaded WSGI worker, open that connection with
+`check_same_thread=False`; the inbox serializes access. Do not construct it before
+forking: its process binding deliberately blocks inherited connections.
+
+The receiver accepts only canonical UTF-8 JSON sent over HTTPS with the exact
+content type, content length, idempotency key, notification ID, and notification
+SHA-256 headers documented above. Before storage, it calls the host verifier as
+`authenticate(authentication_context, normalized_headers)`. The first argument
+is exactly the content-free object supplied to the sender's authentication-header
+provider. The verifier must return:
+
+```json
+{
+  "schema": "blun.cms-source-terminal-notification-principal.v1",
+  "principal_id": "website-cms",
+  "credential_id": "cms-key",
+  "credential_version": "v1",
+  "scope": "terminal-notification:write",
+  "site_id": "public-site"
+}
+```
+
+The returned `site_id` must equal the notification site. The receiver stores the
+exact body and its hash in one SQLite transaction before returning the existing
+`blun.cms-source-terminal-notification-ack.v1` acknowledgement. An exact replay
+returns that same acknowledgement and preserves the original `received_at`.
+Changed bytes under an existing event, notification, or payload identity return
+HTTP `409`; malformed or wrongly bound requests are permanent `4xx` failures,
+while unavailable authentication, damaged storage, and unexpected internal
+failures return retryable `503`. Every error body is content free.
+
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,
 uses interruptible state-specific waits, and joins that worker before closing
