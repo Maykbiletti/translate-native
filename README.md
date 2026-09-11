@@ -107,6 +107,24 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.50.0: secure terminal-notification HTTPS adapter
+
+Version 6.50.0 makes the durable terminal outbox deployable across a real CMS
+boundary. The provider-neutral callback adapter posts one canonical,
+content-free terminal notification to one fixed HTTPS endpoint, never follows
+redirects, and never retries inside the transport. A host-supplied
+authentication function receives the exact body hash and routing identity, so
+deployments may apply their own token, signature, or gateway policy without a
+hard-coded provider.
+
+The notification ID and body hash are repeated in reserved idempotency and
+binding headers. Only an exact JSON acknowledgement for the same notification,
+event, site, and body hash succeeds. Redirects, altered requests, header
+injection, duplicate JSON keys, incorrect content types, malformed or oversized
+bodies, cross-bound acknowledgements, and private transport exceptions fail
+closed. Retryable status and network failures return only stable public codes
+to the durable outbox, which remains the sole owner of bounded retries.
+
 ### Version 6.49.0: durable terminal notifications
 
 Version 6.49.0 closes the callback gap after lifecycle monitoring reaches a
@@ -807,7 +825,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.49.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.50.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

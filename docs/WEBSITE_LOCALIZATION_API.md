@@ -257,6 +257,49 @@ is included in aggregate service health and therefore in hosted readiness.
 Disabling the optional notifier preserves the existing authenticated status
 polling contract and does not create notification state.
 
+For a remote backend, pass an
+`HTTPTerminalNotifierAdapter` from
+`integrations/website_localization_cms_terminal_notification_http.py` as the
+`terminal_notifier`. It sends the canonical notification object itself as the
+request body to one configured HTTPS URL. Loopback HTTP is available only by
+explicit test/development opt-in. Redirects are never followed, and the adapter
+performs exactly one transport attempt; the durable notification outbox alone
+decides whether and when to retry.
+
+Each request reserves these exact transport headers:
+
+- `Content-Type: application/json; charset=utf-8`;
+- `Accept: application/json`;
+- `Idempotency-Key: <notification_id>`;
+- `X-Localization-Terminal-Notification-Id: <notification_id>`;
+- `X-Localization-Terminal-Notification-Sha256: <body_sha256>`.
+
+The host-supplied authentication callback receives a fresh copy of this
+content-free request before any network access:
+
+```json
+{
+  "schema": "blun.cms-source-terminal-notification-http-auth.v1",
+  "method": "POST",
+  "origin": "https://cms.example.test",
+  "path": "/v1/localization/terminal-notifications",
+  "notification_id": "terminal-<sha256>",
+  "event_id": "cms-event-184",
+  "site_id": "public-site",
+  "body_sha256": "<sha256 of exact canonical request bytes>"
+}
+```
+
+It may return deployment-specific authentication or signature headers, but it
+cannot replace reserved framing, idempotency, or binding headers. Empty,
+duplicated, injected, oversized, or reserved authentication headers block
+before transport. The receiver returns the exact acknowledgement documented
+above with HTTP `200` and JSON UTF-8 content type. A `3xx` response is a
+permanent redirect failure; `408`, `425`, `429`, and `5xx` statuses plus network
+failures are retryable by the outbox. Other statuses and malformed or
+cross-bound successful responses are permanent protocol failures. Response
+bodies and private exceptions are never copied into durable error state.
+
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,
 uses interruptible state-specific waits, and joins that worker before closing
