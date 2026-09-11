@@ -9,6 +9,8 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -152,6 +154,15 @@ def open_runtime(path):
 
 
 class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def wait_for(predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.005)
+        raise AssertionError("condition was not reached")
+
     def test_safe_file_runtime_accepts_and_reports_one_notification(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "terminal.sqlite3"
@@ -337,6 +348,218 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         health = runtime.health()
         self.assertEqual((health.status, health.processing_due), ("ok", 0))
         self.assertEqual(health.processing_counts["succeeded"], 1)
+        runtime.close()
+
+    def test_hosted_runtime_processes_notification_and_reports_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "terminal.sqlite3"
+            processed = []
+
+            def callback(payload):
+                processed.append(payload["notification_id"])
+                return processing_ack(payload)
+
+            runtime = (
+                RUNTIME.open_hosted_durable_terminal_notification_receiver(
+                    path,
+                    authenticate,
+                    callback,
+                    origin="https://cms.example.test",
+                    worker_id="cms-consumer",
+                    active_delay_seconds=0.01,
+                    idle_delay_seconds=0.01,
+                    blocked_delay_seconds=0.01,
+                    clock=lambda: 123.5,
+                )
+            )
+            try:
+                self.wait_for(lambda: runtime.worker_state == "running")
+                payload = notification()
+                acknowledgement = adapter(runtime)(payload)
+                self.assertEqual(acknowledgement["status"], "accepted")
+                self.wait_for(lambda: processed == [payload["notification_id"]])
+                self.assertEqual(runtime.worker_readiness(), {
+                    "schema": "blun.cms-terminal-receiver-readiness.v1",
+                    "status": "ready",
+                    "worker_state": "running",
+                    "inbox_status": "ok",
+                    "error_code": None,
+                })
+                self.assertEqual(
+                    runtime.health().processing_counts["succeeded"], 1,
+                )
+            finally:
+                runtime.close(worker_timeout_seconds=1)
+            self.assertEqual(runtime.worker_state, "closed")
+
+    def test_stopped_host_rejects_new_intake_without_storing_it(self):
+        runtime = open_runtime(":memory:")
+        runtime.start_worker(
+            processing_ack,
+            "cms-consumer",
+            active_delay_seconds=0.01,
+            idle_delay_seconds=60,
+            blocked_delay_seconds=60,
+        )
+        self.wait_for(lambda: runtime.worker_state == "running")
+        runtime.stop_worker(timeout_seconds=1)
+        payload = notification(event_id="cms-event-stopped")
+        with self.assertRaises(HTTP.HTTPTerminalNotificationFailed) as caught:
+            adapter(runtime)(payload)
+        self.assertEqual((caught.exception.code, caught.exception.retryable), (
+            "notification_http.http_status", True,
+        ))
+        self.assertEqual(runtime.health().received, 0)
+        self.assertEqual(runtime.worker_readiness()["status"], "not_ready")
+        runtime.close()
+
+    def test_worker_failure_is_visible_content_free_and_blocks_intake(self):
+        runtime = open_runtime(":memory:")
+        secret = "private callback and website text"
+        runtime.process_next = mock.Mock(side_effect=RuntimeError(secret))
+        runtime.start_worker(
+            processing_ack,
+            "cms-consumer",
+            active_delay_seconds=0.01,
+            idle_delay_seconds=0.01,
+            blocked_delay_seconds=0.01,
+        )
+        try:
+            self.wait_for(lambda: runtime.worker_state == "failed")
+            readiness = runtime.worker_readiness()
+            self.assertEqual(readiness, {
+                "schema": "blun.cms-terminal-receiver-readiness.v1",
+                "status": "not_ready",
+                "worker_state": "failed",
+                "inbox_status": None,
+                "error_code": "notification_receiver.worker_blocked",
+            })
+            self.assertNotIn(secret, repr(readiness))
+            with self.assertRaises(HTTP.HTTPTerminalNotificationFailed):
+                adapter(runtime)(notification(event_id="cms-event-failed"))
+            with self.assertRaises(
+                RUNTIME.DurableTerminalReceiverRuntimeBlocked
+            ):
+                runtime.start_worker(processing_ack, "cms-consumer")
+        finally:
+            runtime.close()
+
+    def test_terminal_handler_failure_keeps_worker_alive_but_blocks_intake(self):
+        runtime = open_runtime(":memory:")
+
+        def callback(_payload):
+            raise RuntimeError("private permanent handler failure")
+
+        runtime.start_worker(
+            callback,
+            "cms-consumer",
+            active_delay_seconds=0.01,
+            idle_delay_seconds=0.01,
+            blocked_delay_seconds=0.01,
+        )
+        self.wait_for(lambda: runtime.worker_state == "running")
+        adapter(runtime)(notification())
+        try:
+            self.wait_for(lambda: runtime.health().failed == 1)
+            self.assertEqual(runtime.worker_state, "running")
+            self.assertEqual(runtime.worker_readiness(), {
+                "schema": "blun.cms-terminal-receiver-readiness.v1",
+                "status": "not_ready",
+                "worker_state": "running",
+                "inbox_status": "blocked",
+                "error_code": "notification_receiver.storage_blocked",
+            })
+            with self.assertRaises(HTTP.HTTPTerminalNotificationFailed):
+                adapter(runtime)(notification(event_id="cms-event-later"))
+            self.assertEqual(runtime.health().received, 1)
+        finally:
+            runtime.close()
+
+    def test_idle_worker_shutdown_is_interruptible(self):
+        runtime = open_runtime(":memory:")
+        runtime.start_worker(
+            processing_ack,
+            "cms-consumer",
+            active_delay_seconds=60,
+            idle_delay_seconds=60,
+            blocked_delay_seconds=60,
+        )
+        self.wait_for(lambda: runtime.worker_state == "running")
+        started = time.monotonic()
+        runtime.close(worker_timeout_seconds=1)
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_close_timeout_preserves_database_until_callback_returns(self):
+        runtime = open_runtime(":memory:")
+        payload = notification()
+        adapter(runtime)(payload)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def callback(value):
+            entered.set()
+            release.wait(2)
+            return processing_ack(value)
+
+        runtime.start_worker(
+            callback,
+            "cms-consumer",
+            active_delay_seconds=0.01,
+            idle_delay_seconds=0.01,
+            blocked_delay_seconds=0.01,
+        )
+        self.assertTrue(entered.wait(1))
+        with self.assertRaises(
+            RUNTIME.DurableTerminalReceiverRuntimeBlocked
+        ):
+            runtime.close(worker_timeout_seconds=0.01)
+        self.assertEqual(runtime.state, "open")
+        release.set()
+        runtime.close(worker_timeout_seconds=1)
+        self.assertEqual(runtime.state, "closed")
+
+    def test_hosted_invalid_worker_configuration_creates_no_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "terminal.sqlite3"
+            for changes in (
+                {"callback": None},
+                {"worker_id": "not a worker"},
+                {"lease_seconds": 0},
+                {"idle_delay_seconds": 0},
+            ):
+                options = {
+                    "callback": processing_ack,
+                    "worker_id": "cms-consumer",
+                    "lease_seconds": 60,
+                    "active_delay_seconds": 0.01,
+                    "idle_delay_seconds": 1,
+                    "blocked_delay_seconds": 1,
+                }
+                options.update(changes)
+                with self.subTest(changes=changes), self.assertRaises(
+                    RUNTIME.DurableTerminalReceiverRuntimeBlocked
+                ):
+                    RUNTIME.open_hosted_durable_terminal_notification_receiver(
+                        path,
+                        authenticate,
+                        origin="https://cms.example.test",
+                        **options,
+                    )
+                self.assertFalse(path.exists())
+
+    def test_foreign_process_cannot_control_managed_worker(self):
+        runtime = open_runtime(":memory:")
+        with mock.patch.object(RUNTIME.os, "getpid", return_value=os.getpid() + 1):
+            self.assertEqual(runtime.worker_state, "foreign-process")
+            for operation in (
+                lambda: runtime.start_worker(processing_ack, "cms-consumer"),
+                runtime.stop_worker,
+                runtime.worker_readiness,
+            ):
+                with self.assertRaises(
+                    RUNTIME.DurableTerminalReceiverRuntimeBlocked
+                ):
+                    operation()
         runtime.close()
 
     def test_health_detects_semantically_tampered_storage(self):

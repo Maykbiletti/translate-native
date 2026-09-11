@@ -392,6 +392,23 @@ but before the processing completion commit deliberately repeats the same exact
 notification. Runtime health now includes content-free processing counts, due
 work, expired leases, and terminal failures.
 
+For a single-process WSGI deployment, use
+`open_hosted_durable_terminal_notification_receiver`. It preflights the handler,
+worker ID, lease, and all loop delays before creating the database, then starts
+one process-owned, non-daemon worker. The runtime accepts HTTP notifications
+only while that managed worker is running and the inbox remains healthy.
+`worker_readiness()` returns the content-free
+`blun.cms-terminal-receiver-readiness.v1` object; supervisors must remove the
+instance from service whenever its status is `not_ready`.
+
+Idle, active, and blocked outcomes use separate interruptible delays. A private
+loop exception becomes `notification_receiver.worker_blocked`, makes readiness
+fail, and prevents the same in-memory runtime from restarting. `close()` first
+signals and joins the worker and closes SQLite only after the callback returns.
+If the configured join timeout expires, close fails while durable state remains
+open; the supervisor must resolve or terminate the stuck callback before trying
+again. Construct the hosted runtime after every process fork.
+
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,
 uses interruptible state-specific waits, and joins that worker before closing

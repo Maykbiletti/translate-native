@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import sqlite3
 import stat
@@ -257,6 +258,10 @@ class DurableTerminalNotificationReceiverRuntime:
         self._lock = threading.RLock()
         self._owner_pid = os.getpid()
         self._closed = False
+        self._worker_state = "unmanaged"
+        self._worker_error_code: str | None = None
+        self._worker_stop = threading.Event()
+        self._worker_thread: threading.Thread | None = None
 
     def _assert_owner(self) -> None:
         if os.getpid() != self._owner_pid:
@@ -305,6 +310,7 @@ class DurableTerminalNotificationReceiverRuntime:
             self._assert_owner()
             with self._lock:
                 self._require_open()
+                self.require_worker_ready()
                 return self.application(environ, start_response)
         except Exception:
             return self._unavailable(start_response)
@@ -386,8 +392,218 @@ class DurableTerminalNotificationReceiverRuntime:
                     "terminal receiver processing is unavailable"
                 ) from error
 
-    def close(self) -> None:
+    @staticmethod
+    def _worker_configuration(
+        callback: Any,
+        worker_id: Any,
+        lease_seconds: float | int,
+        active_delay_seconds: float | int,
+        idle_delay_seconds: float | int,
+        blocked_delay_seconds: float | int,
+    ) -> tuple[float, float, float, float]:
+        if (
+            not callable(callback)
+            or not isinstance(worker_id, str)
+            or not _RECEIVER._token(worker_id)
+            or len(worker_id) > 128
+        ):
+            raise DurableTerminalReceiverRuntimeBlocked(
+                "terminal receiver worker configuration is invalid"
+            )
+        try:
+            values = tuple(
+                _RECEIVER._duration(value, "worker_duration_invalid")
+                for value in (
+                    lease_seconds,
+                    active_delay_seconds,
+                    idle_delay_seconds,
+                    blocked_delay_seconds,
+                )
+            )
+        except Exception as error:
+            raise DurableTerminalReceiverRuntimeBlocked(
+                "terminal receiver worker configuration is invalid"
+            ) from error
+        return values
+
+    @staticmethod
+    def _join_timeout(value: float | int) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0 < float(value) <= 300
+        ):
+            raise DurableTerminalReceiverRuntimeBlocked(
+                "terminal receiver worker timeout is invalid"
+            )
+        return float(value)
+
+    def _managed_worker(
+        self,
+        stop: threading.Event,
+        callback: Callable[[Mapping[str, Any]], Any],
+        worker_id: str,
+        configuration: tuple[float, float, float, float],
+    ) -> None:
+        try:
+            with self._lock:
+                if self._worker_state != "starting" or self._worker_stop is not stop:
+                    return
+                self._worker_state = "running"
+            lease, active, idle, blocked = configuration
+            while not stop.is_set():
+                outcome = self.process_next(
+                    callback, worker_id, lease_seconds=lease,
+                )
+                delay = (
+                    idle if outcome is None
+                    else blocked if outcome.status in {"retry_wait", "failed"}
+                    else active
+                )
+                stop.wait(delay)
+        except Exception:
+            with self._lock:
+                self._worker_error_code = (
+                    "notification_receiver.worker_blocked"
+                )
+                self._worker_state = "failed"
+            return
+        with self._lock:
+            if self._worker_state in {"running", "stopping"}:
+                self._worker_state = "stopped"
+
+    def start_worker(
+        self,
+        callback: Callable[[Mapping[str, Any]], Any],
+        worker_id: str,
+        *,
+        lease_seconds: float | int = 600,
+        active_delay_seconds: float | int = 0.05,
+        idle_delay_seconds: float | int = 1,
+        blocked_delay_seconds: float | int = 5,
+    ) -> None:
+        """Start one process-owned, interruptible processing worker."""
+
+        configuration = self._worker_configuration(
+            callback,
+            worker_id,
+            lease_seconds,
+            active_delay_seconds,
+            idle_delay_seconds,
+            blocked_delay_seconds,
+        )
         self._assert_owner()
+        with self._lock:
+            self._require_open()
+            if self._worker_state in {"starting", "running"}:
+                return
+            if self._worker_state in {"stopping", "failed"}:
+                raise DurableTerminalReceiverRuntimeBlocked(
+                    "terminal receiver worker is blocked"
+                )
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._managed_worker,
+                args=(stop, callback, worker_id, configuration),
+                name="cms-terminal-receiver-worker",
+                daemon=False,
+            )
+            self._worker_stop = stop
+            self._worker_thread = thread
+            self._worker_error_code = None
+            self._worker_state = "starting"
+            try:
+                thread.start()
+            except Exception as error:
+                self._worker_thread = None
+                self._worker_state = "failed"
+                self._worker_error_code = (
+                    "notification_receiver.worker_blocked"
+                )
+                raise DurableTerminalReceiverRuntimeBlocked(
+                    "terminal receiver worker is blocked"
+                ) from error
+
+    def stop_worker(self, *, timeout_seconds: float | int = 30) -> None:
+        """Stop and join the managed worker without closing its database."""
+
+        timeout = self._join_timeout(timeout_seconds)
+        self._assert_owner()
+        thread = self._worker_thread
+        state = self._worker_state
+        if thread is None or state in {"unmanaged", "stopped"}:
+            return
+        if thread is threading.current_thread():
+            raise DurableTerminalReceiverRuntimeBlocked(
+                "terminal receiver worker cannot stop itself"
+            )
+        if state != "failed":
+            self._worker_state = "stopping"
+        self._worker_stop.set()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise DurableTerminalReceiverRuntimeBlocked(
+                "terminal receiver worker stop timed out"
+            )
+        with self._lock:
+            if self._worker_state == "stopping":
+                self._worker_state = "stopped"
+
+    def require_worker_ready(self) -> None:
+        """Block hosted HTTP intake unless its processor is healthy."""
+
+        self._assert_owner()
+        if self._closed:
+            raise DurableTerminalReceiverRuntimeBlocked(
+                "terminal receiver runtime is closed"
+            )
+        if self._worker_state == "unmanaged":
+            return
+        if self._worker_state != "running" or self._worker_error_code is not None:
+            raise DurableTerminalReceiverRuntimeBlocked(
+                "terminal receiver worker is not ready"
+            )
+        if self.health().status != "ok":
+            raise DurableTerminalReceiverRuntimeBlocked(
+                "terminal receiver storage is blocked"
+            )
+
+    def worker_readiness(self) -> dict[str, Any]:
+        """Return a content-free readiness snapshot for a host supervisor."""
+
+        self._assert_owner()
+        with self._lock:
+            state = "closed" if self._closed else self._worker_state
+            error_code = self._worker_error_code
+            if state != "running":
+                return {
+                    "schema": "blun.cms-terminal-receiver-readiness.v1",
+                    "status": "not_ready",
+                    "worker_state": state,
+                    "inbox_status": None,
+                    "error_code": error_code or (
+                        "notification_receiver.worker_not_ready"
+                    ),
+                }
+            try:
+                inbox_status = self.health().status
+            except Exception:
+                inbox_status = "blocked"
+            ready = inbox_status == "ok"
+            return {
+                "schema": "blun.cms-terminal-receiver-readiness.v1",
+                "status": "ready" if ready else "not_ready",
+                "worker_state": "running",
+                "inbox_status": inbox_status,
+                "error_code": None if ready else (
+                    "notification_receiver.storage_blocked"
+                ),
+            }
+
+    def close(self, *, worker_timeout_seconds: float | int = 30) -> None:
+        self._assert_owner()
+        self.stop_worker(timeout_seconds=worker_timeout_seconds)
         with self._lock:
             if not self._closed:
                 self._connection.close()
@@ -399,6 +615,13 @@ class DurableTerminalNotificationReceiverRuntime:
             return "foreign-process"
         with self._lock:
             return "closed" if self._closed else "open"
+
+    @property
+    def worker_state(self) -> str:
+        if os.getpid() != self._owner_pid:
+            return "foreign-process"
+        with self._lock:
+            return "closed" if self._closed else self._worker_state
 
     def __enter__(self) -> "DurableTerminalNotificationReceiverRuntime":
         self._require_open()
@@ -479,3 +702,60 @@ def open_durable_terminal_notification_receiver(
     return DurableTerminalNotificationReceiverRuntime(
         connection, inbox, application, database_guard, clock,
     )
+
+
+def open_hosted_durable_terminal_notification_receiver(
+    database: str | os.PathLike[str],
+    authenticate: Callable[[Mapping[str, Any], Mapping[str, str]], Any],
+    callback: Callable[[Mapping[str, Any]], Any],
+    *,
+    origin: str,
+    worker_id: str,
+    clock: Callable[[], float | int] = time.time,
+    path: str = _RECEIVER.DEFAULT_PATH,
+    require_https: bool = True,
+    processing_max_attempts: int = 5,
+    processing_base_delay_seconds: float | int = 5,
+    processing_max_delay_seconds: float | int = 300,
+    lease_seconds: float | int = 600,
+    active_delay_seconds: float | int = 0.05,
+    idle_delay_seconds: float | int = 1,
+    blocked_delay_seconds: float | int = 5,
+) -> DurableTerminalNotificationReceiverRuntime:
+    """Open a durable receiver and start its supervised processor."""
+
+    configuration = (
+        callback,
+        worker_id,
+        lease_seconds,
+        active_delay_seconds,
+        idle_delay_seconds,
+        blocked_delay_seconds,
+    )
+    DurableTerminalNotificationReceiverRuntime._worker_configuration(
+        *configuration
+    )
+    runtime = open_durable_terminal_notification_receiver(
+        database,
+        authenticate,
+        origin=origin,
+        clock=clock,
+        path=path,
+        require_https=require_https,
+        processing_max_attempts=processing_max_attempts,
+        processing_base_delay_seconds=processing_base_delay_seconds,
+        processing_max_delay_seconds=processing_max_delay_seconds,
+    )
+    try:
+        runtime.start_worker(
+            callback,
+            worker_id,
+            lease_seconds=lease_seconds,
+            active_delay_seconds=active_delay_seconds,
+            idle_delay_seconds=idle_delay_seconds,
+            blocked_delay_seconds=blocked_delay_seconds,
+        )
+    except Exception:
+        runtime.close()
+        raise
+    return runtime
