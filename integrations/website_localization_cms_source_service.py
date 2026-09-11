@@ -23,8 +23,8 @@ from typing import Any, Callable, Mapping
 
 
 SCHEMA = "blun.cms-source-service-tick.v1"
-HEALTH_SCHEMA = "blun.cms-source-service-health.v2"
-STATUS_SCHEMA = "blun.cms-source-service-status.v2"
+HEALTH_SCHEMA = "blun.cms-source-service-health.v3"
+STATUS_SCHEMA = "blun.cms-source-service-status.v3"
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 
@@ -52,6 +52,10 @@ _REMOVAL = _load_module(
 _NOTIFICATION = _load_module(
     "blun_website_localization_cms_source_service_terminal_notification",
     _ROOT / "integrations" / "website_localization_cms_terminal_notification.py",
+)
+_PROCESSING = _load_module(
+    "blun_website_localization_cms_source_service_terminal_processing",
+    _ROOT / "integrations" / "website_localization_cms_terminal_processing_monitor.py",
 )
 
 
@@ -86,10 +90,12 @@ class CMSSourceServiceHealth:
     status: str
     pending_lifecycle_registrations: int
     pending_terminal_notifications: int
+    pending_terminal_processing: int
     changes: Mapping[str, Any]
     removals: Mapping[str, Any]
     lifecycle: Mapping[str, Any]
     notifications: Mapping[str, Any]
+    terminal_processing: Mapping[str, Any]
     error_code: str | None = None
 
     def as_payload(self) -> dict[str, Any]:
@@ -102,10 +108,12 @@ class CMSSourceServiceHealth:
             "pending_terminal_notifications": (
                 self.pending_terminal_notifications
             ),
+            "pending_terminal_processing": self.pending_terminal_processing,
             "changes": dict(self.changes),
             "removals": dict(self.removals),
             "lifecycle": dict(self.lifecycle),
             "notifications": dict(self.notifications),
+            "terminal_processing": dict(self.terminal_processing),
             "error_code": self.error_code,
         }
 
@@ -139,6 +147,15 @@ class CMSSourceServiceStatus:
     notification_attempts: int
     notification_max_attempts: int | None
     notification_error_code: str | None
+    terminal_processing_state: str
+    terminal_processing_poll_attempts: int
+    terminal_processing_failures: int
+    terminal_processing_error_code: str | None
+    receiver_processing_state: str | None
+    receiver_processing_attempts: int | None
+    receiver_processing_max_attempts: int | None
+    receiver_processing_error_code: str | None
+    receiver_processed_at: float | None
 
     def as_payload(self) -> dict[str, Any]:
         return {
@@ -169,6 +186,19 @@ class CMSSourceServiceStatus:
             "notification_attempts": self.notification_attempts,
             "notification_max_attempts": self.notification_max_attempts,
             "notification_error_code": self.notification_error_code,
+            "terminal_processing_state": self.terminal_processing_state,
+            "terminal_processing_poll_attempts": (
+                self.terminal_processing_poll_attempts
+            ),
+            "terminal_processing_failures": self.terminal_processing_failures,
+            "terminal_processing_error_code": self.terminal_processing_error_code,
+            "receiver_processing_state": self.receiver_processing_state,
+            "receiver_processing_attempts": self.receiver_processing_attempts,
+            "receiver_processing_max_attempts": (
+                self.receiver_processing_max_attempts
+            ),
+            "receiver_processing_error_code": self.receiver_processing_error_code,
+            "receiver_processed_at": self.receiver_processed_at,
         }
 
 
@@ -232,14 +262,17 @@ class CMSLocalizationSourceService:
         removal_worker_id: str,
         lifecycle_worker_id: str,
         terminal_notifier: Callable[[Mapping[str, Any]], Any] | None = None,
+        terminal_status_reader: Callable[[str, str], Any] | None = None,
         notification_worker_id: str | None = None,
         clock: Callable[[], float | int] = time.time,
         change_lease_seconds: float | int = 600,
         removal_lease_seconds: float | int = 600,
         lifecycle_lease_seconds: float | int = 600,
         notification_lease_seconds: float | int = 600,
+        terminal_processing_lease_seconds: float | int = 600,
         max_lifecycle_failures: int = 5,
         max_notification_attempts: int = 5,
+        max_terminal_processing_failures: int = 5,
         dispatch_base_delay_seconds: float | int = 5,
         dispatch_max_delay_seconds: float | int = 300,
         lifecycle_poll_interval_seconds: float | int = 30,
@@ -247,6 +280,9 @@ class CMSLocalizationSourceService:
         lifecycle_max_delay_seconds: float | int = 300,
         notification_base_delay_seconds: float | int = 5,
         notification_max_delay_seconds: float | int = 300,
+        terminal_processing_poll_interval_seconds: float | int = 30,
+        terminal_processing_base_delay_seconds: float | int = 5,
+        terminal_processing_max_delay_seconds: float | int = 300,
     ):
         connections = (change_connection, removal_connection, lifecycle_connection)
         if not all(isinstance(item, sqlite3.Connection) for item in connections):
@@ -262,6 +298,13 @@ class CMSLocalizationSourceService:
             raise CMSSourceServiceBlocked("source_service.notification_invalid")
         if terminal_notifier is not None and not callable(terminal_notifier):
             raise CMSSourceServiceBlocked("source_service.notification_invalid")
+        if terminal_status_reader is None and terminal_notifier is not None:
+            candidate = getattr(terminal_notifier, "status", None)
+            terminal_status_reader = candidate if callable(candidate) else None
+        if terminal_status_reader is not None and (
+            terminal_notifier is None or not callable(terminal_status_reader)
+        ):
+            raise CMSSourceServiceBlocked("source_service.processing_monitor_invalid")
         if not callable(clock):
             raise CMSSourceServiceBlocked("source_service.clock_invalid")
         timeout = getattr(client, "timeout", None)
@@ -304,12 +347,16 @@ class CMSLocalizationSourceService:
         self.notification_lease_seconds = _positive_duration(
             notification_lease_seconds, "source_service.lease_invalid",
         )
+        self.terminal_processing_lease_seconds = _positive_duration(
+            terminal_processing_lease_seconds, "source_service.lease_invalid",
+        )
         if timeout is not None and any(
             lease <= float(timeout) for lease in (
                 self.change_lease_seconds,
                 self.removal_lease_seconds,
                 self.lifecycle_lease_seconds,
                 self.notification_lease_seconds,
+                self.terminal_processing_lease_seconds,
             )
         ):
             raise CMSSourceServiceBlocked("source_service.lease_too_short")
@@ -323,9 +370,15 @@ class CMSLocalizationSourceService:
             "source_service.max_notification_attempts_invalid",
             20,
         )
+        self.max_terminal_processing_failures = _positive_integer(
+            max_terminal_processing_failures,
+            "source_service.max_terminal_processing_failures_invalid",
+            20,
+        )
         self.clock = clock
         self.client = client
         self.terminal_notifier = terminal_notifier
+        self.terminal_status_reader = terminal_status_reader
 
         # All configuration is validated before the first schema write.
         for value, code in (
@@ -336,6 +389,9 @@ class CMSLocalizationSourceService:
             (lifecycle_max_delay_seconds, "source_service.delay_invalid"),
             (notification_base_delay_seconds, "source_service.delay_invalid"),
             (notification_max_delay_seconds, "source_service.delay_invalid"),
+            (terminal_processing_poll_interval_seconds, "source_service.delay_invalid"),
+            (terminal_processing_base_delay_seconds, "source_service.delay_invalid"),
+            (terminal_processing_max_delay_seconds, "source_service.delay_invalid"),
         ):
             _positive_duration(value, code)
         if float(dispatch_base_delay_seconds) > float(dispatch_max_delay_seconds):
@@ -343,6 +399,11 @@ class CMSLocalizationSourceService:
         if float(lifecycle_base_delay_seconds) > float(lifecycle_max_delay_seconds):
             raise CMSSourceServiceBlocked("source_service.delay_invalid")
         if float(notification_base_delay_seconds) > float(notification_max_delay_seconds):
+            raise CMSSourceServiceBlocked("source_service.delay_invalid")
+        if (
+            float(terminal_processing_base_delay_seconds)
+            > float(terminal_processing_max_delay_seconds)
+        ):
             raise CMSSourceServiceBlocked("source_service.delay_invalid")
 
         self.changes = _DISPATCH.DurableCMSChangeDispatcher(
@@ -368,6 +429,16 @@ class CMSLocalizationSourceService:
                 lifecycle_connection,
                 base_delay_seconds=notification_base_delay_seconds,
                 max_delay_seconds=notification_max_delay_seconds,
+            )
+        )
+        self.terminal_processing = (
+            None
+            if terminal_status_reader is None
+            else _PROCESSING.DurableTerminalProcessingMonitor(
+                lifecycle_connection,
+                poll_interval_seconds=terminal_processing_poll_interval_seconds,
+                base_delay_seconds=terminal_processing_base_delay_seconds,
+                max_delay_seconds=terminal_processing_max_delay_seconds,
             )
         )
 
@@ -455,6 +526,7 @@ class CMSLocalizationSourceService:
             )
 
         notification = None
+        terminal_processing = None
         if self.notifications is None:
             notification_state = "disabled"
         elif lifecycle is None or lifecycle.state != "terminal":
@@ -476,6 +548,36 @@ class CMSLocalizationSourceService:
                         "source_service.notification_binding_mismatch"
                     )
                 notification_state = notification.status
+
+        if self.terminal_processing is None:
+            terminal_processing_state = "disabled"
+        elif notification is None or notification.status != "succeeded":
+            terminal_processing_state = "awaiting_notification"
+        else:
+            try:
+                terminal_processing = self.terminal_processing.status(
+                    event_id, now=now,
+                )
+            except Exception as error:
+                if getattr(error, "code", None) != (
+                    "terminal_processing_monitor.missing"
+                ):
+                    raise CMSSourceServiceBlocked(
+                        "source_service.processing_state_invalid"
+                    ) from error
+                terminal_processing_state = "awaiting_registration"
+            else:
+                if (
+                    terminal_processing.notification_id
+                    != notification.notification_id
+                    or terminal_processing.site_id != site_id
+                    or terminal_processing.notification_sha256
+                    != notification.payload_sha256
+                ):
+                    raise CMSSourceServiceBlocked(
+                        "source_service.processing_binding_mismatch"
+                    )
+                terminal_processing_state = terminal_processing.status
 
         return CMSSourceServiceStatus(
             schema=STATUS_SCHEMA,
@@ -526,6 +628,38 @@ class CMSLocalizationSourceService:
             ),
             notification_error_code=(
                 None if notification is None else notification.last_error_code
+            ),
+            terminal_processing_state=terminal_processing_state,
+            terminal_processing_poll_attempts=(
+                0 if terminal_processing is None
+                else terminal_processing.poll_attempts
+            ),
+            terminal_processing_failures=(
+                0 if terminal_processing is None else terminal_processing.failures
+            ),
+            terminal_processing_error_code=(
+                None if terminal_processing is None
+                else terminal_processing.last_error_code
+            ),
+            receiver_processing_state=(
+                None if terminal_processing is None
+                else terminal_processing.receiver_status
+            ),
+            receiver_processing_attempts=(
+                None if terminal_processing is None
+                else terminal_processing.receiver_attempts
+            ),
+            receiver_processing_max_attempts=(
+                None if terminal_processing is None
+                else terminal_processing.receiver_max_attempts
+            ),
+            receiver_processing_error_code=(
+                None if terminal_processing is None
+                else terminal_processing.receiver_error_code
+            ),
+            receiver_processed_at=(
+                None if terminal_processing is None
+                else terminal_processing.receiver_processed_at
             ),
         )
 
@@ -629,6 +763,56 @@ class CMSLocalizationSourceService:
                 )
         return pending, registered
 
+    def _reconcile_terminal_processing(
+        self, now: float, *, register: bool,
+    ) -> tuple[int, Any | None]:
+        if self.terminal_processing is None or self.notifications is None:
+            return 0, None
+        pending = 0
+        registered = None
+        rows = self.notifications.connection.execute(
+            "SELECT * FROM cms_source_terminal_notification "
+            "WHERE status = 'succeeded' ORDER BY created_at, event_id"
+        ).fetchall()
+        for row in rows:
+            self.notifications._validated_row(row)
+            notification = self.notifications.status(row["event_id"], now=now)
+            current = None
+            try:
+                current = self.terminal_processing.status(
+                    notification.event_id, now=now,
+                )
+            except Exception as error:
+                if getattr(error, "code", None) != (
+                    "terminal_processing_monitor.missing"
+                ):
+                    raise
+                pending += 1
+                if register and registered is None:
+                    payload = json.loads(row["payload_json"])
+                    current = self.terminal_processing.register(
+                        payload,
+                        notification.payload_sha256,
+                        max_failures=self.max_terminal_processing_failures,
+                        now=now,
+                    )
+                    registered = current
+                    pending -= 1
+            if current is None:
+                continue
+            payload = json.loads(row["payload_json"])
+            if (
+                current.notification_id != notification.notification_id
+                or current.site_id != payload.get("site_id")
+                or current.notification_sha256 != notification.payload_sha256
+                or current.max_failures
+                != self.max_terminal_processing_failures
+            ):
+                raise CMSSourceServiceBlocked(
+                    "source_service.processing_binding_mismatch"
+                )
+        return pending, registered
+
     @staticmethod
     def _outcome(phase: str, status: str, **values: Any) -> CMSSourceTickOutcome:
         return CMSSourceTickOutcome(SCHEMA, phase, status, **values)
@@ -698,6 +882,46 @@ class CMSLocalizationSourceService:
                     "notification_registration", "registered",
                     event_id=registered.event_id,
                 )
+            if self.terminal_processing is not None:
+                try:
+                    _pending, processing_registered = (
+                        self._reconcile_terminal_processing(now, register=True)
+                    )
+                except Exception as error:
+                    return self._outcome(
+                        "terminal_processing_registration", "blocked",
+                        error_code=_safe_code(
+                            error,
+                            "source_service.processing_registration_blocked",
+                        ),
+                    )
+                if processing_registered is not None:
+                    return self._outcome(
+                        "terminal_processing_registration", "registered",
+                        event_id=processing_registered.event_id,
+                    )
+                try:
+                    processing = self.terminal_processing.run_once(
+                        self.terminal_status_reader,
+                        self.notification_worker_id,
+                        now=now,
+                        lease_seconds=self.terminal_processing_lease_seconds,
+                    )
+                except Exception as error:
+                    return self._outcome(
+                        "terminal_processing", "blocked",
+                        error_code=_safe_code(
+                            error, "source_service.processing_blocked",
+                        ),
+                    )
+                if processing is not None:
+                    return self._outcome(
+                        "terminal_processing", processing.status,
+                        event_id=processing.event_id,
+                        request_id=processing.notification_id,
+                        attempt=processing.attempt,
+                        error_code=processing.error_code,
+                    )
             try:
                 notification = self.notifications.run_once(
                     self.terminal_notifier,
@@ -823,10 +1047,26 @@ class CMSLocalizationSourceService:
             notification_pending, _notification_registered = (
                 self._reconcile_notifications(now, register=False)
             )
+            processing_pending, _processing_registered = (
+                self._reconcile_terminal_processing(now, register=False)
+            )
             notifications = (
                 {}
                 if self.notifications is None
                 else _health_payload(self.notifications.health(now=now))
+            )
+            terminal_processing = (
+                {}
+                if self.terminal_processing is None
+                else _health_payload(self.terminal_processing.health(now=now))
+            )
+            processing_incomplete = processing_pending + (
+                0
+                if not terminal_processing
+                else sum(
+                    terminal_processing["counts"][state]
+                    for state in ("pending", "leased", "watching", "retry_wait")
+                )
             )
         except Exception as error:
             return CMSSourceServiceHealth(
@@ -834,6 +1074,8 @@ class CMSLocalizationSourceService:
                 "blocked",
                 0,
                 0,
+                0,
+                {},
                 {},
                 {},
                 {},
@@ -847,10 +1089,15 @@ class CMSLocalizationSourceService:
         notification_blocked = (
             bool(notifications) and notifications["status"] == "blocked"
         )
-        blocked = blocked or notification_blocked
+        processing_blocked = (
+            bool(terminal_processing)
+            and terminal_processing["status"] == "blocked"
+        )
+        blocked = blocked or notification_blocked or processing_blocked
         status = (
             "blocked" if blocked
-            else "degraded" if pending or notification_pending
+            else "degraded"
+            if pending or notification_pending or processing_incomplete
             else "ok"
         )
         error_code = (
@@ -859,6 +1106,8 @@ class CMSLocalizationSourceService:
             if pending
             else "source_service.notification_registration_pending"
             if notification_pending
+            else "source_service.processing_registration_pending"
+            if processing_incomplete
             else None
         )
         return CMSSourceServiceHealth(
@@ -866,9 +1115,11 @@ class CMSLocalizationSourceService:
             status,
             pending,
             notification_pending,
+            processing_incomplete,
             changes,
             removals,
             lifecycle,
             notifications,
+            terminal_processing,
             error_code,
         )

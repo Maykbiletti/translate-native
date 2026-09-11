@@ -210,6 +210,89 @@ class CMSLocalizationSourceServiceTests(unittest.TestCase):
         self.assertEqual(status.notification_id, delivered.request_id)
         self.assertEqual(status.notification_attempts, 1)
 
+    def test_receiver_processing_is_durably_observed_after_acceptance(self):
+        service_test = self
+
+        class ReceiverClient:
+            def __init__(self):
+                self.notification = None
+                self.status_calls = []
+                self.processing_status = "pending"
+
+            def __call__(self, payload):
+                self.notification = copy.deepcopy(payload)
+                return service_test.notification_ack(payload)
+
+            def status(self, event_id, site_id):
+                self.status_calls.append((event_id, site_id))
+                payload = self.notification
+                return {
+                    "schema": SERVICE._PROCESSING.STATUS_SCHEMA,
+                    "notification_id": payload["notification_id"],
+                    "event_id": event_id,
+                    "site_id": site_id,
+                    "terminal_status": payload["terminal_status"],
+                    "notification_sha256": SERVICE._NOTIFICATION._hash(
+                        SERVICE._NOTIFICATION._canonical(payload)
+                    ),
+                    "processing_status": self.processing_status,
+                    "attempts": 0 if self.processing_status == "pending" else 1,
+                    "max_attempts": 5,
+                    "next_attempt_at": service_test.now,
+                    "lease_expires_at": None,
+                    "lease_expired": False,
+                    "last_error_code": None,
+                    "processed_at": (
+                        service_test.now
+                        if self.processing_status == "succeeded" else None
+                    ),
+                    "capabilities_sha256": "d" * 64,
+                }
+
+        receiver = ReceiverClient()
+        self.service = self.build(
+            terminal_notifier=receiver,
+            notification_worker_id="notification-worker",
+            notification_lease_seconds=60,
+            terminal_processing_lease_seconds=60,
+        )
+        change = support.event()
+        self.service.enqueue_change(change)
+        self.assertEqual(self.service.run_once().phase, "change")
+        self.client.lifecycle_status = "published"
+        self.assertEqual(self.service.run_once().phase, "lifecycle")
+        self.assertEqual(
+            self.service.run_once().phase, "notification_registration",
+        )
+        self.assertEqual(self.service.run_once().phase, "notification")
+        self.assertEqual(
+            self.service.run_once().phase,
+            "terminal_processing_registration",
+        )
+        watching = self.service.run_once()
+
+        self.assertEqual((watching.phase, watching.status), (
+            "terminal_processing", "watching",
+        ))
+        self.assertEqual(self.service.health().status, "degraded")
+        receiver.processing_status = "succeeded"
+        self.now += 30
+        observed = self.service.run_once()
+
+        self.assertEqual((observed.phase, observed.status), (
+            "terminal_processing", "succeeded",
+        ))
+        self.assertEqual(receiver.status_calls, [
+            (change["event_id"], change["site_id"]),
+            (change["event_id"], change["site_id"]),
+        ])
+        status = self.service.status(change["event_id"], change["site_id"])
+        self.assertEqual(status.terminal_processing_state, "succeeded")
+        self.assertEqual(status.receiver_processing_state, "succeeded")
+        self.assertEqual(status.receiver_processing_attempts, 1)
+        self.assertEqual(status.receiver_processed_at, self.now)
+        self.assertEqual(self.service.health().status, "ok")
+
     def test_restart_recovers_terminal_notification_registration_gap(self):
         notifications = []
 

@@ -553,6 +553,7 @@ def open_durable_cms_source(
     removal_worker_id: str,
     lifecycle_worker_id: str,
     terminal_notifier: Callable[[Mapping[str, Any]], Any] | None = None,
+    terminal_status_reader: Callable[[str, str], Any] | None = None,
     notification_worker_id: str | None = None,
     http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
     clock: Callable[[], float | int] = time.time,
@@ -561,8 +562,10 @@ def open_durable_cms_source(
     removal_lease_seconds: float | int = 600,
     lifecycle_lease_seconds: float | int = 600,
     notification_lease_seconds: float | int = 600,
+    terminal_processing_lease_seconds: float | int = 600,
     max_lifecycle_failures: int = 5,
     max_notification_attempts: int = 5,
+    max_terminal_processing_failures: int = 5,
     dispatch_base_delay_seconds: float | int = 5,
     dispatch_max_delay_seconds: float | int = 300,
     lifecycle_poll_interval_seconds: float | int = 30,
@@ -570,6 +573,9 @@ def open_durable_cms_source(
     lifecycle_max_delay_seconds: float | int = 300,
     notification_base_delay_seconds: float | int = 5,
     notification_max_delay_seconds: float | int = 300,
+    terminal_processing_poll_interval_seconds: float | int = 30,
+    terminal_processing_base_delay_seconds: float | int = 5,
+    terminal_processing_max_delay_seconds: float | int = 300,
 ) -> DurableCMSSourceRuntime:
     """Validate and open the complete durable source-side CMS worker."""
 
@@ -584,14 +590,17 @@ def open_durable_cms_source(
         "removal_worker_id": removal_worker_id,
         "lifecycle_worker_id": lifecycle_worker_id,
         "terminal_notifier": terminal_notifier,
+        "terminal_status_reader": terminal_status_reader,
         "notification_worker_id": notification_worker_id,
         "clock": clock,
         "change_lease_seconds": change_lease_seconds,
         "removal_lease_seconds": removal_lease_seconds,
         "lifecycle_lease_seconds": lifecycle_lease_seconds,
         "notification_lease_seconds": notification_lease_seconds,
+        "terminal_processing_lease_seconds": terminal_processing_lease_seconds,
         "max_lifecycle_failures": max_lifecycle_failures,
         "max_notification_attempts": max_notification_attempts,
+        "max_terminal_processing_failures": max_terminal_processing_failures,
         "dispatch_base_delay_seconds": dispatch_base_delay_seconds,
         "dispatch_max_delay_seconds": dispatch_max_delay_seconds,
         "lifecycle_poll_interval_seconds": lifecycle_poll_interval_seconds,
@@ -599,6 +608,15 @@ def open_durable_cms_source(
         "lifecycle_max_delay_seconds": lifecycle_max_delay_seconds,
         "notification_base_delay_seconds": notification_base_delay_seconds,
         "notification_max_delay_seconds": notification_max_delay_seconds,
+        "terminal_processing_poll_interval_seconds": (
+            terminal_processing_poll_interval_seconds
+        ),
+        "terminal_processing_base_delay_seconds": (
+            terminal_processing_base_delay_seconds
+        ),
+        "terminal_processing_max_delay_seconds": (
+            terminal_processing_max_delay_seconds
+        ),
     }
     _preflight_service(client, service_options)
     _validate_paths(paths)

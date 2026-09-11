@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Durable terminal-processing reconciliation (11 September 2026)
+
+Assume the source CMS received a valid intake acknowledgement but later lost
+the actual CMS processing result.
+
+- An accepted notification could be reported as complete while its receiver
+  processing row was still pending or had failed terminally.
+- A status response for another event, site, terminal outcome, or payload could
+  be attached to the local delivery.
+- Two source workers could poll the same observation concurrently, or a crash
+  could strand a local status lease indefinitely.
+- Repeated network failures could keep the source apparently healthy forever,
+  while private transport detail leaked into durable state.
+
+The source now registers an independent processing observation only after the
+exact notification acknowledgement commits. Its SQLite ledger binds the
+notification, event, site, terminal status, and payload SHA-256; uses expiring
+leases and bounded content-free retry codes; and accepts only the receiver's
+fully bound status shape. Pending work remains visible, while remote failure,
+exhausted observation, lease expiry, response drift, or storage corruption
+blocks source health fail-closed.
+
 ## Response-bound terminal-receiver contract (11 September 2026)
 
 Assume capability discovery passed but the subsequent operational response came

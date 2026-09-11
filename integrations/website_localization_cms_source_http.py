@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import unicodedata
 from dataclasses import asdict
@@ -26,8 +27,8 @@ CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v1"
 REMOVAL_REQUEST_SCHEMA = "blun.cms-source-removal-enqueue-request.v1"
 REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v1"
 STATUS_REQUEST_SCHEMA = "blun.cms-source-status-request.v1"
-STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v2"
-HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v2"
+STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v3"
+HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v3"
 READINESS_RESPONSE_SCHEMA = "blun.cms-source-readiness-response.v1"
 CAPABILITIES_SCHEMA = "blun.cms-source-runtime-capabilities.v1"
 CAPABILITIES_RESPONSE_SCHEMA = "blun.cms-source-capabilities-response.v1"
@@ -223,6 +224,15 @@ def _optional_error(value: Any) -> str | None:
     return value
 
 
+def _timestamp(value: Any) -> float:
+    if (
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        or not math.isfinite(float(value)) or float(value) < 0
+    ):
+        raise ValueError
+    return float(value)
+
+
 def _locales(value: Any) -> list[str]:
     if not isinstance(value, (list, tuple)):
         raise ValueError
@@ -251,10 +261,15 @@ def _source_status_payload(
             "queue_counts", "notification_state", "notification_id",
             "notification_sha256", "notification_attempts",
             "notification_max_attempts", "notification_error_code",
+            "terminal_processing_state", "terminal_processing_poll_attempts",
+            "terminal_processing_failures", "terminal_processing_error_code",
+            "receiver_processing_state", "receiver_processing_attempts",
+            "receiver_processing_max_attempts", "receiver_processing_error_code",
+            "receiver_processed_at",
         }
         if not isinstance(payload, Mapping) or set(payload) != fields:
             raise ValueError
-        if payload["schema"] != "blun.cms-source-service-status.v2":
+        if payload["schema"] != "blun.cms-source-service-status.v3":
             raise ValueError
         event_id = _token(payload["event_id"])
         site_id = _token(payload["site_id"])
@@ -363,6 +378,96 @@ def _source_status_payload(
             notification_error is not None
         ):
             raise ValueError
+        terminal_processing_state = payload["terminal_processing_state"]
+        processing_states = {
+            "disabled", "awaiting_notification", "awaiting_registration",
+            "pending", "leased", "watching", "retry_wait", "succeeded",
+            "failed",
+        }
+        if terminal_processing_state not in processing_states:
+            raise ValueError
+        terminal_processing_poll_attempts = _count(
+            payload["terminal_processing_poll_attempts"]
+        )
+        terminal_processing_failures = _count(
+            payload["terminal_processing_failures"], maximum=20,
+        )
+        terminal_processing_error = _optional_error(
+            payload["terminal_processing_error_code"]
+        )
+        receiver_processing_state = payload["receiver_processing_state"]
+        if (
+            receiver_processing_state is not None
+            and receiver_processing_state not in {
+                "pending", "leased", "retry_wait", "succeeded", "failed",
+            }
+        ):
+            raise ValueError
+        receiver_processing_attempts = payload["receiver_processing_attempts"]
+        receiver_processing_max_attempts = payload[
+            "receiver_processing_max_attempts"
+        ]
+        if receiver_processing_attempts is not None:
+            receiver_processing_attempts = _count(
+                receiver_processing_attempts, maximum=20,
+            )
+        if receiver_processing_max_attempts is not None:
+            receiver_processing_max_attempts = _count(
+                receiver_processing_max_attempts, maximum=20,
+            )
+        receiver_processing_error = _optional_error(
+            payload["receiver_processing_error_code"]
+        )
+        receiver_processed_at = payload["receiver_processed_at"]
+        if receiver_processed_at is not None:
+            receiver_processed_at = _timestamp(receiver_processed_at)
+        durable_processing = terminal_processing_state in {
+            "pending", "leased", "watching", "retry_wait", "succeeded",
+            "failed",
+        }
+        if not durable_processing and any((
+            terminal_processing_poll_attempts,
+            terminal_processing_failures,
+            terminal_processing_error,
+            receiver_processing_state,
+            receiver_processing_attempts,
+            receiver_processing_max_attempts,
+            receiver_processing_error,
+            receiver_processed_at,
+        )):
+            raise ValueError
+        if durable_processing and (
+            (terminal_processing_state in {"retry_wait", "failed"})
+            != (terminal_processing_error is not None)
+        ):
+            raise ValueError
+        if (receiver_processing_state is None) != (
+            receiver_processing_attempts is None
+            and receiver_processing_max_attempts is None
+        ):
+            raise ValueError
+        if receiver_processing_state is None and any((
+            receiver_processing_error,
+            receiver_processed_at,
+        )):
+            raise ValueError
+        if (
+            receiver_processing_attempts is not None
+            and (
+                receiver_processing_max_attempts < 1
+                or receiver_processing_attempts
+                > receiver_processing_max_attempts
+            )
+        ):
+            raise ValueError
+        if (receiver_processing_state == "succeeded") != (
+            receiver_processed_at is not None
+        ):
+            raise ValueError
+        if (receiver_processing_state in {"retry_wait", "failed"}) != (
+            receiver_processing_error is not None
+        ):
+            raise ValueError
         if (plan_id is None) != (job_count is None):
             raise ValueError
         if (dispatch_status == "succeeded") != (plan_id is not None):
@@ -426,6 +531,19 @@ def _source_status_payload(
             "notification_attempts": notification_attempts,
             "notification_max_attempts": notification_max_attempts,
             "notification_error_code": notification_error,
+            "terminal_processing_state": terminal_processing_state,
+            "terminal_processing_poll_attempts": (
+                terminal_processing_poll_attempts
+            ),
+            "terminal_processing_failures": terminal_processing_failures,
+            "terminal_processing_error_code": terminal_processing_error,
+            "receiver_processing_state": receiver_processing_state,
+            "receiver_processing_attempts": receiver_processing_attempts,
+            "receiver_processing_max_attempts": (
+                receiver_processing_max_attempts
+            ),
+            "receiver_processing_error_code": receiver_processing_error,
+            "receiver_processed_at": receiver_processed_at,
         }
     except Exception:
         raise CMSSourceHTTPBlocked(
@@ -480,10 +598,11 @@ def _health_payload(value: Any) -> dict[str, Any]:
         if not isinstance(payload, Mapping) or set(payload) != {
             "schema", "status", "pending_lifecycle_registrations",
             "pending_terminal_notifications", "changes", "removals",
-            "lifecycle", "notifications", "error_code",
+            "pending_terminal_processing", "lifecycle", "notifications",
+            "terminal_processing", "error_code",
         }:
             raise ValueError
-        if payload["schema"] != "blun.cms-source-service-health.v2":
+        if payload["schema"] != "blun.cms-source-service-health.v3":
             raise ValueError
         if payload["status"] not in HEALTH_STATUSES:
             raise ValueError
@@ -495,6 +614,9 @@ def _health_payload(value: Any) -> dict[str, Any]:
             ),
             "pending_terminal_notifications": _count(
                 payload["pending_terminal_notifications"]
+            ),
+            "pending_terminal_processing": _count(
+                payload["pending_terminal_processing"]
             ),
             "changes": _component(payload["changes"], STATUSES),
             "removals": _component(
@@ -508,6 +630,14 @@ def _health_payload(value: Any) -> dict[str, Any]:
                 {}
                 if payload["notifications"] == {}
                 else _component(payload["notifications"], STATUSES)
+            ),
+            "terminal_processing": (
+                {}
+                if payload["terminal_processing"] == {}
+                else _component(payload["terminal_processing"], {
+                    "pending", "leased", "watching", "retry_wait",
+                    "succeeded", "failed",
+                })
             ),
             "error_code": payload["error_code"],
         }

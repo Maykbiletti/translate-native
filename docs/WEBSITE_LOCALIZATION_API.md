@@ -592,8 +592,8 @@ The status request is exact, query-free JSON and uses
 }
 ```
 
-Its `blun.cms-source-status-response.v2` response contains one nested
-`blun.cms-source-service-status.v2` snapshot. It binds the stored
+Its `blun.cms-source-status-response.v3` response contains one nested
+`blun.cms-source-service-status.v3` snapshot. It binds the stored
 `website_version`, `source_sequence`, canonical change hash, dispatch state and
 attempts, remote plan and job count, local lifecycle state, remote lifecycle
 status, lifecycle hash, required and approved locales, blocked locale reason
@@ -606,8 +606,14 @@ terminal failure without accidentally advancing the worker.
 
 Version 2 additionally exposes only the terminal notification state, its
 content-free identity and hash, bounded attempt counters, and a public error
-code. The corresponding `blun.cms-source-health-response.v2` and nested
-`blun.cms-source-service-health.v2` report notification backlog and component
+code. When the terminal notifier exposes the pinned receiver `status` method,
+the snapshot also reports the independently durable processing observation,
+poll failures, receiver attempts, and stable local and receiver error codes.
+An intake acknowledgement is never presented as completed CMS processing.
+
+The corresponding `blun.cms-source-health-response.v3` and nested
+`blun.cms-source-service-health.v3` report notification and processing-observer
+backlog plus component
 health without revealing website content or callback responses.
 
 Before parsing JSON or touching SQLite, the application calls the host-supplied
