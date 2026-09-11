@@ -564,7 +564,7 @@ or network call, and returns fail-closed if its route metadata is incomplete or
 internally inconsistent.
 
 The body-free readiness route uses
-`blun.cms-source-readiness-response.v1`. It returns HTTP `200` only while the
+`blun.cms-source-readiness-response.v2`. It returns HTTP `200` only while the
 managed worker is running and durable service health is `ok` or `degraded`;
 startup, shutdown, a worker exception, closed state, or blocked durable health
 returns HTTP `503`. Its separate `source-readiness:read` credential receives no
@@ -575,11 +575,12 @@ driven runtimes retain their explicit `run_once` contract.
 Change requests use
 `blun.cms-source-change-enqueue-request.v1`; removal requests use
 `blun.cms-source-removal-enqueue-request.v1`. Both contain the exact downstream
-payload plus an explicit `max_attempts` from 1 through 20. Successful responses
-return HTTP `202` with the canonical request identity, payload SHA-256, durable
-state, attempt count, and retry ceiling. Replaying identical bytes converges on
-the same durable item. Reusing an identity with different content or policy
-returns HTTP `409` and does not alter stored work.
+payload plus an explicit `max_attempts` from 1 through 20. Successful V2
+responses return HTTP `202` with the canonical request identity, payload
+SHA-256, durable state, attempt count, retry ceiling, and exact capability
+digest. Replaying identical bytes converges on the same durable item. Reusing
+an identity with different content or policy returns HTTP `409` and does not
+alter stored work.
 
 The status request is exact, query-free JSON and uses
 `blun.cms-source-status-request.v1`:
@@ -592,7 +593,7 @@ The status request is exact, query-free JSON and uses
 }
 ```
 
-Its `blun.cms-source-status-response.v3` response contains one nested
+Its `blun.cms-source-status-response.v4` response contains one nested
 `blun.cms-source-service-status.v3` snapshot. It binds the stored
 `website_version`, `source_sequence`, canonical change hash, dispatch state and
 attempts, remote plan and job count, local lifecycle state, remote lifecycle
@@ -611,7 +612,7 @@ the snapshot also reports the independently durable processing observation,
 poll failures, receiver attempts, and stable local and receiver error codes.
 An intake acknowledgement is never presented as completed CMS processing.
 
-The corresponding `blun.cms-source-health-response.v3` and nested
+The corresponding `blun.cms-source-health-response.v4` and nested
 `blun.cms-source-service-health.v3` report notification and processing-observer
 backlog plus component
 health without revealing website content or callback responses.
@@ -647,6 +648,40 @@ content type. Every response sets `Cache-Control: no-store`,
 `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`. Errors use
 `blun.cms-source-runtime-http-error.v1` and never echo a body, header, path,
 credential, exception, source string, or target string.
+
+#### Contract-pinned website client
+
+`integrations/website_localization_cms_source_client.py` is the provider-neutral
+client for this complete ingress. Construct `CMSLocalizationSourceHTTPClient`
+with one exact HTTPS origin, an `expected_capabilities_sha256` supplied through
+trusted deployment configuration, and a callback that provides authentication
+headers for the canonical request context. The callback receives the method,
+origin, verified path and scope, body SHA-256, and the applicable event, site,
+or request identity; it cannot replace framing, idempotency, or binding headers.
+
+`submit_change()` and `submit_removal()` validate the complete V2 CMS change or
+V1 cancellation/tombstone locally before discovery and before any write. Each
+method fetches the capability object, requires its canonical digest and every
+operation definition to match the installed contract and trusted pin, takes
+the write path from that fresh result, and performs exactly one request. The
+immutable event, cancellation, or tombstone identity is the idempotency key.
+An accepted response must return the same operation, request and event IDs,
+canonical inner-payload hash, retry ceiling, and capability digest.
+
+`status()`, `health()`, and `readiness()` repeat discovery independently and
+then validate every returned field and cross-field invariant. Status is bound
+to the requested event and site. Health and readiness accept their documented
+`200` and `503` states only when the HTTP status agrees with the nested state.
+All five operational response schemas carry `capabilities_sha256`; a process
+swap or stale response between discovery and the operation therefore blocks.
+
+The adapter owns no retry loop. `CMSSourceClientBlocked` contains only a stable
+content-free code and retryability decision, so the website host may apply its
+own bounded retry policy. Network failures, `408`, `425`, `429`, and server
+errors are retryable; redirects, contract drift, malformed JSON, unexpected
+fields, cross-tenant evidence, payload mismatches, and invalid requests are
+not. The client never returns website text through a status or health method
+and never treats a failed or ambiguous response as accepted work.
 
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could

@@ -23,13 +23,13 @@ AUTH_REQUEST_SCHEMA = "blun.cms-source-runtime-http-auth-request.v1"
 PRINCIPAL_SCHEMA = "blun.cms-source-runtime-principal.v1"
 STATUS_PRINCIPAL_SCHEMA = "blun.cms-source-status-principal.v1"
 CHANGE_REQUEST_SCHEMA = "blun.cms-source-change-enqueue-request.v1"
-CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v1"
+CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v2"
 REMOVAL_REQUEST_SCHEMA = "blun.cms-source-removal-enqueue-request.v1"
-REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v1"
+REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v2"
 STATUS_REQUEST_SCHEMA = "blun.cms-source-status-request.v1"
-STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v3"
-HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v3"
-READINESS_RESPONSE_SCHEMA = "blun.cms-source-readiness-response.v1"
+STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v4"
+HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v4"
+READINESS_RESPONSE_SCHEMA = "blun.cms-source-readiness-response.v2"
 CAPABILITIES_SCHEMA = "blun.cms-source-runtime-capabilities.v1"
 CAPABILITIES_RESPONSE_SCHEMA = "blun.cms-source-capabilities-response.v1"
 
@@ -743,6 +743,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "response_fields": [
                 "schema", "operation", "request_id", "event_id",
                 "payload_sha256", "status", "attempts", "max_attempts",
+                "capabilities_sha256",
             ],
             "success_status": 202,
         },
@@ -754,7 +755,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "request_schema": None,
             "request_fields": [],
             "response_schema": HEALTH_RESPONSE_SCHEMA,
-            "response_fields": ["schema", "health"],
+            "response_fields": ["schema", "health", "capabilities_sha256"],
             "success_status": 200,
         },
         "removal": {
@@ -768,6 +769,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "response_fields": [
                 "schema", "operation", "request_id", "event_id",
                 "payload_sha256", "status", "attempts", "max_attempts",
+                "capabilities_sha256",
             ],
             "success_status": 202,
         },
@@ -779,7 +781,9 @@ def _capabilities_payload() -> dict[str, Any]:
             "request_schema": None,
             "request_fields": [],
             "response_schema": READINESS_RESPONSE_SCHEMA,
-            "response_fields": ["schema", "readiness"],
+            "response_fields": [
+                "schema", "readiness", "capabilities_sha256",
+            ],
             "success_status": 200,
         },
         "status": {
@@ -790,7 +794,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "request_schema": STATUS_REQUEST_SCHEMA,
             "request_fields": ["schema", "event_id", "site_id"],
             "response_schema": STATUS_RESPONSE_SCHEMA,
-            "response_fields": ["schema", "status"],
+            "response_fields": ["schema", "status", "capabilities_sha256"],
             "success_status": 200,
         },
     }
@@ -1021,6 +1025,7 @@ class CMSSourceHTTPApplication:
                 return self._send(start_response, response_status, {
                     "schema": HEALTH_RESPONSE_SCHEMA,
                     "health": report,
+                    "capabilities_sha256": _capabilities_payload()["sha256"],
                 })
 
             if path == READINESS_PATH:
@@ -1035,6 +1040,7 @@ class CMSSourceHTTPApplication:
                 return self._send(start_response, response_status, {
                     "schema": READINESS_RESPONSE_SCHEMA,
                     "readiness": report,
+                    "capabilities_sha256": _capabilities_payload()["sha256"],
                 })
 
             request = self._request(body)
@@ -1078,6 +1084,7 @@ class CMSSourceHTTPApplication:
                         expected_event_id=event_id,
                         expected_site_id=site_id,
                     ),
+                    "capabilities_sha256": _capabilities_payload()["sha256"],
                 })
 
             envelope_key = "change" if path == CHANGE_PATH else "removal"
@@ -1135,6 +1142,7 @@ class CMSSourceHTTPApplication:
                     if path == CHANGE_PATH else REMOVAL_RESPONSE_SCHEMA
                 ),
                 **payload,
+                "capabilities_sha256": _capabilities_payload()["sha256"],
             })
         except CMSSourceHTTPBlocked as failure:
             return self._error(start_response, failure)
