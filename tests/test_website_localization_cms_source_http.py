@@ -309,6 +309,81 @@ class SourceHTTPTests(unittest.TestCase):
         self.assertEqual(blocked[0], "503 Service Unavailable")
         self.assertEqual(blocked[2]["error_code"], "source_http.runtime_blocked")
 
+    def test_capabilities_are_authenticated_hashed_and_match_active_routes(self):
+        source = cms_support.event()["localization"]["source_text"]
+        methods = ("enqueue_change", "enqueue_removal", "status", "health")
+        patches = [
+            mock.patch.object(
+                self.runtime, name, wraps=getattr(self.runtime, name),
+            )
+            for name in methods
+        ]
+        started = [patch.start() for patch in patches]
+        try:
+            status, headers, response = self.call(
+                HTTP.CAPABILITIES_PATH, method="GET",
+            )
+        finally:
+            for patch in patches:
+                patch.stop()
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(
+            response["schema"], HTTP.CAPABILITIES_RESPONSE_SCHEMA,
+        )
+        capabilities = response["capabilities"]
+        claimed = capabilities.pop("sha256")
+        self.assertEqual(
+            claimed,
+            hashlib.sha256(self.encode(capabilities)).hexdigest(),
+        )
+        self.assertEqual(capabilities["schema"], HTTP.CAPABILITIES_SCHEMA)
+        self.assertEqual(capabilities["api_schema"], HTTP.API_SCHEMA)
+        self.assertEqual(set(capabilities["operations"]), {
+            "capabilities", "change", "health", "removal", "status",
+        })
+        for operation in capabilities["operations"].values():
+            path = operation["path"]
+            self.assertEqual(operation["method"], HTTP.METHODS[path])
+            self.assertEqual(operation["scope"], HTTP.SCOPES[path])
+        self.assertEqual(
+            capabilities["operations"]["status"]["principal_schema"],
+            HTTP.STATUS_PRINCIPAL_SCHEMA,
+        )
+        self.assertEqual(
+            capabilities["operations"]["change"]["request_fields"],
+            ["schema", "change", "max_attempts"],
+        )
+        self.assertEqual(
+            capabilities["limits"]["max_body_bytes"], HTTP.MAX_BODY_BYTES,
+        )
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertNotIn(source, json.dumps(response))
+        self.assertTrue(all(item.call_count == 0 for item in started))
+        auth = self.authenticator.requests[-1]
+        self.assertEqual(auth["path"], HTTP.CAPABILITIES_PATH)
+        self.assertEqual(auth["method"], "GET")
+        self.assertEqual(
+            auth["body_sha256"], hashlib.sha256(b"").hexdigest(),
+        )
+
+    def test_capability_contract_drift_and_auth_failure_block(self):
+        changed_methods = dict(HTTP.METHODS)
+        changed_methods[HTTP.CHANGE_PATH] = "PUT"
+        with mock.patch.object(HTTP, "METHODS", changed_methods):
+            drift = self.call(HTTP.CAPABILITIES_PATH, method="GET")
+        self.assertEqual(drift[0], "503 Service Unavailable")
+        self.assertEqual(
+            drift[2]["error_code"], "source_http.capabilities_invalid",
+        )
+
+        self.authenticator.override_scope = "source-health:read"
+        rejected = self.call(HTTP.CAPABILITIES_PATH, method="GET")
+        self.assertEqual(rejected[0], "403 Forbidden")
+        self.assertEqual(
+            rejected[2]["error_code"], "source_http.scope_rejected",
+        )
+
     def test_status_is_site_bound_read_only_and_tracks_remote_lifecycle(self):
         change = cms_support.event()
         source = change["localization"]["source_text"]
@@ -520,6 +595,11 @@ class SourceHTTPTests(unittest.TestCase):
             method="GET",
             value={"unexpected": True},
         )
+        capabilities_body = self.call(
+            HTTP.CAPABILITIES_PATH,
+            method="GET",
+            value={"unexpected": True},
+        )
         raw = b'{"schema":"x","schema":"y"}'
         environ = {
             "PATH_INFO": HTTP.CHANGE_PATH,
@@ -540,6 +620,11 @@ class SourceHTTPTests(unittest.TestCase):
         self.assertEqual(method[0], "405 Method Not Allowed")
         self.assertEqual(body[0], "400 Bad Request")
         self.assertEqual(body[2]["error_code"], "source_http.body_not_allowed")
+        self.assertEqual(capabilities_body[0], "400 Bad Request")
+        self.assertEqual(
+            capabilities_body[2]["error_code"],
+            "source_http.body_not_allowed",
+        )
         self.assertEqual(captured["status"], "400 Bad Request")
         self.assertEqual(duplicate["error_code"], "source_http.json_invalid")
 

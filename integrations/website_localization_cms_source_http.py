@@ -2,8 +2,8 @@
 """Authenticated WSGI ingress for one durable source-CMS runtime.
 
 The boundary accepts exact change and removal envelopes from the website host
-and exposes only aggregate, content-free health. Authentication receives the
-request metadata and body digest, never the website payload itself.
+and exposes content-free status, health, and capability data. Authentication
+receives the request metadata and body digest, never the website payload itself.
 """
 
 from __future__ import annotations
@@ -28,11 +28,14 @@ REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v1"
 STATUS_REQUEST_SCHEMA = "blun.cms-source-status-request.v1"
 STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v1"
 HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v1"
+CAPABILITIES_SCHEMA = "blun.cms-source-runtime-capabilities.v1"
+CAPABILITIES_RESPONSE_SCHEMA = "blun.cms-source-capabilities-response.v1"
 
 CHANGE_PATH = "/v1/localization/source/changes"
 REMOVAL_PATH = "/v1/localization/source/removals"
 STATUS_PATH = "/v1/localization/source/status"
 HEALTH_PATH = "/v1/localization/source/health"
+CAPABILITIES_PATH = "/v1/localization/source/capabilities"
 
 MAX_BODY_BYTES = 4_000_000
 MAX_HEADERS = 64
@@ -58,6 +61,14 @@ SCOPES = {
     REMOVAL_PATH: "source-removal:write",
     STATUS_PATH: "source-status:read",
     HEALTH_PATH: "source-health:read",
+    CAPABILITIES_PATH: "source-capabilities:read",
+}
+METHODS = {
+    CHANGE_PATH: "POST",
+    REMOVAL_PATH: "POST",
+    STATUS_PATH: "POST",
+    HEALTH_PATH: "GET",
+    CAPABILITIES_PATH: "GET",
 }
 
 
@@ -449,6 +460,138 @@ def _health_payload(value: Any) -> dict[str, Any]:
         raise CMSSourceHTTPBlocked("source_http.health_invalid", 503) from None
 
 
+def _capabilities_payload() -> dict[str, Any]:
+    """Build the public contract from the exact active HTTP constants."""
+    expected_scopes = {
+        CHANGE_PATH: "source-change:write",
+        REMOVAL_PATH: "source-removal:write",
+        STATUS_PATH: "source-status:read",
+        HEALTH_PATH: "source-health:read",
+        CAPABILITIES_PATH: "source-capabilities:read",
+    }
+    expected_methods = {
+        CHANGE_PATH: "POST",
+        REMOVAL_PATH: "POST",
+        STATUS_PATH: "POST",
+        HEALTH_PATH: "GET",
+        CAPABILITIES_PATH: "GET",
+    }
+    if (
+        SCOPES != expected_scopes
+        or METHODS != expected_methods
+        or len(set(SCOPES.values())) != len(SCOPES)
+    ):
+        raise CMSSourceHTTPBlocked(
+            "source_http.capabilities_invalid", 503,
+        )
+
+    operations = {
+        "capabilities": {
+            "method": METHODS[CAPABILITIES_PATH],
+            "path": CAPABILITIES_PATH,
+            "scope": SCOPES[CAPABILITIES_PATH],
+            "principal_schema": PRINCIPAL_SCHEMA,
+            "request_schema": None,
+            "request_fields": [],
+            "response_schema": CAPABILITIES_RESPONSE_SCHEMA,
+            "response_fields": ["schema", "capabilities"],
+            "success_status": 200,
+        },
+        "change": {
+            "method": METHODS[CHANGE_PATH],
+            "path": CHANGE_PATH,
+            "scope": SCOPES[CHANGE_PATH],
+            "principal_schema": PRINCIPAL_SCHEMA,
+            "request_schema": CHANGE_REQUEST_SCHEMA,
+            "request_fields": ["schema", "change", "max_attempts"],
+            "response_schema": CHANGE_RESPONSE_SCHEMA,
+            "response_fields": [
+                "schema", "operation", "request_id", "event_id",
+                "payload_sha256", "status", "attempts", "max_attempts",
+            ],
+            "success_status": 202,
+        },
+        "health": {
+            "method": METHODS[HEALTH_PATH],
+            "path": HEALTH_PATH,
+            "scope": SCOPES[HEALTH_PATH],
+            "principal_schema": PRINCIPAL_SCHEMA,
+            "request_schema": None,
+            "request_fields": [],
+            "response_schema": HEALTH_RESPONSE_SCHEMA,
+            "response_fields": ["schema", "health"],
+            "success_status": 200,
+        },
+        "removal": {
+            "method": METHODS[REMOVAL_PATH],
+            "path": REMOVAL_PATH,
+            "scope": SCOPES[REMOVAL_PATH],
+            "principal_schema": PRINCIPAL_SCHEMA,
+            "request_schema": REMOVAL_REQUEST_SCHEMA,
+            "request_fields": ["schema", "removal", "max_attempts"],
+            "response_schema": REMOVAL_RESPONSE_SCHEMA,
+            "response_fields": [
+                "schema", "operation", "request_id", "event_id",
+                "payload_sha256", "status", "attempts", "max_attempts",
+            ],
+            "success_status": 202,
+        },
+        "status": {
+            "method": METHODS[STATUS_PATH],
+            "path": STATUS_PATH,
+            "scope": SCOPES[STATUS_PATH],
+            "principal_schema": STATUS_PRINCIPAL_SCHEMA,
+            "request_schema": STATUS_REQUEST_SCHEMA,
+            "request_fields": ["schema", "event_id", "site_id"],
+            "response_schema": STATUS_RESPONSE_SCHEMA,
+            "response_fields": ["schema", "status"],
+            "success_status": 200,
+        },
+    }
+    capabilities = {
+        "schema": CAPABILITIES_SCHEMA,
+        "api_schema": API_SCHEMA,
+        "authentication_request_schema": AUTH_REQUEST_SCHEMA,
+        "error_schema": ERROR_SCHEMA,
+        "limits": {
+            "max_body_bytes": MAX_BODY_BYTES,
+            "max_headers": MAX_HEADERS,
+            "max_header_value_bytes": MAX_HEADER_VALUE,
+            "max_attempts_min": 1,
+            "max_attempts_max": 20,
+        },
+        "operations": operations,
+    }
+    try:
+        encoded = _canonical_json(capabilities)
+        if set(operations) != {
+            "capabilities", "change", "health", "removal", "status",
+        }:
+            raise ValueError
+        for name, operation in operations.items():
+            if (
+                operation["path"] not in SCOPES
+                or operation["scope"] != SCOPES[operation["path"]]
+                or operation["method"] != METHODS[operation["path"]]
+                or operation["principal_schema"] not in {
+                    PRINCIPAL_SCHEMA, STATUS_PRINCIPAL_SCHEMA,
+                }
+                or not isinstance(operation["success_status"], int)
+                or name not in {"capabilities", "change", "health", "removal", "status"}
+            ):
+                raise ValueError
+    except CMSSourceHTTPBlocked:
+        raise
+    except Exception:
+        raise CMSSourceHTTPBlocked(
+            "source_http.capabilities_invalid", 503,
+        ) from None
+    return {
+        **capabilities,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
 class CMSSourceHTTPApplication:
     """Strict authenticated WSGI adapter over a source-CMS runtime."""
 
@@ -593,14 +736,14 @@ class CMSSourceHTTPApplication:
             if path not in SCOPES:
                 raise CMSSourceHTTPBlocked("source_http.route_not_found", 404)
             method = environ.get("REQUEST_METHOD")
-            expected_method = "GET" if path == HEALTH_PATH else "POST"
+            expected_method = METHODS[path]
             if method != expected_method:
                 raise CMSSourceHTTPBlocked("source_http.method_not_allowed", 405)
             if environ.get("wsgi.url_scheme") != "https":
                 raise CMSSourceHTTPBlocked("source_http.https_required", 400)
             if environ.get("QUERY_STRING") not in {None, ""}:
                 raise CMSSourceHTTPBlocked("source_http.query_rejected", 400)
-            if path == HEALTH_PATH:
+            if path in {HEALTH_PATH, CAPABILITIES_PATH}:
                 body = self._body(environ, required=False)
                 if body or environ.get("CONTENT_TYPE") not in {None, ""}:
                     raise CMSSourceHTTPBlocked("source_http.body_not_allowed", 400)
@@ -609,6 +752,12 @@ class CMSSourceHTTPApplication:
                     raise CMSSourceHTTPBlocked("source_http.content_type_invalid", 415)
                 body = self._body(environ, required=True)
             principal = self._authenticate(environ, path, body)
+
+            if path == CAPABILITIES_PATH:
+                return self._send(start_response, 200, {
+                    "schema": CAPABILITIES_RESPONSE_SCHEMA,
+                    "capabilities": _capabilities_payload(),
+                })
 
             if path == HEALTH_PATH:
                 try:

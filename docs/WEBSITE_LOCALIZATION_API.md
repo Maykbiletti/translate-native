@@ -231,6 +231,20 @@ The exact routes are:
 | `POST` | `/v1/localization/source/removals` | `source-removal:write` | Persist one cancellation or tombstone |
 | `POST` | `/v1/localization/source/status` | `source-status:read` | Read one site-bound event lifecycle |
 | `GET` | `/v1/localization/source/health` | `source-health:read` | Read aggregate content-free health |
+| `GET` | `/v1/localization/source/capabilities` | `source-capabilities:read` | Discover the exact active HTTP contract |
+
+The capabilities route accepts no body or query. Its
+`blun.cms-source-capabilities-response.v1` response contains one
+`blun.cms-source-runtime-capabilities.v1` contract with the exact active
+methods, paths, scopes, principal schemas, request and response schemas,
+required top-level fields, success statuses, retry limits, and transport
+bounds. The nested `sha256` is calculated over the canonical capability object
+before that digest field is added. Clients can pin it during deployment and
+reject unexpected contract drift without receiving website content or reading
+the three runtime databases. The route has its own
+`source-capabilities:read` credential, performs no state write, lease, repair,
+or network call, and returns fail-closed if its route metadata is incomplete or
+internally inconsistent.
 
 Change requests use
 `blun.cms-source-change-enqueue-request.v1`; removal requests use
@@ -277,7 +291,8 @@ authenticator with this content-free request:
 }
 ```
 
-For change, removal, and health routes, the authenticator returns exactly
+For change, removal, health, and capabilities routes, the authenticator returns
+exactly
 `blun.cms-source-runtime-principal.v1` with `principal_id`, `credential_id`,
 `credential_version`, and the one route-specific `scope`. Status uses the
 separate `blun.cms-source-status-principal.v1` schema and additionally binds
@@ -289,9 +304,9 @@ The WSGI server remains responsible for rejecting ambiguous wire-level HTTP
 before constructing the WSGI environment.
 
 Requests require an exact query-free HTTPS route, fixed `Content-Length`, UTF-8
-JSON, and no transfer encoding. Health accepts no body or content type. Every
-response sets `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and
-`Referrer-Policy: no-referrer`. Errors use
+JSON, and no transfer encoding. Health and capabilities accept no body or
+content type. Every response sets `Cache-Control: no-store`,
+`X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`. Errors use
 `blun.cms-source-runtime-http-error.v1` and never echo a body, header, path,
 credential, exception, source string, or target string.
 
