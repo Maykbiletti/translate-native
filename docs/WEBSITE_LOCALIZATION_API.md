@@ -717,6 +717,41 @@ tampering blocks before client access. Contract drift does not silently move
 queued writes to a newly advertised endpoint: the deployment must explicitly
 resolve or migrate those immutable records first.
 
+#### Hosted website-source delivery runtime
+
+`integrations/website_localization_cms_source_delivery_runtime.py` is the
+production composition root for that outbox. Call
+`open_durable_cms_source_delivery()` with one absolute private database path,
+one pinned source client, and a stable worker ID. It validates the client,
+worker ID, timeout, lease, and backoff policy against an in-memory outbox before
+creating the file. The resulting runtime owns its SQLite connection and must be
+constructed after a prefork server creates the final worker process.
+
+The database file is created mode `0600` without following links. Its complete
+parent chain, owner, type, link count, permissions, device, and inode are
+checked before and after every operation. A missing, replaced, linked, or
+permission-weakened file blocks before client access. One reentrant runtime
+lock serializes callers inside a process, while SQLite transactions and durable
+leases let separately constructed processes share the same database safely.
+An inherited runtime rejects the foreign process before attempting its lock.
+
+`open_hosted_cms_source_delivery()` additionally starts one process-owned,
+non-daemon background worker. It uses interruptible active, idle, and blocked
+waits, claims one network attempt per tick, and gives removal events the same
+priority defined by the outbox. Once managed, `enqueue_change()` and
+`enqueue_removal()` accept new work only while that worker is alive and has no
+recorded failure. Manual runtimes remain available for an external supervisor
+that calls `run_once()` itself.
+
+`worker_readiness()` returns only worker state, outbox health state, and a
+stable error code. It is ready only when the managed worker is alive and the
+outbox reports `ok`. `stop_worker()` signals before waiting, so an idle worker
+wakes immediately. If a source-client call exceeds the configured join bound,
+shutdown returns `source_delivery_runtime.worker_stop_timeout` and deliberately
+keeps the database connection open; close it only after the worker finishes.
+Worker exceptions are reduced to `source_delivery_runtime.worker_blocked`, and
+the failed runtime cannot accept more managed source events.
+
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could
 reuse a vanished parent's lock; or a permission change could redirect the next
