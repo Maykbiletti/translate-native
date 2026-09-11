@@ -61,6 +61,7 @@ def _service_failure(error: Exception) -> DurableCMSSourceRuntimeBlocked:
         "dispatch.max_attempts_invalid",
         "removal.request_invalid",
         "removal.max_attempts_invalid",
+        "source_service.status_invalid",
     }:
         return _blocked("source_runtime.request_invalid")
     if code in {
@@ -68,6 +69,8 @@ def _service_failure(error: Exception) -> DurableCMSSourceRuntimeBlocked:
         "removal.idempotency_collision",
     }:
         return _blocked("source_runtime.idempotency_collision")
+    if code == "source_service.status_not_found":
+        return _blocked("source_runtime.status_not_found")
     return _blocked("source_runtime.service_blocked")
 
 
@@ -304,6 +307,9 @@ class DurableCMSSourceRuntime:
         self, request: Mapping[str, Any], *, max_attempts: int = 5,
     ) -> Any:
         return self._call("enqueue_removal", request, max_attempts=max_attempts)
+
+    def status(self, event_id: str, site_id: str) -> Any:
+        return self._call("status", event_id, site_id)
 
     def run_once(self) -> Any:
         return self._call("run_once")

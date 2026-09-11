@@ -24,6 +24,7 @@ from typing import Any, Callable, Mapping
 
 SCHEMA = "blun.cms-source-service-tick.v1"
 HEALTH_SCHEMA = "blun.cms-source-service-health.v1"
+STATUS_SCHEMA = "blun.cms-source-service-status.v1"
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 
@@ -96,6 +97,56 @@ class CMSSourceServiceHealth:
             "removals": dict(self.removals),
             "lifecycle": dict(self.lifecycle),
             "error_code": self.error_code,
+        }
+
+
+@dataclass(frozen=True)
+class CMSSourceServiceStatus:
+    schema: str
+    event_id: str
+    site_id: str
+    website_version: str
+    source_sequence: int
+    change_sha256: str
+    dispatch_status: str
+    dispatch_attempts: int
+    dispatch_max_attempts: int
+    dispatch_error_code: str | None
+    plan_id: str | None
+    job_count: int | None
+    lifecycle_state: str | None
+    lifecycle_poll_attempts: int
+    lifecycle_error_code: str | None
+    remote_status: str | None
+    lifecycle_sha256: str | None
+    required_locales: tuple[str, ...]
+    approved_locales: tuple[str, ...]
+    blocked_locales: tuple[tuple[str, str], ...]
+    queue_counts: Mapping[str, int]
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "event_id": self.event_id,
+            "site_id": self.site_id,
+            "website_version": self.website_version,
+            "source_sequence": self.source_sequence,
+            "change_sha256": self.change_sha256,
+            "dispatch_status": self.dispatch_status,
+            "dispatch_attempts": self.dispatch_attempts,
+            "dispatch_max_attempts": self.dispatch_max_attempts,
+            "dispatch_error_code": self.dispatch_error_code,
+            "plan_id": self.plan_id,
+            "job_count": self.job_count,
+            "lifecycle_state": self.lifecycle_state,
+            "lifecycle_poll_attempts": self.lifecycle_poll_attempts,
+            "lifecycle_error_code": self.lifecycle_error_code,
+            "remote_status": self.remote_status,
+            "lifecycle_sha256": self.lifecycle_sha256,
+            "required_locales": list(self.required_locales),
+            "approved_locales": list(self.approved_locales),
+            "blocked_locales": [list(item) for item in self.blocked_locales],
+            "queue_counts": dict(self.queue_counts),
         }
 
 
@@ -293,6 +344,88 @@ class CMSLocalizationSourceService:
     ) -> Any:
         return self.removals.enqueue(
             request, max_attempts=max_attempts, now=self._now(),
+        )
+
+    def status(self, event_id: str, site_id: str) -> CMSSourceServiceStatus:
+        """Return a content-free snapshot without repairing or leasing work."""
+        event_id = _identifier(event_id, "source_service.status_invalid")
+        site_id = _identifier(site_id, "source_service.status_invalid")
+        now = self._now()
+        row = self.changes.connection.execute(
+            "SELECT * FROM cms_source_change_outbox WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            raise CMSSourceServiceBlocked("source_service.status_not_found")
+        try:
+            self.changes._validated_row(row)
+            change = json.loads(row["payload_json"])
+        except Exception as error:
+            raise CMSSourceServiceBlocked(
+                "source_service.change_state_invalid"
+            ) from error
+        if (
+            not isinstance(change, Mapping)
+            or change.get("event_id") != event_id
+            or change.get("site_id") != site_id
+        ):
+            # Deliberately hide whether the event exists for another site.
+            raise CMSSourceServiceBlocked("source_service.status_not_found")
+
+        try:
+            dispatch = self.changes.status(event_id, now=now)
+            lifecycle = self.lifecycle_monitor.status(event_id, now=now)
+        except Exception as error:
+            if getattr(error, "code", None) == "lifecycle_monitor.event_missing":
+                lifecycle = None
+            else:
+                raise CMSSourceServiceBlocked(
+                    "source_service.status_blocked"
+                ) from error
+        if lifecycle is not None and not self._matching_registration(
+            change,
+            dispatch,
+            lifecycle,
+            self.max_lifecycle_failures,
+        ):
+            raise CMSSourceServiceBlocked(
+                "source_service.lifecycle_binding_mismatch"
+            )
+
+        return CMSSourceServiceStatus(
+            schema=STATUS_SCHEMA,
+            event_id=event_id,
+            site_id=site_id,
+            website_version=change["website_version"],
+            source_sequence=change["source_sequence"],
+            change_sha256=dispatch.payload_sha256,
+            dispatch_status=dispatch.status,
+            dispatch_attempts=dispatch.attempts,
+            dispatch_max_attempts=dispatch.max_attempts,
+            dispatch_error_code=dispatch.last_error_code,
+            plan_id=dispatch.remote_plan_id,
+            job_count=dispatch.remote_job_count,
+            lifecycle_state=None if lifecycle is None else lifecycle.state,
+            lifecycle_poll_attempts=(
+                0 if lifecycle is None else lifecycle.poll_attempts
+            ),
+            lifecycle_error_code=(
+                None if lifecycle is None else lifecycle.last_error_code
+            ),
+            remote_status=None if lifecycle is None else lifecycle.remote_status,
+            lifecycle_sha256=(
+                None if lifecycle is None else lifecycle.lifecycle_sha256
+            ),
+            required_locales=(
+                () if lifecycle is None else lifecycle.required_locales
+            ),
+            approved_locales=(
+                () if lifecycle is None else lifecycle.approved_locales
+            ),
+            blocked_locales=(
+                () if lifecycle is None else lifecycle.blocked_locales
+            ),
+            queue_counts={} if lifecycle is None else lifecycle.queue_counts,
         )
 
     @staticmethod

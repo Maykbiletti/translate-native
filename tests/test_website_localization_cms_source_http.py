@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -42,6 +43,7 @@ class ScriptedClient:
     def __init__(self):
         self.calls = []
         self.events = {}
+        self.lifecycle_status = "processing"
 
     def submit_change(self, change):
         self.calls.append(("change", copy.deepcopy(change)))
@@ -81,6 +83,16 @@ class ScriptedClient:
         self.calls.append(("lifecycle", event_id, site_id))
         change = self.events[event_id]
         required = sorted(change["localization"]["target_locales"])
+        counts = {
+            "failed": 0,
+            "leased": 0,
+            "pending": len(required),
+            "retry_wait": 0,
+            "succeeded": 0,
+        }
+        if self.lifecycle_status == "cancelled":
+            counts["pending"] = 0
+            counts["cancelled"] = len(required)
         return {
             "schema": SERVICE._DISPATCH._CLIENT._API.LIFECYCLE_RESPONSE_SCHEMA,
             "request_id": "lifecycle-" + event_id,
@@ -89,17 +101,11 @@ class ScriptedClient:
             "plan_id": "plan-" + event_id,
             "website_version": change["website_version"],
             "source_sequence": change["source_sequence"],
-            "status": "processing",
+            "status": self.lifecycle_status,
             "required_locales": required,
             "approved_locales": [],
             "blocked_locales": [],
-            "queue_counts": {
-                "failed": 0,
-                "leased": 0,
-                "pending": len(required),
-                "retry_wait": 0,
-                "succeeded": 0,
-            },
+            "queue_counts": counts,
             "delivery": None,
             "tombstone": None,
         }
@@ -110,19 +116,27 @@ class Authenticator:
         self.requests = []
         self.override_scope = None
         self.error = None
+        self.site_id = cms_support.event()["site_id"]
 
     def __call__(self, request):
         self.requests.append(copy.deepcopy(request))
         if self.error is not None:
             raise self.error
         scope = self.override_scope or HTTP.SCOPES[request["path"]]
-        return {
-            "schema": HTTP.PRINCIPAL_SCHEMA,
+        principal = {
+            "schema": (
+                HTTP.STATUS_PRINCIPAL_SCHEMA
+                if request["path"] == HTTP.STATUS_PATH
+                else HTTP.PRINCIPAL_SCHEMA
+            ),
             "principal_id": "source-cms",
             "credential_id": "source-cms-credential",
             "credential_version": "1",
             "scope": scope,
         }
+        if request["path"] == HTTP.STATUS_PATH:
+            principal["site_id"] = self.site_id
+        return principal
 
 
 class SourceHTTPTests(unittest.TestCase):
@@ -203,6 +217,14 @@ class SourceHTTPTests(unittest.TestCase):
             "schema": HTTP.REMOVAL_REQUEST_SCHEMA,
             "removal": cms_support.cancellation() if removal is None else removal,
             "max_attempts": 5,
+        }
+
+    def status_request(self, change=None):
+        change = cms_support.event() if change is None else change
+        return {
+            "schema": HTTP.STATUS_REQUEST_SCHEMA,
+            "event_id": change["event_id"],
+            "site_id": change["site_id"],
         }
 
     def test_change_ingress_persists_then_worker_dispatches(self):
@@ -286,6 +308,135 @@ class SourceHTTPTests(unittest.TestCase):
         blocked = self.call(HTTP.HEALTH_PATH, method="GET")
         self.assertEqual(blocked[0], "503 Service Unavailable")
         self.assertEqual(blocked[2]["error_code"], "source_http.runtime_blocked")
+
+    def test_status_is_site_bound_read_only_and_tracks_remote_lifecycle(self):
+        change = cms_support.event()
+        source = change["localization"]["source_text"]
+        self.call(HTTP.CHANGE_PATH, value=self.change_request(change))
+
+        queued = self.call(HTTP.STATUS_PATH, value=self.status_request(change))
+        self.assertEqual(queued[0], "200 OK")
+        self.assertEqual(queued[2]["schema"], HTTP.STATUS_RESPONSE_SCHEMA)
+        self.assertEqual(queued[2]["status"]["dispatch_status"], "pending")
+        self.assertIsNone(queued[2]["status"]["lifecycle_state"])
+        self.assertEqual(self.client.calls, [])
+        auth = self.authenticator.requests[-1]
+        self.assertEqual(auth["path"], HTTP.STATUS_PATH)
+        self.assertEqual(auth["body_sha256"], hashlib.sha256(
+            self.encode(self.status_request(change))
+        ).hexdigest())
+
+        self.runtime.run_once()
+        self.runtime.run_once()
+        observed = self.call(
+            HTTP.STATUS_PATH, value=self.status_request(change),
+        )
+        result = observed[2]["status"]
+        self.assertEqual((result["lifecycle_state"], result["remote_status"]), (
+            "watching", "processing",
+        ))
+        self.assertEqual(
+            result["queue_counts"]["pending"],
+            len(change["localization"]["target_locales"]),
+        )
+        self.assertNotIn(source, json.dumps(observed[2]))
+        self.assertEqual([call[0] for call in self.client.calls], (
+            ["change", "lifecycle"]
+        ))
+
+        self.paths[2].chmod(0o640)
+        blocked = self.call(
+            HTTP.STATUS_PATH, value=self.status_request(change),
+        )
+        self.assertEqual(blocked[0], "503 Service Unavailable")
+        self.assertEqual(
+            blocked[2]["error_code"], "source_http.runtime_blocked",
+        )
+
+    def test_status_hides_missing_and_cross_site_events(self):
+        change = cms_support.event()
+        self.call(HTTP.CHANGE_PATH, value=self.change_request(change))
+        wrong_site = self.status_request(change)
+        wrong_site["site_id"] = "another-site"
+        missing = self.status_request(change)
+        missing["event_id"] = "missing-event"
+
+        with mock.patch.object(
+            self.runtime, "status", wraps=self.runtime.status,
+        ) as reader:
+            response = self.call(HTTP.STATUS_PATH, value=wrong_site)
+            self.assertEqual(response[0], "404 Not Found")
+            self.assertEqual(
+                response[2]["error_code"], "source_http.status_not_found",
+            )
+            reader.assert_not_called()
+            response = self.call(HTTP.STATUS_PATH, value=missing)
+            self.assertEqual(response[0], "404 Not Found")
+            self.assertEqual(
+                response[2]["error_code"], "source_http.status_not_found",
+            )
+            reader.assert_called_once()
+        invalid = self.status_request(change)
+        invalid["event_id"] = "not valid"
+        response = self.call(HTTP.STATUS_PATH, value=invalid)
+        self.assertEqual(response[0], "400 Bad Request")
+        self.assertEqual(
+            response[2]["error_code"], "source_http.request_invalid",
+        )
+
+        self.authenticator.site_id = "not valid"
+        response = self.call(
+            HTTP.STATUS_PATH, value=self.status_request(change),
+        )
+        self.assertEqual(response[0], "401 Unauthorized")
+        self.assertEqual(
+            response[2]["error_code"], "source_http.authentication_failed",
+        )
+
+    def test_status_accepts_terminal_cancelled_queue_shape(self):
+        change = cms_support.event()
+        self.client.lifecycle_status = "cancelled"
+        self.runtime.enqueue_change(change)
+        self.runtime.run_once()
+        self.runtime.run_once()
+
+        response = self.call(
+            HTTP.STATUS_PATH, value=self.status_request(change),
+        )
+        self.assertEqual(response[0], "200 OK")
+        status = response[2]["status"]
+        self.assertEqual(status["remote_status"], "cancelled")
+        self.assertEqual(
+            status["queue_counts"]["cancelled"],
+            len(change["localization"]["target_locales"]),
+        )
+
+    def test_status_rejects_unbound_runtime_response_and_private_failure(self):
+        change = cms_support.event()
+        source = change["localization"]["source_text"]
+        self.runtime.enqueue_change(change)
+        request = self.status_request(change)
+        valid = self.runtime.status(change["event_id"], change["site_id"])
+
+        with mock.patch.object(
+            self.runtime, "status", return_value=replace(
+                valid, site_id="another-site",
+            ),
+        ):
+            unbound = self.call(HTTP.STATUS_PATH, value=request)
+        self.assertEqual(unbound[0], "503 Service Unavailable")
+        self.assertEqual(
+            unbound[2]["error_code"],
+            "source_http.runtime_response_invalid",
+        )
+
+        with mock.patch.object(
+            self.runtime, "status", side_effect=RuntimeError(source),
+        ):
+            failed = self.call(HTTP.STATUS_PATH, value=request)
+        self.assertEqual(failed[0], "503 Service Unavailable")
+        self.assertEqual(failed[2]["error_code"], "source_http.runtime_blocked")
+        self.assertNotIn(source, json.dumps((unbound[2], failed[2])))
 
     def test_scope_mismatch_and_authenticator_failure_block_before_store(self):
         request = self.change_request()

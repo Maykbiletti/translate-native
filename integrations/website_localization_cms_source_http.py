@@ -20,14 +20,18 @@ API_SCHEMA = "blun.cms-source-runtime-api.v1"
 ERROR_SCHEMA = "blun.cms-source-runtime-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-source-runtime-http-auth-request.v1"
 PRINCIPAL_SCHEMA = "blun.cms-source-runtime-principal.v1"
+STATUS_PRINCIPAL_SCHEMA = "blun.cms-source-status-principal.v1"
 CHANGE_REQUEST_SCHEMA = "blun.cms-source-change-enqueue-request.v1"
 CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v1"
 REMOVAL_REQUEST_SCHEMA = "blun.cms-source-removal-enqueue-request.v1"
 REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v1"
+STATUS_REQUEST_SCHEMA = "blun.cms-source-status-request.v1"
+STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v1"
 HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v1"
 
 CHANGE_PATH = "/v1/localization/source/changes"
 REMOVAL_PATH = "/v1/localization/source/removals"
+STATUS_PATH = "/v1/localization/source/status"
 HEALTH_PATH = "/v1/localization/source/health"
 
 MAX_BODY_BYTES = 4_000_000
@@ -38,10 +42,21 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 STATUSES = {"pending", "leased", "retry_wait", "succeeded", "failed"}
+REMOTE_QUEUE_STATES = STATUSES | {"cancelled"}
+LIFECYCLE_STATES = {
+    "pending", "leased", "watching", "retry_wait", "terminal", "failed",
+}
+REMOTE_STATUSES = {
+    "awaiting_approval", "cancelled", "deleted", "deleting",
+    "deletion_failed", "localization_failed", "processing",
+    "publication_blocked", "publication_failed", "published", "publishing",
+    "queue_recovery", "ready", "superseded",
+}
 HEALTH_STATUSES = {"ok", "degraded", "blocked"}
 SCOPES = {
     CHANGE_PATH: "source-change:write",
     REMOVAL_PATH: "source-removal:write",
+    STATUS_PATH: "source-status:read",
     HEALTH_PATH: "source-health:read",
 }
 
@@ -108,21 +123,29 @@ def _constant(_value):
     raise ValueError
 
 
-def _principal(value: Any, scope: str) -> None:
-    if not isinstance(value, Mapping) or set(value) != {
+def _principal(value: Any, scope: str) -> dict[str, str]:
+    fields = {
         "schema", "principal_id", "credential_id", "credential_version", "scope",
-    }:
+    }
+    status_scope = scope == SCOPES[STATUS_PATH]
+    if status_scope:
+        fields.add("site_id")
+    if not isinstance(value, Mapping) or set(value) != fields:
         raise CMSSourceHTTPBlocked("source_http.authentication_failed", 401)
     try:
-        if value["schema"] != PRINCIPAL_SCHEMA:
+        expected_schema = STATUS_PRINCIPAL_SCHEMA if status_scope else PRINCIPAL_SCHEMA
+        if value["schema"] != expected_schema:
             raise ValueError
         for name in ("principal_id", "credential_id", "credential_version"):
             _token(value[name])
         _token(value["scope"])
+        if status_scope:
+            _token(value["site_id"])
     except (KeyError, ValueError, TypeError):
         raise CMSSourceHTTPBlocked("source_http.authentication_failed", 401) from None
     if value["scope"] != scope:
         raise CMSSourceHTTPBlocked("source_http.scope_rejected", 403)
+    return dict(value)
 
 
 def _status_payload(value: Any, *, removal: bool) -> dict[str, Any]:
@@ -164,6 +187,180 @@ def _status_payload(value: Any, *, removal: bool) -> dict[str, Any]:
             "status": payload["status"],
             "attempts": attempts,
             "max_attempts": maximum,
+        }
+    except Exception:
+        raise CMSSourceHTTPBlocked(
+            "source_http.runtime_response_invalid", 503,
+        ) from None
+
+
+def _optional_token(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _token(value)
+
+
+def _optional_error(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or ERROR_CODE.fullmatch(value) is None:
+        raise ValueError
+    return value
+
+
+def _locales(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError
+    result = [_token(item) for item in value]
+    if len(result) > 24 or len(set(result)) != len(result):
+        raise ValueError
+    return result
+
+
+def _source_status_payload(
+    value: Any,
+    *,
+    expected_event_id: str,
+    expected_site_id: str,
+) -> dict[str, Any]:
+    try:
+        payload = value.as_payload()
+        fields = {
+            "schema", "event_id", "site_id", "website_version",
+            "source_sequence", "change_sha256", "dispatch_status",
+            "dispatch_attempts", "dispatch_max_attempts",
+            "dispatch_error_code", "plan_id", "job_count",
+            "lifecycle_state", "lifecycle_poll_attempts",
+            "lifecycle_error_code", "remote_status", "lifecycle_sha256",
+            "required_locales", "approved_locales", "blocked_locales",
+            "queue_counts",
+        }
+        if not isinstance(payload, Mapping) or set(payload) != fields:
+            raise ValueError
+        if payload["schema"] != "blun.cms-source-service-status.v1":
+            raise ValueError
+        event_id = _token(payload["event_id"])
+        site_id = _token(payload["site_id"])
+        if event_id != expected_event_id or site_id != expected_site_id:
+            raise ValueError
+        website_version = _token(payload["website_version"])
+        source_sequence = _count(payload["source_sequence"])
+        if source_sequence < 1 or SHA256.fullmatch(payload["change_sha256"]) is None:
+            raise ValueError
+        dispatch_status = payload["dispatch_status"]
+        if dispatch_status not in STATUSES:
+            raise ValueError
+        attempts = _count(payload["dispatch_attempts"], maximum=20)
+        maximum = _count(payload["dispatch_max_attempts"], maximum=20)
+        if maximum < 1 or attempts > maximum:
+            raise ValueError
+        dispatch_error = _optional_error(payload["dispatch_error_code"])
+        plan_id = _optional_token(payload["plan_id"])
+        job_count = payload["job_count"]
+        if job_count is not None:
+            job_count = _count(job_count)
+            if job_count < 1:
+                raise ValueError
+        lifecycle_state = payload["lifecycle_state"]
+        if lifecycle_state is not None and lifecycle_state not in LIFECYCLE_STATES:
+            raise ValueError
+        poll_attempts = _count(payload["lifecycle_poll_attempts"], maximum=20)
+        lifecycle_error = _optional_error(payload["lifecycle_error_code"])
+        remote_status = payload["remote_status"]
+        if remote_status is not None and remote_status not in REMOTE_STATUSES:
+            raise ValueError
+        lifecycle_sha256 = payload["lifecycle_sha256"]
+        if lifecycle_sha256 is not None and SHA256.fullmatch(lifecycle_sha256) is None:
+            raise ValueError
+        required = _locales(payload["required_locales"])
+        approved = _locales(payload["approved_locales"])
+        blocked_value = payload["blocked_locales"]
+        if not isinstance(blocked_value, (list, tuple)):
+            raise ValueError
+        blocked = []
+        for item in blocked_value:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise ValueError
+            blocked.append([_token(item[0]), _optional_error(item[1])])
+        if any(reason is None for _locale, reason in blocked):
+            raise ValueError
+        blocked_locales = [locale for locale, _reason in blocked]
+        if (
+            len(blocked) > 24
+            or len(set(blocked_locales)) != len(blocked_locales)
+            or required != sorted(required)
+            or approved != sorted(approved)
+            or blocked != sorted(blocked)
+            or not set(approved).issubset(required)
+            or not set(blocked_locales).issubset(required)
+            or set(approved).intersection(blocked_locales)
+        ):
+            raise ValueError
+        queue_value = payload["queue_counts"]
+        if not isinstance(queue_value, Mapping) or set(queue_value) not in (
+            set(), STATUSES, REMOTE_QUEUE_STATES,
+        ):
+            raise ValueError
+        queue_counts = {
+            name: _count(queue_value[name]) for name in sorted(queue_value)
+        }
+        if (plan_id is None) != (job_count is None):
+            raise ValueError
+        if (dispatch_status == "succeeded") != (plan_id is not None):
+            raise ValueError
+        if (dispatch_status in {"retry_wait", "failed"}) != (
+            dispatch_error is not None
+        ):
+            raise ValueError
+        if lifecycle_state is None:
+            if any((poll_attempts, lifecycle_error, remote_status, lifecycle_sha256)):
+                raise ValueError
+            if required or approved or blocked or queue_counts:
+                raise ValueError
+        elif plan_id is None:
+            raise ValueError
+        if remote_status is None and (
+            lifecycle_sha256 is not None
+            or required or approved or blocked or queue_counts
+        ):
+            raise ValueError
+        if remote_status is not None and (
+            lifecycle_sha256 is None
+            or not required
+            or job_count != len(required)
+            or set(queue_counts) not in (STATUSES, REMOTE_QUEUE_STATES)
+            or (
+                remote_status == "queue_recovery"
+                and sum(queue_counts.values()) != 0
+            )
+            or (
+                remote_status != "queue_recovery"
+                and sum(queue_counts.values()) != len(required)
+            )
+        ):
+            raise ValueError
+        return {
+            "schema": payload["schema"],
+            "event_id": event_id,
+            "site_id": site_id,
+            "website_version": website_version,
+            "source_sequence": source_sequence,
+            "change_sha256": payload["change_sha256"],
+            "dispatch_status": dispatch_status,
+            "dispatch_attempts": attempts,
+            "dispatch_max_attempts": maximum,
+            "dispatch_error_code": dispatch_error,
+            "plan_id": plan_id,
+            "job_count": job_count,
+            "lifecycle_state": lifecycle_state,
+            "lifecycle_poll_attempts": poll_attempts,
+            "lifecycle_error_code": lifecycle_error,
+            "remote_status": remote_status,
+            "lifecycle_sha256": lifecycle_sha256,
+            "required_locales": required,
+            "approved_locales": approved,
+            "blocked_locales": blocked,
+            "queue_counts": queue_counts,
         }
     except Exception:
         raise CMSSourceHTTPBlocked(
@@ -257,7 +454,7 @@ class CMSSourceHTTPApplication:
 
     def __init__(self, runtime: Any, authenticator: Callable[[dict[str, Any]], Any]):
         if not all(callable(getattr(runtime, name, None)) for name in (
-            "enqueue_change", "enqueue_removal", "health",
+            "enqueue_change", "enqueue_removal", "status", "health",
         )):
             raise TypeError("runtime must provide source CMS operations")
         if not callable(authenticator):
@@ -331,7 +528,7 @@ class CMSSourceHTTPApplication:
         environ: Mapping[str, Any],
         path: str,
         body: bytes,
-    ) -> None:
+    ) -> dict[str, str]:
         request = {
             "schema": AUTH_REQUEST_SCHEMA,
             "method": environ["REQUEST_METHOD"],
@@ -345,7 +542,7 @@ class CMSSourceHTTPApplication:
             raise CMSSourceHTTPBlocked(
                 "source_http.authentication_unavailable", 503
             ) from None
-        _principal(principal, SCOPES[path])
+        return _principal(principal, SCOPES[path])
 
     @staticmethod
     def _send(start_response, status: int, payload: Mapping[str, Any]):
@@ -411,7 +608,7 @@ class CMSSourceHTTPApplication:
                 if not self._content_type(environ.get("CONTENT_TYPE")):
                     raise CMSSourceHTTPBlocked("source_http.content_type_invalid", 415)
                 body = self._body(environ, required=True)
-            self._authenticate(environ, path, body)
+            principal = self._authenticate(environ, path, body)
 
             if path == HEALTH_PATH:
                 try:
@@ -428,6 +625,48 @@ class CMSSourceHTTPApplication:
                 })
 
             request = self._request(body)
+            if path == STATUS_PATH:
+                if (
+                    not isinstance(request, Mapping)
+                    or set(request) != {"schema", "event_id", "site_id"}
+                    or request.get("schema") != STATUS_REQUEST_SCHEMA
+                ):
+                    raise CMSSourceHTTPBlocked("source_http.request_invalid", 400)
+                try:
+                    event_id = _token(request["event_id"])
+                    site_id = _token(request["site_id"])
+                except (KeyError, TypeError, ValueError):
+                    raise CMSSourceHTTPBlocked(
+                        "source_http.request_invalid", 400,
+                    ) from None
+                if site_id != principal["site_id"]:
+                    raise CMSSourceHTTPBlocked(
+                        "source_http.status_not_found", 404,
+                    )
+                try:
+                    status = self.runtime.status(event_id, site_id)
+                except Exception as error:
+                    code = getattr(error, "code", None)
+                    if code == "source_runtime.request_invalid":
+                        raise CMSSourceHTTPBlocked(
+                            "source_http.request_invalid", 400,
+                        ) from None
+                    if code == "source_runtime.status_not_found":
+                        raise CMSSourceHTTPBlocked(
+                            "source_http.status_not_found", 404,
+                        ) from None
+                    raise CMSSourceHTTPBlocked(
+                        "source_http.runtime_blocked", 503,
+                    ) from None
+                return self._send(start_response, 200, {
+                    "schema": STATUS_RESPONSE_SCHEMA,
+                    "status": _source_status_payload(
+                        status,
+                        expected_event_id=event_id,
+                        expected_site_id=site_id,
+                    ),
+                })
+
             envelope_key = "change" if path == CHANGE_PATH else "removal"
             expected_schema = (
                 CHANGE_REQUEST_SCHEMA if path == CHANGE_PATH else REMOVAL_REQUEST_SCHEMA

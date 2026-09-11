@@ -229,6 +229,7 @@ The exact routes are:
 | --- | --- | --- | --- |
 | `POST` | `/v1/localization/source/changes` | `source-change:write` | Persist one complete signed CMS change |
 | `POST` | `/v1/localization/source/removals` | `source-removal:write` | Persist one cancellation or tombstone |
+| `POST` | `/v1/localization/source/status` | `source-status:read` | Read one site-bound event lifecycle |
 | `GET` | `/v1/localization/source/health` | `source-health:read` | Read aggregate content-free health |
 
 Change requests use
@@ -239,6 +240,29 @@ return HTTP `202` with the canonical request identity, payload SHA-256, durable
 state, attempt count, and retry ceiling. Replaying identical bytes converges on
 the same durable item. Reusing an identity with different content or policy
 returns HTTP `409` and does not alter stored work.
+
+The status request is exact, query-free JSON and uses
+`blun.cms-source-status-request.v1`:
+
+```json
+{
+  "schema": "blun.cms-source-status-request.v1",
+  "event_id": "cms-event-184",
+  "site_id": "public-site"
+}
+```
+
+Its `blun.cms-source-status-response.v1` response contains one nested
+`blun.cms-source-service-status.v1` snapshot. It binds the stored
+`website_version`, `source_sequence`, canonical change hash, dispatch state and
+attempts, remote plan and job count, local lifecycle state, remote lifecycle
+status, lifecycle hash, required and approved locales, blocked locale reason
+codes, and queue counts. It never contains source text, target text, delivery
+payloads, credentials, signatures, provider bodies, or private exceptions.
+The read performs no reconciliation, lease, retry, network call, or state
+write. A caller can therefore distinguish queued work, a pending local
+registration, active localization, approval, publication, cancellation, and a
+terminal failure without accidentally advancing the worker.
 
 Before parsing JSON or touching SQLite, the application calls the host-supplied
 authenticator with this content-free request:
@@ -253,12 +277,16 @@ authenticator with this content-free request:
 }
 ```
 
-The authenticator returns exactly
+For change, removal, and health routes, the authenticator returns exactly
 `blun.cms-source-runtime-principal.v1` with `principal_id`, `credential_id`,
-`credential_version`, and the one route-specific `scope`. The runtime does not
-interpret credentials and never stores them. Operators should give health and
-write routes distinct credentials. The WSGI server remains responsible for
-rejecting ambiguous wire-level HTTP before constructing the WSGI environment.
+`credential_version`, and the one route-specific `scope`. Status uses the
+separate `blun.cms-source-status-principal.v1` schema and additionally binds
+one exact `site_id`. The request site must match that principal before SQLite
+is queried; another site and an unknown event both return the same HTTP `404`
+error. The runtime does not interpret credentials and never stores them.
+Operators should give status, health, and write routes distinct credentials.
+The WSGI server remains responsible for rejecting ambiguous wire-level HTTP
+before constructing the WSGI environment.
 
 Requests require an exact query-free HTTPS route, fixed `Content-Length`, UTF-8
 JSON, and no transfer encoding. Health accepts no body or content type. Every

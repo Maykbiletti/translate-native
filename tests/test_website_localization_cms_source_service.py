@@ -230,6 +230,75 @@ class CMSLocalizationSourceServiceTests(unittest.TestCase):
             ["cancellation", "change"],
         )
 
+    def test_status_tracks_dispatch_and_lifecycle_without_network_or_content(self):
+        change = support.event()
+        source = change["localization"]["source_text"]
+        self.service.enqueue_change(change)
+
+        writes_before = tuple(
+            connection.total_changes for connection in self.connections
+        )
+        queued = self.service.status(change["event_id"], change["site_id"])
+        self.assertEqual((queued.dispatch_status, queued.lifecycle_state), (
+            "pending", None,
+        ))
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(
+            tuple(connection.total_changes for connection in self.connections),
+            writes_before,
+        )
+
+        self.service.run_once()
+        registered = self.service.status(
+            change["event_id"], change["site_id"],
+        )
+        self.assertEqual((registered.dispatch_status, registered.lifecycle_state), (
+            "succeeded", "pending",
+        ))
+        self.assertIsNone(registered.remote_status)
+
+        self.service.run_once()
+        observed = self.service.status(change["event_id"], change["site_id"])
+        payload = observed.as_payload()
+        self.assertEqual((observed.lifecycle_state, observed.remote_status), (
+            "watching", "processing",
+        ))
+        self.assertEqual(
+            observed.required_locales,
+            tuple(sorted(change["localization"]["target_locales"])),
+        )
+        self.assertEqual(
+            observed.queue_counts["pending"],
+            len(change["localization"]["target_locales"]),
+        )
+        self.assertNotIn(source, repr(payload))
+        self.assertEqual([call[0] for call in self.client.calls], (
+            ["change", "lifecycle"]
+        ))
+
+    def test_status_hides_cross_site_and_missing_event_identity(self):
+        change = support.event()
+        self.service.enqueue_change(change)
+
+        for event_id, site_id in (
+            (change["event_id"], "another-site"),
+            ("missing-event", change["site_id"]),
+        ):
+            with self.subTest(event_id=event_id, site_id=site_id):
+                with self.assertRaises(
+                    SERVICE.CMSSourceServiceBlocked,
+                ) as blocked:
+                    self.service.status(event_id, site_id)
+                self.assertEqual(
+                    blocked.exception.code,
+                    "source_service.status_not_found",
+                )
+        with self.assertRaises(SERVICE.CMSSourceServiceBlocked) as invalid:
+            self.service.status("not valid", change["site_id"])
+        self.assertEqual(
+            invalid.exception.code, "source_service.status_invalid",
+        )
+
     def test_conflicting_lifecycle_binding_blocks_before_network(self):
         change = support.event()
         self.service.enqueue_change(change)
