@@ -796,6 +796,39 @@ semantics under one canonical SHA-256. That digest is repeated on every
 operational response, and any internal contract drift blocks the complete
 response instead of advertising a rehashed weakened interface.
 
+#### Contract-pinned source-delivery sidecar client
+
+`integrations/website_localization_cms_source_delivery_client.py` is the
+provider-neutral HTTPS reference client for all six sidecar operations.
+Construct `CMSSourceDeliverySidecarHTTPClient` with one exact HTTPS origin, the
+trusted sidecar capability SHA-256, the separately trusted downstream
+source-service capability SHA-256, and a callback that returns authentication
+headers for the immutable request context. Loopback HTTP is available only
+through the explicit test/development option.
+
+Before every operational request the client fetches the live capability
+object, validates its complete canonical form against the installed contract,
+and requires its digest to equal the deployment pin. The subsequent request
+uses only the method, path, schema, and success status from that fresh object.
+The authentication callback receives the origin, method, verified path, scope,
+exact body SHA-256, and applicable site, event, request, and payload identities
+under `blun.cms-source-delivery-sidecar-client-auth-context.v1`.
+It cannot supply `Host`, framing, content type, idempotency, or source-payload
+binding headers.
+
+`submit_change()` and `submit_removal()` validate and canonically copy the
+complete source event before discovery. The body carries distinct source and
+delivery retry ceilings, while the reserved payload header hashes only the
+immutable inner event. One call performs one transport attempt and follows no
+redirect. Acceptance requires the exact request, event, tenant, payload,
+retry-policy, sidecar-contract, and downstream-contract bindings.
+
+`status()` requires the caller's already known operation, request, event,
+tenant, and payload hash; a response cannot silently substitute another
+durable item. `health()` and `readiness()` accept HTTP `503` only as an exactly
+validated blocked snapshot. Transport and server failures expose stable
+content-free codes plus retryability, but the client never schedules a retry.
+
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could
 reuse a vanished parent's lock; or a permission change could redirect the next
