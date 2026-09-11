@@ -40,6 +40,7 @@ class ScriptedClient:
     def __init__(self):
         self.calls = []
         self.events = {}
+        self.lifecycle_status = "processing"
 
     def submit_change(self, change):
         self.calls.append(("change", copy.deepcopy(change)))
@@ -78,6 +79,7 @@ class ScriptedClient:
         self.calls.append(("lifecycle", event_id, site_id))
         change = self.events[event_id]
         required = sorted(change["localization"]["target_locales"])
+        terminal = self.lifecycle_status == "published"
         return {
             "schema": SERVICE._DISPATCH._CLIENT._API.LIFECYCLE_RESPONSE_SCHEMA,
             "request_id": "lifecycle-" + event_id,
@@ -86,16 +88,16 @@ class ScriptedClient:
             "plan_id": "plan-" + event_id,
             "website_version": change["website_version"],
             "source_sequence": change["source_sequence"],
-            "status": "processing",
+            "status": self.lifecycle_status,
             "required_locales": required,
-            "approved_locales": [],
+            "approved_locales": required if terminal else [],
             "blocked_locales": [],
             "queue_counts": {
                 "failed": 0,
                 "leased": 0,
-                "pending": len(required),
+                "pending": 0 if terminal else len(required),
                 "retry_wait": 0,
-                "succeeded": 0,
+                "succeeded": len(required) if terminal else 0,
             },
             "delivery": None,
             "tombstone": None,
@@ -160,6 +162,49 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
             finally:
                 second.close()
 
+    def test_runtime_persists_and_delivers_optional_terminal_notification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifications = []
+
+            def callback(payload):
+                notifications.append(copy.deepcopy(payload))
+                return {
+                    "schema": SERVICE._NOTIFICATION.ACK_SCHEMA,
+                    "notification_id": payload["notification_id"],
+                    "event_id": payload["event_id"],
+                    "site_id": payload["site_id"],
+                    "status": "accepted",
+                    "notification_sha256": SERVICE._NOTIFICATION._hash(
+                        SERVICE._NOTIFICATION._canonical(payload)
+                    ),
+                }
+
+            runtime = self.open(
+                self.paths(directory),
+                terminal_notifier=callback,
+                notification_worker_id="source-notification-worker",
+                notification_lease_seconds=60,
+            )
+            change = cms_support.event()
+            try:
+                runtime.enqueue_change(change)
+                runtime.run_once()
+                self.client.lifecycle_status = "published"
+                runtime.run_once()
+                runtime.run_once()
+                delivered = runtime.run_once()
+                self.assertEqual((delivered.phase, delivered.status), (
+                    "notification", "succeeded",
+                ))
+                self.assertEqual(len(notifications), 1)
+                self.assertEqual(runtime.health().status, "ok")
+                self.assertNotIn(
+                    change["localization"]["source_text"],
+                    repr(notifications),
+                )
+            finally:
+                runtime.close()
+
     def test_files_are_created_owner_only_and_repr_is_content_free(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self.paths(directory)
@@ -183,6 +228,18 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
                 RUNTIME.DurableCMSSourceRuntimeBlocked,
             ) as invalid:
                 self.open(paths, change_worker_id="not a valid worker")
+            self.assertEqual(
+                invalid.exception.code,
+                "source_runtime.configuration_invalid",
+            )
+            self.assertFalse(any(path.exists() for path in paths))
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as invalid:
+                self.open(paths, terminal_notifier=lambda _payload: None)
             self.assertEqual(
                 invalid.exception.code,
                 "source_runtime.configuration_invalid",

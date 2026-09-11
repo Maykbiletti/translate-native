@@ -437,6 +437,7 @@ class SourceHTTPTests(unittest.TestCase):
         self.assertEqual(queued[2]["schema"], HTTP.STATUS_RESPONSE_SCHEMA)
         self.assertEqual(queued[2]["status"]["dispatch_status"], "pending")
         self.assertIsNone(queued[2]["status"]["lifecycle_state"])
+        self.assertEqual(queued[2]["status"]["notification_state"], "disabled")
         self.assertEqual(self.client.calls, [])
         auth = self.authenticator.requests[-1]
         self.assertEqual(auth["path"], HTTP.STATUS_PATH)

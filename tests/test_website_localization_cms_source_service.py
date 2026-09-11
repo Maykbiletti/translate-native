@@ -36,6 +36,7 @@ class ScriptedClient:
         self.calls = []
         self.events = {}
         self.submit_error = None
+        self.lifecycle_status = "processing"
 
     def submit_change(self, change):
         self.calls.append(("change", copy.deepcopy(change)))
@@ -76,6 +77,8 @@ class ScriptedClient:
         self.calls.append(("lifecycle", event_id, site_id))
         change = self.events[event_id]
         required = sorted(change["localization"]["target_locales"])
+        status = self.lifecycle_status
+        terminal = status == "published"
         return {
             "schema": SERVICE._DISPATCH._CLIENT._API.LIFECYCLE_RESPONSE_SCHEMA,
             "request_id": "lifecycle-" + event_id,
@@ -84,16 +87,16 @@ class ScriptedClient:
             "plan_id": "plan-" + event_id,
             "website_version": change["website_version"],
             "source_sequence": change["source_sequence"],
-            "status": "processing",
+            "status": status,
             "required_locales": required,
-            "approved_locales": [],
+            "approved_locales": required if terminal else [],
             "blocked_locales": [],
             "queue_counts": {
                 "failed": 0,
                 "leased": 0,
-                "pending": len(required),
+                "pending": 0 if terminal else len(required),
                 "retry_wait": 0,
-                "succeeded": 0,
+                "succeeded": len(required) if terminal else 0,
             },
             "delivery": None,
             "tombstone": None,
@@ -111,19 +114,34 @@ class CMSLocalizationSourceServiceTests(unittest.TestCase):
         for connection in self.connections:
             connection.close()
 
-    def build(self):
+    def build(self, **overrides):
+        values = {
+            "change_worker_id": "change-worker",
+            "removal_worker_id": "removal-worker",
+            "lifecycle_worker_id": "lifecycle-worker",
+            "clock": lambda: self.now,
+            "change_lease_seconds": 60,
+            "removal_lease_seconds": 60,
+            "lifecycle_lease_seconds": 60,
+            "lifecycle_poll_interval_seconds": 30,
+        }
+        values.update(overrides)
         return SERVICE.CMSLocalizationSourceService(
-            *self.connections,
-            self.client,
-            change_worker_id="change-worker",
-            removal_worker_id="removal-worker",
-            lifecycle_worker_id="lifecycle-worker",
-            clock=lambda: self.now,
-            change_lease_seconds=60,
-            removal_lease_seconds=60,
-            lifecycle_lease_seconds=60,
-            lifecycle_poll_interval_seconds=30,
+            *self.connections, self.client, **values,
         )
+
+    @staticmethod
+    def notification_ack(payload):
+        return {
+            "schema": SERVICE._NOTIFICATION.ACK_SCHEMA,
+            "notification_id": payload["notification_id"],
+            "event_id": payload["event_id"],
+            "site_id": payload["site_id"],
+            "status": "accepted",
+            "notification_sha256": SERVICE._NOTIFICATION._hash(
+                SERVICE._NOTIFICATION._canonical(payload)
+            ),
+        }
 
     def test_change_is_dispatched_registered_and_polled_without_host_handoff(self):
         change = support.event()
@@ -151,6 +169,103 @@ class CMSLocalizationSourceServiceTests(unittest.TestCase):
         self.assertEqual(health.status, "ok")
         self.assertEqual(health.pending_lifecycle_registrations, 0)
         self.assertNotIn(change["localization"]["source_text"], repr(health))
+
+    def test_terminal_lifecycle_is_registered_then_notified_exactly_once(self):
+        notifications = []
+
+        def callback(payload):
+            notifications.append(copy.deepcopy(payload))
+            return self.notification_ack(payload)
+
+        self.service = self.build(
+            terminal_notifier=callback,
+            notification_worker_id="notification-worker",
+            notification_lease_seconds=60,
+        )
+        change = support.event()
+        self.service.enqueue_change(change)
+        self.assertEqual(self.service.run_once().phase, "change")
+        self.client.lifecycle_status = "published"
+        terminal = self.service.run_once()
+        registered = self.service.run_once()
+        delivered = self.service.run_once()
+
+        self.assertEqual((terminal.phase, terminal.status), (
+            "lifecycle", "terminal",
+        ))
+        self.assertEqual((registered.phase, registered.status), (
+            "notification_registration", "registered",
+        ))
+        self.assertEqual((delivered.phase, delivered.status), (
+            "notification", "succeeded",
+        ))
+        self.assertEqual(len(notifications), 1)
+        self.assertNotIn(change["localization"]["source_text"], repr(notifications))
+        health = self.service.health()
+        self.assertEqual(health.status, "ok")
+        self.assertEqual(health.pending_terminal_notifications, 0)
+        self.assertEqual(health.notifications["counts"]["succeeded"], 1)
+        status = self.service.status(change["event_id"], change["site_id"])
+        self.assertEqual(status.notification_state, "succeeded")
+        self.assertEqual(status.notification_id, delivered.request_id)
+        self.assertEqual(status.notification_attempts, 1)
+
+    def test_restart_recovers_terminal_notification_registration_gap(self):
+        notifications = []
+
+        def callback(payload):
+            notifications.append(payload["notification_id"])
+            return self.notification_ack(payload)
+
+        self.service = self.build(
+            terminal_notifier=callback,
+            notification_worker_id="notification-worker",
+            notification_lease_seconds=60,
+        )
+        change = support.event()
+        self.service.enqueue_change(change)
+        self.service.run_once()
+        self.client.lifecycle_status = "published"
+        self.service.run_once()
+
+        gap = self.service.health()
+        self.assertEqual((gap.status, gap.pending_terminal_notifications), (
+            "degraded", 1,
+        ))
+        restarted = self.build(
+            terminal_notifier=callback,
+            notification_worker_id="notification-worker-restarted",
+            notification_lease_seconds=60,
+        )
+        self.assertEqual(restarted.run_once().phase, "notification_registration")
+        self.assertEqual(restarted.run_once().phase, "notification")
+        self.assertEqual(len(notifications), 1)
+
+    def test_terminal_notification_failure_blocks_health_without_private_text(self):
+        source = support.event()["localization"]["source_text"]
+
+        def callback(_payload):
+            raise RuntimeError(source)
+
+        self.service = self.build(
+            terminal_notifier=callback,
+            notification_worker_id="notification-worker",
+            notification_lease_seconds=60,
+            max_notification_attempts=1,
+        )
+        change = support.event()
+        self.service.enqueue_change(change)
+        self.service.run_once()
+        self.client.lifecycle_status = "published"
+        self.service.run_once()
+        self.service.run_once()
+        failed = self.service.run_once()
+
+        self.assertEqual((failed.phase, failed.status, failed.error_code), (
+            "notification", "failed", "terminal_notification.callback_failure",
+        ))
+        self.assertEqual(self.service.health().status, "blocked")
+        self.assertNotIn(source, repr(failed))
 
     def test_restart_recovers_post_acceptance_registration_gap_without_resend(self):
         change = support.event()

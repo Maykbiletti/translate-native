@@ -214,6 +214,49 @@ never enter the runtime representation or stable failure codes. A deployment
 may therefore choose its own secret manager and supervisor without weakening
 the provider-neutral contract.
 
+### Durable terminal notification callback
+
+Polling remains sufficient, but a deployment can pass `terminal_notifier` and
+`notification_worker_id` to `open_durable_cms_source` or
+`open_hosted_cms_source`. Both values are required together. After the durable
+lifecycle monitor verifies a terminal state, the service first stores one
+`blun.cms-source-terminal-notification.v1` object in the same protected
+lifecycle database. It contains only:
+
+- `notification_id`, `event_id`, `site_id`, and `plan_id`;
+- `website_version`, `source_sequence`, and `job_count`;
+- `change_sha256` and `lifecycle_binding_sha256`;
+- `terminal_status` and `lifecycle_sha256`.
+
+`lifecycle_sha256` is present for a signed lifecycle response and is `null`
+only when the original dispatch acknowledgement already made `cancelled` or
+`superseded` terminal. Source text, target text, locale prose, credentials,
+provider responses, and private errors are never copied into this callback.
+
+The host callback must atomically and idempotently record the notification and
+return exactly:
+
+```json
+{
+  "schema": "blun.cms-source-terminal-notification-ack.v1",
+  "notification_id": "terminal-<sha256>",
+  "event_id": "cms-event-184",
+  "site_id": "public-site",
+  "status": "accepted",
+  "notification_sha256": "<sha256>"
+}
+```
+
+Returning normally with any other object is a terminal protocol failure. A
+callback may raise `TerminalNotificationFailure(code, retryable=True)` only
+for a content-free transient condition; retries use the same immutable
+notification identity, an expiring lease, bounded exponential backoff, and
+the configured `max_notification_attempts`. Unknown exceptions are reduced to
+`terminal_notification.callback_failure` and fail closed. Notification health
+is included in aggregate service health and therefore in hosted readiness.
+Disabling the optional notifier preserves the existing authenticated status
+polling contract and does not create notification state.
+
 For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
 worker lifecycle. It starts one non-daemon background worker before returning,
 uses interruptible state-specific waits, and joins that worker before closing
@@ -284,8 +327,8 @@ The status request is exact, query-free JSON and uses
 }
 ```
 
-Its `blun.cms-source-status-response.v1` response contains one nested
-`blun.cms-source-service-status.v1` snapshot. It binds the stored
+Its `blun.cms-source-status-response.v2` response contains one nested
+`blun.cms-source-service-status.v2` snapshot. It binds the stored
 `website_version`, `source_sequence`, canonical change hash, dispatch state and
 attempts, remote plan and job count, local lifecycle state, remote lifecycle
 status, lifecycle hash, required and approved locales, blocked locale reason
@@ -295,6 +338,12 @@ The read performs no reconciliation, lease, retry, network call, or state
 write. A caller can therefore distinguish queued work, a pending local
 registration, active localization, approval, publication, cancellation, and a
 terminal failure without accidentally advancing the worker.
+
+Version 2 additionally exposes only the terminal notification state, its
+content-free identity and hash, bounded attempt counters, and a public error
+code. The corresponding `blun.cms-source-health-response.v2` and nested
+`blun.cms-source-service-health.v2` report notification backlog and component
+health without revealing website content or callback responses.
 
 Before parsing JSON or touching SQLite, the application calls the host-supplied
 authenticator with this content-free request:

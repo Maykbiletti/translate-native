@@ -26,8 +26,8 @@ CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v1"
 REMOVAL_REQUEST_SCHEMA = "blun.cms-source-removal-enqueue-request.v1"
 REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v1"
 STATUS_REQUEST_SCHEMA = "blun.cms-source-status-request.v1"
-STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v1"
-HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v1"
+STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v2"
+HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v2"
 READINESS_RESPONSE_SCHEMA = "blun.cms-source-readiness-response.v1"
 CAPABILITIES_SCHEMA = "blun.cms-source-runtime-capabilities.v1"
 CAPABILITIES_RESPONSE_SCHEMA = "blun.cms-source-capabilities-response.v1"
@@ -248,11 +248,13 @@ def _source_status_payload(
             "lifecycle_state", "lifecycle_poll_attempts",
             "lifecycle_error_code", "remote_status", "lifecycle_sha256",
             "required_locales", "approved_locales", "blocked_locales",
-            "queue_counts",
+            "queue_counts", "notification_state", "notification_id",
+            "notification_sha256", "notification_attempts",
+            "notification_max_attempts", "notification_error_code",
         }
         if not isinstance(payload, Mapping) or set(payload) != fields:
             raise ValueError
-        if payload["schema"] != "blun.cms-source-service-status.v1":
+        if payload["schema"] != "blun.cms-source-service-status.v2":
             raise ValueError
         event_id = _token(payload["event_id"])
         site_id = _token(payload["site_id"])
@@ -319,6 +321,48 @@ def _source_status_payload(
         queue_counts = {
             name: _count(queue_value[name]) for name in sorted(queue_value)
         }
+        notification_state = payload["notification_state"]
+        if notification_state not in {
+            "disabled", "awaiting_terminal", "awaiting_registration",
+            "pending", "leased", "retry_wait", "succeeded", "failed",
+        }:
+            raise ValueError
+        notification_id = _optional_token(payload["notification_id"])
+        notification_sha256 = payload["notification_sha256"]
+        if (
+            notification_sha256 is not None
+            and SHA256.fullmatch(notification_sha256) is None
+        ):
+            raise ValueError
+        notification_attempts = _count(
+            payload["notification_attempts"], maximum=20,
+        )
+        notification_max_attempts = payload["notification_max_attempts"]
+        if notification_max_attempts is not None:
+            notification_max_attempts = _count(
+                notification_max_attempts, maximum=20,
+            )
+        notification_error = _optional_error(
+            payload["notification_error_code"]
+        )
+        durable_notification = notification_state in STATUSES
+        if durable_notification != (notification_id is not None):
+            raise ValueError
+        if durable_notification != (notification_sha256 is not None):
+            raise ValueError
+        if durable_notification != (notification_max_attempts is not None):
+            raise ValueError
+        if durable_notification and (
+            notification_max_attempts < 1
+            or notification_attempts > notification_max_attempts
+        ):
+            raise ValueError
+        if not durable_notification and notification_attempts != 0:
+            raise ValueError
+        if (notification_state in {"retry_wait", "failed"}) != (
+            notification_error is not None
+        ):
+            raise ValueError
         if (plan_id is None) != (job_count is None):
             raise ValueError
         if (dispatch_status == "succeeded") != (plan_id is not None):
@@ -376,6 +420,12 @@ def _source_status_payload(
             "approved_locales": approved,
             "blocked_locales": blocked,
             "queue_counts": queue_counts,
+            "notification_state": notification_state,
+            "notification_id": notification_id,
+            "notification_sha256": notification_sha256,
+            "notification_attempts": notification_attempts,
+            "notification_max_attempts": notification_max_attempts,
+            "notification_error_code": notification_error,
         }
     except Exception:
         raise CMSSourceHTTPBlocked(
@@ -429,10 +479,11 @@ def _health_payload(value: Any) -> dict[str, Any]:
         payload = value.as_payload()
         if not isinstance(payload, Mapping) or set(payload) != {
             "schema", "status", "pending_lifecycle_registrations",
-            "changes", "removals", "lifecycle", "error_code",
+            "pending_terminal_notifications", "changes", "removals",
+            "lifecycle", "notifications", "error_code",
         }:
             raise ValueError
-        if payload["schema"] != "blun.cms-source-service-health.v1":
+        if payload["schema"] != "blun.cms-source-service-health.v2":
             raise ValueError
         if payload["status"] not in HEALTH_STATUSES:
             raise ValueError
@@ -442,6 +493,9 @@ def _health_payload(value: Any) -> dict[str, Any]:
             "pending_lifecycle_registrations": _count(
                 payload["pending_lifecycle_registrations"]
             ),
+            "pending_terminal_notifications": _count(
+                payload["pending_terminal_notifications"]
+            ),
             "changes": _component(payload["changes"], STATUSES),
             "removals": _component(
                 payload["removals"], STATUSES, operations=True,
@@ -450,6 +504,11 @@ def _health_payload(value: Any) -> dict[str, Any]:
                 "pending", "leased", "watching", "retry_wait",
                 "terminal", "failed",
             }, remote_failures=True),
+            "notifications": (
+                {}
+                if payload["notifications"] == {}
+                else _component(payload["notifications"], STATUSES)
+            ),
             "error_code": payload["error_code"],
         }
         if result["error_code"] is not None and ERROR_CODE.fullmatch(
