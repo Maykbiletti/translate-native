@@ -107,6 +107,23 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.67.0: rotatable source-delivery authentication
+
+Version 6.67.0 completes a deployable authentication path for the
+source-delivery sidecar without fixing one identity provider. The reference
+client signer and server verifier bind the exact origin, method, verified path,
+route scope, body hash, tenant identities, idempotency headers, and both active
+capability-contract digests into one canonical HMAC-SHA-256 proof.
+
+Credentials carry an explicit generation and allowlist of scopes, so several
+versions can overlap during controlled rotation without granting another site.
+A caller-owned durable SQLite replay store atomically consumes every random
+nonce before protected content is parsed or persisted. Expired, future,
+replayed, altered, retired, cross-tenant, or wrongly scoped proofs fail closed;
+store and clock outages remain distinguishable, content-free retryable server
+failures. No key, credential, website text, or provider response is represented
+or stored in the replay ledger.
+
 ### Version 6.66.0: contract-pinned source-delivery sidecar client
 
 Version 6.66.0 gives CMS and website backends one provider-neutral HTTPS
@@ -1093,7 +1110,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.66.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.67.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

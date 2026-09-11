@@ -829,6 +829,49 @@ durable item. `health()` and `readiness()` accept HTTP `503` only as an exactly
 validated blocked snapshot. Transport and server failures expose stable
 content-free codes plus retryability, but the client never schedules a retry.
 
+#### Rotatable source-delivery HMAC authentication
+
+`integrations/website_localization_cms_source_delivery_auth.py` provides a
+complete provider-neutral authentication implementation for the client and
+sidecar callback contracts. It is optional: deployments may still use bearer
+tokens, mutual TLS, an external identity proxy, or another verifier. HMAC here
+authenticates transport requests; it is not a linguistic-quality signature and
+cannot replace either review stage or a signed publication approval.
+
+Create an `HMACCredential` from a host-owned secret of at least 32 bytes, an
+explicit credential ID and generation, a sorted allowlist of route scopes, and
+the one authorized `site_id` whenever tenant scopes are present. The credential
+object redacts the secret from representations. Secrets are passed in memory;
+the module never reads, writes, generates, or rotates a live key file.
+
+`SourceDeliveryHMACSigner` is the `authentication_headers` callback for
+`CMSSourceDeliverySidecarHTTPClient`. `SourceDeliveryHMACVerifier` is the
+matching `http_authenticator` callback for
+`open_hosted_cms_source_delivery()`. Configure both from trusted deployment
+state with the identical HTTPS origin, sidecar capability SHA-256, downstream
+source-service capability SHA-256, and accepted credential generation. The
+canonical proof binds those values together with the exact method, live
+contract path, route scope, body hash, site, event, request and payload
+identities, and the actual idempotency and source-payload headers.
+
+Every proof has a short bounded timestamp and a random nonce. The verifier
+checks the HMAC with constant-time comparison and then calls
+`DurableHMACReplayStore.consume()` before returning a principal. Construct the
+store over a dedicated caller-owned SQLite connection; threaded WSGI hosts
+must open that connection with `check_same_thread=False`. Keep its database on
+the same class of private durable storage as the delivery outbox and close it
+only after the HTTP host has stopped. The ledger contains only credential IDs,
+versions, nonces, proof hashes, and validity times—never secrets, request
+bodies, website text, translations, or provider responses.
+
+The store validates its schema and every retained row inside the same immediate
+transaction that consumes a nonce. Exact replay returns an invalid principal
+and therefore HTTP `401`. A store transaction conflict, malformed retained row,
+SQLite outage, or invalid clock raises a stable content-free infrastructure
+failure, which the sidecar maps to retryable HTTP `503` without accepting the
+request. Multiple credential generations may be configured simultaneously for
+a bounded rotation window; removing a generation retires it immediately.
+
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could
 reuse a vanished parent's lock; or a permission change could redirect the next
