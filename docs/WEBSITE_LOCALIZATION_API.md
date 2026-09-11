@@ -214,6 +214,14 @@ never enter the runtime representation or stable failure codes. A deployment
 may therefore choose its own secret manager and supervisor without weakening
 the provider-neutral contract.
 
+For a single-process WSGI deployment, `open_hosted_cms_source` adds the owned
+worker lifecycle. It starts one non-daemon background worker before returning,
+uses interruptible state-specific waits, and joins that worker before closing
+any database. `start_worker` and `stop_worker` remain available to supervisors
+that need an explicit startup boundary. Worker exceptions become a stable
+content-free failure state; the same in-memory runtime cannot restart after
+such a failure and must be replaced from its durable databases.
+
 ### Authenticated source-CMS ingress
 
 `integrations/website_localization_cms_source_http.py` provides the optional
@@ -231,6 +239,7 @@ The exact routes are:
 | `POST` | `/v1/localization/source/removals` | `source-removal:write` | Persist one cancellation or tombstone |
 | `POST` | `/v1/localization/source/status` | `source-status:read` | Read one site-bound event lifecycle |
 | `GET` | `/v1/localization/source/health` | `source-health:read` | Read aggregate content-free health |
+| `GET` | `/v1/localization/source/readiness` | `source-readiness:read` | Verify that the managed worker and durable service can accept work |
 | `GET` | `/v1/localization/source/capabilities` | `source-capabilities:read` | Discover the exact active HTTP contract |
 
 The capabilities route accepts no body or query. Its
@@ -245,6 +254,15 @@ the three runtime databases. The route has its own
 `source-capabilities:read` credential, performs no state write, lease, repair,
 or network call, and returns fail-closed if its route metadata is incomplete or
 internally inconsistent.
+
+The body-free readiness route uses
+`blun.cms-source-readiness-response.v1`. It returns HTTP `200` only while the
+managed worker is running and durable service health is `ok` or `degraded`;
+startup, shutdown, a worker exception, closed state, or blocked durable health
+returns HTTP `503`. Its separate `source-readiness:read` credential receives no
+website content. After a runtime enters managed mode, change and removal routes
+also require this worker state before persisting new work. Existing manually
+driven runtimes retain their explicit `run_once` contract.
 
 Change requests use
 `blun.cms-source-change-enqueue-request.v1`; removal requests use

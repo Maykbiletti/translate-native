@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -311,7 +312,10 @@ class SourceHTTPTests(unittest.TestCase):
 
     def test_capabilities_are_authenticated_hashed_and_match_active_routes(self):
         source = cms_support.event()["localization"]["source_text"]
-        methods = ("enqueue_change", "enqueue_removal", "status", "health")
+        methods = (
+            "enqueue_change", "enqueue_removal", "status", "health",
+            "worker_readiness", "require_worker_ready",
+        )
         patches = [
             mock.patch.object(
                 self.runtime, name, wraps=getattr(self.runtime, name),
@@ -340,7 +344,8 @@ class SourceHTTPTests(unittest.TestCase):
         self.assertEqual(capabilities["schema"], HTTP.CAPABILITIES_SCHEMA)
         self.assertEqual(capabilities["api_schema"], HTTP.API_SCHEMA)
         self.assertEqual(set(capabilities["operations"]), {
-            "capabilities", "change", "health", "removal", "status",
+            "capabilities", "change", "health", "readiness", "removal",
+            "status",
         })
         for operation in capabilities["operations"].values():
             path = operation["path"]
@@ -349,6 +354,10 @@ class SourceHTTPTests(unittest.TestCase):
         self.assertEqual(
             capabilities["operations"]["status"]["principal_schema"],
             HTTP.STATUS_PRINCIPAL_SCHEMA,
+        )
+        self.assertEqual(
+            capabilities["operations"]["readiness"]["scope"],
+            "source-readiness:read",
         )
         self.assertEqual(
             capabilities["operations"]["change"]["request_fields"],
@@ -383,6 +392,40 @@ class SourceHTTPTests(unittest.TestCase):
         self.assertEqual(
             rejected[2]["error_code"], "source_http.scope_rejected",
         )
+
+    def test_readiness_tracks_worker_and_stopped_host_rejects_writes(self):
+        unmanaged = self.call(HTTP.READINESS_PATH, method="GET")
+        self.assertEqual(unmanaged[0], "503 Service Unavailable")
+        self.assertEqual(unmanaged[2]["schema"], HTTP.READINESS_RESPONSE_SCHEMA)
+        self.assertEqual(unmanaged[2]["readiness"]["worker_state"], "unmanaged")
+
+        self.runtime.start_worker(
+            active_delay_seconds=0.01,
+            idle_delay_seconds=60,
+            blocked_delay_seconds=60,
+        )
+        deadline = time.monotonic() + 2
+        while self.runtime.worker_state != "running" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        ready = self.call(HTTP.READINESS_PATH, method="GET")
+        self.assertEqual(ready[0], "200 OK")
+        self.assertEqual(ready[2]["readiness"]["status"], "ready")
+        self.assertEqual(ready[2]["readiness"]["service_status"], "ok")
+        self.assertEqual(
+            self.authenticator.requests[-1]["path"], HTTP.READINESS_PATH,
+        )
+
+        self.runtime.stop_worker(timeout_seconds=1)
+        stopped = self.call(HTTP.READINESS_PATH, method="GET")
+        rejected = self.call(HTTP.CHANGE_PATH, value=self.change_request())
+        self.assertEqual(stopped[0], "503 Service Unavailable")
+        self.assertEqual(stopped[2]["readiness"]["worker_state"], "stopped")
+        self.assertEqual(rejected[0], "503 Service Unavailable")
+        self.assertEqual(rejected[2]["error_code"], "source_http.runtime_blocked")
+        count = self.runtime._service.changes.connection.execute(
+            "SELECT COUNT(*) FROM cms_source_change_outbox"
+        ).fetchone()[0]
+        self.assertEqual(count, 0)
 
     def test_status_is_site_bound_read_only_and_tracks_remote_lifecycle(self):
         change = cms_support.event()
@@ -600,6 +643,11 @@ class SourceHTTPTests(unittest.TestCase):
             method="GET",
             value={"unexpected": True},
         )
+        readiness_body = self.call(
+            HTTP.READINESS_PATH,
+            method="GET",
+            value={"unexpected": True},
+        )
         raw = b'{"schema":"x","schema":"y"}'
         environ = {
             "PATH_INFO": HTTP.CHANGE_PATH,
@@ -624,6 +672,10 @@ class SourceHTTPTests(unittest.TestCase):
         self.assertEqual(
             capabilities_body[2]["error_code"],
             "source_http.body_not_allowed",
+        )
+        self.assertEqual(readiness_body[0], "400 Bad Request")
+        self.assertEqual(
+            readiness_body[2]["error_code"], "source_http.body_not_allowed",
         )
         self.assertEqual(captured["status"], "400 Bad Request")
         self.assertEqual(duplicate["error_code"], "source_http.json_invalid")

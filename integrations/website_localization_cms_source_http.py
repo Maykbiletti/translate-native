@@ -28,6 +28,7 @@ REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v1"
 STATUS_REQUEST_SCHEMA = "blun.cms-source-status-request.v1"
 STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v1"
 HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v1"
+READINESS_RESPONSE_SCHEMA = "blun.cms-source-readiness-response.v1"
 CAPABILITIES_SCHEMA = "blun.cms-source-runtime-capabilities.v1"
 CAPABILITIES_RESPONSE_SCHEMA = "blun.cms-source-capabilities-response.v1"
 
@@ -35,6 +36,7 @@ CHANGE_PATH = "/v1/localization/source/changes"
 REMOVAL_PATH = "/v1/localization/source/removals"
 STATUS_PATH = "/v1/localization/source/status"
 HEALTH_PATH = "/v1/localization/source/health"
+READINESS_PATH = "/v1/localization/source/readiness"
 CAPABILITIES_PATH = "/v1/localization/source/capabilities"
 
 MAX_BODY_BYTES = 4_000_000
@@ -61,6 +63,7 @@ SCOPES = {
     REMOVAL_PATH: "source-removal:write",
     STATUS_PATH: "source-status:read",
     HEALTH_PATH: "source-health:read",
+    READINESS_PATH: "source-readiness:read",
     CAPABILITIES_PATH: "source-capabilities:read",
 }
 METHODS = {
@@ -68,6 +71,7 @@ METHODS = {
     REMOVAL_PATH: "POST",
     STATUS_PATH: "POST",
     HEALTH_PATH: "GET",
+    READINESS_PATH: "GET",
     CAPABILITIES_PATH: "GET",
 }
 
@@ -460,6 +464,46 @@ def _health_payload(value: Any) -> dict[str, Any]:
         raise CMSSourceHTTPBlocked("source_http.health_invalid", 503) from None
 
 
+def _readiness_payload(value: Any) -> dict[str, Any]:
+    try:
+        if not isinstance(value, Mapping) or set(value) != {
+            "schema", "status", "worker_state", "service_status", "error_code",
+        }:
+            raise ValueError
+        if value["schema"] != "blun.cms-source-worker-readiness.v1":
+            raise ValueError
+        if value["status"] not in {"ready", "not_ready"}:
+            raise ValueError
+        if value["worker_state"] not in {
+            "unmanaged", "starting", "running", "stopping", "stopped",
+            "failed", "closed",
+        }:
+            raise ValueError
+        if value["service_status"] not in {None, "ok", "degraded", "blocked"}:
+            raise ValueError
+        error_code = value["error_code"]
+        if error_code is not None and ERROR_CODE.fullmatch(error_code) is None:
+            raise ValueError
+        if value["status"] == "ready":
+            if (
+                value["worker_state"] != "running"
+                or value["service_status"] not in {"ok", "degraded"}
+                or error_code is not None
+            ):
+                raise ValueError
+        elif error_code is None:
+            raise ValueError
+        result = dict(value)
+        _canonical_json(result)
+        return result
+    except CMSSourceHTTPBlocked:
+        raise
+    except Exception:
+        raise CMSSourceHTTPBlocked(
+            "source_http.readiness_invalid", 503,
+        ) from None
+
+
 def _capabilities_payload() -> dict[str, Any]:
     """Build the public contract from the exact active HTTP constants."""
     expected_scopes = {
@@ -467,6 +511,7 @@ def _capabilities_payload() -> dict[str, Any]:
         REMOVAL_PATH: "source-removal:write",
         STATUS_PATH: "source-status:read",
         HEALTH_PATH: "source-health:read",
+        READINESS_PATH: "source-readiness:read",
         CAPABILITIES_PATH: "source-capabilities:read",
     }
     expected_methods = {
@@ -474,6 +519,7 @@ def _capabilities_payload() -> dict[str, Any]:
         REMOVAL_PATH: "POST",
         STATUS_PATH: "POST",
         HEALTH_PATH: "GET",
+        READINESS_PATH: "GET",
         CAPABILITIES_PATH: "GET",
     }
     if (
@@ -536,6 +582,17 @@ def _capabilities_payload() -> dict[str, Any]:
             ],
             "success_status": 202,
         },
+        "readiness": {
+            "method": METHODS[READINESS_PATH],
+            "path": READINESS_PATH,
+            "scope": SCOPES[READINESS_PATH],
+            "principal_schema": PRINCIPAL_SCHEMA,
+            "request_schema": None,
+            "request_fields": [],
+            "response_schema": READINESS_RESPONSE_SCHEMA,
+            "response_fields": ["schema", "readiness"],
+            "success_status": 200,
+        },
         "status": {
             "method": METHODS[STATUS_PATH],
             "path": STATUS_PATH,
@@ -565,7 +622,7 @@ def _capabilities_payload() -> dict[str, Any]:
     try:
         encoded = _canonical_json(capabilities)
         if set(operations) != {
-            "capabilities", "change", "health", "removal", "status",
+            "capabilities", "change", "health", "readiness", "removal", "status",
         }:
             raise ValueError
         for name, operation in operations.items():
@@ -577,7 +634,10 @@ def _capabilities_payload() -> dict[str, Any]:
                     PRINCIPAL_SCHEMA, STATUS_PRINCIPAL_SCHEMA,
                 }
                 or not isinstance(operation["success_status"], int)
-                or name not in {"capabilities", "change", "health", "removal", "status"}
+                or name not in {
+                    "capabilities", "change", "health", "readiness", "removal",
+                    "status",
+                }
             ):
                 raise ValueError
     except CMSSourceHTTPBlocked:
@@ -598,6 +658,7 @@ class CMSSourceHTTPApplication:
     def __init__(self, runtime: Any, authenticator: Callable[[dict[str, Any]], Any]):
         if not all(callable(getattr(runtime, name, None)) for name in (
             "enqueue_change", "enqueue_removal", "status", "health",
+            "worker_readiness", "require_worker_ready",
         )):
             raise TypeError("runtime must provide source CMS operations")
         if not callable(authenticator):
@@ -743,7 +804,7 @@ class CMSSourceHTTPApplication:
                 raise CMSSourceHTTPBlocked("source_http.https_required", 400)
             if environ.get("QUERY_STRING") not in {None, ""}:
                 raise CMSSourceHTTPBlocked("source_http.query_rejected", 400)
-            if path in {HEALTH_PATH, CAPABILITIES_PATH}:
+            if path in {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH}:
                 body = self._body(environ, required=False)
                 if body or environ.get("CONTENT_TYPE") not in {None, ""}:
                     raise CMSSourceHTTPBlocked("source_http.body_not_allowed", 400)
@@ -771,6 +832,20 @@ class CMSSourceHTTPApplication:
                 return self._send(start_response, response_status, {
                     "schema": HEALTH_RESPONSE_SCHEMA,
                     "health": report,
+                })
+
+            if path == READINESS_PATH:
+                try:
+                    readiness = self.runtime.worker_readiness()
+                except Exception:
+                    raise CMSSourceHTTPBlocked(
+                        "source_http.runtime_blocked", 503,
+                    ) from None
+                report = _readiness_payload(readiness)
+                response_status = 200 if report["status"] == "ready" else 503
+                return self._send(start_response, response_status, {
+                    "schema": READINESS_RESPONSE_SCHEMA,
+                    "readiness": report,
                 })
 
             request = self._request(body)
@@ -834,6 +909,7 @@ class CMSSourceHTTPApplication:
             ):
                 raise CMSSourceHTTPBlocked("source_http.request_invalid", 400)
             try:
+                self.runtime.require_worker_ready()
                 if path == CHANGE_PATH:
                     status = self.runtime.enqueue_change(
                         request["change"], max_attempts=maximum,

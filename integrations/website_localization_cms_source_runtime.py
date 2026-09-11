@@ -256,6 +256,10 @@ class DurableCMSSourceRuntime:
         self._lock = threading.RLock()
         self._closed = False
         self._owner_pid = os.getpid()
+        self._worker_stop = threading.Event()
+        self._worker_thread: threading.Thread | None = None
+        self._worker_state = "unmanaged"
+        self._worker_error_code: str | None = None
         self.http = (
             None
             if http_authenticator is None
@@ -317,6 +321,172 @@ class DurableCMSSourceRuntime:
     def health(self) -> Any:
         return self._call("health")
 
+    @staticmethod
+    def _loop_delays(
+        active_delay_seconds: float | int,
+        idle_delay_seconds: float | int,
+        blocked_delay_seconds: float | int,
+    ) -> tuple[float, float, float]:
+        try:
+            return tuple(
+                _SERVICE._positive_duration(
+                    value, "source_service.delay_invalid",
+                )
+                for value in (
+                    active_delay_seconds,
+                    idle_delay_seconds,
+                    blocked_delay_seconds,
+                )
+            )
+        except Exception as error:
+            raise _blocked("source_runtime.loop_invalid") from error
+
+    @staticmethod
+    def _join_timeout(value: float | int) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0 < float(value) <= 300
+        ):
+            raise _blocked("source_runtime.worker_timeout_invalid")
+        return float(value)
+
+    def _managed_worker(
+        self,
+        stop: threading.Event,
+        delays: tuple[float, float, float],
+    ) -> None:
+        try:
+            with self._lock:
+                if self._worker_state != "starting" or self._worker_stop is not stop:
+                    return
+                self._worker_state = "running"
+            active, idle, blocked = delays
+            while not stop.is_set():
+                outcome = self.run_once()
+                delay = (
+                    blocked
+                    if outcome.status in {"blocked", "failed", "retry_wait"}
+                    else idle if outcome.status == "idle" else active
+                )
+                stop.wait(delay)
+        except Exception:
+            with self._lock:
+                self._worker_error_code = "source_runtime.worker_blocked"
+                self._worker_state = "failed"
+            return
+        with self._lock:
+            if self._worker_state in {"running", "stopping"}:
+                self._worker_state = "stopped"
+
+    def start_worker(
+        self,
+        *,
+        active_delay_seconds: float | int = 0.05,
+        idle_delay_seconds: float | int = 1,
+        blocked_delay_seconds: float | int = 5,
+    ) -> None:
+        """Start one interruptible, process-owned background worker."""
+
+        delays = self._loop_delays(
+            active_delay_seconds,
+            idle_delay_seconds,
+            blocked_delay_seconds,
+        )
+        self._assert_owner()
+        with self._lock:
+            if self._closed:
+                raise _blocked("source_runtime.closed")
+            if self._worker_state in {"starting", "running"}:
+                return
+            if self._worker_state in {"stopping", "failed"}:
+                raise _blocked("source_runtime.worker_blocked")
+            self._guard_databases()
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._managed_worker,
+                args=(stop, delays),
+                name="cms-source-worker",
+                daemon=False,
+            )
+            self._worker_stop = stop
+            self._worker_thread = thread
+            self._worker_error_code = None
+            self._worker_state = "starting"
+            try:
+                thread.start()
+            except Exception as error:
+                self._worker_thread = None
+                self._worker_state = "failed"
+                self._worker_error_code = "source_runtime.worker_blocked"
+                raise _blocked("source_runtime.worker_blocked") from error
+
+    def stop_worker(self, *, timeout_seconds: float | int = 30) -> None:
+        """Stop and join the managed worker without closing durable state."""
+
+        timeout = self._join_timeout(timeout_seconds)
+        self._assert_owner()
+        # Signal before taking the runtime lock. A provider call may currently
+        # hold that lock, and shutdown still needs a real upper time bound.
+        thread = self._worker_thread
+        state = self._worker_state
+        if thread is None or state in {"unmanaged", "stopped"}:
+            return
+        if thread is threading.current_thread():
+            raise _blocked("source_runtime.worker_stop_invalid")
+        if state != "failed":
+            self._worker_state = "stopping"
+        self._worker_stop.set()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise _blocked("source_runtime.worker_stop_timeout")
+        with self._lock:
+            if self._worker_state == "stopping":
+                self._worker_state = "stopped"
+
+    def require_worker_ready(self) -> None:
+        """Block hosted HTTP writes unless their managed worker is running."""
+
+        self._assert_owner()
+        with self._lock:
+            if self._closed:
+                raise _blocked("source_runtime.closed")
+            if self._worker_state == "unmanaged":
+                return
+            if self._worker_state != "running" or self._worker_error_code is not None:
+                raise _blocked("source_runtime.worker_not_ready")
+
+    def worker_readiness(self) -> dict[str, Any]:
+        """Return a content-free readiness snapshot for supervised hosts."""
+
+        self._assert_owner()
+        with self._lock:
+            state = "closed" if self._closed else self._worker_state
+            error_code = self._worker_error_code
+        if state != "running":
+            return {
+                "schema": "blun.cms-source-worker-readiness.v1",
+                "status": "not_ready",
+                "worker_state": state,
+                "service_status": None,
+                "error_code": error_code or "source_runtime.worker_not_ready",
+            }
+        health = self.health()
+        service_status = getattr(health, "status", None)
+        if service_status not in {"ok", "degraded", "blocked"}:
+            raise _blocked("source_runtime.service_blocked")
+        ready = service_status != "blocked"
+        return {
+            "schema": "blun.cms-source-worker-readiness.v1",
+            "status": "ready" if ready else "not_ready",
+            "worker_state": "running",
+            "service_status": service_status,
+            "error_code": (
+                None if ready else "source_runtime.service_blocked"
+            ),
+        }
+
     def run_forever(
         self,
         stop: Callable[[], bool],
@@ -328,18 +498,11 @@ class DurableCMSSourceRuntime:
     ) -> None:
         if not callable(stop) or not callable(sleeper):
             raise _blocked("source_runtime.loop_invalid")
-        try:
-            active = _SERVICE._positive_duration(
-                active_delay_seconds, "source_service.delay_invalid",
-            )
-            idle = _SERVICE._positive_duration(
-                idle_delay_seconds, "source_service.delay_invalid",
-            )
-            blocked = _SERVICE._positive_duration(
-                blocked_delay_seconds, "source_service.delay_invalid",
-            )
-        except Exception as error:
-            raise _blocked("source_runtime.loop_invalid") from error
+        active, idle, blocked = self._loop_delays(
+            active_delay_seconds,
+            idle_delay_seconds,
+            blocked_delay_seconds,
+        )
         while not stop():
             outcome = self.run_once()
             delay = (
@@ -349,8 +512,9 @@ class DurableCMSSourceRuntime:
             )
             sleeper(delay)
 
-    def close(self) -> None:
+    def close(self, *, worker_timeout_seconds: float | int = 30) -> None:
         self._assert_owner()
+        self.stop_worker(timeout_seconds=worker_timeout_seconds)
         with self._lock:
             if self._closed:
                 return
@@ -370,6 +534,13 @@ class DurableCMSSourceRuntime:
             return "foreign-process"
         with self._lock:
             return "closed" if self._closed else "open"
+
+    @property
+    def worker_state(self) -> str:
+        if os.getpid() != self._owner_pid:
+            return "foreign-process"
+        with self._lock:
+            return "closed" if self._closed else self._worker_state
 
 
 def open_durable_cms_source(
@@ -450,3 +621,25 @@ def open_durable_cms_source(
     return DurableCMSSourceRuntime(
         tuple(connections), guards, service, http_authenticator,
     )
+
+
+def open_hosted_cms_source(
+    *args: Any,
+    active_delay_seconds: float | int = 0.05,
+    idle_delay_seconds: float | int = 1,
+    blocked_delay_seconds: float | int = 5,
+    **kwargs: Any,
+) -> DurableCMSSourceRuntime:
+    """Open a durable runtime and start its supervised background worker."""
+
+    runtime = open_durable_cms_source(*args, **kwargs)
+    try:
+        runtime.start_worker(
+            active_delay_seconds=active_delay_seconds,
+            idle_delay_seconds=idle_delay_seconds,
+            blocked_delay_seconds=blocked_delay_seconds,
+        )
+    except Exception:
+        runtime.close()
+        raise
+    return runtime

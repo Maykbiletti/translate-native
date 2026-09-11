@@ -5,6 +5,8 @@ import importlib.util
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -375,6 +377,149 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
             ) as blocked:
                 runtime.health()
             self.assertEqual(blocked.exception.code, "source_runtime.closed")
+
+    @staticmethod
+    def wait_for(predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.005)
+        raise AssertionError("condition was not reached")
+
+    def test_managed_worker_dispatches_and_stops_interruptibly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.open(self.paths(directory))
+            runtime.enqueue_change(cms_support.event())
+            runtime.start_worker(
+                active_delay_seconds=0.01,
+                idle_delay_seconds=60,
+                blocked_delay_seconds=60,
+            )
+            try:
+                self.wait_for(lambda: bool(self.client.calls))
+                readiness = runtime.worker_readiness()
+                self.assertEqual(readiness, {
+                    "schema": "blun.cms-source-worker-readiness.v1",
+                    "status": "ready",
+                    "worker_state": "running",
+                    "service_status": "ok",
+                    "error_code": None,
+                })
+                started = time.monotonic()
+                runtime.stop_worker(timeout_seconds=1)
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertEqual(runtime.worker_state, "stopped")
+                self.assertEqual(
+                    runtime.worker_readiness()["status"], "not_ready",
+                )
+                calls = len(self.client.calls)
+                time.sleep(0.03)
+                self.assertEqual(len(self.client.calls), calls)
+            finally:
+                runtime.close()
+
+    def test_managed_worker_failure_is_visible_and_content_free(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.open(self.paths(directory))
+            secret = cms_support.event()["localization"]["source_text"]
+            runtime._service.run_once = mock.Mock(
+                side_effect=RuntimeError(secret),
+            )
+            runtime.start_worker(
+                active_delay_seconds=0.01,
+                idle_delay_seconds=0.01,
+                blocked_delay_seconds=0.01,
+            )
+            try:
+                self.wait_for(lambda: runtime.worker_state == "failed")
+                readiness = runtime.worker_readiness()
+                self.assertEqual(readiness["status"], "not_ready")
+                self.assertEqual(readiness["worker_state"], "failed")
+                self.assertEqual(
+                    readiness["error_code"], "source_runtime.worker_blocked",
+                )
+                self.assertNotIn(secret, repr(readiness))
+                with self.assertRaises(
+                    RUNTIME.DurableCMSSourceRuntimeBlocked,
+                ) as blocked:
+                    runtime.start_worker()
+                self.assertEqual(
+                    blocked.exception.code, "source_runtime.worker_blocked",
+                )
+            finally:
+                runtime.close()
+
+    def test_hosted_factory_starts_before_return_and_close_joins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            runtime = RUNTIME.open_hosted_cms_source(
+                *paths,
+                self.client,
+                change_worker_id="source-change-worker",
+                removal_worker_id="source-removal-worker",
+                lifecycle_worker_id="source-lifecycle-worker",
+                clock=lambda: self.now,
+                change_lease_seconds=60,
+                removal_lease_seconds=60,
+                lifecycle_lease_seconds=60,
+                lifecycle_poll_interval_seconds=30,
+                active_delay_seconds=0.01,
+                idle_delay_seconds=60,
+                blocked_delay_seconds=60,
+            )
+            self.wait_for(lambda: runtime.worker_state == "running")
+            runtime.close(worker_timeout_seconds=1)
+            self.assertEqual(runtime.state, "closed")
+            self.assertEqual(runtime.worker_state, "closed")
+
+    def test_invalid_worker_configuration_does_not_launch_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = self.open(self.paths(directory))
+            try:
+                with self.assertRaises(
+                    RUNTIME.DurableCMSSourceRuntimeBlocked,
+                ) as blocked:
+                    runtime.start_worker(idle_delay_seconds=0)
+                self.assertEqual(
+                    blocked.exception.code, "source_runtime.loop_invalid",
+                )
+                self.assertEqual(runtime.worker_state, "unmanaged")
+                self.assertIsNone(runtime._worker_thread)
+            finally:
+                runtime.close()
+
+    def test_worker_stop_timeout_is_bounded_during_provider_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            entered = threading.Event()
+            release = threading.Event()
+
+            def blocked_submit(change):
+                entered.set()
+                release.wait(2)
+                return ScriptedClient.submit_change(self.client, change)
+
+            self.client.submit_change = blocked_submit
+            runtime = self.open(self.paths(directory))
+            runtime.enqueue_change(cms_support.event())
+            runtime.start_worker(
+                active_delay_seconds=0.01,
+                idle_delay_seconds=60,
+                blocked_delay_seconds=60,
+            )
+            self.assertTrue(entered.wait(1))
+            started = time.monotonic()
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as blocked:
+                runtime.stop_worker(timeout_seconds=0.05)
+            self.assertLess(time.monotonic() - started, 0.2)
+            self.assertEqual(
+                blocked.exception.code, "source_runtime.worker_stop_timeout",
+            )
+            release.set()
+            runtime.stop_worker(timeout_seconds=1)
+            runtime.close()
 
 
 if __name__ == "__main__":
