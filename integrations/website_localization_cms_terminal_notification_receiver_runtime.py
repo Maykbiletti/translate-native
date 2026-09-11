@@ -313,7 +313,7 @@ class DurableTerminalNotificationReceiverRuntime:
                 self._require_open()
                 if isinstance(environ, Mapping) and environ.get("PATH_INFO") in {
                     _RECEIVER.STATUS_PATH, _RECEIVER.READINESS_PATH,
-                    _RECEIVER.CAPABILITIES_PATH,
+                    _RECEIVER.CAPABILITIES_PATH, _RECEIVER.HEALTH_PATH,
                 }:
                     return self._control_request(environ, start_response)
                 self.require_worker_ready()
@@ -326,7 +326,7 @@ class DurableTerminalNotificationReceiverRuntime:
         environ: Mapping[str, Any],
         start_response: Callable[..., Any],
     ):
-        """Serve authenticated, content-free status and readiness routes."""
+        """Serve authenticated, content-free receiver control routes."""
 
         try:
             path = environ.get("PATH_INFO")
@@ -345,6 +345,8 @@ class DurableTerminalNotificationReceiverRuntime:
                 return self._capabilities_request(
                     environ, headers, start_response,
                 )
+            if path == _RECEIVER.HEALTH_PATH:
+                return self._health_request(environ, headers, start_response)
             if path == _RECEIVER.READINESS_PATH:
                 return self._readiness_request(
                     environ, headers, start_response,
@@ -431,6 +433,111 @@ class DurableTerminalNotificationReceiverRuntime:
         )
         report = self.worker_readiness()
         status = 200 if report["status"] == "ready" else 503
+        return self.application._send(start_response, status, report)
+
+    def _health_request(
+        self,
+        environ: Mapping[str, Any],
+        headers: dict[str, str],
+        start_response: Callable[..., Any],
+    ):
+        if environ.get("REQUEST_METHOD") != "GET":
+            _RECEIVER._blocked("method_not_allowed", 405)
+        if headers.get("content-length") not in {None, "0"}:
+            _RECEIVER._blocked("body_invalid", 400)
+        if "content-type" in headers:
+            _RECEIVER._blocked("content_type", 415)
+        body_sha256 = hashlib.sha256(b"").hexdigest()
+        request = {
+            "schema": _RECEIVER.AUTH_SCHEMA,
+            "method": "GET",
+            "origin": self.application.origin,
+            "path": _RECEIVER.HEALTH_PATH,
+            "body_sha256": body_sha256,
+        }
+        self._authenticate_control(
+            request, headers, None, _RECEIVER.HEALTH_SCOPE,
+        )
+        report = self.worker_health()
+        counts = report.get("processing_counts") if isinstance(
+            report, Mapping
+        ) else None
+        metrics = tuple(
+            report.get(name) if isinstance(report, Mapping) else None
+            for name in (
+                "received", "processing_due", "expired_leases", "failed",
+            )
+        )
+        metrics_available = counts is not None
+        worker_ok = isinstance(report, Mapping) and report.get(
+            "worker_state"
+        ) in {"unmanaged", "running"}
+        healthy = (
+            isinstance(report, Mapping)
+            and report.get("status") == "ok"
+            and report.get("inbox_status") == "ok"
+            and report.get("error_code") is None
+            and worker_ok
+        )
+        valid_counts = (
+            isinstance(counts, dict)
+            and set(counts) == set(_RECEIVER.PROCESSING_STATUSES)
+            and all(
+                isinstance(value, int) and not isinstance(value, bool)
+                and value >= 0
+                for value in counts.values()
+            )
+        )
+        if not (
+            isinstance(report, dict)
+            and set(report) == set(_RECEIVER.HEALTH_RESPONSE_FIELDS)
+            and report.get("schema") == _RECEIVER.HEALTH_RESPONSE_SCHEMA
+            and report.get("status") in {"ok", "blocked"}
+            and report.get("runtime_state") == "open"
+            and report.get("worker_state") in {
+                "unmanaged", "starting", "running", "stopping", "stopped",
+                "failed",
+            }
+            and report.get("inbox_status") in {"ok", "blocked"}
+            and (report.get("error_code") is None or _RECEIVER._error(
+                report.get("error_code")
+            ))
+            and healthy == (report.get("status") == "ok")
+            and (report.get("status") == "ok") == (
+                report.get("error_code") is None
+            )
+            and (
+                (metrics_available and valid_counts and all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    and value >= 0
+                    for value in metrics
+                ))
+                or (
+                    not metrics_available
+                    and counts is None
+                    and all(value is None for value in metrics)
+                    and report.get("status") == "blocked"
+                    and report.get("inbox_status") == "blocked"
+                )
+            )
+            and (
+                not metrics_available
+                or (
+                    sum(counts.values()) == report["received"]
+                    and report["failed"] == counts["failed"]
+                    and report["processing_due"] <= (
+                        counts["pending"] + counts["retry_wait"]
+                    )
+                    and report["expired_leases"] <= counts["leased"]
+                    and (report["inbox_status"] == "ok") == (
+                        report["failed"] == 0
+                        and report["expired_leases"] == 0
+                    )
+                )
+            )
+        ):
+            _RECEIVER._blocked("health_invalid", 503)
+        status = 200 if report["status"] == "ok" else 503
         return self.application._send(start_response, status, report)
 
     def _status_request(
@@ -808,6 +915,57 @@ class DurableTerminalNotificationReceiverRuntime:
                 "error_code": None if ready else (
                     "notification_receiver.storage_blocked"
                 ),
+            }
+
+    def worker_health(self) -> dict[str, Any]:
+        """Return aggregate runtime, worker, and durable inbox health."""
+
+        self._assert_owner()
+        with self._lock:
+            self._require_open()
+            worker_state = self._worker_state
+            worker_error = self._worker_error_code
+            try:
+                inbox = self.health()
+            except Exception:
+                return {
+                    "schema": _RECEIVER.HEALTH_RESPONSE_SCHEMA,
+                    "status": "blocked",
+                    "runtime_state": "open",
+                    "worker_state": worker_state,
+                    "inbox_status": "blocked",
+                    "received": None,
+                    "processing_counts": None,
+                    "processing_due": None,
+                    "expired_leases": None,
+                    "failed": None,
+                    "error_code": "notification_receiver.storage_blocked",
+                }
+            worker_ok = (
+                worker_state in {"unmanaged", "running"}
+                and worker_error is None
+            )
+            healthy = worker_ok and inbox.status == "ok"
+            if worker_error is not None:
+                error_code = worker_error
+            elif not worker_ok:
+                error_code = "notification_receiver.worker_not_ready"
+            elif inbox.status != "ok":
+                error_code = "notification_receiver.storage_blocked"
+            else:
+                error_code = None
+            return {
+                "schema": _RECEIVER.HEALTH_RESPONSE_SCHEMA,
+                "status": "ok" if healthy else "blocked",
+                "runtime_state": "open",
+                "worker_state": worker_state,
+                "inbox_status": inbox.status,
+                "received": inbox.received,
+                "processing_counts": dict(inbox.processing_counts),
+                "processing_due": inbox.processing_due,
+                "expired_leases": inbox.expired_leases,
+                "failed": inbox.failed,
+                "error_code": error_code,
             }
 
     def close(self, *, worker_timeout_seconds: float | int = 30) -> None:

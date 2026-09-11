@@ -107,11 +107,28 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.57.0: terminal-receiver operational health API
+
+Version 6.57.0 adds a separately authenticated, body-free health route for
+the hosted terminal receiver. It combines runtime ownership, managed-worker
+state, verified SQLite inbox integrity, processing counts, due work, expired
+leases, and terminal failures in one content-free operational snapshot. HTTP
+`200` requires an open runtime, a running or deliberately unmanaged worker,
+and an `ok` inbox; every worker or storage failure returns `503` with a stable
+error code.
+
+The route authenticates before reading health, never claims work or invokes the
+CMS handler, and uses a fifth distinct scope. Aggregate counts contain no site,
+event, notification, website text, credential, provider response, or private
+exception detail. The discoverable receiver contract now hashes this fifth
+operation, its exact schema, fields, path, method, scope, and success status;
+path collisions or scope reuse block before SQLite is opened.
+
 ### Version 6.56.0: discoverable terminal-receiver contract
 
 Version 6.56.0 adds a separately authenticated, body-free capability route for
 the hosted terminal receiver. It publishes the exact active notification,
-status, readiness, and discovery operations with their methods, paths, scopes,
+status, health, readiness, and discovery operations with their methods, paths, scopes,
 schemas, required fields, success statuses, transport limits, processing
 states, and terminal outcomes. One canonical SHA-256 covers the complete
 content-free contract, including a configured custom notification intake path.
@@ -930,7 +947,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.56.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.57.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

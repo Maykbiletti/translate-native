@@ -35,14 +35,22 @@ CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v1"
 CAPABILITIES_RESPONSE_SCHEMA = (
     "blun.cms-terminal-receiver-capabilities-response.v1"
 )
+HEALTH_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-health.v1"
+HEALTH_RESPONSE_FIELDS = (
+    "schema", "status", "runtime_state", "worker_state", "inbox_status",
+    "received", "processing_counts", "processing_due", "expired_leases",
+    "failed", "error_code",
+)
 WRITE_SCOPE = "terminal-notification:write"
 STATUS_SCOPE = "terminal-notification-status:read"
 READINESS_SCOPE = "terminal-notification-readiness:read"
 CAPABILITIES_SCOPE = "terminal-notification-capabilities:read"
+HEALTH_SCOPE = "terminal-notification-health:read"
 DEFAULT_PATH = "/v1/localization/terminal-notifications"
 STATUS_PATH = DEFAULT_PATH + "/status"
 READINESS_PATH = DEFAULT_PATH + "/readiness"
 CAPABILITIES_PATH = DEFAULT_PATH + "/capabilities"
+HEALTH_PATH = DEFAULT_PATH + "/health"
 STATUS_REQUEST_SCHEMA = "blun.cms-terminal-receiver-status-request.v1"
 STATUS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-status-response.v1"
 READINESS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-readiness.v1"
@@ -339,6 +347,16 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
             "response_fields": ["schema", "capabilities"],
             "success_status": 200,
         },
+        "health": {
+            "method": "GET",
+            "path": HEALTH_PATH,
+            "scope": HEALTH_SCOPE,
+            "request_schema": None,
+            "request_fields": [],
+            "response_schema": HEALTH_RESPONSE_SCHEMA,
+            "response_fields": list(HEALTH_RESPONSE_FIELDS),
+            "success_status": 200,
+        },
         "readiness": {
             "method": "GET",
             "path": READINESS_PATH,
@@ -372,11 +390,12 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
     if (
         not isinstance(notification_path, str)
         or notification_path in {
-            STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH,
+            STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH, HEALTH_PATH,
         }
         or len({
             WRITE_SCOPE, STATUS_SCOPE, READINESS_SCOPE, CAPABILITIES_SCOPE,
-        }) != 4
+            HEALTH_SCOPE,
+        }) != 5
     ):
         _blocked("capabilities_invalid", 503)
     operations = {
@@ -419,7 +438,7 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
     }
     try:
         if set(operations) != {
-            "capabilities", "notification", "readiness", "status",
+            "capabilities", "health", "notification", "readiness", "status",
         }:
             raise ValueError
         if set(NOTIFICATION_FIELDS) != set(
@@ -1315,7 +1334,9 @@ class CMSTerminalNotificationReceiverApplication:
             or "?" in path
             or "#" in path
             or len(path) > 256
-            or path in {STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH}
+            or path in {
+                STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH, HEALTH_PATH,
+            }
         ):
             raise ValueError("path is invalid")
         if not isinstance(require_https, bool):

@@ -409,14 +409,15 @@ If the configured join timeout expires, close fails while durable state remains
 open; the supervisor must resolve or terminate the stuck callback before trying
 again. Construct the hosted runtime after every process fork.
 
-#### Terminal-receiver status, readiness, and capabilities
+#### Terminal-receiver status, health, readiness, and capabilities
 
-The durable runtime also serves three authenticated, content-free control routes
+The durable runtime also serves four authenticated, content-free control routes
 on the same exact HTTPS origin:
 
 | Method | Path | Required scope | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/v1/localization/terminal-notifications/status` | `terminal-notification-status:read` | Read one site's durable processing state |
+| `GET` | `/v1/localization/terminal-notifications/health` | `terminal-notification-health:read` | Inspect aggregate runtime, worker, and durable inbox health |
 | `GET` | `/v1/localization/terminal-notifications/readiness` | `terminal-notification-readiness:read` | Check the managed worker and verified inbox |
 | `GET` | `/v1/localization/terminal-notifications/capabilities` | `terminal-notification-capabilities:read` | Discover the exact active receiver contract |
 
@@ -444,6 +445,18 @@ managed worker and verified `ok` inbox; all other states return `503`. None
 of these control routes claims a lease, invokes the host handler, changes retry
 state, or performs a model call.
 
+Health is also strictly `GET`, body-free, query-free, and separately scoped.
+Its `blun.cms-terminal-receiver-health.v1` response combines `runtime_state`,
+`worker_state`, verified `inbox_status`, received and per-state processing
+counts, due work, expired leases, terminal failures, and one stable error code.
+HTTP `200` requires an open runtime, a running or deliberately unmanaged worker,
+and an `ok` inbox. A stopped or failed managed worker, failed processing record,
+expired lease, unreadable health state, or damaged inbox returns content-free
+`503`. Unavailable counts are `null`; the receiver never invents a healthy
+snapshot from partial evidence. Authentication completes before SQLite health
+inspection, and the read does not claim, retry, complete, or otherwise mutate
+processing state.
+
 Discovery is also strictly `GET`, body-free, query-free, and separately scoped.
 Its `blun.cms-terminal-receiver-capabilities-response.v1` envelope contains a
 `blun.cms-terminal-receiver-capabilities.v1` contract and canonical SHA-256.
@@ -451,7 +464,9 @@ The digest covers all active operations, including the runtime's configured
 notification intake path, plus methods, scopes, request and response schemas,
 required fields, success statuses, transport limits, processing states, and
 terminal outcomes. It contains no site, endpoint origin, notification,
-credential, website text, provider response, or private error detail.
+credential, website text, provider response, or private error detail. The
+contract includes the health operation's exact method, path, distinct scope,
+schema, fields, and success status.
 
 The capability request authenticates the exact empty-body hash before the
 contract is built. It never reads the inbox, checks worker readiness, claims a

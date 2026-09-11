@@ -97,6 +97,7 @@ def authenticate(request, headers):
         RUNTIME._RECEIVER.CAPABILITIES_PATH: (
             RUNTIME._RECEIVER.CAPABILITIES_SCOPE
         ),
+        RUNTIME._RECEIVER.HEALTH_PATH: RUNTIME._RECEIVER.HEALTH_SCOPE,
     }
     return principal(request.get("site_id", "public-site"), scopes[request["path"]])
 
@@ -256,6 +257,7 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
                 {"path": RUNTIME._RECEIVER.STATUS_PATH},
                 {"path": RUNTIME._RECEIVER.READINESS_PATH},
                 {"path": RUNTIME._RECEIVER.CAPABILITIES_PATH},
+                {"path": RUNTIME._RECEIVER.HEALTH_PATH},
                 {"authenticate": None},
                 {"processing_max_attempts": 0},
                 {
@@ -453,6 +455,7 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         )
         runtime.inbox.processing_status = mock.Mock()
         runtime.worker_readiness = mock.Mock()
+        runtime.worker_health = mock.Mock()
         changes = runtime._connection.total_changes
 
         response = control_request(
@@ -476,7 +479,7 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
             capabilities["schema"], RUNTIME._RECEIVER.CAPABILITIES_SCHEMA,
         )
         self.assertEqual(set(capabilities["operations"]), {
-            "capabilities", "notification", "readiness", "status",
+            "capabilities", "health", "notification", "readiness", "status",
         })
         expected = {
             "capabilities": (
@@ -486,6 +489,10 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
             "notification": (
                 "POST", RUNTIME._RECEIVER.DEFAULT_PATH,
                 RUNTIME._RECEIVER.WRITE_SCOPE,
+            ),
+            "health": (
+                "GET", RUNTIME._RECEIVER.HEALTH_PATH,
+                RUNTIME._RECEIVER.HEALTH_SCOPE,
             ),
             "readiness": (
                 "GET", RUNTIME._RECEIVER.READINESS_PATH,
@@ -516,6 +523,7 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime._connection.total_changes, changes)
         runtime.inbox.processing_status.assert_not_called()
         runtime.worker_readiness.assert_not_called()
+        runtime.worker_health.assert_not_called()
         self.assertNotIn("public-site", json.dumps(capabilities))
         runtime.close()
 
@@ -607,6 +615,121 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(stopped.body)["worker_state"], "stopped")
         runtime.close()
 
+    def test_health_route_reports_aggregate_state_without_mutating_it(self):
+        runtime = open_runtime(":memory:")
+        payload = notification()
+        adapter(runtime)(payload)
+        before = runtime._connection.total_changes
+
+        healthy_result = control_request(
+            runtime, RUNTIME._RECEIVER.HEALTH_PATH,
+        )
+        healthy = json.loads(healthy_result.body)
+        self.assertEqual(healthy_result.status, 200)
+        self.assertEqual(healthy, {
+            "schema": RUNTIME._RECEIVER.HEALTH_RESPONSE_SCHEMA,
+            "status": "ok",
+            "runtime_state": "open",
+            "worker_state": "unmanaged",
+            "inbox_status": "ok",
+            "received": 1,
+            "processing_counts": {
+                "pending": 1,
+                "leased": 0,
+                "retry_wait": 0,
+                "succeeded": 0,
+                "failed": 0,
+            },
+            "processing_due": 1,
+            "expired_leases": 0,
+            "failed": 0,
+            "error_code": None,
+        })
+        self.assertEqual(runtime._connection.total_changes, before)
+        self.assertNotIn(payload["event_id"], repr(healthy))
+        self.assertNotIn(payload["site_id"], repr(healthy))
+        self.assertNotIn(payload["notification_id"], repr(healthy))
+
+        runtime.process_next(
+            lambda _payload: (_ for _ in ()).throw(
+                RuntimeError("private CMS handler failure")
+            ),
+            "cms-consumer",
+            now=124,
+        )
+        before = runtime._connection.total_changes
+        blocked_result = control_request(
+            runtime, RUNTIME._RECEIVER.HEALTH_PATH,
+        )
+        blocked = json.loads(blocked_result.body)
+        self.assertEqual(blocked_result.status, 503)
+        self.assertEqual((
+            blocked["status"], blocked["inbox_status"],
+            blocked["processing_counts"]["failed"], blocked["failed"],
+            blocked["error_code"],
+        ), (
+            "blocked", "blocked", 1, 1,
+            "notification_receiver.storage_blocked",
+        ))
+        self.assertEqual(runtime._connection.total_changes, before)
+        self.assertNotIn("private CMS handler failure", repr(blocked))
+        runtime.close()
+
+    def test_health_route_reports_worker_and_storage_failures_fail_closed(self):
+        runtime = open_runtime(":memory:")
+        runtime.start_worker(
+            processing_ack,
+            "cms-consumer",
+            active_delay_seconds=0.01,
+            idle_delay_seconds=60,
+            blocked_delay_seconds=60,
+        )
+        self.wait_for(lambda: runtime.worker_state == "running")
+        runtime.stop_worker(timeout_seconds=1)
+        stopped = json.loads(control_request(
+            runtime, RUNTIME._RECEIVER.HEALTH_PATH,
+        ).body)
+        self.assertEqual((
+            stopped["status"], stopped["worker_state"],
+            stopped["inbox_status"], stopped["error_code"],
+        ), (
+            "blocked", "stopped", "ok",
+            "notification_receiver.worker_not_ready",
+        ))
+
+        secret = "private damaged store detail"
+        runtime.health = mock.Mock(side_effect=RuntimeError(secret))
+        unavailable_result = control_request(
+            runtime, RUNTIME._RECEIVER.HEALTH_PATH,
+        )
+        unavailable = json.loads(unavailable_result.body)
+        self.assertEqual(unavailable_result.status, 503)
+        self.assertEqual(unavailable, {
+            "schema": RUNTIME._RECEIVER.HEALTH_RESPONSE_SCHEMA,
+            "status": "blocked",
+            "runtime_state": "open",
+            "worker_state": "stopped",
+            "inbox_status": "blocked",
+            "received": None,
+            "processing_counts": None,
+            "processing_due": None,
+            "expired_leases": None,
+            "failed": None,
+            "error_code": "notification_receiver.storage_blocked",
+        })
+        self.assertNotIn(secret, unavailable_result.body.decode("utf-8"))
+
+        runtime.worker_health = mock.Mock(return_value={
+            **unavailable,
+            "unexpected": "field",
+        })
+        drift = control_request(runtime, RUNTIME._RECEIVER.HEALTH_PATH)
+        self.assertEqual(drift.status, 503)
+        self.assertEqual(json.loads(drift.body)["error_code"], (
+            "notification_receiver.health_invalid"
+        ))
+        runtime.close()
+
     def test_control_routes_require_separate_scopes_before_store_access(self):
         def write_only(request, _headers):
             return principal(request.get("site_id", "public-site"))
@@ -618,6 +741,7 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
             clock=lambda: 123.5,
         )
         runtime.inbox.processing_status = mock.Mock()
+        runtime.worker_health = mock.Mock()
         status = control_request(
             runtime,
             RUNTIME._RECEIVER.STATUS_PATH,
@@ -634,11 +758,13 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         capabilities = control_request(
             runtime, RUNTIME._RECEIVER.CAPABILITIES_PATH,
         )
+        health = control_request(runtime, RUNTIME._RECEIVER.HEALTH_PATH)
         self.assertEqual(
-            (status.status, readiness.status, capabilities.status),
-            (403, 403, 403),
+            (status.status, readiness.status, capabilities.status, health.status),
+            (403, 403, 403, 403),
         )
         runtime.inbox.processing_status.assert_not_called()
+        runtime.worker_health.assert_not_called()
         runtime.close()
 
     def test_control_transport_and_body_bindings_fail_closed(self):
@@ -692,9 +818,18 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
                     "Content-Type": "application/json; charset=utf-8",
                 },
             ),
+            transport.request(
+                "GET",
+                "https://cms.example.test" + RUNTIME._RECEIVER.HEALTH_PATH,
+                {
+                    "Authorization": "Bearer exact",
+                    "Content-Length": "1",
+                },
+                b"x",
+            ),
         )
         self.assertEqual(tuple(result.status for result in cases), (
-            400, 400, 405, 400, 415,
+            400, 400, 405, 400, 415, 400,
         ))
         runtime.close()
 

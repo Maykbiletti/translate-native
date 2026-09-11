@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Terminal-receiver operational health API (11 September 2026)
+
+Assume the hosted terminal receiver accepted work while its operational health
+report was stale, misleading, state-changing, or exposed tenant information.
+
+- Readiness alone could hide due work, expired leases, or permanently failed
+  processing records from an operator.
+- A stopped or failed managed worker could be reported healthy because SQLite
+  integrity still passed independently.
+- A health request could reuse a write credential, mutate retry state, or expose
+  event, site, notification, target text, or private callback details.
+- The runtime route and machine-readable capability contract could drift or a
+  custom intake path could collide with the health path.
+
+The new body-free health route uses its own scope and authenticates before a
+read-only aggregate inspection. It combines runtime, worker, SQLite integrity,
+processing counts, due work, expired leases, and terminal failures; incomplete
+evidence, worker failure, and storage failure return content-free `503` with a
+stable code. The canonical capability digest covers the exact route and fields,
+while preflight rejects path collisions and scope reuse before SQLite opens.
+
 ## Durable terminal-notification processing (11 September 2026)
 
 Assume the CMS accepted and stored a verified terminal notification but never
