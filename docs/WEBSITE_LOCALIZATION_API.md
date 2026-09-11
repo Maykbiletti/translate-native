@@ -214,6 +214,59 @@ never enter the runtime representation or stable failure codes. A deployment
 may therefore choose its own secret manager and supervisor without weakening
 the provider-neutral contract.
 
+### Authenticated source-CMS ingress
+
+`integrations/website_localization_cms_source_http.py` provides the optional
+WSGI boundary exposed as `runtime.http` when `open_durable_cms_source` receives
+an `http_authenticator`. Mount it behind a production WSGI server and a trusted
+TLS terminator. Construct the runtime after the worker process forks, and run
+`runtime.run_forever` in the supervised background worker that owns the same
+runtime. No HTTP route advances a lease or performs a network call.
+
+The exact routes are:
+
+| Method | Path | Required scope | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/v1/localization/source/changes` | `source-change:write` | Persist one complete signed CMS change |
+| `POST` | `/v1/localization/source/removals` | `source-removal:write` | Persist one cancellation or tombstone |
+| `GET` | `/v1/localization/source/health` | `source-health:read` | Read aggregate content-free health |
+
+Change requests use
+`blun.cms-source-change-enqueue-request.v1`; removal requests use
+`blun.cms-source-removal-enqueue-request.v1`. Both contain the exact downstream
+payload plus an explicit `max_attempts` from 1 through 20. Successful responses
+return HTTP `202` with the canonical request identity, payload SHA-256, durable
+state, attempt count, and retry ceiling. Replaying identical bytes converges on
+the same durable item. Reusing an identity with different content or policy
+returns HTTP `409` and does not alter stored work.
+
+Before parsing JSON or touching SQLite, the application calls the host-supplied
+authenticator with this content-free request:
+
+```json
+{
+  "schema": "blun.cms-source-runtime-http-auth-request.v1",
+  "method": "POST",
+  "path": "/v1/localization/source/changes",
+  "headers": [["authorization", "<host credential>"]],
+  "body_sha256": "<sha256 of exact request bytes>"
+}
+```
+
+The authenticator returns exactly
+`blun.cms-source-runtime-principal.v1` with `principal_id`, `credential_id`,
+`credential_version`, and the one route-specific `scope`. The runtime does not
+interpret credentials and never stores them. Operators should give health and
+write routes distinct credentials. The WSGI server remains responsible for
+rejecting ambiguous wire-level HTTP before constructing the WSGI environment.
+
+Requests require an exact query-free HTTPS route, fixed `Content-Length`, UTF-8
+JSON, and no transfer encoding. Health accepts no body or content type. Every
+response sets `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and
+`Referrer-Policy: no-referrer`. Errors use
+`blun.cms-source-runtime-http-error.v1` and never echo a body, header, path,
+credential, exception, source string, or target string.
+
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could
 reuse a vanished parent's lock; or a permission change could redirect the next

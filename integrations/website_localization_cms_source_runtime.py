@@ -36,6 +36,10 @@ _SERVICE = _load_module(
     "blun_website_localization_composed_cms_source_service",
     _ROOT / "integrations" / "website_localization_cms_source_service.py",
 )
+_HTTP = _load_module(
+    "blun_website_localization_composed_cms_source_http",
+    _ROOT / "integrations" / "website_localization_cms_source_http.py",
+)
 
 
 class DurableCMSSourceRuntimeBlocked(RuntimeError):
@@ -48,6 +52,23 @@ class DurableCMSSourceRuntimeBlocked(RuntimeError):
 
 def _blocked(code: str) -> DurableCMSSourceRuntimeBlocked:
     return DurableCMSSourceRuntimeBlocked(code)
+
+
+def _service_failure(error: Exception) -> DurableCMSSourceRuntimeBlocked:
+    code = getattr(error, "code", None)
+    if code in {
+        "dispatch.change_invalid",
+        "dispatch.max_attempts_invalid",
+        "removal.request_invalid",
+        "removal.max_attempts_invalid",
+    }:
+        return _blocked("source_runtime.request_invalid")
+    if code in {
+        "dispatch.idempotency_collision",
+        "removal.idempotency_collision",
+    }:
+        return _blocked("source_runtime.idempotency_collision")
+    return _blocked("source_runtime.service_blocked")
 
 
 def _database_path(value: Any) -> str:
@@ -224,6 +245,7 @@ class DurableCMSSourceRuntime:
         connections: tuple[sqlite3.Connection, sqlite3.Connection, sqlite3.Connection],
         guards: tuple[Callable[[], None], Callable[[], None], Callable[[], None]],
         service: Any,
+        http_authenticator: Callable[[dict[str, Any]], Any] | None,
     ):
         self._connections = connections
         self._guards = guards
@@ -231,6 +253,11 @@ class DurableCMSSourceRuntime:
         self._lock = threading.RLock()
         self._closed = False
         self._owner_pid = os.getpid()
+        self.http = (
+            None
+            if http_authenticator is None
+            else _HTTP.CMSSourceHTTPApplication(self, http_authenticator)
+        )
 
     def __repr__(self) -> str:
         return f"DurableCMSSourceRuntime(state={self.state!r})"
@@ -262,10 +289,8 @@ class DurableCMSSourceRuntime:
             self._guard_databases()
             try:
                 result = getattr(self._service, name)(*args, **kwargs)
-            except _SERVICE.CMSSourceServiceBlocked as error:
-                raise _blocked("source_runtime.service_blocked") from error
             except Exception as error:
-                raise _blocked("source_runtime.service_blocked") from error
+                raise _service_failure(error) from error
             finally:
                 self._guard_databases()
             return result
@@ -350,6 +375,7 @@ def open_durable_cms_source(
     change_worker_id: str,
     removal_worker_id: str,
     lifecycle_worker_id: str,
+    http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
     clock: Callable[[], float | int] = time.time,
     sqlite_timeout_seconds: float | int = 5,
     change_lease_seconds: float | int = 600,
@@ -368,6 +394,8 @@ def open_durable_cms_source(
         change_database, removal_database, lifecycle_database,
     ))
     timeout = _sqlite_timeout(sqlite_timeout_seconds)
+    if http_authenticator is not None and not callable(http_authenticator):
+        raise _blocked("source_runtime.http_authenticator_invalid")
     service_options = {
         "change_worker_id": change_worker_id,
         "removal_worker_id": removal_worker_id,
@@ -413,4 +441,6 @@ def open_durable_cms_source(
         if isinstance(error, DurableCMSSourceRuntimeBlocked):
             raise
         raise _blocked("source_runtime.initialization_failed") from error
-    return DurableCMSSourceRuntime(tuple(connections), guards, service)
+    return DurableCMSSourceRuntime(
+        tuple(connections), guards, service, http_authenticator,
+    )
