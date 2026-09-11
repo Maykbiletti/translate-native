@@ -752,6 +752,50 @@ keeps the database connection open; close it only after the worker finishes.
 Worker exceptions are reduced to `source_delivery_runtime.worker_blocked`, and
 the failed runtime cannot accept more managed source events.
 
+#### Website-source delivery HTTP sidecar
+
+`integrations/website_localization_cms_source_delivery_http.py` makes the
+protected website outbox available to CMS and website backends that do not
+embed Python. Pass `http_authenticator` to
+`open_hosted_cms_source_delivery()` and serve the resulting `runtime.http`
+WSGI application behind TLS. Invalid authentication configuration is rejected
+during in-memory preflight before the SQLite file is created. Omitting the
+option preserves the manual Python runtime and leaves `runtime.http` as `None`.
+
+The sidecar exposes these independently authorized operations:
+
+- `POST /v1/localization/source-delivery/changes`
+- `POST /v1/localization/source-delivery/removals`
+- `POST /v1/localization/source-delivery/status`
+- `GET /v1/localization/source-delivery/health`
+- `GET /v1/localization/source-delivery/readiness`
+- `GET /v1/localization/source-delivery/capabilities`
+
+The authenticator receives schema
+`blun.cms-source-delivery-sidecar-auth-request.v1` with the exact method, path,
+sorted request headers, and SHA-256 of the received body. It returns a stable
+principal, credential identity and version, and the route's exact scope.
+Change, removal, and status routes additionally require the authorized
+`site_id`; the sidecar compares it independently with the request and the
+runtime result. An unknown request and one belonging to another website both
+return the same content-free `404` response.
+
+Change and removal bodies carry the complete immutable payload plus distinct
+`source_max_attempts` and `delivery_max_attempts` values. The
+`Idempotency-Key` must equal the event, cancellation, or tombstone ID, and
+`X-Localization-Source-Payload-SHA256` must equal the canonical inner-payload
+hash. HTTP `202` is returned only after the exact binding has been persisted.
+The sidecar performs no delivery attempt itself; the managed worker retains
+the single-attempt, durable-backoff, and crash-recovery semantics.
+
+Status, health, and readiness never return website text. Every outgoing
+runtime object is checked for its exact field set, types, hashes, state
+invariants, request identity, and tenant before serialization. The capability
+route describes all six schemas, methods, paths, scopes, limits, and safety
+semantics under one canonical SHA-256. That digest is repeated on every
+operational response, and any internal contract drift blocks the complete
+response instead of advertising a rehashed weakened interface.
+
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could
 reuse a vanished parent's lock; or a permission change could redirect the next

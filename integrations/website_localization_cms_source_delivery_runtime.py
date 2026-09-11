@@ -38,6 +38,12 @@ _DELIVERY = _load_module(
     "blun_website_localization_composed_cms_source_delivery",
     _ROOT / "integrations" / "website_localization_cms_source_delivery.py",
 )
+_HTTP = _load_module(
+    "blun_website_localization_composed_cms_source_delivery_http",
+    _ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_http.py",
+)
 
 
 class DurableCMSSourceDeliveryRuntimeBlocked(RuntimeError):
@@ -253,6 +259,7 @@ class DurableCMSSourceDeliveryRuntime:
         *,
         worker_id: str,
         lease_seconds: float,
+        http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
     ):
         self._connection = connection
         self._guard = guard
@@ -266,6 +273,13 @@ class DurableCMSSourceDeliveryRuntime:
         self._worker_thread: threading.Thread | None = None
         self._worker_state = "unmanaged"
         self._worker_error_code: str | None = None
+        self.http = (
+            None
+            if http_authenticator is None
+            else _HTTP.CMSSourceDeliveryHTTPApplication(
+                self, http_authenticator,
+            )
+        )
 
     def __repr__(self) -> str:
         return f"DurableCMSSourceDeliveryRuntime(state={self.state!r})"
@@ -593,9 +607,12 @@ def open_durable_cms_source_delivery(
     lease_seconds: float | int = 600,
     base_delay_seconds: float | int = 5,
     max_delay_seconds: float | int = 300,
+    http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
 ) -> DurableCMSSourceDeliveryRuntime:
     """Validate configuration, then open one guarded durable outbox."""
 
+    if http_authenticator is not None and not callable(http_authenticator):
+        raise _blocked("source_delivery_runtime.configuration_invalid")
     path = _database_path(database)
     timeout = _sqlite_timeout(sqlite_timeout_seconds)
     outbox_options = {
@@ -635,6 +652,7 @@ def open_durable_cms_source_delivery(
         outbox,
         worker_id=worker_id,
         lease_seconds=lease,
+        http_authenticator=http_authenticator,
     )
 
 
