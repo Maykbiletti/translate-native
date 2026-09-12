@@ -931,11 +931,20 @@ non-daemon worker. Both construct one `RotatingHMACCMSSourceDeliveryClient`,
 one `CMSSourceDeliverySidecarOutboxAdapter`, and one guarded SQLite runtime.
 
 Supply the initial `HMACCredential`, exact HTTPS origin, trusted sidecar and
-downstream capability hashes, worker identity, and the middle
-`sidecar_delivery_max_attempts` once. The hosted factory validates all loop
-delays before creating the database; the remaining client, adapter, lease,
-backoff, and path checks also finish before the first request. The SQLite file
-retains the existing owner-only, process-bound, inode-guarded lifecycle.
+downstream capability hashes, the expected source-runtime capability SHA-256,
+the expected commercial rendering-registry SHA-256, worker identity, and the
+middle `sidecar_delivery_max_attempts` once. Before opening the website SQLite
+file, the composition reads source readiness through the authenticated sidecar
+and requires its verified capability binding to match both generation pins.
+Unavailable, missing, partial, malformed, or substituted evidence blocks with
+a stable content-free error before database creation. The hosted factory still
+validates all loop delays before that preflight.
+
+Both verified generation values become part of the adapter capability digest
+and the outer outbox's role-specific durable binding. A restart therefore
+resumes pending website work only under the exact same sidecar adapter,
+source-runtime, and commercial rendering generation. The SQLite file retains
+the existing owner-only, process-bound, inode-guarded lifecycle.
 
 `enqueue_change()` and `enqueue_removal()` persist work before transport.
 Their `delivery_max_attempts` controls only website-to-sidecar acceptance;

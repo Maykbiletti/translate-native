@@ -17,7 +17,7 @@ import re
 from typing import Any, Mapping
 
 
-ADAPTER_SCHEMA = "blun.cms-source-delivery-sidecar-outbox-adapter.v1"
+ADAPTER_SCHEMA = "blun.cms-source-delivery-sidecar-outbox-adapter.v2"
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -90,7 +90,14 @@ def _failure(error: Exception) -> CMSSourceDeliverySidecarAdapterBlocked:
 class CMSSourceDeliverySidecarOutboxAdapter:
     """Project validated sidecar acceptance into the durable outbox contract."""
 
-    def __init__(self, client: Any, *, sidecar_delivery_max_attempts: int = 5):
+    def __init__(
+        self,
+        client: Any,
+        *,
+        sidecar_delivery_max_attempts: int = 5,
+        runtime_capabilities_sha256: str | None = None,
+        commercial_rendering_registry_sha256: str | None = None,
+    ):
         sidecar_digest = getattr(client, "expected_capabilities_sha256", None)
         remote_digest = getattr(client, "expected_remote_capabilities_sha256", None)
         timeout = getattr(client, "timeout", None)
@@ -101,6 +108,14 @@ class CMSSourceDeliverySidecarOutboxAdapter:
             or SHA256.fullmatch(sidecar_digest) is None
             or not isinstance(remote_digest, str)
             or SHA256.fullmatch(remote_digest) is None
+            or (runtime_capabilities_sha256 is None)
+            != (commercial_rendering_registry_sha256 is None)
+            or runtime_capabilities_sha256 is not None and (
+                not isinstance(runtime_capabilities_sha256, str)
+                or SHA256.fullmatch(runtime_capabilities_sha256) is None
+                or not isinstance(commercial_rendering_registry_sha256, str)
+                or SHA256.fullmatch(commercial_rendering_registry_sha256) is None
+            )
             or isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
             or not math.isfinite(float(timeout))
@@ -115,11 +130,21 @@ class CMSSourceDeliverySidecarOutboxAdapter:
             "sidecar_capabilities_sha256": sidecar_digest,
             "remote_capabilities_sha256": remote_digest,
             "sidecar_delivery_max_attempts": delivery_attempts,
+            "runtime_capabilities_sha256": runtime_capabilities_sha256,
+            "commercial_rendering_registry_sha256": (
+                commercial_rendering_registry_sha256
+            ),
         }
         self.client = client
         self.sidecar_capabilities_sha256 = sidecar_digest
         self.remote_capabilities_sha256 = remote_digest
         self.sidecar_delivery_max_attempts = delivery_attempts
+        self.expected_runtime_capabilities_sha256 = (
+            runtime_capabilities_sha256
+        )
+        self.expected_commercial_rendering_registry_sha256 = (
+            commercial_rendering_registry_sha256
+        )
         self.expected_capabilities_sha256 = hashlib.sha256(
             _canonical(binding)
         ).hexdigest()
@@ -244,7 +269,7 @@ class CMSSourceDeliverySidecarOutboxAdapter:
 
         # This private projection records sidecar acceptance only. It is never
         # exposed as source-service status; downstream state remains separate.
-        return {
+        projected = {
             "schema": CHANGE_RESPONSE_SCHEMA if change else REMOVAL_RESPONSE_SCHEMA,
             "operation": operation,
             "request_id": request_id,
@@ -255,6 +280,19 @@ class CMSSourceDeliverySidecarOutboxAdapter:
             "max_attempts": source_attempts,
             "capabilities_sha256": self.expected_capabilities_sha256,
         }
+        if self.expected_runtime_capabilities_sha256 is not None:
+            projected["capability_binding"] = {
+                "schema": "blun.cms-source-capability-binding.v2",
+                "status": "verified",
+                "capabilities_sha256": (
+                    self.expected_runtime_capabilities_sha256
+                ),
+                "commercial_rendering_registry_sha256": (
+                    self.expected_commercial_rendering_registry_sha256
+                ),
+                "database_roles": ["changes", "removals", "lifecycle"],
+            }
+        return projected
 
     def submit_change(
         self, value: Mapping[str, Any], *, max_attempts: int = 5,

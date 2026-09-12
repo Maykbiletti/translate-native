@@ -158,6 +158,54 @@ class SidecarOutboxAdapterTests(unittest.TestCase):
         self.assertEqual(len(digests), 4)
         self.assertNotIn("a" * 64, repr(self.adapter))
 
+    def test_verified_generation_pins_are_part_of_the_adapter_contract(self):
+        pinned = ADAPTER.CMSSourceDeliverySidecarOutboxAdapter(
+            self.client,
+            sidecar_delivery_max_attempts=4,
+            runtime_capabilities_sha256="c" * 64,
+            commercial_rendering_registry_sha256="d" * 64,
+        )
+        changed = ADAPTER.CMSSourceDeliverySidecarOutboxAdapter(
+            self.client,
+            sidecar_delivery_max_attempts=4,
+            runtime_capabilities_sha256="e" * 64,
+            commercial_rendering_registry_sha256="d" * 64,
+        )
+
+        self.assertEqual(pinned.expected_runtime_capabilities_sha256, "c" * 64)
+        self.assertEqual(
+            pinned.expected_commercial_rendering_registry_sha256, "d" * 64,
+        )
+        self.assertNotEqual(
+            pinned.expected_capabilities_sha256,
+            changed.expected_capabilities_sha256,
+        )
+        self.assertNotEqual(
+            pinned.expected_capabilities_sha256,
+            self.adapter.expected_capabilities_sha256,
+        )
+
+    def test_generation_pins_must_be_complete_and_canonical(self):
+        invalid = (
+            {"runtime_capabilities_sha256": "c" * 64},
+            {"commercial_rendering_registry_sha256": "d" * 64},
+            {
+                "runtime_capabilities_sha256": "C" * 64,
+                "commercial_rendering_registry_sha256": "d" * 64,
+            },
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(
+                ADAPTER.CMSSourceDeliverySidecarAdapterBlocked,
+            ) as caught:
+                ADAPTER.CMSSourceDeliverySidecarOutboxAdapter(
+                    self.client, **values,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "source_delivery_sidecar_adapter.client_invalid",
+            )
+
     def test_retryable_sidecar_failure_uses_only_outer_acceptance_budget(self):
         change = cms_support.event()
         self.client.failures.append(SidecarFailure())

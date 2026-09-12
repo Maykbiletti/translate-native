@@ -946,6 +946,8 @@ def _client_and_adapter(
     origin: str,
     sidecar_capabilities_sha256: str,
     remote_capabilities_sha256: str,
+    runtime_capabilities_sha256: str,
+    commercial_rendering_registry_sha256: str,
     sidecar_delivery_max_attempts: int,
     clock: Callable[[], float | int],
     nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24),
@@ -967,7 +969,36 @@ def _client_and_adapter(
     adapter = _ADAPTER.CMSSourceDeliverySidecarOutboxAdapter(
         client,
         sidecar_delivery_max_attempts=sidecar_delivery_max_attempts,
+        runtime_capabilities_sha256=runtime_capabilities_sha256,
+        commercial_rendering_registry_sha256=(
+            commercial_rendering_registry_sha256
+        ),
     )
+    try:
+        response = client.source_readiness()
+    except Exception:
+        raise _blocked("capability_preflight_unavailable") from None
+    binding = (
+        response.get("source_capability_binding")
+        if isinstance(response, Mapping)
+        else None
+    )
+    if (
+        not isinstance(binding, Mapping)
+        or set(binding) != {
+            "schema", "status", "capabilities_sha256",
+            "commercial_rendering_registry_sha256", "database_roles",
+        }
+        or binding.get("schema") != "blun.cms-source-capability-binding.v2"
+        or binding.get("status") != "verified"
+        or binding.get("capabilities_sha256")
+        != runtime_capabilities_sha256
+        or binding.get("commercial_rendering_registry_sha256")
+        != commercial_rendering_registry_sha256
+        or binding.get("database_roles")
+        != ["changes", "removals", "lifecycle"]
+    ):
+        raise _blocked("capability_preflight_mismatch")
     return client, adapter
 
 
@@ -979,6 +1010,8 @@ def open_durable_hmac_cms_source_delivery_submission(
     origin: str,
     sidecar_capabilities_sha256: str,
     remote_capabilities_sha256: str,
+    runtime_capabilities_sha256: str,
+    commercial_rendering_registry_sha256: str,
     sidecar_delivery_max_attempts: int = 5,
     clock: Callable[[], float | int] = time.time,
     nonce_factory: Callable[[], str],
@@ -997,6 +1030,10 @@ def open_durable_hmac_cms_source_delivery_submission(
         origin=origin,
         sidecar_capabilities_sha256=sidecar_capabilities_sha256,
         remote_capabilities_sha256=remote_capabilities_sha256,
+        runtime_capabilities_sha256=runtime_capabilities_sha256,
+        commercial_rendering_registry_sha256=(
+            commercial_rendering_registry_sha256
+        ),
         sidecar_delivery_max_attempts=sidecar_delivery_max_attempts,
         clock=clock,
         nonce_factory=nonce_factory,

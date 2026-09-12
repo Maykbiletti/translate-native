@@ -107,6 +107,21 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.92.0: authenticated website generation preflight
+
+Version 6.92.0 closes the remaining durable generation gap at the public
+website edge. The owned HMAC submission composition now requires the expected
+source-runtime and commercial rendering-registry hashes, verifies both through
+the authenticated sidecar source-readiness route, and opens no website database
+until that exact content-free binding is proven.
+
+The verified values become part of the sidecar-adapter contract and the outer
+website outbox's role-specific SQLite binding. Missing, partial, malformed,
+stale, or substituted generations block fail-closed before database creation;
+pending website work can resume only with the same adapter, runtime, and price
+format generation. Direct low-level adapter use remains compatible and
+deliberately unbound unless both generation pins are supplied together.
+
 ### Version 6.91.0: durable sidecar generation binding
 
 Version 6.91.0 durably binds the source-delivery sidecar database to the exact
@@ -118,8 +133,8 @@ therefore resume only under the generation that accepted it.
 An empty unbound legacy outbox may be adopted atomically. A non-empty unbound
 outbox, changed capability generation, altered binding record, malformed table,
 or attempt to reopen a bound production database without generation pins blocks
-fail-closed. The deliberately unbound outer website adapter remains compatible
-when it uses its own separate database.
+fail-closed. Version 6.92 extends the same generation guarantee to the outer
+website database.
 
 ### Version 6.90.0: authenticated source runtime binding
 
@@ -1453,7 +1468,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.91.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.92.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

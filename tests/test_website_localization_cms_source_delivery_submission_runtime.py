@@ -58,10 +58,13 @@ class WSGITransport:
     def __init__(self, application):
         self.application = application
         self.calls = []
+        self.blocked = False
 
     def request(self, method, url, headers, body, *, timeout):
         call = (method, url, dict(headers), body, timeout)
         self.calls.append(call)
+        if self.blocked:
+            raise OSError("transport blocked")
         parsed = urlsplit(url)
         raw = b"" if body is None else body
         environ = {
@@ -188,6 +191,12 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "origin": "https://delivery.example",
             "sidecar_capabilities_sha256": self.sidecar_digest,
             "remote_capabilities_sha256": self.remote_digest,
+            "runtime_capabilities_sha256": (
+                self.remote.expected_runtime_capabilities_sha256
+            ),
+            "commercial_rendering_registry_sha256": (
+                self.remote.expected_commercial_rendering_registry_sha256
+            ),
             "sidecar_delivery_max_attempts": 4,
             "clock": lambda: self.now,
             "nonce_factory": self.nonces,
@@ -241,6 +250,65 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.website_database.stat().st_mode), 0o600)
         self.assertEqual(runtime.health().status, "ok")
 
+    def test_authenticated_preflight_binds_the_outer_database_generation(self):
+        runtime = self.open()
+        stored = runtime._delivery._connection.execute(
+            "SELECT database_role, delivery_capabilities_sha256, "
+            "runtime_capabilities_sha256, "
+            "commercial_rendering_registry_sha256 "
+            "FROM cms_source_delivery_runtime_capability_binding"
+        ).fetchone()
+
+        self.assertEqual(tuple(stored), (
+            "source_delivery",
+            runtime.expected_capabilities_sha256,
+            self.remote.expected_runtime_capabilities_sha256,
+            self.remote.expected_commercial_rendering_registry_sha256,
+        ))
+        self.assertEqual(
+            runtime._adapter.expected_runtime_capabilities_sha256,
+            self.remote.expected_runtime_capabilities_sha256,
+        )
+        self.assertEqual(
+            runtime._adapter.expected_commercial_rendering_registry_sha256,
+            self.remote.expected_commercial_rendering_registry_sha256,
+        )
+        self.assertEqual(
+            [urlsplit(call[1]).path for call in self.transport.calls],
+            [
+                "/v1/localization/source-delivery/capabilities",
+                "/v1/localization/source-delivery/source-readiness",
+            ],
+        )
+
+    def test_preflight_generation_mismatch_blocks_before_database_creation(self):
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(runtime_capabilities_sha256="e" * 64)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.capability_preflight_mismatch",
+        )
+        self.assertFalse(self.website_database.exists())
+        self.assertEqual(len(self.transport.calls), 2)
+
+    def test_unavailable_preflight_blocks_before_database_creation(self):
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.capability_preflight_unavailable",
+        )
+        self.assertFalse(self.website_database.exists())
+        self.assertEqual(len(transport.calls), 1)
+
     def test_sidecar_lifecycle_uses_the_owned_authenticated_client(self):
         runtime = self.open()
 
@@ -251,10 +319,11 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(capabilities["sha256"], self.sidecar_digest)
         self.assertEqual(health["status"], "ok")
         self.assertEqual(readiness["status"], "ready")
-        self.assertEqual(len(self.transport.calls), 5)
+        self.assertEqual(len(self.transport.calls), 7)
 
     def test_submission_lifecycle_reaches_source_without_collapsing_stages(self):
         runtime = self.open()
+        preflight_calls = len(self.transport.calls)
         change = cms_support.event()
         runtime.enqueue_change(change, source_max_attempts=3)
 
@@ -263,7 +332,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "pending", "website_acceptance",
         ))
         self.assertIsNone(local.source_status)
-        self.assertEqual(len(self.transport.calls), 0)
+        self.assertEqual(len(self.transport.calls), preflight_calls)
 
         runtime.run_once()
         sidecar = runtime.submission_lifecycle("change", change["event_id"])
@@ -871,8 +940,9 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.transport.calls), before)
 
     def test_terminal_website_failure_never_reads_sidecar_status(self):
-        transport = NoNetworkTransport()
+        transport = WSGITransport(self.sidecar.http)
         runtime = self.open(transport=transport)
+        transport.blocked = True
         change = cms_support.event()
         runtime.enqueue_change(change, delivery_max_attempts=1)
         failed = runtime.run_once()
