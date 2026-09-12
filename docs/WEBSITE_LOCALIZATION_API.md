@@ -848,6 +848,31 @@ from host-owned secret state. Client errors retain the underlying stable
 content-free retry decision, and neither the wrapper nor its representation
 exposes the credential, tenant, endpoint, or website content.
 
+#### Durable website submission through the sidecar
+
+`integrations/website_localization_cms_source_delivery_sidecar_adapter.py`
+connects that sidecar client to `DurableCMSSourceDeliveryOutbox` without
+collapsing retry ownership. Wrap the pinned or rotating-HMAC sidecar client in
+`CMSSourceDeliverySidecarOutboxAdapter`, configure the sidecar's downstream
+`sidecar_delivery_max_attempts`, and pass the adapter to
+`open_durable_cms_source_delivery()` or
+`open_hosted_cms_source_delivery()`.
+
+The runtime's `delivery_max_attempts` remains the website's ceiling for
+obtaining durable sidecar acceptance. `source_max_attempts` remains the source
+service's processing ceiling. The adapter's fixed
+`sidecar_delivery_max_attempts` is the independent middle ceiling used after
+acceptance. A transient failure reaching the sidecar therefore consumes only
+the outer budget.
+
+The adapter derives the outbox capability binding from a canonical record of
+the sidecar capability pin, downstream source-service capability pin, and
+middle retry ceiling. Any change blocks existing active rows before network
+access. Only an exact sidecar acceptance envelope is projected into the
+outbox's private completion receipt; downstream status is never represented as
+completed and must still be read through the sidecar status/lifecycle APIs.
+Malformed acknowledgements and undeclared exceptions fail closed.
+
 #### Rotatable source-delivery HMAC authentication
 
 `integrations/website_localization_cms_source_delivery_auth.py` provides a

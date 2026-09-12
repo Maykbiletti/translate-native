@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Durable authenticated sidecar submission (12 September 2026)
+
+Assume a website persisted an event but mixed the retry policy for reaching the
+sidecar with the sidecar's delivery policy or the source service's processing
+policy.
+
+- A transient sidecar outage could exhaust the downstream source retry budget.
+- A changed sidecar pin or inner retry ceiling could alter an already queued
+  event after restart.
+- Treating sidecar acceptance as a direct source-service response could let a
+  malformed acknowledgement satisfy the existing outbox validator.
+- Translating a client exception could accidentally turn an unknown failure
+  into a retryable one.
+
+The sidecar outbox adapter gives each boundary its own explicit retry ceiling
+and hashes both capability pins plus the inner delivery policy into the
+outbox's immutable contract binding. It accepts only the exact validated
+sidecar envelope before producing a private completion projection, preserves
+declared retryability, and makes every unknown or malformed failure permanent
+and content-free.
+
 ## Source-bound commercial review evidence (12 September 2026)
 
 Assume a structurally valid, content-free commercial review summary was copied
