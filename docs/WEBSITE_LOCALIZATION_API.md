@@ -48,12 +48,24 @@ native-Unicode JSON before signing and are never mutated.
 
 Successful responses require canonical bounded JSON, an allowed status code,
 the exact response schema, and the originating request, event, and site
-bindings. Capability responses additionally recompute both advertised hashes
-and verify the exact ordered operation names, methods, paths, request schemas,
-response schemas, and enabled booleans. Rehashing a substituted endpoint is
-therefore insufficient. Stable server failures retain their content-free error
-code and derive retryability from HTTP status; redirects and invalid bindings
-fail closed.
+bindings. Capability responses additionally recompute both advertised hashes,
+verify the exact ordered operation names, methods, paths, request schemas,
+response schemas, and enabled booleans, and compare the complete v5 capability
+shape, commercial profile, 24 locale bindings, and commercial rendering
+registry with the installed canonical contract. Rehashing a substituted
+endpoint or registry is therefore insufficient.
+
+Production hosts can also pass constructor-fixed
+`capabilities_sha256` and `commercial_rendering_registry_sha256` deployment
+pins. Each must be a lowercase 64-character SHA-256 digest; malformed
+configuration is rejected before transport. A valid response that does not
+match either configured pin fails after the single HTTP attempt with the
+distinct, non-retryable `capabilities_pin_mismatch` or
+`commercial_rendering_registry_pin_mismatch` code. Rotate a pin only as an
+explicit deployment change after installing and validating the corresponding
+client contract. Stable server failures retain their content-free error code
+and derive retryability from HTTP status; redirects and invalid bindings fail
+closed.
 
 ### Durable change dispatch
 
