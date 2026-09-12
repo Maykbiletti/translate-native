@@ -53,7 +53,13 @@ def make_plan(targets=("de-AT", "sv-SE"), **overrides):
     return PLANNER.plan_website_localization(**values)
 
 
-def completed_result(job, candidate, *, review_confidence=None):
+def completed_result(
+    job,
+    candidate,
+    *,
+    review_confidence=None,
+    commercial_review_required_dimensions=None,
+):
     payload = job.as_payload()
     review_confidence = review_confidence or {
         "target_native": "high",
@@ -104,8 +110,13 @@ def completed_result(job, candidate, *, review_confidence=None):
             {
                 "schema": WORKER._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
                 "profile": payload["commercial_profile"],
-                "status": "verified",
-                "review_required_dimensions": [],
+                "status": (
+                    "review_required"
+                    if commercial_review_required_dimensions else "verified"
+                ),
+                "review_required_dimensions": (
+                    commercial_review_required_dimensions or []
+                ),
                 "evidence_sha256": "c" * 64,
             }
             if payload["content_type"] == "commercial" else None
@@ -197,7 +208,14 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.release_connection.close()
         self.queue_connection.close()
 
-    def complete(self, plan, translations=None, *, review_confidence=None):
+    def complete(
+        self,
+        plan,
+        translations=None,
+        *,
+        review_confidence=None,
+        commercial_review_required_dimensions=None,
+    ):
         translations = translations or {
             "de-AT": "Baue dein Unternehmen mit BLUN auf.",
             "sv-SE": "Bygg ditt företag med BLUN.",
@@ -210,6 +228,9 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 job,
                 translations[claim.target_locale],
                 review_confidence=review_confidence,
+                commercial_review_required_dimensions=(
+                    commercial_review_required_dimensions
+                ),
             )
             self.queue.complete(claim, result, now=101 + index)
             completed[job.job_id] = result
@@ -561,6 +582,90 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertEqual(binding["quality_profile"]["locale"], "sv-SE")
         self.assertIsNone(binding["commercial_profile"])
         self.store.lookup(plan, plan.jobs[0].job_id, self.authority, now=201)
+
+    def test_commercial_escalation_resolution_is_bound_for_publication(self):
+        plan = make_plan(
+            ("fi-FI",),
+            content_type="commercial",
+            source_text="From €40 per month, billed yearly. Tax excluded.",
+        )
+        candidate = "Alkaen 40 € kuukaudessa, laskutus vuosittain. Ei sisällä veroa."
+        dimensions = ["tax_status", "billing_interval"]
+        self.complete(
+            plan,
+            {"fi-FI": candidate},
+            review_confidence={
+                "target_native": "high",
+                "source_fidelity": "low",
+            },
+            commercial_review_required_dimensions=dimensions,
+        )
+        reviewer = {
+            "schema": RELEASE.INDEPENDENT_MODEL_REVIEW_SCHEMA,
+            "provider": {
+                "id": "second-provider",
+                "model_id": "commercial-reviewer",
+                "model_version": "2026-09-12",
+            },
+            "receipt": "commercial-independent-receipt",
+        }
+
+        approved = self.approve(
+            plan,
+            plan.jobs[0],
+            independent_model_review=reviewer,
+            independent_model_review_verifier=ExactReceiptVerifier(
+                "commercial-independent-receipt",
+            ),
+        )
+
+        resolution = approved.release_evidence["commercial_review_resolution"]
+        self.assertEqual(resolution, {
+            "schema": RELEASE.COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
+            "status": "resolved",
+            "reviewed_dimensions": dimensions,
+            "method": "independent_model",
+            "receipt_sha256": hashlib.sha256(
+                b"commercial-independent-receipt"
+            ).hexdigest(),
+            "provider": reviewer["provider"],
+        })
+        self.assertEqual(
+            approved.release_evidence["commercial_review"]
+            ["review_required_dimensions"],
+            dimensions,
+        )
+
+    def test_commercial_human_resolution_is_bound_without_identity_leak(self):
+        plan = make_plan(
+            ("fi-FI",),
+            content_type="commercial",
+            source_text="Cancel within 14 days for a full refund.",
+        )
+        self.complete(
+            plan,
+            {"fi-FI": "Peruuta 14 päivän kuluessa, niin saat täyden hyvityksen."},
+            review_confidence={
+                "target_native": "high",
+                "source_fidelity": "low",
+            },
+            commercial_review_required_dimensions=["cancellation"],
+        )
+
+        approved = self.approve(
+            plan,
+            plan.jobs[0],
+            human_review_receipt="qualified-commercial-review",
+            human_review_verifier=ExactReceiptVerifier(
+                "qualified-commercial-review",
+            ),
+        )
+
+        resolution = approved.release_evidence["commercial_review_resolution"]
+        self.assertEqual(resolution["method"], "qualified_human")
+        self.assertEqual(resolution["reviewed_dimensions"], ["cancellation"])
+        self.assertIsNone(resolution["provider"])
+        self.assertNotIn("qualified-commercial-review", json.dumps(resolution))
 
     def test_same_provider_is_not_an_independent_model_adapter(self):
         plan = make_plan(("sv-SE",))

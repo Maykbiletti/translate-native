@@ -95,6 +95,7 @@ def publication_request(authority=None):
                 "commercial_profile": None,
                 "commercial_quality_profile": None,
                 "commercial_review": None,
+                "commercial_review_resolution": None,
             },
         }],
     }

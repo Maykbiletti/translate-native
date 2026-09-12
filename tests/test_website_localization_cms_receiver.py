@@ -60,11 +60,19 @@ class Authority:
         )
 
 
-def release_evidence(target: str, *, locale="fi-FI", commercial=True):
+def release_evidence(
+    target: str,
+    *,
+    locale="fi-FI",
+    commercial=True,
+    review_required=False,
+    resolution_method="independent_model",
+):
     target_sha256 = hashlib.sha256(target.encode("utf-8")).hexdigest()
     review = None
     profile = None
     quality_profile = None
+    resolution = None
     content_type = "cta"
     if commercial:
         content_type = "commercial"
@@ -78,10 +86,28 @@ def release_evidence(target: str, *, locale="fi-FI", commercial=True):
         review = {
             "schema": CMS._RELEASE._WORKER._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
             "profile": profile,
-            "status": "verified",
-            "review_required_dimensions": [],
+            "status": "review_required" if review_required else "verified",
+            "review_required_dimensions": (
+                ["tax_status", "cancellation"] if review_required else []
+            ),
             "evidence_sha256": "5" * 64,
         }
+        if review_required:
+            resolution = {
+                "schema": CMS._RELEASE.COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
+                "status": "resolved",
+                "reviewed_dimensions": ["tax_status", "cancellation"],
+                "method": resolution_method,
+                "receipt_sha256": "7" * 64,
+                "provider": (
+                    {
+                        "id": "independent-reviewer",
+                        "model_id": "review-model",
+                        "model_version": "2026-09-12",
+                    }
+                    if resolution_method == "independent_model" else None
+                ),
+            }
     return {
         "schema": CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
         "job_id": "blun-l10n-job-" + "1" * 64,
@@ -95,6 +121,7 @@ def release_evidence(target: str, *, locale="fi-FI", commercial=True):
         "commercial_profile": profile,
         "commercial_quality_profile": quality_profile,
         "commercial_review": review,
+        "commercial_review_resolution": resolution,
     }
 
 
@@ -496,6 +523,80 @@ class CMSPublicationReceiverTests(unittest.TestCase):
             "sha256": canonical["sha256"],
         })
         self.assertEqual(evidence["commercial_review"]["status"], "verified")
+        self.assertIsNone(evidence["commercial_review_resolution"])
+
+    def test_targeted_commercial_resolution_reaches_commit_content_free(self):
+        for method in ("independent_model", "qualified_human"):
+            payload = publication_payload()
+            item = payload["localizations"][0]
+            item["release_evidence"] = release_evidence(
+                item["target_text"], review_required=True,
+                resolution_method=method,
+            )
+            item["target_sha256"] = item["release_evidence"]["target_sha256"]
+            item["approval_id"] = item["release_evidence"]["approval_id"]
+            rebind_publication(payload)
+            body, headers, _, _ = wire(payload, self.publication_authority)
+
+            response = RECEIVER.receive_publication(
+                body, headers, self.publication_authority,
+                self.acknowledgement_authority, expectation(payload),
+                self.commit, now=1000,
+            )
+
+            with self.subTest(method=method):
+                self.assertEqual(
+                    json.loads(response.body)["acknowledgement"]["status"],
+                    "accepted",
+                )
+                resolution = self.commits[-1].payload["localizations"][0][
+                    "release_evidence"
+                ]["commercial_review_resolution"]
+                self.assertEqual(resolution["method"], method)
+                self.assertEqual(
+                    resolution["reviewed_dimensions"],
+                    ["tax_status", "cancellation"],
+                )
+                self.assertNotIn("receipt", resolution)
+
+    def test_invalid_targeted_commercial_resolution_never_reaches_commit(self):
+        mutations = (
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                commercial_review_resolution=None,
+            ),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"].update(
+                reviewed_dimensions=["cancellation"],
+            ),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"].update(
+                method="qualified_human",
+            ),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"].update(
+                receipt_sha256="8" * 63,
+            ),
+        )
+        for mutation in mutations:
+            payload = publication_payload()
+            item = payload["localizations"][0]
+            item["release_evidence"] = release_evidence(
+                item["target_text"], review_required=True,
+            )
+            expected = expectation(payload)
+            mutation(payload)
+            rebind_publication(payload)
+            body, headers, _, _ = wire(payload, self.publication_authority)
+            before = len(self.commits)
+            with self.subTest(mutation=mutation), self.assertRaises(
+                RECEIVER.CMSReceiverBlocked,
+            ):
+                RECEIVER.receive_publication(
+                    body, headers, self.publication_authority,
+                    self.acknowledgement_authority, expected,
+                    self.commit, now=1000,
+                )
+            self.assertEqual(len(self.commits), before)
 
     def test_every_eu_locale_uses_its_exact_commercial_quality_binding(self):
         for locale in sorted(

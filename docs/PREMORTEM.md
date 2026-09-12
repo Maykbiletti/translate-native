@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Commercial escalation evidence at publication (12 September 2026)
+
+Assume a locale reached the CMS with a commercial review summary that still
+said `review_required`, while the publication evidence did not say whether the
+targeted dimensions were resolved by an independent model or a qualified human.
+
+- A valid approval could conceal which escalation path actually satisfied the
+  unresolved amount, tax, renewal, cancellation, or condition checks.
+- A receiver that accepts `review_required` without a matching resolution could
+  mistake an unresolved primary review for publishable evidence.
+- A generic receipt hash could be copied to a different ordered dimension scope
+  unless the scope and review method remain inside the signed publication.
+- Exposing raw receipts or reviewer prose would leak sensitive review material.
+
+Advance the publication-evidence contract, add one content-free resolution only
+when the commercial summary is unresolved, and bind its exact ordered dimensions,
+review method, receipt hash, and independent provider identity when applicable.
+Require the receiver to reject missing, unexpected, cross-scope, malformed, or
+method-inconsistent resolution evidence before its commit callback. Prove both
+allowed escalation paths and keep verified commercial and non-commercial traffic
+compact with a `null` resolution.
+
 ## Commercial evidence HTTP profile binding (12 September 2026)
 
 Assume a valid commercial worker result could not reach the remote quality

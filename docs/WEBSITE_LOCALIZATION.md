@@ -1305,12 +1305,15 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v2` object. That content-free
+a `blun.website-localization-release-evidence.v3` object. That content-free
 object binds the signed approval and worker-result hashes, quality-receipt
 hash, and either a null commercial scope or the exact commercial-profile ID,
 locale-specific commercial quality-profile version and digest, and validated
-review summary. The receiver recomputes that binding for each locale before
-the host commit. It contains no source text, target text, amount,
+review summary. If that summary requires targeted review, the object also binds
+the exact ordered dimensions, resolution method, receipt hash, and independent
+provider identity when a second model was used. The receiver rejects a missing,
+unexpected, cross-scope, or method-inconsistent resolution before the host
+commit. It contains no source text, target text, amount,
 currency, tax wording, brand, or reviewer explanation. A CMS can therefore
 pin the advertised profile and reject missing, malformed, or drifted evidence
 before replacing its current content, without treating a cross-language regex

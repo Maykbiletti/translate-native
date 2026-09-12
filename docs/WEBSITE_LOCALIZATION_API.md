@@ -1423,14 +1423,19 @@ The full object is bound into the job ID and all three provider requests; its
 version and digest remain in signed quality evidence. A stale, substituted or
 mutated locale profile blocks before any provider call.
 
-For publication, `blun.website-localization-release-evidence.v2` carries the
+For publication, `blun.website-localization-release-evidence.v3` carries the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
 commercial content and requires all three fields to be null for every other
 content type. The reference CMS receiver recomputes the canonical version and
 digest for each exact target locale before calling host code. A syntactically
 valid digest, a binding from another EU locale, or a prior profile generation
 is therefore not accepted merely because the generic commercial profile still
-matches.
+matches. An unresolved commercial summary additionally requires
+`commercial_review_resolution` with the exact ordered dimensions, a
+`qualified_human` or `independent_model` method, the verified receipt hash, and
+the independent provider binding only for the model route. Verified commercial
+summaries and non-commercial content require this field to be `null`. Raw
+receipts, qualified-human identities and reviewer prose are never published.
 
 ```json
 {
@@ -1500,7 +1505,7 @@ matches.
         "response_schema": "blun.cms-localization-publication-http-ack.v1"
       }],
       "request_content_type": "application/json; charset=utf-8",
-      "release_evidence_schema": "blun.website-localization-release-evidence.v2",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v3",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v2",
       "sha256": "<sha256>"
