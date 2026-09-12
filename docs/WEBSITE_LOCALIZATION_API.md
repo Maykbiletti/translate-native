@@ -874,6 +874,23 @@ local acceptance outbox. `sidecar_status()`, `sidecar_health()`,
 authenticated lifecycle reads and never reinterpret local success as
 downstream completion.
 
+Use `submission_status(operation, request_id)` for a single content-free
+projection across both acceptance queues. While the website row is pending,
+leased, retrying, or failed, it performs no network request and reports stage
+`website_acceptance`. Only after local success does it query the sidecar with
+the persisted operation, request, event, site, and payload hash. The response
+must preserve those bindings, both capability pins, the configured middle
+delivery ceiling, and the source-processing ceiling.
+
+The projection schema is
+`blun.cms-source-delivery-submission-status.v1`. Its top-level status is
+`pending`, `failed`, or `accepted`; its stage is `website_acceptance`,
+`sidecar_delivery`, or `source_acceptance`. It includes the separate website
+and sidecar states, attempt counts and retry ceilings, the next-attempt time,
+lease-expiry flag, and a stable content-free error code. `accepted` means the
+source service has durably accepted the event. It does not mean translation,
+quality review, release approval, or publication succeeded.
+
 Call `replace_credential()` only during a server-side generation overlap. It
 updates the exact signer owned by the worker without reopening the outbox or
 changing either contract pin. The wrapper blocks network and storage access

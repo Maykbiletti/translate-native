@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import io
@@ -251,6 +252,190 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(health["status"], "ok")
         self.assertEqual(readiness["status"], "ready")
         self.assertEqual(len(self.transport.calls), 5)
+
+    def test_submission_status_stays_local_until_sidecar_acceptance(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        before = len(self.transport.calls)
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(len(self.transport.calls), before)
+        self.assertEqual((status.status, status.stage), (
+            "pending", "website_acceptance",
+        ))
+        self.assertEqual((
+            status.website_status,
+            status.website_delivery_max_attempts,
+            status.sidecar_status,
+            status.sidecar_delivery_max_attempts,
+            status.source_max_attempts,
+        ), ("pending", 2, None, 4, 3))
+        payload = status.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "operation", "request_id", "event_id", "site_id",
+            "payload_sha256", "status", "stage", "website_status",
+            "website_attempts", "website_delivery_max_attempts",
+            "sidecar_status", "sidecar_attempts",
+            "sidecar_delivery_max_attempts", "source_max_attempts",
+            "next_attempt_at", "lease_expired", "error_code",
+        })
+        self.assertNotIn(change["localization"]["source_text"], repr(payload))
+
+    def test_submission_status_projects_exact_sidecar_pending_state(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        runtime.run_once()
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual((status.status, status.stage), (
+            "pending", "sidecar_delivery",
+        ))
+        self.assertEqual((
+            status.website_status,
+            status.website_delivery_max_attempts,
+            status.sidecar_status,
+            status.sidecar_delivery_max_attempts,
+            status.source_max_attempts,
+        ), ("succeeded", 2, "pending", 4, 3))
+        self.assertIsNone(status.error_code)
+
+    def test_submission_status_calls_source_acceptance_only_after_delivery(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        runtime.run_once()
+        delivered = self.sidecar.delivery.run_once()
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(delivered.status, "succeeded")
+        self.assertEqual((status.status, status.stage), (
+            "accepted", "source_acceptance",
+        ))
+        self.assertEqual(status.sidecar_status, "succeeded")
+        self.assertIsNone(status.error_code)
+
+    def test_submission_status_preserves_distinct_removal_identities(self):
+        runtime = self.open()
+        removal = cms_support.cancellation()
+        runtime.enqueue_removal(
+            removal, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        runtime.run_once()
+        self.sidecar.delivery.run_once()
+
+        status = runtime.submission_status(
+            "cancellation", removal["cancellation_id"],
+        )
+
+        self.assertEqual((status.status, status.stage), (
+            "accepted", "source_acceptance",
+        ))
+        self.assertEqual((status.operation, status.request_id, status.event_id), (
+            "cancellation", removal["cancellation_id"], removal["event_id"],
+        ))
+        self.assertEqual(status.site_id, removal["site_id"])
+        self.assertEqual(status.payload_sha256, self.payload_hash(removal))
+
+    def test_submission_status_surfaces_terminal_sidecar_failure(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change)
+        runtime.run_once()
+        self.remote.failures.append(delivery_support.ClientFailure(
+            "source_client.denied", retryable=False,
+        ))
+        failed = self.sidecar.delivery.run_once()
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual((status.status, status.stage), (
+            "failed", "sidecar_delivery",
+        ))
+        self.assertEqual(status.sidecar_status, "failed")
+        self.assertEqual(status.error_code, "source_client.denied")
+
+    def test_submission_status_rejects_changed_retry_bindings(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        runtime.run_once()
+        response = runtime.sidecar_status(
+            "change",
+            change["event_id"],
+            change["event_id"],
+            change["site_id"],
+            self.payload_hash(change),
+        )
+        altered = copy.deepcopy(response)
+        altered["status"]["delivery_max_attempts"] = 5
+        runtime._client.status = lambda *_args: altered
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.status_invalid",
+        )
+
+    def test_stale_local_contract_blocks_before_sidecar_status_access(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change)
+        runtime.run_once()
+        runtime._delivery._connection.execute(
+            """
+            UPDATE cms_source_delivery_outbox
+            SET capabilities_sha256 = ?
+            WHERE operation = 'change' AND request_id = ?
+            """,
+            ("f" * 64, change["event_id"]),
+        )
+        before = len(self.transport.calls)
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.status_invalid",
+        )
+        self.assertEqual(len(self.transport.calls), before)
+
+    def test_terminal_website_failure_never_reads_sidecar_status(self):
+        transport = NoNetworkTransport()
+        runtime = self.open(transport=transport)
+        change = cms_support.event()
+        runtime.enqueue_change(change, delivery_max_attempts=1)
+        failed = runtime.run_once()
+        before = len(transport.calls)
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(len(transport.calls), before)
+        self.assertEqual((status.status, status.stage, status.sidecar_status), (
+            "failed", "website_acceptance", None,
+        ))
+        self.assertEqual(status.error_code, "source_delivery_client.network")
 
     def test_rotation_reaches_the_exact_signer_without_reopening_outbox(self):
         runtime = self.open()

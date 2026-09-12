@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Bound submission progress (12 September 2026)
+
+Assume an operator polled a successfully queued website event and mistook one
+durable boundary for completion at the next boundary.
+
+- Reading the sidecar before local acceptance could disclose or manufacture a
+  remote state for work that the website still owns.
+- A status response for another event, tenant, payload, or contract generation
+  could be attached to the local row.
+- Collapsing the three retry ceilings could hide which queue exhausted its
+  attempts and make an unsafe retry appear available.
+- Sidecar-to-source acceptance could be reported as finished localization or
+  publication even though those later stages have not run.
+
+The combined status projection stays local until website acceptance, then uses
+the owned authenticated client and revalidates all immutable identities,
+payload and capability hashes, and both downstream retry ceilings. It exposes
+three explicit acceptance stages, carries only content-free error codes, and
+defines final `accepted` as durable source-service acceptance rather than
+localization completion.
+
 ## Owned authenticated submission runtime (12 September 2026)
 
 Assume a website operator assembled the valid HMAC client, sidecar adapter,

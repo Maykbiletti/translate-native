@@ -8,6 +8,7 @@ import os
 import secrets
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -55,6 +56,56 @@ def _blocked(code: str) -> HMACCMSSourceDeliverySubmissionRuntimeBlocked:
     return HMACCMSSourceDeliverySubmissionRuntimeBlocked(
         "source_delivery_submission_runtime." + code
     )
+
+
+@dataclass(frozen=True)
+class HMACCMSSourceDeliverySubmissionStatus:
+    """Content-free progress across website and sidecar acceptance queues."""
+
+    schema: str
+    operation: str
+    request_id: str
+    event_id: str
+    site_id: str
+    payload_sha256: str
+    status: str
+    stage: str
+    website_status: str
+    website_attempts: int
+    website_delivery_max_attempts: int
+    sidecar_status: str | None
+    sidecar_attempts: int | None
+    sidecar_delivery_max_attempts: int
+    source_max_attempts: int
+    next_attempt_at: float
+    lease_expired: bool
+    error_code: str | None
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "operation": self.operation,
+            "request_id": self.request_id,
+            "event_id": self.event_id,
+            "site_id": self.site_id,
+            "payload_sha256": self.payload_sha256,
+            "status": self.status,
+            "stage": self.stage,
+            "website_status": self.website_status,
+            "website_attempts": self.website_attempts,
+            "website_delivery_max_attempts": (
+                self.website_delivery_max_attempts
+            ),
+            "sidecar_status": self.sidecar_status,
+            "sidecar_attempts": self.sidecar_attempts,
+            "sidecar_delivery_max_attempts": (
+                self.sidecar_delivery_max_attempts
+            ),
+            "source_max_attempts": self.source_max_attempts,
+            "next_attempt_at": self.next_attempt_at,
+            "lease_expired": self.lease_expired,
+            "error_code": self.error_code,
+        }
 
 
 class HMACCMSSourceDeliverySubmissionRuntime:
@@ -127,6 +178,102 @@ class HMACCMSSourceDeliverySubmissionRuntime:
 
         self._assert_open()
         return self._delivery.status(operation, request_id)
+
+    def submission_status(
+        self, operation: str, request_id: str,
+    ) -> HMACCMSSourceDeliverySubmissionStatus:
+        """Project exact progress through both durable acceptance queues."""
+
+        self._assert_open()
+        local = self._delivery.status(operation, request_id)
+        if local.capabilities_sha256 != self.expected_capabilities_sha256:
+            raise _blocked("status_invalid")
+        if local.status != "succeeded":
+            failed = local.status == "failed"
+            return HMACCMSSourceDeliverySubmissionStatus(
+                schema="blun.cms-source-delivery-submission-status.v1",
+                operation=local.operation,
+                request_id=local.request_id,
+                event_id=local.event_id,
+                site_id=local.site_id,
+                payload_sha256=local.payload_sha256,
+                status="failed" if failed else "pending",
+                stage="website_acceptance",
+                website_status=local.status,
+                website_attempts=local.attempts,
+                website_delivery_max_attempts=local.delivery_max_attempts,
+                sidecar_status=None,
+                sidecar_attempts=None,
+                sidecar_delivery_max_attempts=(
+                    self._adapter.sidecar_delivery_max_attempts
+                ),
+                source_max_attempts=local.source_max_attempts,
+                next_attempt_at=local.next_attempt_at,
+                lease_expired=local.lease_expired,
+                error_code=local.last_error_code,
+            )
+
+        response = self._client.status(
+            local.operation,
+            local.request_id,
+            local.event_id,
+            local.site_id,
+            local.payload_sha256,
+        )
+        try:
+            if (
+                not isinstance(response, Mapping)
+                or set(response)
+                != {"schema", "status", "capabilities_sha256"}
+                or response.get("schema")
+                != _AUTH._HTTP.STATUS_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self._client.expected_capabilities_sha256
+            ):
+                raise ValueError
+            sidecar = _AUTH._CLIENT._status_payload(
+                response["status"],
+                expected_operation=local.operation,
+                expected_request_id=local.request_id,
+                expected_event_id=local.event_id,
+                expected_site_id=local.site_id,
+                expected_payload_sha256=local.payload_sha256,
+                expected_remote_capabilities_sha256=(
+                    self._client.expected_remote_capabilities_sha256
+                ),
+            )
+            if (
+                sidecar["delivery_max_attempts"]
+                != self._adapter.sidecar_delivery_max_attempts
+                or sidecar["source_max_attempts"]
+                != local.source_max_attempts
+            ):
+                raise ValueError
+        except Exception:
+            raise _blocked("status_invalid") from None
+
+        accepted = sidecar["status"] == "succeeded"
+        failed = sidecar["status"] == "failed"
+        return HMACCMSSourceDeliverySubmissionStatus(
+            schema="blun.cms-source-delivery-submission-status.v1",
+            operation=local.operation,
+            request_id=local.request_id,
+            event_id=local.event_id,
+            site_id=local.site_id,
+            payload_sha256=local.payload_sha256,
+            status="accepted" if accepted else "failed" if failed else "pending",
+            stage="source_acceptance" if accepted else "sidecar_delivery",
+            website_status=local.status,
+            website_attempts=local.attempts,
+            website_delivery_max_attempts=local.delivery_max_attempts,
+            sidecar_status=sidecar["status"],
+            sidecar_attempts=sidecar["attempts"],
+            sidecar_delivery_max_attempts=sidecar["delivery_max_attempts"],
+            source_max_attempts=sidecar["source_max_attempts"],
+            next_attempt_at=float(sidecar["next_attempt_at"]),
+            lease_expired=sidecar["lease_expired"],
+            error_code=sidecar["last_error_code"],
+        )
 
     def health(self) -> Any:
         self._assert_open()
