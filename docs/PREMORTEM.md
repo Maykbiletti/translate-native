@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Source-bound commercial review evidence (12 September 2026)
+
+Assume a structurally valid, content-free commercial review summary was copied
+to a different source, target, or policy generation.
+
+- A digest covering only the evidence object could remain unchanged when the
+  reviewed source or candidate changed outside an evidence span.
+- Updating the digest recipe without the commercial profile could leave old
+  plan, cache, and approval identities apparently current.
+- A worker and authenticated capability registry could enforce different hash
+  recipes while sharing the same summary schema.
+- Mutation tests could cover changed reviewer evidence but miss exact Unicode
+  text or profile changes.
+
+Commercial profile v3 and summary-contract v2 now hash a versioned binding of
+the exact UTF-8 source hash, exact UTF-8 target hash, profile, and complete
+canonical evidence. The profile bump invalidates earlier derived identities;
+the capability registry validates and publishes the same recipe. Independent
+tests mutate source, target, profile, and evidence and require distinct digest
+changes for every input.
+
 ## Single-source authenticated client composition (12 September 2026)
 
 Assume a website backend wired a valid rotating signer to a valid HTTPS client,

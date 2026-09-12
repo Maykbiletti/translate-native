@@ -1260,11 +1260,12 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v2` object. Its nested and separately
+`translate-native.commercial-capabilities.v3` object. Its nested and separately
 hashed `review_summary_contract` defines the exact content-free result schema,
 field set, verified/review-required state invariant, ten allowed ordered
-review dimensions, complete-evidence hash semantics, and excluded sensitive
-content. A CMS or independent-review adapter can validate targeted commercial
+review dimensions, exact source/target/profile/evidence hash semantics, and
+excluded sensitive content. A CMS or independent-review adapter can validate
+targeted commercial
 escalation without receiving project prices, brands, source/target text, spans,
 or reviewer prose. Any registry or digest drift blocks the whole discovery
 response rather than advertising a partial contract.
@@ -1275,19 +1276,19 @@ response rather than advertising a partial contract.
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": {
-      "profile": "translate-native.commercial.v2",
+      "profile": "translate-native.commercial.v3",
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
-        "evidence_sha256": {"algorithm": "sha-256", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": "complete-commercial-review-evidence"},
-        "profile": "translate-native.commercial.v2",
+        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v1", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-source-sha256", "exact-target-sha256", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
+        "profile": "translate-native.commercial.v3",
         "required_fields": ["schema", "profile", "status", "review_required_dimensions", "evidence_sha256"],
-        "result_schema": "translate-native.commercial-review-summary.v1",
+        "result_schema": "translate-native.commercial-review-summary.v2",
         "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
-        "schema": "translate-native.commercial-review-summary-capabilities.v1",
+        "schema": "translate-native.commercial-review-summary-capabilities.v2",
         "sha256": "<sha256>",
         "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
       },
-      "schema": "translate-native.commercial-capabilities.v2",
+      "schema": "translate-native.commercial-capabilities.v3",
       "sha256": "<sha256>"
     },
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],

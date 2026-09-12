@@ -268,7 +268,7 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
 
     def test_commercial_review_scope_is_exact_and_content_free(self):
         base = evidence_request().as_payload()
-        base["commercial_profile"] = "translate-native.commercial.v2"
+        base["commercial_profile"] = "translate-native.commercial.v3"
         base["commercial_review"] = {
             "schema": HTTP.COMMERCIAL_REVIEW_SUMMARY_SCHEMA,
             "profile": base["commercial_profile"],

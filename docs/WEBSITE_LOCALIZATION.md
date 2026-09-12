@@ -1648,7 +1648,7 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v2` profile to the job payload, job ID
+versioned `translate-native.commercial.v3` profile to the job payload, job ID
 and plan ID; the existing seven types retain their previous payloads and IDs.
 It is available for every planner locale, including `mt-MT` and `fi-FI`.
 The public skill's [commercial guide](../translate-native/references/commercial-localization.md)
@@ -1685,12 +1685,14 @@ Do not classify legal text as commercial to bypass the legal human-review gate.
 The full commercial response hash stays in the normal quality-pass receipt;
 job IDs bind the profile version through queue, signed memory and publication.
 The content-free result summary uses
-`translate-native.commercial-review-summary.v1`; the authenticated capability
+`translate-native.commercial-review-summary.v2`; the authenticated capability
 response publishes its exact separately hashed machine contract, including the
 ordered allowed dimensions and the invariant between status and unresolved
-dimensions. Quality-evidence request v5 and receipt-binding v2 carry that exact
-summary, so adapters can reject unknown, reordered or contradictory review
-scope without reconstructing it from prose.
+dimensions. Its evidence digest covers a versioned canonical binding of the
+commercial profile, exact UTF-8 source and target hashes, and complete review
+evidence. Quality-evidence request v5 and receipt-binding v2 carry that exact
+summary, so adapters can reject unknown, reordered, contradictory, or
+transplanted review scope without reconstructing it from prose.
 As before, the host must verify an independent quality receipt before signing.
 Schema validation does not prove that a model's semantic findings are true or
 complete. The receipt verifier must validate evidence held by the trusted host;

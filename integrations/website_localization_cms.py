@@ -570,7 +570,18 @@ class WebsiteLocalizationCMSBridge:
                     "canonicalization": (
                         "utf-8-json-sort-keys-no-insignificant-whitespace"
                     ),
-                    "covers": "complete-commercial-review-evidence",
+                    "binding_schema": _COMMERCIAL.EVIDENCE_BINDING_SCHEMA,
+                    "binding_fields": [
+                        "schema", "profile", "source_sha256", "target_sha256",
+                        "evidence",
+                    ],
+                    "text_hashing": "exact-utf-8",
+                    "covers": [
+                        "commercial-profile",
+                        "exact-source-sha256",
+                        "exact-target-sha256",
+                        "complete-commercial-review-evidence",
+                    ],
                 }
                 or review_summary_contract["content_policy"] != {
                     "source_text": False,

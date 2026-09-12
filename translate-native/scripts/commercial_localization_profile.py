@@ -12,11 +12,12 @@ import json
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v2"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v3"
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-summary-capabilities.v1"
+    "translate-native.commercial-review-summary-capabilities.v2"
 )
-REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v1"
+REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
+EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v1"
 
 DIMENSIONS = {
     "amount_currency": "Amounts, currency identity, units and price-to-product association; no conversion or rounding.",
@@ -36,6 +37,22 @@ def _canonical_json(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def evidence_sha256(value: Any, source: str, target: str, profile: str) -> str:
+    """Bind complete evidence to exact UTF-8 texts and the commercial profile."""
+    binding = {
+        "schema": EVIDENCE_BINDING_SCHEMA,
+        "profile": profile,
+        "source_sha256": _text_sha256(source),
+        "target_sha256": _text_sha256(target),
+        "evidence": value,
+    }
+    return hashlib.sha256(_canonical_json(binding)).hexdigest()
 
 
 def public_review_summary_contract(profile: str) -> dict[str, Any]:
@@ -63,7 +80,18 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
         "evidence_sha256": {
             "algorithm": "sha-256",
             "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace",
-            "covers": "complete-commercial-review-evidence",
+            "binding_schema": EVIDENCE_BINDING_SCHEMA,
+            "binding_fields": [
+                "schema", "profile", "source_sha256", "target_sha256",
+                "evidence",
+            ],
+            "text_hashing": "exact-utf-8",
+            "covers": [
+                "commercial-profile",
+                "exact-source-sha256",
+                "exact-target-sha256",
+                "complete-commercial-review-evidence",
+            ],
         },
         "content_policy": {
             "source_text": False,
@@ -292,7 +320,7 @@ def validate_review(
         "review_required_dimensions": [
             name for name in DIMENSIONS if name in uncertain_dimensions
         ],
-        "evidence_sha256": hashlib.sha256(_canonical_json(value)).hexdigest(),
+        "evidence_sha256": evidence_sha256(value, source, target, schema),
     }
     if uncertain_dimensions and not allow_uncertain:
         raise CommercialReviewBlocked("review.commercial.independent_review_required")

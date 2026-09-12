@@ -29,7 +29,7 @@ REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v1"
+COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
 COMMERCIAL_DIMENSIONS = (
     "amount_currency", "discount_basis", "qualifiers", "tax_status",
     "billing_interval", "commitment", "renewal", "cancellation",

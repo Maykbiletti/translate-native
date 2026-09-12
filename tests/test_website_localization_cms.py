@@ -477,9 +477,19 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
 
         for item in request.payload["localizations"]:
             evidence = item["release_evidence"]
+            self.assertEqual(set(evidence), {
+                "schema", "job_id", "target_locale", "content_type",
+                "target_sha256", "result_sha256", "quality_receipt_sha256",
+                "approval_id", "approval_sha256", "commercial_profile",
+                "commercial_review",
+            })
             self.assertEqual(
                 evidence["commercial_profile"], PLANNER.COMMERCIAL_PROFILE,
             )
+            self.assertEqual(set(evidence["commercial_review"]), {
+                "schema", "profile", "status", "review_required_dimensions",
+                "evidence_sha256",
+            })
             self.assertEqual(evidence["commercial_review"]["status"], "verified")
             self.assertEqual(
                 evidence["commercial_review"]["review_required_dimensions"], [],
@@ -487,7 +497,7 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         serialized = json.dumps(
             [item["release_evidence"] for item in request.payload["localizations"]]
         )
-        self.assertNotIn("480", serialized)
+        self.assertNotIn(event["localization"]["source_text"], serialized)
         self.assertNotIn("VAT", serialized)
 
     def test_success_requires_exact_ack_and_sends_one_complete_request(self):

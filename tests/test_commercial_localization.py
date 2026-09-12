@@ -63,6 +63,27 @@ class CommercialLocalizationTests(unittest.TestCase):
             value["review_required_dimensions"]["order"],
             list(PROFILE.DIMENSIONS),
         )
+        self.assertEqual(
+            value["evidence_sha256"],
+            {
+                "algorithm": "sha-256",
+                "canonicalization": (
+                    "utf-8-json-sort-keys-no-insignificant-whitespace"
+                ),
+                "binding_schema": PROFILE.EVIDENCE_BINDING_SCHEMA,
+                "binding_fields": [
+                    "schema", "profile", "source_sha256", "target_sha256",
+                    "evidence",
+                ],
+                "text_hashing": "exact-utf-8",
+                "covers": [
+                    "commercial-profile",
+                    "exact-source-sha256",
+                    "exact-target-sha256",
+                    "complete-commercial-review-evidence",
+                ],
+            },
+        )
         unsigned = dict(value)
         digest = unsigned.pop("sha256")
         self.assertEqual(
@@ -91,13 +112,40 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(summary["review_required_dimensions"], [])
         self.assertEqual(
             summary["evidence_sha256"],
-            PROFILE.hashlib.sha256(PROFILE._canonical_json(evidence())).hexdigest(),
+            PROFILE.evidence_sha256(evidence(), SOURCE, TARGET, SCHEMA),
         )
         summary_without_digest = dict(summary)
         summary_without_digest.pop("evidence_sha256")
         self.assertNotIn("480", json.dumps(summary_without_digest))
         self.assertNotIn("VAT", json.dumps(summary_without_digest))
         self.assertTrue(result["release_required"])
+
+    def test_review_digest_binds_exact_source_target_profile_and_evidence(self):
+        report = evidence()
+        baseline = PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+        digests = {
+            baseline["evidence_sha256"],
+            PROFILE.validate_review(
+                report, SOURCE + " ", TARGET, SCHEMA,
+            )["evidence_sha256"],
+            PROFILE.validate_review(
+                report, SOURCE, TARGET + " ", SCHEMA,
+            )["evidence_sha256"],
+        }
+        changed_profile = SCHEMA + ".next"
+        changed_report = copy.deepcopy(report)
+        changed_report["schema"] = changed_profile
+        digests.add(PROFILE.validate_review(
+            changed_report, SOURCE, TARGET, changed_profile,
+        )["evidence_sha256"])
+        changed_evidence = copy.deepcopy(report)
+        changed_evidence["checks"]["amount_currency"]["items"][0][
+            "explanation"
+        ] += " Exact semantic interpretation changed."
+        digests.add(PROFILE.validate_review(
+            changed_evidence, SOURCE, TARGET, SCHEMA,
+        )["evidence_sha256"])
+        self.assertEqual(len(digests), 5)
 
     def test_all_eu_locales_receive_profile_without_source_language_translation(self):
         plan = PLANNER.plan_website_localization(
@@ -128,7 +176,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v3"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v4"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])

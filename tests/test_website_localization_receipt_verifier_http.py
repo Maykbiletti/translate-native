@@ -271,7 +271,7 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
 
     def test_commercial_review_scope_is_bound_before_transport(self):
         value = binding()
-        value["commercial_profile"] = "translate-native.commercial.v2"
+        value["commercial_profile"] = "translate-native.commercial.v3"
         value["commercial_review"] = {
             "schema": HTTP.COMMERCIAL_REVIEW_SUMMARY_SCHEMA,
             "profile": value["commercial_profile"],
