@@ -31,7 +31,7 @@ PUBLICATION_SCHEMA = "blun.cms-localization-publication.v3"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
-CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v4"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v5"
 PUBLICATION_HTTP_CONTRACT_SCHEMA = (
     "blun.cms-localization-publication-http-capabilities.v2"
 )
@@ -507,6 +507,7 @@ class WebsiteLocalizationCMSBridge:
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
 
             commercial = _COMMERCIAL.public_profile(_PLANNER.COMMERCIAL_PROFILE)
+            rendering_registry = _PLANNER.commercial_rendering_registry()
             review_summary_contract = _COMMERCIAL.public_review_summary_contract(
                 _PLANNER.COMMERCIAL_PROFILE,
             )
@@ -638,6 +639,7 @@ class WebsiteLocalizationCMSBridge:
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
 
             locales = []
+            expected_rendering_locales = []
             seen_locales: set[str] = set()
             seen_languages: set[str] = set()
             seen_eu_codes: set[str] = set()
@@ -722,6 +724,39 @@ class WebsiteLocalizationCMSBridge:
                         commercial_quality["sha256"]
                     ),
                 })
+                expected_rendering_locales.append({
+                    "locale": locale,
+                    "commercial_quality_profile": {
+                        "version": commercial_quality["version"],
+                        "sha256": commercial_quality["sha256"],
+                    },
+                    "rendering_reference": commercial_quality[
+                        "rendering_reference"
+                    ],
+                })
+
+            expected_rendering_registry = {
+                "schema": _PLANNER.COMMERCIAL_RENDERING_REGISTRY_SCHEMA,
+                "commercial_profile": _PLANNER.COMMERCIAL_PROFILE,
+                "source": {
+                    "authority": "Unicode CLDR",
+                    "version": "48",
+                },
+                "content_policy": {
+                    "source_text": False,
+                    "target_text": False,
+                    "project_prices": False,
+                    "project_brands": False,
+                    "credentials": False,
+                },
+                "locales": expected_rendering_locales,
+            }
+            expected_rendering_registry = {
+                **expected_rendering_registry,
+                "sha256": _hash(_canonical_json(expected_rendering_registry)),
+            }
+            if rendering_registry != expected_rendering_registry:
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
 
             body = {
                 "schema": CAPABILITIES_SCHEMA,
@@ -741,6 +776,7 @@ class WebsiteLocalizationCMSBridge:
                 "content_types": sorted(content_types),
                 "quality_passes": list(quality_passes),
                 "commercial_profile": commercial,
+                "commercial_rendering_registry": rendering_registry,
                 "publication_http": self._publication_http_capabilities(),
                 "locales": locales,
             }

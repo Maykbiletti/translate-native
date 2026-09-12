@@ -12,6 +12,9 @@ from typing import Any
 SCHEMA = "blun.website-localization-quality-profile.v1"
 COMMERCIAL_SCHEMA = "translate-native.commercial-locale-quality-profile.v2"
 COMMERCIAL_RENDERING_SCHEMA = "translate-native.commercial-rendering-reference.v1"
+COMMERCIAL_RENDERING_REGISTRY_SCHEMA = (
+    "translate-native.commercial-rendering-registry.v1"
+)
 CLDR_VERSION = "48"
 CLDR_SUMMARY = "https://www.unicode.org/cldr/charts/48/summary/{language}.html"
 CLDR_NUMBERS = (
@@ -538,6 +541,44 @@ def commercial_quality_profile_for(
         ],
         "required_commercial_checks": list(COMMERCIAL_REVIEW_CHECKS),
         "source_refs": quality["source_refs"],
+    }
+    detached = json.loads(_canonical_json(body))
+    detached["sha256"] = hashlib.sha256(_canonical_json(detached)).hexdigest()
+    return detached
+
+
+def commercial_rendering_registry(commercial_profile: str) -> dict[str, Any]:
+    """Return the complete content-free commercial rendering registry."""
+
+    entries = []
+    for profile in PROFILES:
+        commercial = commercial_quality_profile_for(
+            profile.locale,
+            commercial_profile,
+        )
+        entries.append({
+            "locale": profile.locale,
+            "commercial_quality_profile": {
+                "version": commercial["version"],
+                "sha256": commercial["sha256"],
+            },
+            "rendering_reference": commercial["rendering_reference"],
+        })
+    body = {
+        "schema": COMMERCIAL_RENDERING_REGISTRY_SCHEMA,
+        "commercial_profile": commercial_profile,
+        "source": {
+            "authority": "Unicode CLDR",
+            "version": CLDR_VERSION,
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "project_prices": False,
+            "project_brands": False,
+            "credentials": False,
+        },
+        "locales": entries,
     }
     detached = json.loads(_canonical_json(body))
     detached["sha256"] = hashlib.sha256(_canonical_json(detached)).hexdigest()

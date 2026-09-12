@@ -152,6 +152,55 @@ class WebsiteLocalizationQualityProfileTests(unittest.TestCase):
         self.assertEqual(portuguese["minimum_grouping_digits"], 2)
         self.assertEqual(portuguese["symbols"]["group"], "\N{NO-BREAK SPACE}")
 
+    def test_public_commercial_rendering_registry_is_complete_and_detached(self):
+        registry = PROFILES.commercial_rendering_registry(
+            PLANNER.COMMERCIAL_PROFILE,
+        )
+        self.assertEqual(
+            registry["schema"],
+            PROFILES.COMMERCIAL_RENDERING_REGISTRY_SCHEMA,
+        )
+        self.assertEqual(registry["commercial_profile"], PLANNER.COMMERCIAL_PROFILE)
+        self.assertEqual(
+            registry["source"],
+            {"authority": "Unicode CLDR", "version": "48"},
+        )
+        self.assertTrue(all(value is False for value in registry["content_policy"].values()))
+        self.assertEqual(len(registry["locales"]), 24)
+        self.assertEqual(
+            [item["locale"] for item in registry["locales"]],
+            [profile.locale for profile in PROFILES.PROFILES],
+        )
+        for item in registry["locales"]:
+            commercial = PROFILES.commercial_quality_profile_for(
+                item["locale"],
+                PLANNER.COMMERCIAL_PROFILE,
+            )
+            self.assertEqual(
+                item["commercial_quality_profile"],
+                {
+                    "version": commercial["version"],
+                    "sha256": commercial["sha256"],
+                },
+            )
+            self.assertEqual(
+                item["rendering_reference"],
+                commercial["rendering_reference"],
+            )
+        unsigned = dict(registry)
+        digest = unsigned.pop("sha256")
+        self.assertEqual(digest, hashlib.sha256(
+            json.dumps(
+                unsigned, ensure_ascii=False, allow_nan=False,
+                sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest())
+        registry["locales"][0]["rendering_reference"]["patterns"]["currency"] = "x"
+        self.assertNotEqual(
+            registry,
+            PROFILES.commercial_rendering_registry(PLANNER.COMMERCIAL_PROFILE),
+        )
+
     def test_maltese_and_finnish_profiles_cover_required_language_risks(self):
         maltese = PROFILES.quality_profile_for("mt-MT")
         finnish = PROFILES.quality_profile_for("fi-FI")

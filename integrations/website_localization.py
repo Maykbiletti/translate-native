@@ -78,6 +78,9 @@ def _load_quality_profiles():
 
 
 _QUALITY_PROFILES = _load_quality_profiles()
+COMMERCIAL_RENDERING_REGISTRY_SCHEMA = (
+    _QUALITY_PROFILES.COMMERCIAL_RENDERING_REGISTRY_SCHEMA
+)
 
 
 def _locale(locale: str, eu_code: str, language: str, native_name: str, script: str) -> LocaleProfile:
@@ -128,6 +131,10 @@ def commercial_quality_profile_for(locale: str) -> dict[str, Any]:
         locale,
         COMMERCIAL_PROFILE,
     )
+
+
+def commercial_rendering_registry() -> dict[str, Any]:
+    return _QUALITY_PROFILES.commercial_rendering_registry(COMMERCIAL_PROFILE)
 
 
 @dataclass(frozen=True)

@@ -1397,7 +1397,7 @@ disabled, so a CMS can fail closed before submitting work. The object uses
 over every other canonical field. Paths and schemas come from the same runtime
 constants used for routing; they are not copied into a second configuration.
 
-The nested `blun.website-localization-capabilities.v4` object carries a
+The nested `blun.website-localization-capabilities.v5` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
 runtime rebuilds and validates the complete registry on every read; duplicate,
@@ -1432,6 +1432,16 @@ all three provider phases and covered by the profile digest. This is rendering
 guidance only: deterministic punctuation or numeric regex matching is not
 semantic proof, equivalent written forms remain eligible, and uncertainty is
 routed to independent model or qualified native-domain review.
+
+The separately hashed `commercial_rendering_registry` makes those exact
+references available to CMS and website clients without exposing localized
+content. It contains all 24 locales in canonical order and binds each reference
+to the exact commercial locale-profile version and digest advertised in the
+same response. The runtime reconstructs and compares the complete registry
+before returning capabilities; a missing, reordered, altered, or merely
+rehashed entry returns `503` without a partial registry. Consumers must still
+treat these values as display guidance and route uncertain semantic equality to
+the configured independent review path.
 
 For publication, `blun.website-localization-release-evidence.v3` carries the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
@@ -1476,6 +1486,27 @@ receipts, qualified-human identities and reviewer prose are never published.
       },
       "schema": "translate-native.commercial-capabilities.v5",
       "sha256": "<sha256>"
+    },
+    "commercial_rendering_registry": {
+      "commercial_profile": "translate-native.commercial.v5",
+      "content_policy": {"credentials": false, "project_brands": false, "project_prices": false, "source_text": false, "target_text": false},
+      "locales": [{
+        "commercial_quality_profile": {"sha256": "<sha256>", "version": "commercial-eu-mt-MT-2026-09-2"},
+        "locale": "mt-MT",
+        "rendering_reference": {
+          "locale": "mt-MT",
+          "minimum_grouping_digits": 1,
+          "native_numbering_system": "latn",
+          "numbering_system": "latn",
+          "patterns": {"currency": "¤#,##0.00", "decimal": "#,##0.###", "percent": "#,##0%", "range": "{0}–{1}"},
+          "schema": "translate-native.commercial-rendering-reference.v1",
+          "source": {"authority": "Unicode CLDR", "locale": "mt", "version": "48"},
+          "symbols": {"decimal": ".", "group": ","}
+        }
+      }],
+      "schema": "translate-native.commercial-rendering-registry.v1",
+      "sha256": "<sha256>",
+      "source": {"authority": "Unicode CLDR", "version": "48"}
     },
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
     "default_target_policy": "all-eu-official-locales-except-source-language",
@@ -1523,7 +1554,7 @@ receipts, qualified-human identities and reviewer prose are never published.
     },
     "publication_schema": "blun.cms-localization-publication.v3",
     "quality_passes": ["target_native", "source_fidelity"],
-    "schema": "blun.website-localization-capabilities.v4",
+    "schema": "blun.website-localization-capabilities.v5",
     "sha256": "<sha256>"
   },
   "api_contract": {
