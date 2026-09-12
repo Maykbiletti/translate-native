@@ -183,6 +183,21 @@ class SourceDeliveryHMACRuntimeTests(unittest.TestCase):
             nonce_factory=self.nonces if nonce_factory is None else nonce_factory,
         )
 
+    def rotating_client(self, runtime, credential=None, *, transport=None, **options):
+        actual_transport = (
+            WSGITransport(runtime.http) if transport is None else transport
+        )
+        return RUNTIME.RotatingHMACCMSSourceDeliveryClient(
+            self.credential if credential is None else credential,
+            origin="https://delivery.example",
+            sidecar_capabilities_sha256=self.sidecar_digest,
+            remote_capabilities_sha256=self.remote_digest,
+            clock=lambda: self.now,
+            nonce_factory=self.nonces,
+            transport=actual_transport,
+            **options,
+        ), actual_transport
+
     def http_client(self, runtime, credential=None):
         transport = WSGITransport(runtime.http)
         client = CLIENT.CMSSourceDeliverySidecarHTTPClient(
@@ -487,6 +502,92 @@ class SourceDeliveryHMACRuntimeTests(unittest.TestCase):
             caught.exception.code,
             "source_delivery_hmac.signer_foreign_process",
         )
+
+    def test_composed_client_covers_all_operations_and_live_rotation(self):
+        runtime = self.open()
+        client, transport = self.rotating_client(runtime)
+        change = cms_support.event()
+        payload_sha256 = hashlib.sha256(CLIENT._canonical(change)).hexdigest()
+
+        capabilities = client.capabilities()
+        queued = client.submit_change(change)["queue"]
+        status = client.status(
+            "change",
+            change["event_id"],
+            change["event_id"],
+            change["site_id"],
+            payload_sha256,
+        )["status"]
+        health = client.health()["health"]
+        readiness = client.readiness()["readiness"]
+        removed = client.submit_removal(cms_support.cancellation(change))["queue"]
+        second_credential = self.make_credential("2")
+        worker = runtime.delivery._worker_thread
+
+        runtime.replace_credentials((self.credential, second_credential))
+        client.replace_credential(second_credential)
+        runtime.replace_credentials((second_credential,))
+
+        self.assertEqual(capabilities["capabilities"]["sha256"], self.sidecar_digest)
+        self.assertEqual(queued["operation"], "change")
+        self.assertEqual(status["request_id"], change["event_id"])
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(readiness["status"], "ready")
+        self.assertEqual(removed["operation"], "cancellation")
+        self.assertEqual(
+            client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+        self.assertIs(runtime.delivery._worker_thread, worker)
+        self.assertGreaterEqual(len(transport.calls), 12)
+
+    def test_composed_client_rejects_invalid_configuration_without_network(self):
+        runtime = self.open()
+        transport = WSGITransport(runtime.http)
+
+        with self.assertRaises(
+            AUTH.SourceDeliveryHMACAuthenticationUnavailable,
+        ) as caught:
+            self.rotating_client(runtime, transport=transport, timeout=0)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_hmac.client_configuration_invalid",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_composed_client_is_process_bound_and_keeps_valid_credential(self):
+        runtime = self.open()
+        client, transport = self.rotating_client(runtime)
+
+        with self.assertRaises(
+            AUTH.SourceDeliveryHMACAuthenticationUnavailable,
+        ) as invalid:
+            client.replace_credential(object())
+        self.assertEqual(
+            invalid.exception.code,
+            "source_delivery_hmac.signer_configuration_invalid",
+        )
+        self.assertEqual(
+            client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+        rendered = repr(client)
+        self.assertNotIn(self.credential.secret.hex(), rendered)
+        self.assertNotIn(self.credential.site_id, rendered)
+
+        calls = len(transport.calls)
+        client._owner_pid -= 1
+        self.assertEqual(client.state, "foreign-process")
+        with self.assertRaises(
+            AUTH.SourceDeliveryHMACAuthenticationUnavailable,
+        ) as foreign:
+            client.capabilities()
+        self.assertEqual(
+            foreign.exception.code,
+            "source_delivery_hmac.client_foreign_process",
+        )
+        self.assertEqual(len(transport.calls), calls)
 
     def test_invalid_configuration_creates_neither_database(self):
         cases = (

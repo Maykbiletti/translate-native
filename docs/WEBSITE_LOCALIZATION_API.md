@@ -829,6 +829,25 @@ durable item. `health()` and `readiness()` accept HTTP `503` only as an exactly
 validated blocked snapshot. Transport and server failures expose stable
 content-free codes plus retryability, but the client never schedules a retry.
 
+For the authenticated production path, construct
+`RotatingHMACCMSSourceDeliveryClient` from
+`website_localization_cms_source_delivery_auth_runtime.py`. Supply the exact
+origin, sidecar capability SHA-256, downstream capability SHA-256, initial
+`HMACCredential`, clock/nonce policy, timeout, and optional transport once. The
+composition creates one private `RotatingSourceDeliveryHMACSigner` and one
+`CMSSourceDeliverySidecarHTTPClient` from that same immutable configuration.
+Invalid construction is reduced to
+`source_delivery_hmac.client_configuration_invalid` before any network call.
+
+The composed surface exposes `capabilities()`, `submit_change()`,
+`submit_removal()`, `status()`, `health()`, and `readiness()` with the original
+contract signatures. `replace_credential()` updates the exact signer used by
+all six routes. The client is process-bound before delegation, so a forked
+worker cannot reach its inherited transport; create a fresh client in the child
+from host-owned secret state. Client errors retain the underlying stable
+content-free retry decision, and neither the wrapper nor its representation
+exposes the credential, tenant, endpoint, or website content.
+
 #### Rotatable source-delivery HMAC authentication
 
 `integrations/website_localization_cms_source_delivery_auth.py` provides a

@@ -38,6 +38,9 @@ _DELIVERY_RUNTIME = _load_module(
 )
 HMACCredential = _AUTH.HMACCredential
 RotatingSourceDeliveryHMACSigner = _AUTH.RotatingSourceDeliveryHMACSigner
+RotatingHMACCMSSourceDeliveryClient = (
+    _AUTH.RotatingHMACCMSSourceDeliveryClient
+)
 
 
 class SourceDeliveryHMACRuntimeBlocked(RuntimeError):

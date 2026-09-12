@@ -574,6 +574,122 @@ class RotatingSourceDeliveryHMACSigner:
             self._signer = replacement
 
 
+class RotatingHMACCMSSourceDeliveryClient:
+    """Bind one rotatable signer and HTTP client to the same fixed contract."""
+
+    def __init__(
+        self,
+        credential: HMACCredential,
+        *,
+        origin: str,
+        sidecar_capabilities_sha256: str,
+        remote_capabilities_sha256: str,
+        clock: Callable[[], float | int] = time.time,
+        nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24),
+        transport: Any = None,
+        timeout: float | int = 30,
+        allow_loopback_http: bool = False,
+    ):
+        self._owner_pid = os.getpid()
+        try:
+            signer = RotatingSourceDeliveryHMACSigner(
+                credential,
+                origin=origin,
+                sidecar_capabilities_sha256=sidecar_capabilities_sha256,
+                remote_capabilities_sha256=remote_capabilities_sha256,
+                clock=clock,
+                nonce_factory=nonce_factory,
+                allow_loopback_http=allow_loopback_http,
+            )
+            client_options = {
+                "timeout": timeout,
+                "allow_loopback_http": allow_loopback_http,
+            }
+            if transport is not None:
+                client_options["transport"] = transport
+            client = _CLIENT.CMSSourceDeliverySidecarHTTPClient(
+                origin,
+                sidecar_capabilities_sha256,
+                remote_capabilities_sha256,
+                signer,
+                **client_options,
+            )
+        except Exception:
+            raise _unavailable("client_configuration_invalid") from None
+        self._signer = signer
+        self._client = client
+
+    def __repr__(self) -> str:
+        return f"RotatingHMACCMSSourceDeliveryClient(state={self.state!r})"
+
+    def _assert_owner(self) -> None:
+        if os.getpid() != self._owner_pid:
+            raise _unavailable("client_foreign_process")
+
+    def _call(self, name: str, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        self._assert_owner()
+        return getattr(self._client, name)(*args, **kwargs)
+
+    def replace_credential(self, credential: HMACCredential) -> None:
+        self._assert_owner()
+        self._signer.replace_credential(credential)
+
+    def capabilities(self) -> Mapping[str, Any]:
+        return self._call("capabilities")
+
+    def submit_change(
+        self,
+        change: Mapping[str, Any],
+        *,
+        source_max_attempts: int = 5,
+        delivery_max_attempts: int = 5,
+    ) -> Mapping[str, Any]:
+        return self._call(
+            "submit_change",
+            change,
+            source_max_attempts=source_max_attempts,
+            delivery_max_attempts=delivery_max_attempts,
+        )
+
+    def submit_removal(
+        self,
+        removal: Mapping[str, Any],
+        *,
+        source_max_attempts: int = 5,
+        delivery_max_attempts: int = 5,
+    ) -> Mapping[str, Any]:
+        return self._call(
+            "submit_removal",
+            removal,
+            source_max_attempts=source_max_attempts,
+            delivery_max_attempts=delivery_max_attempts,
+        )
+
+    def status(
+        self,
+        operation: str,
+        request_id: str,
+        event_id: str,
+        site_id: str,
+        payload_sha256: str,
+    ) -> Mapping[str, Any]:
+        return self._call(
+            "status", operation, request_id, event_id, site_id, payload_sha256,
+        )
+
+    def health(self) -> Mapping[str, Any]:
+        return self._call("health")
+
+    def readiness(self) -> Mapping[str, Any]:
+        return self._call("readiness")
+
+    @property
+    def state(self) -> str:
+        if os.getpid() != self._owner_pid:
+            return "foreign-process"
+        return "open"
+
+
 class SourceDeliveryHMACVerifier:
     """Authenticate exact sidecar requests and consume each proof once."""
 

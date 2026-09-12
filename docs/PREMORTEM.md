@@ -1,5 +1,25 @@
 # Version 6 premortem
 
+## Single-source authenticated client composition (12 September 2026)
+
+Assume a website backend wired a valid rotating signer to a valid HTTPS client,
+but duplicated their security configuration incorrectly.
+
+- The signer and client could receive different origins or capability pins and
+  fail only after the service entered production.
+- An adapter could rotate one signer while a different signer still protected
+  outgoing operations.
+- A convenience wrapper could omit status, health, readiness, or removal and
+  encourage an unprotected alternate path.
+- A forked worker could reach the network through an inherited client before
+  the signer rejected its first proof.
+
+The composed client now accepts origin and both capability pins exactly once,
+constructs its private rotating signer and HTTP client together, and exposes
+all six contract operations through one process-bound surface. Configuration
+failure performs no network call. Credential replacement reaches the exact
+signer used by every operation and retains its previous credential on failure.
+
 ## Uninterrupted source-delivery client rotation (12 September 2026)
 
 Assume the server accepted an overlap generation, but a long-lived source
