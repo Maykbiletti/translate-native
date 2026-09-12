@@ -707,7 +707,7 @@ class CMSSourceDeliverySidecarHTTPClient:
         if (
             set(response) != {
                 "schema", "source_status", "source_capabilities_sha256",
-                "capabilities_sha256",
+                "capabilities_sha256", "source_capability_binding",
             }
             or response.get("schema") != contract["response_schema"]
             or response.get("capabilities_sha256")
@@ -721,6 +721,9 @@ class CMSSourceDeliverySidecarHTTPClient:
                 {
                     "schema": _HTTP._SOURCE_HTTP.STATUS_RESPONSE_SCHEMA,
                     "status": response["source_status"],
+                    "capability_binding": response[
+                        "source_capability_binding"
+                    ],
                     "capabilities_sha256": (
                         response["source_capabilities_sha256"]
                     ),
@@ -733,7 +736,11 @@ class CMSSourceDeliverySidecarHTTPClient:
             )
         except Exception:
             _fail("source_status_binding")
-        if normalized != response["source_status"]:
+        if (
+            normalized["status"] != response["source_status"]
+            or normalized["capability_binding"]
+            != response["source_capability_binding"]
+        ):
             _fail("source_status_binding")
         return response
 
@@ -747,7 +754,7 @@ class CMSSourceDeliverySidecarHTTPClient:
         if (
             set(response) != {
                 "schema", "source_readiness", "source_capabilities_sha256",
-                "capabilities_sha256",
+                "capabilities_sha256", "source_capability_binding",
             }
             or response.get("schema") != contract["response_schema"]
             or response.get("capabilities_sha256")
@@ -761,6 +768,9 @@ class CMSSourceDeliverySidecarHTTPClient:
                 {
                     "schema": _HTTP._SOURCE_HTTP.READINESS_RESPONSE_SCHEMA,
                     "readiness": response["source_readiness"],
+                    "capability_binding": response[
+                        "source_capability_binding"
+                    ],
                     "capabilities_sha256": (
                         response["source_capabilities_sha256"]
                     ),
@@ -772,8 +782,11 @@ class CMSSourceDeliverySidecarHTTPClient:
         except Exception:
             _fail("source_readiness_binding")
         if (
-            normalized != response["source_readiness"]
-            or (result.status == 200) != (normalized["status"] == "ready")
+            normalized["readiness"] != response["source_readiness"]
+            or normalized["capability_binding"]
+            != response["source_capability_binding"]
+            or (result.status == 200)
+            != (normalized["readiness"]["status"] == "ready")
         ):
             _fail("source_readiness_binding")
         return response
@@ -788,7 +801,7 @@ class CMSSourceDeliverySidecarHTTPClient:
         if (
             set(response) != {
                 "schema", "source_health", "source_capabilities_sha256",
-                "capabilities_sha256",
+                "capabilities_sha256", "source_capability_binding",
             }
             or response.get("schema") != contract["response_schema"]
             or response.get("capabilities_sha256")
@@ -802,6 +815,9 @@ class CMSSourceDeliverySidecarHTTPClient:
                 {
                     "schema": _HTTP._SOURCE_HTTP.HEALTH_RESPONSE_SCHEMA,
                     "health": response["source_health"],
+                    "capability_binding": response[
+                        "source_capability_binding"
+                    ],
                     "capabilities_sha256": (
                         response["source_capabilities_sha256"]
                     ),
@@ -813,8 +829,11 @@ class CMSSourceDeliverySidecarHTTPClient:
         except Exception:
             _fail("source_health_binding")
         if (
-            normalized != response["source_health"]
-            or (result.status == 503) != (normalized["status"] == "blocked")
+            normalized["health"] != response["source_health"]
+            or normalized["capability_binding"]
+            != response["source_capability_binding"]
+            or (result.status == 503)
+            != (normalized["health"]["status"] == "blocked")
         ):
             _fail("source_health_binding")
         return response

@@ -24,8 +24,8 @@ ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 CHANGE_SCHEMA = "blun.cms-content-change.v2"
 CANCELLATION_SCHEMA = "blun.cms-content-cancellation.v1"
 TOMBSTONE_SCHEMA = "blun.cms-content-tombstone.v1"
-CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v2"
-REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v2"
+CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v3"
+REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v3"
 SIDECAR_QUEUE_RESPONSE_SCHEMA = "blun.cms-source-delivery-queue-response.v1"
 QUEUE_FIELDS = {
     "operation", "request_id", "event_id", "site_id", "payload_sha256",

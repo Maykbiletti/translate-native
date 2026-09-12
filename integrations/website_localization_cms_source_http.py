@@ -23,15 +23,17 @@ AUTH_REQUEST_SCHEMA = "blun.cms-source-runtime-http-auth-request.v1"
 PRINCIPAL_SCHEMA = "blun.cms-source-runtime-principal.v1"
 STATUS_PRINCIPAL_SCHEMA = "blun.cms-source-status-principal.v1"
 CHANGE_REQUEST_SCHEMA = "blun.cms-source-change-enqueue-request.v1"
-CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v2"
+CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v3"
 REMOVAL_REQUEST_SCHEMA = "blun.cms-source-removal-enqueue-request.v1"
-REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v2"
+REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v3"
 STATUS_REQUEST_SCHEMA = "blun.cms-source-status-request.v1"
-STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v4"
-HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v4"
-READINESS_RESPONSE_SCHEMA = "blun.cms-source-readiness-response.v2"
+STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v5"
+HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v5"
+READINESS_RESPONSE_SCHEMA = "blun.cms-source-readiness-response.v3"
 CAPABILITIES_SCHEMA = "blun.cms-source-runtime-capabilities.v1"
 CAPABILITIES_RESPONSE_SCHEMA = "blun.cms-source-capabilities-response.v1"
+CAPABILITY_BINDING_SCHEMA = "blun.cms-source-capability-binding.v2"
+CAPABILITY_DATABASE_ROLES = ("changes", "removals", "lifecycle")
 
 CHANGE_PATH = "/v1/localization/source/changes"
 REMOVAL_PATH = "/v1/localization/source/removals"
@@ -693,6 +695,42 @@ def _readiness_payload(value: Any) -> dict[str, Any]:
         ) from None
 
 
+def _capability_binding_payload(value: Any) -> dict[str, Any]:
+    """Validate the exact content-free durable runtime binding."""
+
+    try:
+        if not isinstance(value, Mapping) or set(value) != {
+            "schema", "status", "capabilities_sha256",
+            "commercial_rendering_registry_sha256", "database_roles",
+        }:
+            raise ValueError
+        if (
+            value["schema"] != CAPABILITY_BINDING_SCHEMA
+            or value["status"] != "verified"
+            or SHA256.fullmatch(value["capabilities_sha256"]) is None
+            or SHA256.fullmatch(
+                value["commercial_rendering_registry_sha256"]
+            ) is None
+            or value["database_roles"] != list(CAPABILITY_DATABASE_ROLES)
+        ):
+            raise ValueError
+        result = {
+            "schema": value["schema"],
+            "status": value["status"],
+            "capabilities_sha256": value["capabilities_sha256"],
+            "commercial_rendering_registry_sha256": value[
+                "commercial_rendering_registry_sha256"
+            ],
+            "database_roles": list(value["database_roles"]),
+        }
+        _canonical_json(result)
+        return result
+    except Exception:
+        raise CMSSourceHTTPBlocked(
+            "source_http.capability_binding_invalid", 503,
+        ) from None
+
+
 def _capabilities_payload() -> dict[str, Any]:
     """Build the public contract from the exact active HTTP constants."""
     expected_scopes = {
@@ -729,7 +767,9 @@ def _capabilities_payload() -> dict[str, Any]:
             "request_schema": None,
             "request_fields": [],
             "response_schema": CAPABILITIES_RESPONSE_SCHEMA,
-            "response_fields": ["schema", "capabilities"],
+            "response_fields": [
+                "schema", "capabilities", "capability_binding",
+            ],
             "success_status": 200,
         },
         "change": {
@@ -743,7 +783,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "response_fields": [
                 "schema", "operation", "request_id", "event_id",
                 "payload_sha256", "status", "attempts", "max_attempts",
-                "capabilities_sha256",
+                "capabilities_sha256", "capability_binding",
             ],
             "success_status": 202,
         },
@@ -755,7 +795,10 @@ def _capabilities_payload() -> dict[str, Any]:
             "request_schema": None,
             "request_fields": [],
             "response_schema": HEALTH_RESPONSE_SCHEMA,
-            "response_fields": ["schema", "health", "capabilities_sha256"],
+            "response_fields": [
+                "schema", "health", "capabilities_sha256",
+                "capability_binding",
+            ],
             "success_status": 200,
         },
         "removal": {
@@ -769,7 +812,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "response_fields": [
                 "schema", "operation", "request_id", "event_id",
                 "payload_sha256", "status", "attempts", "max_attempts",
-                "capabilities_sha256",
+                "capabilities_sha256", "capability_binding",
             ],
             "success_status": 202,
         },
@@ -783,6 +826,7 @@ def _capabilities_payload() -> dict[str, Any]:
             "response_schema": READINESS_RESPONSE_SCHEMA,
             "response_fields": [
                 "schema", "readiness", "capabilities_sha256",
+                "capability_binding",
             ],
             "success_status": 200,
         },
@@ -794,7 +838,10 @@ def _capabilities_payload() -> dict[str, Any]:
             "request_schema": STATUS_REQUEST_SCHEMA,
             "request_fields": ["schema", "event_id", "site_id"],
             "response_schema": STATUS_RESPONSE_SCHEMA,
-            "response_fields": ["schema", "status", "capabilities_sha256"],
+            "response_fields": [
+                "schema", "status", "capabilities_sha256",
+                "capability_binding",
+            ],
             "success_status": 200,
         },
     }
@@ -851,13 +898,25 @@ class CMSSourceHTTPApplication:
     def __init__(self, runtime: Any, authenticator: Callable[[dict[str, Any]], Any]):
         if not all(callable(getattr(runtime, name, None)) for name in (
             "enqueue_change", "enqueue_removal", "status", "health",
-            "worker_readiness", "require_worker_ready",
+            "worker_readiness", "require_worker_ready", "capability_binding",
         )):
             raise TypeError("runtime must provide source CMS operations")
         if not callable(authenticator):
             raise TypeError("authenticator must be callable")
         self.runtime = runtime
         self.authenticator = authenticator
+
+    def _runtime_binding(self) -> dict[str, Any]:
+        try:
+            return _capability_binding_payload(
+                self.runtime.capability_binding()
+            )
+        except CMSSourceHTTPBlocked:
+            raise
+        except Exception:
+            raise CMSSourceHTTPBlocked(
+                "source_http.runtime_blocked", 503,
+            ) from None
 
     @staticmethod
     def _headers(environ: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
@@ -1006,11 +1065,13 @@ class CMSSourceHTTPApplication:
                     raise CMSSourceHTTPBlocked("source_http.content_type_invalid", 415)
                 body = self._body(environ, required=True)
             principal = self._authenticate(environ, path, body)
+            binding = self._runtime_binding()
 
             if path == CAPABILITIES_PATH:
                 return self._send(start_response, 200, {
                     "schema": CAPABILITIES_RESPONSE_SCHEMA,
                     "capabilities": _capabilities_payload(),
+                    "capability_binding": binding,
                 })
 
             if path == HEALTH_PATH:
@@ -1026,6 +1087,7 @@ class CMSSourceHTTPApplication:
                     "schema": HEALTH_RESPONSE_SCHEMA,
                     "health": report,
                     "capabilities_sha256": _capabilities_payload()["sha256"],
+                    "capability_binding": self._runtime_binding(),
                 })
 
             if path == READINESS_PATH:
@@ -1041,6 +1103,7 @@ class CMSSourceHTTPApplication:
                     "schema": READINESS_RESPONSE_SCHEMA,
                     "readiness": report,
                     "capabilities_sha256": _capabilities_payload()["sha256"],
+                    "capability_binding": self._runtime_binding(),
                 })
 
             request = self._request(body)
@@ -1085,6 +1148,7 @@ class CMSSourceHTTPApplication:
                         expected_site_id=site_id,
                     ),
                     "capabilities_sha256": _capabilities_payload()["sha256"],
+                    "capability_binding": self._runtime_binding(),
                 })
 
             envelope_key = "change" if path == CHANGE_PATH else "removal"
@@ -1143,6 +1207,7 @@ class CMSSourceHTTPApplication:
                 ),
                 **payload,
                 "capabilities_sha256": _capabilities_payload()["sha256"],
+                "capability_binding": self._runtime_binding(),
             })
         except CMSSourceHTTPBlocked as failure:
             return self._error(start_response, failure)

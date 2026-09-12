@@ -880,6 +880,8 @@ def open_durable_cms_source(
         raise _blocked("source_runtime.capability_preflight_invalid")
     if http_authenticator is not None and not callable(http_authenticator):
         raise _blocked("source_runtime.http_authenticator_invalid")
+    if http_authenticator is not None and not capability_preflight:
+        raise _blocked("source_runtime.capability_preflight_required")
     service_options = {
         "change_worker_id": change_worker_id,
         "removal_worker_id": removal_worker_id,

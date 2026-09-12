@@ -226,8 +226,9 @@ never enter the runtime representation or stable failure codes. A deployment
 may therefore choose its own secret manager and supervisor without weakening
 the provider-neutral contract.
 
-Set `capability_preflight=True` for a pinned production startup. The runtime
-then requires both constructor-fixed client pins described above and performs
+Set `capability_preflight=True` for a pinned production startup. It is
+mandatory whenever `http_authenticator` exposes the runtime over HTTP. The
+runtime then requires both constructor-fixed client pins described above and performs
 one signed capability request after all in-memory configuration and existing
 path checks, but before creating any database file. Missing pins, a network or
 contract failure, and either pin mismatch leave all three paths absent and
@@ -589,7 +590,8 @@ The exact routes are:
 | `GET` | `/v1/localization/source/readiness` | `source-readiness:read` | Verify that the managed worker and durable service can accept work |
 | `GET` | `/v1/localization/source/capabilities` | `source-capabilities:read` | Discover the exact active HTTP contract |
 
-The capabilities route accepts no body or query. Its
+Authenticated startup requires `capability_preflight=True`; omission blocks
+before any database is created. The capabilities route accepts no body or query. Its
 `blun.cms-source-capabilities-response.v1` response contains one
 `blun.cms-source-runtime-capabilities.v1` contract with the exact active
 methods, paths, scopes, principal schemas, request and response schemas,
@@ -600,10 +602,12 @@ reject unexpected contract drift without receiving website content or reading
 the three runtime databases. The route has its own
 `source-capabilities:read` credential, performs no state write, lease, repair,
 or network call, and returns fail-closed if its route metadata is incomplete or
-internally inconsistent.
+internally inconsistent. The response also carries the runtime's separately
+validated `blun.cms-source-capability-binding.v2`: the exact commercial
+capability digest, rendering-registry digest, and three durable database roles.
 
 The body-free readiness route uses
-`blun.cms-source-readiness-response.v2`. It returns HTTP `200` only while the
+`blun.cms-source-readiness-response.v3`. It returns HTTP `200` only while the
 managed worker is running and durable service health is `ok` or `degraded`;
 startup, shutdown, a worker exception, closed state, or blocked durable health
 returns HTTP `503`. Its separate `source-readiness:read` credential receives no
@@ -614,10 +618,11 @@ driven runtimes retain their explicit `run_once` contract.
 Change requests use
 `blun.cms-source-change-enqueue-request.v1`; removal requests use
 `blun.cms-source-removal-enqueue-request.v1`. Both contain the exact downstream
-payload plus an explicit `max_attempts` from 1 through 20. Successful V2
+payload plus an explicit `max_attempts` from 1 through 20. Successful V3
 responses return HTTP `202` with the canonical request identity, payload
-SHA-256, durable state, attempt count, retry ceiling, and exact capability
-digest. Replaying identical bytes converges on the same durable item. Reusing
+SHA-256, durable state, attempt count, retry ceiling, exact HTTP capability
+digest, and verified runtime binding. Replaying identical bytes converges on
+the same durable item. Reusing
 an identity with different content or policy returns HTTP `409` and does not
 alter stored work.
 
@@ -632,7 +637,7 @@ The status request is exact, query-free JSON and uses
 }
 ```
 
-Its `blun.cms-source-status-response.v4` response contains one nested
+Its `blun.cms-source-status-response.v5` response contains one nested
 `blun.cms-source-service-status.v3` snapshot. It binds the stored
 `website_version`, `source_sequence`, canonical change hash, dispatch state and
 attempts, remote plan and job count, local lifecycle state, remote lifecycle
@@ -651,7 +656,7 @@ the snapshot also reports the independently durable processing observation,
 poll failures, receiver attempts, and stable local and receiver error codes.
 An intake acknowledgement is never presented as completed CMS processing.
 
-The corresponding `blun.cms-source-health-response.v4` and nested
+The corresponding `blun.cms-source-health-response.v5` and nested
 `blun.cms-source-service-health.v3` report notification and processing-observer
 backlog plus component
 health without revealing website content or callback responses.
@@ -692,9 +697,10 @@ credential, exception, source string, or target string.
 
 `integrations/website_localization_cms_source_client.py` is the provider-neutral
 client for this complete ingress. Construct `CMSLocalizationSourceHTTPClient`
-with one exact HTTPS origin, an `expected_capabilities_sha256` supplied through
-trusted deployment configuration, and a callback that provides authentication
-headers for the canonical request context. The callback receives the method,
+with one exact HTTPS origin, the HTTP contract pin, and the source runtime's
+commercial capability and rendering-registry pins supplied through trusted
+deployment configuration. A callback provides authentication headers for the
+canonical request context and receives the method,
 origin, verified path and scope, body SHA-256, and the applicable event, site,
 or request identity; it cannot replace framing, idempotency, or binding headers.
 
@@ -705,14 +711,16 @@ operation definition to match the installed contract and trusted pin, takes
 the write path from that fresh result, and performs exactly one request. The
 immutable event, cancellation, or tombstone identity is the idempotency key.
 An accepted response must return the same operation, request and event IDs,
-canonical inner-payload hash, retry ceiling, and capability digest.
+canonical inner-payload hash, retry ceiling, capability digest, and exact
+runtime binding.
 
 `status()`, `health()`, and `readiness()` repeat discovery independently and
 then validate every returned field and cross-field invariant. Status is bound
 to the requested event and site. Health and readiness accept their documented
 `200` and `503` states only when the HTTP status agrees with the nested state.
-All five operational response schemas carry `capabilities_sha256`; a process
-swap or stale response between discovery and the operation therefore blocks.
+All five operational response schemas carry `capabilities_sha256` and the
+runtime binding. A missing, malformed, substituted, or stale binding blocks
+even when the static HTTP schema still matches its separate contract pin.
 
 The adapter owns no retry loop. `CMSSourceClientBlocked` contains only a stable
 content-free code and retryability decision, so the website host may apply its
@@ -840,7 +848,9 @@ identity, and applicable tenant before serialization. The capability route
 describes all nine schemas, methods, paths, scopes, limits, and safety
 semantics under one canonical SHA-256. That digest is repeated on every
 operational response, and any internal contract drift blocks the complete
-response instead of advertising a rehashed weakened interface.
+response instead of advertising a rehashed weakened interface. Each of the
+three source-facing reads also carries the separately validated source runtime
+binding without exposing content.
 
 #### Contract-pinned source-delivery sidecar client
 
@@ -872,7 +882,8 @@ retry-policy, sidecar-contract, and downstream-contract bindings.
 `status()` requires the caller's already known operation, request, event,
 tenant, and payload hash; a response cannot silently substitute another
 durable item. `source_status()` adds the complete validated localization
-lifecycle only after exact durable source acceptance. `health()`, `readiness()`,
+lifecycle and source runtime binding only after exact durable source
+acceptance. `health()`, `readiness()`,
 `source_health()`, and `source_readiness()` accept HTTP `503` only as an exactly
 validated blocked snapshot. Transport and server failures expose stable
 content-free codes plus retryability, but the client never schedules a retry.
@@ -942,6 +953,12 @@ lease-expiry flag, and a stable content-free error code. `accepted` means the
 source service has durably accepted the event. It does not mean translation,
 quality review, release approval, or publication succeeded.
 
+`submission_lifecycle()` extends that accepted state with the independently
+validated source lifecycle. Its
+`blun.cms-source-delivery-submission-lifecycle.v2` projection keeps submission,
+source status, and the verified source runtime binding separate. Missing or
+changed binding evidence blocks instead of returning a processing state.
+
 Use `submission_readiness()` to inspect the complete durable intake path
 without collapsing its two independently operated workers. The method first
 validates the website worker's local readiness object. If that worker or its
@@ -966,9 +983,10 @@ Only fully ready intake performs the separately authenticated, body-free
 `source_readiness()` operation through the sidecar.
 
 The resulting
-`blun.cms-source-delivery-submission-pipeline-readiness.v1` object keeps the
+`blun.cms-source-delivery-submission-pipeline-readiness.v2` object keeps the
 complete intake projection and source-worker projection separate, binds the
-current sidecar and source-service capability hashes, and reports overall
+current sidecar and source-service capability hashes plus the source runtime
+binding, and reports overall
 `ready` only when both projections are independently ready. A stopped source
 worker, transport failure, malformed status combination, or capability drift
 blocks fail-closed. This operational probe is content-free and makes no claim
@@ -994,9 +1012,10 @@ intake projection first. If either intake outbox is blocked, `source_health`
 remains `null` and no source-health request is made. Healthy intake performs a
 separately authenticated, body-free source-health request through the sidecar.
 
-The resulting `blun.cms-source-delivery-submission-pipeline-health.v1` object
+The resulting `blun.cms-source-delivery-submission-pipeline-health.v2` object
 keeps the intake projection and complete source-service projection separate,
-binds both current capability hashes, and preserves `ok`, `degraded`, or
+binds both current capability hashes and the source runtime binding, and
+preserves `ok`, `degraded`, or
 `blocked` source state. Invalid counters, contradictory HTTP status, transport
 failure, or capability drift block fail-closed without returning content.
 

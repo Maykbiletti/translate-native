@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -45,6 +46,43 @@ class ScriptedClient:
         self.calls = []
         self.events = {}
         self.lifecycle_status = "processing"
+        queue_connection = sqlite3.connect(":memory:")
+        release_connection = sqlite3.connect(":memory:")
+        cms_connection = sqlite3.connect(":memory:")
+        try:
+            queue = cms_support.CMS._QUEUE.LocalizationQueue(queue_connection)
+            release = cms_support.CMS._RELEASE.LocalizationReleaseStore(
+                release_connection, queue,
+            )
+            bridge = cms_support.CMS.WebsiteLocalizationCMSBridge(
+                cms_connection, queue, release,
+            )
+            authority = cms_support.Authority()
+            api = cms_support.API.WebsiteLocalizationAPI(
+                bridge,
+                authority,
+                approval_authority=authority,
+                publication_authority=authority,
+            )
+            capabilities = bridge.localization_capabilities()
+            self._capability_response = {
+                "schema": cms_support.API.API_SCHEMA,
+                "status": "CAPABILITIES",
+                "request_id": "source-fixture-capabilities",
+                "capabilities": capabilities,
+                "api_contract": api._api_contract(capabilities),
+            }
+            self.capabilities_sha256 = capabilities["sha256"]
+            self.commercial_rendering_registry_sha256 = capabilities[
+                "commercial_rendering_registry"
+            ]["sha256"]
+        finally:
+            queue_connection.close()
+            release_connection.close()
+            cms_connection.close()
+
+    def capabilities(self):
+        return copy.deepcopy(self._capability_response)
 
     def submit_change(self, change):
         self.calls.append(("change", copy.deepcopy(change)))
@@ -164,6 +202,7 @@ class SourceHTTPTests(unittest.TestCase):
             removal_lease_seconds=60,
             lifecycle_lease_seconds=60,
             lifecycle_poll_interval_seconds=30,
+            capability_preflight=True,
         )
         self.app = self.runtime.http
 

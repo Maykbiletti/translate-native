@@ -275,6 +275,22 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
             )
             self.assertFalse(any(path.exists() for path in paths))
 
+    def test_authenticated_runtime_requires_preflight_before_persistence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as caught:
+                self.open(paths, http_authenticator=lambda _request: {})
+
+            self.assertEqual(
+                caught.exception.code,
+                "source_runtime.capability_preflight_required",
+            )
+            self.assertFalse(any(path.exists() for path in paths))
+            self.assertEqual(self.client.calls, [])
+
     def test_verified_client_binding_change_blocks_before_persistence(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self.paths(directory)

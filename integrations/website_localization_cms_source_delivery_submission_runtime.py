@@ -151,6 +151,7 @@ class HMACCMSSourceDeliverySubmissionPipelineReadiness:
     status: str
     intake_readiness: Mapping[str, Any]
     source_readiness: Mapping[str, Any] | None
+    source_capability_binding: Mapping[str, Any] | None
     sidecar_capabilities_sha256: str
     source_capabilities_sha256: str
 
@@ -163,6 +164,11 @@ class HMACCMSSourceDeliverySubmissionPipelineReadiness:
                 None
                 if self.source_readiness is None
                 else copy.deepcopy(dict(self.source_readiness))
+            ),
+            "source_capability_binding": (
+                None
+                if self.source_capability_binding is None
+                else copy.deepcopy(dict(self.source_capability_binding))
             ),
             "sidecar_capabilities_sha256": (
                 self.sidecar_capabilities_sha256
@@ -210,6 +216,7 @@ class HMACCMSSourceDeliverySubmissionPipelineHealth:
     status: str
     intake_health: Mapping[str, Any]
     source_health: Mapping[str, Any] | None
+    source_capability_binding: Mapping[str, Any] | None
     sidecar_capabilities_sha256: str
     source_capabilities_sha256: str
 
@@ -222,6 +229,11 @@ class HMACCMSSourceDeliverySubmissionPipelineHealth:
                 None
                 if self.source_health is None
                 else copy.deepcopy(dict(self.source_health))
+            ),
+            "source_capability_binding": (
+                None
+                if self.source_capability_binding is None
+                else copy.deepcopy(dict(self.source_capability_binding))
             ),
             "sidecar_capabilities_sha256": (
                 self.sidecar_capabilities_sha256
@@ -241,6 +253,7 @@ class HMACCMSSourceDeliverySubmissionLifecycle:
     stage: str
     submission: Mapping[str, Any]
     source_status: Mapping[str, Any] | None
+    source_capability_binding: Mapping[str, Any] | None
     sidecar_capabilities_sha256: str
     source_capabilities_sha256: str
 
@@ -254,6 +267,11 @@ class HMACCMSSourceDeliverySubmissionLifecycle:
                 None
                 if self.source_status is None
                 else copy.deepcopy(dict(self.source_status))
+            ),
+            "source_capability_binding": (
+                None
+                if self.source_capability_binding is None
+                else copy.deepcopy(dict(self.source_capability_binding))
             ),
             "sidecar_capabilities_sha256": (
                 self.sidecar_capabilities_sha256
@@ -441,11 +459,12 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         submission_payload = submission.as_payload()
         if submission.status != "accepted":
             return HMACCMSSourceDeliverySubmissionLifecycle(
-                schema="blun.cms-source-delivery-submission-lifecycle.v1",
+                schema="blun.cms-source-delivery-submission-lifecycle.v2",
                 status=submission.status,
                 stage=submission.stage,
                 submission=submission_payload,
                 source_status=None,
+                source_capability_binding=None,
                 sidecar_capabilities_sha256=(
                     self._client.expected_capabilities_sha256
                 ),
@@ -468,6 +487,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                 or set(response) != {
                     "schema", "source_status",
                     "source_capabilities_sha256", "capabilities_sha256",
+                    "source_capability_binding",
                 }
                 or response.get("schema")
                 != _AUTH._HTTP.SOURCE_STATUS_RESPONSE_SCHEMA
@@ -481,6 +501,9 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                 {
                     "schema": _AUTH._HTTP._SOURCE_HTTP.STATUS_RESPONSE_SCHEMA,
                     "status": response["source_status"],
+                    "capability_binding": response[
+                        "source_capability_binding"
+                    ],
                     "capabilities_sha256": (
                         response["source_capabilities_sha256"]
                     ),
@@ -491,11 +514,17 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                     self._client.expected_remote_capabilities_sha256
                 ),
             )
-            if source_status != response["source_status"]:
+            if (
+                source_status["status"] != response["source_status"]
+                or source_status["capability_binding"]
+                != response["source_capability_binding"]
+            ):
                 raise ValueError
         except Exception:
             raise _blocked("lifecycle_invalid") from None
 
+        source_capability_binding = source_status["capability_binding"]
+        source_status = source_status["status"]
         remote_status = source_status["remote_status"]
         if remote_status is not None:
             status = remote_status
@@ -507,11 +536,12 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             status = "accepted"
             stage = "source_processing"
         return HMACCMSSourceDeliverySubmissionLifecycle(
-            schema="blun.cms-source-delivery-submission-lifecycle.v1",
+            schema="blun.cms-source-delivery-submission-lifecycle.v2",
             status=status,
             stage=stage,
             submission=submission_payload,
             source_status=source_status,
+            source_capability_binding=source_capability_binding,
             sidecar_capabilities_sha256=(
                 self._client.expected_capabilities_sha256
             ),
@@ -579,10 +609,11 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         intake_payload = intake.as_payload()
         if intake.status != "ok":
             return HMACCMSSourceDeliverySubmissionPipelineHealth(
-                schema="blun.cms-source-delivery-submission-pipeline-health.v1",
+                schema="blun.cms-source-delivery-submission-pipeline-health.v2",
                 status="blocked",
                 intake_health=intake_payload,
                 source_health=None,
+                source_capability_binding=None,
                 sidecar_capabilities_sha256=(
                     self._client.expected_capabilities_sha256
                 ),
@@ -601,6 +632,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                 or set(response) != {
                     "schema", "source_health",
                     "source_capabilities_sha256", "capabilities_sha256",
+                    "source_capability_binding",
                 }
                 or response.get("schema")
                 != _AUTH._HTTP.SOURCE_HEALTH_RESPONSE_SCHEMA
@@ -614,6 +646,9 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                 {
                     "schema": _AUTH._HTTP._SOURCE_HTTP.HEALTH_RESPONSE_SCHEMA,
                     "health": response["source_health"],
+                    "capability_binding": response[
+                        "source_capability_binding"
+                    ],
                     "capabilities_sha256": (
                         response["source_capabilities_sha256"]
                     ),
@@ -622,16 +657,21 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                     self._client.expected_remote_capabilities_sha256
                 ),
             )
-            if source_health != response["source_health"]:
+            if (
+                source_health["health"] != response["source_health"]
+                or source_health["capability_binding"]
+                != response["source_capability_binding"]
+            ):
                 raise ValueError
         except Exception:
             raise _blocked("pipeline_health_invalid") from None
 
         return HMACCMSSourceDeliverySubmissionPipelineHealth(
-            schema="blun.cms-source-delivery-submission-pipeline-health.v1",
-            status=source_health["status"],
+            schema="blun.cms-source-delivery-submission-pipeline-health.v2",
+            status=source_health["health"]["status"],
             intake_health=intake_payload,
-            source_health=source_health,
+            source_health=source_health["health"],
+            source_capability_binding=source_health["capability_binding"],
             sidecar_capabilities_sha256=(
                 self._client.expected_capabilities_sha256
             ),
@@ -723,11 +763,12 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         if intake.status != "ready":
             return HMACCMSSourceDeliverySubmissionPipelineReadiness(
                 schema=(
-                    "blun.cms-source-delivery-submission-pipeline-readiness.v1"
+                    "blun.cms-source-delivery-submission-pipeline-readiness.v2"
                 ),
                 status="not_ready",
                 intake_readiness=intake_payload,
                 source_readiness=None,
+                source_capability_binding=None,
                 sidecar_capabilities_sha256=(
                     self._client.expected_capabilities_sha256
                 ),
@@ -746,6 +787,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                 or set(response) != {
                     "schema", "source_readiness",
                     "source_capabilities_sha256", "capabilities_sha256",
+                    "source_capability_binding",
                 }
                 or response.get("schema")
                 != _AUTH._HTTP.SOURCE_READINESS_RESPONSE_SCHEMA
@@ -761,6 +803,9 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                         _AUTH._HTTP._SOURCE_HTTP.READINESS_RESPONSE_SCHEMA
                     ),
                     "readiness": response["source_readiness"],
+                    "capability_binding": response[
+                        "source_capability_binding"
+                    ],
                     "capabilities_sha256": (
                         response["source_capabilities_sha256"]
                     ),
@@ -769,20 +814,28 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                     self._client.expected_remote_capabilities_sha256
                 ),
             )
-            if source_readiness != response["source_readiness"]:
+            if (
+                source_readiness["readiness"]
+                != response["source_readiness"]
+                or source_readiness["capability_binding"]
+                != response["source_capability_binding"]
+            ):
                 raise ValueError
         except Exception:
             raise _blocked("pipeline_readiness_invalid") from None
 
         return HMACCMSSourceDeliverySubmissionPipelineReadiness(
-            schema="blun.cms-source-delivery-submission-pipeline-readiness.v1",
+            schema="blun.cms-source-delivery-submission-pipeline-readiness.v2",
             status=(
                 "ready"
-                if source_readiness["status"] == "ready"
+                if source_readiness["readiness"]["status"] == "ready"
                 else "not_ready"
             ),
             intake_readiness=intake_payload,
-            source_readiness=source_readiness,
+            source_readiness=source_readiness["readiness"],
+            source_capability_binding=(
+                source_readiness["capability_binding"]
+            ),
             sidecar_capabilities_sha256=(
                 self._client.expected_capabilities_sha256
             ),

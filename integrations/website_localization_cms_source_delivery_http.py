@@ -38,13 +38,13 @@ SOURCE_STATUS_REQUEST_SCHEMA = (
 QUEUE_RESPONSE_SCHEMA = "blun.cms-source-delivery-queue-response.v1"
 STATUS_RESPONSE_SCHEMA = "blun.cms-source-delivery-status-response.v1"
 SOURCE_STATUS_RESPONSE_SCHEMA = (
-    "blun.cms-source-delivery-source-status-response.v1"
+    "blun.cms-source-delivery-source-status-response.v2"
 )
 SOURCE_READINESS_RESPONSE_SCHEMA = (
-    "blun.cms-source-delivery-source-readiness-response.v1"
+    "blun.cms-source-delivery-source-readiness-response.v2"
 )
 SOURCE_HEALTH_RESPONSE_SCHEMA = (
-    "blun.cms-source-delivery-source-health-response.v1"
+    "blun.cms-source-delivery-source-health-response.v2"
 )
 HEALTH_RESPONSE_SCHEMA = "blun.cms-source-delivery-health-response.v1"
 READINESS_RESPONSE_SCHEMA = (
@@ -373,7 +373,10 @@ def _source_status_response(
     try:
         if (
             not isinstance(value, Mapping)
-            or set(value) != {"schema", "status", "capabilities_sha256"}
+            or set(value) != {
+                "schema", "status", "capabilities_sha256",
+                "capability_binding",
+            }
             or value.get("schema") != _SOURCE_HTTP.STATUS_RESPONSE_SCHEMA
             or value.get("capabilities_sha256")
             != expected_capabilities_sha256
@@ -386,7 +389,13 @@ def _source_status_response(
         )
         if normalized != value["status"]:
             raise ValueError
-        return normalized
+        binding = _SOURCE_HTTP._capability_binding_payload(
+            value["capability_binding"]
+        )
+        return {
+            "status": normalized,
+            "capability_binding": binding,
+        }
     except Exception:
         raise CMSSourceDeliveryHTTPBlocked(
             "source_delivery_http.runtime_response_invalid", 503,
@@ -403,7 +412,10 @@ def _source_readiness_response(
     try:
         if (
             not isinstance(value, Mapping)
-            or set(value) != {"schema", "readiness", "capabilities_sha256"}
+            or set(value) != {
+                "schema", "readiness", "capabilities_sha256",
+                "capability_binding",
+            }
             or value.get("schema") != _SOURCE_HTTP.READINESS_RESPONSE_SCHEMA
             or value.get("capabilities_sha256")
             != expected_capabilities_sha256
@@ -412,7 +424,13 @@ def _source_readiness_response(
         normalized = _SOURCE_HTTP._readiness_payload(value["readiness"])
         if normalized != value["readiness"]:
             raise ValueError
-        return normalized
+        binding = _SOURCE_HTTP._capability_binding_payload(
+            value["capability_binding"]
+        )
+        return {
+            "readiness": normalized,
+            "capability_binding": binding,
+        }
     except Exception:
         raise CMSSourceDeliveryHTTPBlocked(
             "source_delivery_http.runtime_response_invalid", 503,
@@ -439,7 +457,10 @@ def _source_health_response(
     try:
         if (
             not isinstance(value, Mapping)
-            or set(value) != {"schema", "health", "capabilities_sha256"}
+            or set(value) != {
+                "schema", "health", "capabilities_sha256",
+                "capability_binding",
+            }
             or value.get("schema") != _SOURCE_HTTP.HEALTH_RESPONSE_SCHEMA
             or value.get("capabilities_sha256")
             != expected_capabilities_sha256
@@ -451,7 +472,13 @@ def _source_health_response(
         )
         if normalized != value["health"]:
             raise ValueError
-        return normalized
+        binding = _SOURCE_HTTP._capability_binding_payload(
+            value["capability_binding"]
+        )
+        return {
+            "health": normalized,
+            "capability_binding": binding,
+        }
     except Exception:
         raise CMSSourceDeliveryHTTPBlocked(
             "source_delivery_http.runtime_response_invalid", 503,
@@ -664,6 +691,7 @@ def _capabilities_payload() -> dict[str, Any]:
                 "source_status_requires_accepted_submission": True,
                 "source_readiness_is_independently_validated": True,
                 "source_health_is_independently_validated": True,
+                "source_runtime_binding_is_independently_validated": True,
                 "write_requires_ready_worker": True,
             },
         }
@@ -953,18 +981,21 @@ class CMSSourceDeliveryHTTPApplication:
                     raise CMSSourceDeliveryHTTPBlocked(
                         "source_delivery_http.runtime_blocked", 503,
                     ) from None
-                source_readiness = _source_readiness_response(
+                source = _source_readiness_response(
                     source_response,
                     expected_capabilities_sha256=(
                         self.runtime.expected_capabilities_sha256
                     ),
                 )
                 status = (
-                    200 if source_readiness["status"] == "ready" else 503
+                    200 if source["readiness"]["status"] == "ready" else 503
                 )
                 return self._send(start_response, status, {
                     "schema": SOURCE_READINESS_RESPONSE_SCHEMA,
-                    "source_readiness": source_readiness,
+                    "source_readiness": source["readiness"],
+                    "source_capability_binding": source[
+                        "capability_binding"
+                    ],
                     "source_capabilities_sha256": (
                         self.runtime.expected_capabilities_sha256
                     ),
@@ -979,16 +1010,21 @@ class CMSSourceDeliveryHTTPApplication:
                     raise CMSSourceDeliveryHTTPBlocked(
                         "source_delivery_http.runtime_blocked", 503,
                     ) from None
-                source_health = _source_health_response(
+                source = _source_health_response(
                     source_response,
                     expected_capabilities_sha256=(
                         self.runtime.expected_capabilities_sha256
                     ),
                 )
-                status = 503 if source_health["status"] == "blocked" else 200
+                status = (
+                    503 if source["health"]["status"] == "blocked" else 200
+                )
                 return self._send(start_response, status, {
                     "schema": SOURCE_HEALTH_RESPONSE_SCHEMA,
-                    "source_health": source_health,
+                    "source_health": source["health"],
+                    "source_capability_binding": source[
+                        "capability_binding"
+                    ],
                     "source_capabilities_sha256": (
                         self.runtime.expected_capabilities_sha256
                     ),
@@ -1045,7 +1081,7 @@ class CMSSourceDeliveryHTTPApplication:
                     raise CMSSourceDeliveryHTTPBlocked(
                         "source_delivery_http.runtime_blocked", 503,
                     ) from None
-                source_status = _source_status_response(
+                source = _source_status_response(
                     source_response,
                     expected_event_id=event_id,
                     expected_site_id=site_id,
@@ -1055,7 +1091,10 @@ class CMSSourceDeliveryHTTPApplication:
                 )
                 return self._send(start_response, 200, {
                     "schema": SOURCE_STATUS_RESPONSE_SCHEMA,
-                    "source_status": source_status,
+                    "source_status": source["status"],
+                    "source_capability_binding": source[
+                        "capability_binding"
+                    ],
                     "source_capabilities_sha256": (
                         self.runtime.expected_capabilities_sha256
                     ),

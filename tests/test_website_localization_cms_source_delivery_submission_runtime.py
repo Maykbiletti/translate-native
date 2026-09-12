@@ -284,6 +284,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "fi-FI", "mt-MT",
         ])
         self.assertEqual(lifecycle.submission["status"], "accepted")
+        self.assertEqual(
+            lifecycle.source_capability_binding,
+            self.remote.capability_binding(),
+        )
         payload = lifecycle.as_payload()
         self.assertEqual(payload["source_status"]["remote_status"], "processing")
         self.assertNotIn(
@@ -436,6 +440,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(health.intake_health["status"], "ok")
         self.assertEqual(health.source_health["status"], "ok")
         self.assertEqual(
+            health.source_capability_binding,
+            self.remote.capability_binding(),
+        )
+        self.assertEqual(
             health.sidecar_capabilities_sha256, self.sidecar_digest,
         )
         self.assertEqual(
@@ -444,6 +452,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         payload = health.as_payload()
         self.assertEqual(set(payload), {
             "schema", "status", "intake_health", "source_health",
+            "source_capability_binding",
             "sidecar_capabilities_sha256", "source_capabilities_sha256",
         })
         self.assertNotIn("delivery.example", repr(payload))
@@ -641,6 +650,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "error_code": None,
         })
         self.assertEqual(
+            readiness.source_capability_binding,
+            self.remote.capability_binding(),
+        )
+        self.assertEqual(
             readiness.sidecar_capabilities_sha256, self.sidecar_digest,
         )
         self.assertEqual(
@@ -649,6 +662,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         payload = readiness.as_payload()
         self.assertEqual(set(payload), {
             "schema", "status", "intake_readiness", "source_readiness",
+            "source_capability_binding",
             "sidecar_capabilities_sha256", "source_capabilities_sha256",
         })
         self.assertNotIn("delivery.example", repr(payload))
@@ -656,7 +670,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
 
         def not_ready():
             return {
-                "schema": "blun.cms-source-readiness-response.v2",
+                "schema": delivery_support.DELIVERY._CLIENT._HTTP.READINESS_RESPONSE_SCHEMA,
                 "readiness": {
                     "schema": "blun.cms-source-worker-readiness.v1",
                     "status": "not_ready",
@@ -665,6 +679,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
                     "error_code": "source_runtime.worker_not_ready",
                 },
                 "capabilities_sha256": self.remote_digest,
+                "capability_binding": self.remote.capability_binding(),
             }
 
         self.remote.readiness = not_ready

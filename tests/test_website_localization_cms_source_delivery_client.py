@@ -270,6 +270,10 @@ class SourceDeliveryClientTests(unittest.TestCase):
         self.assertEqual(
             response["source_capabilities_sha256"], self.remote_digest,
         )
+        self.assertEqual(
+            response["source_capability_binding"],
+            self.remote_client.capability_binding(),
+        )
         context = self.contexts[-1]
         self.assertEqual(context["path"], HTTP.SOURCE_STATUS_PATH)
         self.assertEqual(context["event_id"], change["event_id"])
@@ -292,6 +296,27 @@ class SourceDeliveryClientTests(unittest.TestCase):
             WSGITransport(self.runtime.http), substitute_event,
         )
         tampered_client = self.make_client(transport=tampering_transport)
+        with self.assertRaises(CLIENT.CMSSourceDeliveryClientBlocked) as caught:
+            tampered_client.source_status(
+                change["event_id"], change["site_id"],
+                queued["payload_sha256"],
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_client.source_status_binding",
+        )
+
+        def remove_source_binding(call_number, result):
+            if call_number == 2:
+                return replace_json(
+                    result,
+                    lambda value: value.pop("source_capability_binding"),
+                )
+            return result
+
+        tampered_client = self.make_client(transport=TransformingTransport(
+            WSGITransport(self.runtime.http), remove_source_binding,
+        ))
         with self.assertRaises(CLIENT.CMSSourceDeliveryClientBlocked) as caught:
             tampered_client.source_status(
                 change["event_id"], change["site_id"],

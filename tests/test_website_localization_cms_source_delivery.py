@@ -42,6 +42,8 @@ class ClientFailure(RuntimeError):
 class ScriptedClient:
     def __init__(self, digest="a" * 64):
         self.expected_capabilities_sha256 = digest
+        self.expected_runtime_capabilities_sha256 = "c" * 64
+        self.expected_commercial_rendering_registry_sha256 = "d" * 64
         self.timeout = 30
         self.calls = []
         self.failures = []
@@ -61,7 +63,7 @@ class ScriptedClient:
             raise self.failures.pop(0)
         if operation == "change":
             request_id = copied["event_id"]
-            schema = "blun.cms-source-change-enqueue-response.v2"
+            schema = DELIVERY._CLIENT._HTTP.CHANGE_RESPONSE_SCHEMA
             self.events[copied["event_id"]] = copied
         else:
             if copied["schema"].endswith("cancellation.v1"):
@@ -70,7 +72,7 @@ class ScriptedClient:
             else:
                 operation = "tombstone"
                 request_id = copied["tombstone_id"]
-            schema = "blun.cms-source-removal-enqueue-response.v2"
+            schema = DELIVERY._CLIENT._HTTP.REMOVAL_RESPONSE_SCHEMA
         return {
             "schema": schema,
             "operation": operation,
@@ -83,6 +85,7 @@ class ScriptedClient:
             "attempts": 0,
             "max_attempts": max_attempts,
             "capabilities_sha256": self.expected_capabilities_sha256,
+            "capability_binding": self.capability_binding(),
         }
 
     def submit_change(self, value, *, max_attempts):
@@ -95,7 +98,7 @@ class ScriptedClient:
         self.calls.append(("status", event_id, site_id))
         change = self.events[event_id]
         return {
-            "schema": "blun.cms-source-status-response.v4",
+            "schema": DELIVERY._CLIENT._HTTP.STATUS_RESPONSE_SCHEMA,
             "status": {
                 "schema": "blun.cms-source-service-status.v3",
                 "event_id": event_id,
@@ -141,12 +144,24 @@ class ScriptedClient:
                 "receiver_processed_at": None,
             },
             "capabilities_sha256": self.expected_capabilities_sha256,
+            "capability_binding": self.capability_binding(),
+        }
+
+    def capability_binding(self):
+        return {
+            "schema": "blun.cms-source-capability-binding.v2",
+            "status": "verified",
+            "capabilities_sha256": self.expected_runtime_capabilities_sha256,
+            "commercial_rendering_registry_sha256": (
+                self.expected_commercial_rendering_registry_sha256
+            ),
+            "database_roles": ["changes", "removals", "lifecycle"],
         }
 
     def readiness(self):
         self.calls.append(("readiness",))
         return {
-            "schema": "blun.cms-source-readiness-response.v2",
+            "schema": DELIVERY._CLIENT._HTTP.READINESS_RESPONSE_SCHEMA,
             "readiness": {
                 "schema": "blun.cms-source-worker-readiness.v1",
                 "status": "ready",
@@ -155,6 +170,7 @@ class ScriptedClient:
                 "error_code": None,
             },
             "capabilities_sha256": self.expected_capabilities_sha256,
+            "capability_binding": self.capability_binding(),
         }
 
     def health(self):
@@ -174,7 +190,7 @@ class ScriptedClient:
             "failed": 0,
         }
         return {
-            "schema": "blun.cms-source-health-response.v4",
+            "schema": DELIVERY._CLIENT._HTTP.HEALTH_RESPONSE_SCHEMA,
             "health": {
                 "schema": "blun.cms-source-service-health.v3",
                 "status": "ok",
@@ -203,6 +219,7 @@ class ScriptedClient:
                 "error_code": None,
             },
             "capabilities_sha256": self.expected_capabilities_sha256,
+            "capability_binding": self.capability_binding(),
         }
 
 
@@ -293,7 +310,7 @@ class SourceDeliveryTests(unittest.TestCase):
         )
 
         self.client.readiness = lambda: {
-            "schema": "blun.cms-source-readiness-response.v2",
+            "schema": DELIVERY._CLIENT._HTTP.READINESS_RESPONSE_SCHEMA,
             "readiness": {
                 "schema": "blun.cms-source-worker-readiness.v1",
                 "status": "ready",

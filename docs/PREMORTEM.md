@@ -1,5 +1,31 @@
 # Version 6 premortem
 
+## Authenticated source runtime binding (12 September 2026)
+
+Assume a sidecar reached a healthy source API whose static HTTP contract was
+correct, but whose durable worker used another price and offer capability
+generation.
+
+- A static API digest could remain unchanged while the internal commercial
+  profile or locale-rendering registry changed.
+- A capability check followed by a write could lose the verified runtime
+  binding at the response boundary, leaving the caller unable to prove which
+  generation accepted the work.
+- Health and readiness could report a plausible service state without exposing
+  whether all three durable databases still carried the same verified binding.
+- A sidecar could accidentally discard or reshape the binding while forwarding
+  operational evidence, hiding a partial deployment mismatch from the website
+  host.
+
+The source HTTP application now requires a verified durable binding before it
+can be hosted, returns the exact content-free binding with capabilities and
+every operation, and revalidates it after runtime work. The contract-pinned
+source client requires both internal deployment pins and rejects missing,
+stale, malformed, or substituted bindings. Source delivery independently
+revalidates and forwards the same binding through health and readiness, so a
+single mismatch blocks fail-closed rather than being reduced to a healthy
+aggregate state.
+
 ## Locale-exact commercial rendering references (12 September 2026)
 
 Assume every commercial provider phase received the correct language profile,

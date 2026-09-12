@@ -121,10 +121,16 @@ class SourceClientTests(unittest.TestCase):
             removal_lease_seconds=60,
             lifecycle_lease_seconds=60,
             lifecycle_poll_interval_seconds=30,
+            capability_preflight=True,
         )
         self.transport = WSGITransport(self.runtime.http)
         self.auth_contexts = []
         self.digest = HTTP._capabilities_payload()["sha256"]
+        binding = self.runtime.capability_binding()
+        self.runtime_digest = binding["capabilities_sha256"]
+        self.rendering_digest = binding[
+            "commercial_rendering_registry_sha256"
+        ]
         self.client = self.make_client()
 
     def tearDown(self):
@@ -141,6 +147,10 @@ class SourceClientTests(unittest.TestCase):
             "https://source.example",
             self.digest if digest is None else digest,
             headers,
+            expected_runtime_capabilities_sha256=self.runtime_digest,
+            expected_commercial_rendering_registry_sha256=(
+                self.rendering_digest
+            ),
             transport=self.transport if transport is None else transport,
         )
 
@@ -218,6 +228,45 @@ class SourceClientTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "source_client.enqueue_binding")
 
+    def test_runtime_binding_replacement_blocks_capabilities_and_writes(self):
+        def replace_binding(index, result):
+            if index == 1:
+                return replace_json(
+                    result,
+                    lambda value: value["capability_binding"].update(
+                        capabilities_sha256="0" * 64,
+                    ),
+                )
+            return result
+
+        replaced = self.make_client(transport=TransformingTransport(
+            self.transport, replace_binding,
+        ))
+        with self.assertRaises(CLIENT.CMSSourceClientBlocked) as caught:
+            replaced.capabilities()
+        self.assertEqual(
+            caught.exception.code, "source_client.runtime_capability_binding",
+        )
+
+        def replace_write_binding(index, result):
+            if index == 2:
+                return replace_json(
+                    result,
+                    lambda value: value["capability_binding"].update(
+                        commercial_rendering_registry_sha256="0" * 64,
+                    ),
+                )
+            return result
+
+        replaced = self.make_client(transport=TransformingTransport(
+            self.transport, replace_write_binding,
+        ))
+        with self.assertRaises(CLIENT.CMSSourceClientBlocked) as caught:
+            replaced.submit_change(cms_support.event())
+        self.assertEqual(
+            caught.exception.code, "source_client.runtime_capability_binding",
+        )
+
     def test_wrong_payload_hash_and_tenant_status_block(self):
         change = cms_support.event()
 
@@ -267,6 +316,10 @@ class SourceClientTests(unittest.TestCase):
             "https://source.example",
             self.digest,
             lambda _context: {"Content-Type": "forged"},
+            expected_runtime_capabilities_sha256=self.runtime_digest,
+            expected_commercial_rendering_registry_sha256=(
+                self.rendering_digest
+            ),
             transport=self.transport,
         )
         with self.assertRaises(CLIENT.CMSSourceClientBlocked) as caught:
@@ -280,6 +333,10 @@ class SourceClientTests(unittest.TestCase):
                 f"X-Auth-{index}": "value"
                 for index in range(CLIENT.MAX_AUTHENTICATION_HEADERS + 1)
             },
+            expected_runtime_capabilities_sha256=self.runtime_digest,
+            expected_commercial_rendering_registry_sha256=(
+                self.rendering_digest
+            ),
             transport=self.transport,
         )
         with self.assertRaises(CLIENT.CMSSourceClientBlocked) as caught:

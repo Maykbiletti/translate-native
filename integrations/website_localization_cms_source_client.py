@@ -346,6 +346,8 @@ class CMSLocalizationSourceHTTPClient:
         expected_capabilities_sha256: str,
         authentication_headers: Callable[[Mapping[str, Any]], Mapping[str, str]],
         *,
+        expected_runtime_capabilities_sha256: str,
+        expected_commercial_rendering_registry_sha256: str,
         transport: HTTPTransport | None = None,
         timeout: float | int = 30,
         allow_loopback_http: bool = False,
@@ -361,6 +363,17 @@ class CMSLocalizationSourceHTTPClient:
         if not callable(authentication_headers):
             raise TypeError("authentication_headers must be callable")
         if (
+            not isinstance(expected_runtime_capabilities_sha256, str)
+            or SHA256.fullmatch(expected_runtime_capabilities_sha256) is None
+            or not isinstance(
+                expected_commercial_rendering_registry_sha256, str,
+            )
+            or SHA256.fullmatch(
+                expected_commercial_rendering_registry_sha256
+            ) is None
+        ):
+            raise ValueError("expected runtime capability binding is invalid")
+        if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
             or not math.isfinite(float(timeout))
@@ -368,6 +381,12 @@ class CMSLocalizationSourceHTTPClient:
         ):
             raise ValueError("timeout is outside the supported range")
         self.expected_capabilities_sha256 = expected_capabilities_sha256
+        self.expected_runtime_capabilities_sha256 = (
+            expected_runtime_capabilities_sha256
+        )
+        self.expected_commercial_rendering_registry_sha256 = (
+            expected_commercial_rendering_registry_sha256
+        )
         self.authentication_headers = authentication_headers
         self.transport = URLTransport() if transport is None else transport
         if not callable(getattr(self.transport, "request", None)):
@@ -417,13 +436,30 @@ class CMSLocalizationSourceHTTPClient:
         except Exception:
             _fail("local_contract_invalid")
         if (
-            set(response) != {"schema", "capabilities"}
+            set(response) != {
+                "schema", "capabilities", "capability_binding",
+            }
             or response.get("schema") != _HTTP.CAPABILITIES_RESPONSE_SCHEMA
             or response.get("capabilities") != expected
             or expected.get("sha256") != self.expected_capabilities_sha256
         ):
             _fail("capabilities_binding")
+        self._verified_runtime_binding(response.get("capability_binding"))
         return response
+
+    def _verified_runtime_binding(self, value: Any) -> Mapping[str, Any]:
+        try:
+            binding = _HTTP._capability_binding_payload(value)
+        except Exception:
+            _fail("runtime_capability_binding")
+        if (
+            binding["capabilities_sha256"]
+            != self.expected_runtime_capabilities_sha256
+            or binding["commercial_rendering_registry_sha256"]
+            != self.expected_commercial_rendering_registry_sha256
+        ):
+            _fail("runtime_capability_binding")
+        return binding
 
     def _contract(self, operation: str) -> Mapping[str, Any]:
         capabilities = self.capabilities()["capabilities"]
@@ -498,6 +534,7 @@ class CMSLocalizationSourceHTTPClient:
             != self.expected_capabilities_sha256
         ):
             _fail("enqueue_binding")
+        self._verified_runtime_binding(response.get("capability_binding"))
         return response
 
     def status(self, event_id: str, site_id: str) -> Mapping[str, Any]:
@@ -522,6 +559,7 @@ class CMSLocalizationSourceHTTPClient:
             != self.expected_capabilities_sha256
         ):
             _fail("status_binding")
+        self._verified_runtime_binding(response.get("capability_binding"))
         try:
             normalized = _HTTP._source_status_payload(
                 _PayloadView(response["status"]),
@@ -547,6 +585,7 @@ class CMSLocalizationSourceHTTPClient:
             != self.expected_capabilities_sha256
         ):
             _fail("health_binding")
+        self._verified_runtime_binding(response.get("capability_binding"))
         try:
             normalized = _HTTP._health_payload(_PayloadView(response["health"]))
         except Exception:
@@ -571,6 +610,7 @@ class CMSLocalizationSourceHTTPClient:
             != self.expected_capabilities_sha256
         ):
             _fail("readiness_binding")
+        self._verified_runtime_binding(response.get("capability_binding"))
         try:
             normalized = _HTTP._readiness_payload(response["readiness"])
         except Exception:

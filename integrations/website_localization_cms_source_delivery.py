@@ -278,11 +278,24 @@ class DurableCMSSourceDeliveryOutbox:
         if not callable(clock):
             raise TypeError("clock must be callable")
         digest = getattr(client, "expected_capabilities_sha256", None)
+        runtime_digest = getattr(
+            client, "expected_runtime_capabilities_sha256", None,
+        )
+        rendering_digest = getattr(
+            client, "expected_commercial_rendering_registry_sha256", None,
+        )
         if (
             not callable(getattr(client, "submit_change", None))
             or not callable(getattr(client, "submit_removal", None))
             or not isinstance(digest, str)
             or SHA256.fullmatch(digest) is None
+            or (runtime_digest is None) != (rendering_digest is None)
+            or runtime_digest is not None and (
+                not isinstance(runtime_digest, str)
+                or SHA256.fullmatch(runtime_digest) is None
+                or not isinstance(rendering_digest, str)
+                or SHA256.fullmatch(rendering_digest) is None
+            )
         ):
             raise TypeError("client must provide the pinned source operations")
         timeout = getattr(client, "timeout", None)
@@ -297,6 +310,8 @@ class DurableCMSSourceDeliveryOutbox:
         self.connection.row_factory = sqlite3.Row
         self.client = client
         self.capabilities_sha256 = digest
+        self.runtime_capabilities_sha256 = runtime_digest
+        self.commercial_rendering_registry_sha256 = rendering_digest
         self.timeout = float(timeout)
         self.clock = clock
         self.base_delay_seconds = _duration(
@@ -402,8 +417,40 @@ class DurableCMSSourceDeliveryOutbox:
             or len(meta) != 1
             or tuple(meta[0]) != (1, SCHEMA_VERSION)
             or columns != _COLUMNS
+            or self.runtime_capabilities_sha256 is not None and (
+                getattr(
+                    self.client,
+                    "expected_runtime_capabilities_sha256",
+                    None,
+                ) != self.runtime_capabilities_sha256
+                or getattr(
+                    self.client,
+                    "expected_commercial_rendering_registry_sha256",
+                    None,
+                ) != self.commercial_rendering_registry_sha256
+            )
         ):
             raise CMSSourceDeliveryBlocked("source_delivery.schema_altered")
+
+    def _verified_source_binding(self, value: Any) -> dict[str, Any]:
+        try:
+            binding = _CLIENT._HTTP._capability_binding_payload(value)
+        except Exception:
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.source_capability_binding_invalid"
+            ) from None
+        if (
+            self.runtime_capabilities_sha256 is None
+            or self.commercial_rendering_registry_sha256 is None
+            or binding["capabilities_sha256"]
+            != self.runtime_capabilities_sha256
+            or binding["commercial_rendering_registry_sha256"]
+            != self.commercial_rendering_registry_sha256
+        ):
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.source_capability_binding_invalid"
+            )
+        return binding
 
     def enqueue_change(
         self,
@@ -661,7 +708,10 @@ class DurableCMSSourceDeliveryOutbox:
             if (
                 not isinstance(response, Mapping)
                 or set(response)
-                != {"schema", "status", "capabilities_sha256"}
+                != {
+                    "schema", "status", "capabilities_sha256",
+                    "capability_binding",
+                }
                 or response.get("schema")
                 != _CLIENT._HTTP.STATUS_RESPONSE_SCHEMA
                 or response.get("capabilities_sha256")
@@ -675,6 +725,9 @@ class DurableCMSSourceDeliveryOutbox:
             )
             if normalized != response["status"]:
                 raise ValueError
+            binding = self._verified_source_binding(
+                response["capability_binding"]
+            )
         except Exception as error:
             if getattr(error, "cms_source_client_failure", False) is True:
                 raise
@@ -685,6 +738,7 @@ class DurableCMSSourceDeliveryOutbox:
             "schema": response["schema"],
             "status": dict(normalized),
             "capabilities_sha256": response["capabilities_sha256"],
+            "capability_binding": binding,
         }
 
     def source_readiness(self) -> Mapping[str, Any]:
@@ -701,7 +755,10 @@ class DurableCMSSourceDeliveryOutbox:
             if (
                 not isinstance(response, Mapping)
                 or set(response)
-                != {"schema", "readiness", "capabilities_sha256"}
+                != {
+                    "schema", "readiness", "capabilities_sha256",
+                    "capability_binding",
+                }
                 or response.get("schema")
                 != _CLIENT._HTTP.READINESS_RESPONSE_SCHEMA
                 or response.get("capabilities_sha256")
@@ -713,6 +770,9 @@ class DurableCMSSourceDeliveryOutbox:
             )
             if normalized != response["readiness"]:
                 raise ValueError
+            binding = self._verified_source_binding(
+                response["capability_binding"]
+            )
         except Exception as error:
             if getattr(error, "cms_source_client_failure", False) is True:
                 raise
@@ -723,6 +783,7 @@ class DurableCMSSourceDeliveryOutbox:
             "schema": response["schema"],
             "readiness": dict(normalized),
             "capabilities_sha256": response["capabilities_sha256"],
+            "capability_binding": binding,
         }
 
     def source_health(self) -> Mapping[str, Any]:
@@ -736,7 +797,10 @@ class DurableCMSSourceDeliveryOutbox:
             response = client_health()
             if (
                 not isinstance(response, Mapping)
-                or set(response) != {"schema", "health", "capabilities_sha256"}
+                or set(response) != {
+                    "schema", "health", "capabilities_sha256",
+                    "capability_binding",
+                }
                 or response.get("schema") != _CLIENT._HTTP.HEALTH_RESPONSE_SCHEMA
                 or response.get("capabilities_sha256")
                 != self.capabilities_sha256
@@ -747,6 +811,9 @@ class DurableCMSSourceDeliveryOutbox:
             )
             if normalized != response["health"]:
                 raise ValueError
+            binding = self._verified_source_binding(
+                response["capability_binding"]
+            )
         except Exception as error:
             if getattr(error, "cms_source_client_failure", False) is True:
                 raise
@@ -757,6 +824,7 @@ class DurableCMSSourceDeliveryOutbox:
             "schema": response["schema"],
             "health": normalized,
             "capabilities_sha256": response["capabilities_sha256"],
+            "capability_binding": binding,
         }
 
     def claim(
@@ -908,12 +976,15 @@ class DurableCMSSourceDeliveryOutbox:
             if claim.operation == "change"
             else _CLIENT._HTTP.REMOVAL_RESPONSE_SCHEMA
         )
+        expected_fields = {
+            "schema", "operation", "request_id", "event_id",
+            "payload_sha256", "status", "attempts", "max_attempts",
+            "capabilities_sha256",
+        }
+        if self.runtime_capabilities_sha256 is not None:
+            expected_fields.add("capability_binding")
         if (
-            set(response) != {
-                "schema", "operation", "request_id", "event_id",
-                "payload_sha256", "status", "attempts", "max_attempts",
-                "capabilities_sha256",
-            }
+            set(response) != expected_fields
             or response.get("schema") != expected_schema
             or response.get("operation") != claim.operation
             or response.get("request_id") != claim.request_id
@@ -928,6 +999,8 @@ class DurableCMSSourceDeliveryOutbox:
             or response.get("max_attempts") != claim.source_max_attempts
         ):
             raise CMSSourceDeliveryBlocked("source_delivery.response_invalid")
+        if self.runtime_capabilities_sha256 is not None:
+            self._verified_source_binding(response["capability_binding"])
         return response_json
 
     def complete(
