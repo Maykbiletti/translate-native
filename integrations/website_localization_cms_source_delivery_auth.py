@@ -13,6 +13,7 @@ import hmac
 import importlib.util
 import json
 import math
+import os
 import re
 import secrets
 import sqlite3
@@ -514,6 +515,63 @@ class SourceDeliveryHMACSigner:
                 HEADER_PAYLOAD_SHA256: payload_sha256,
             })
         return headers
+
+
+class RotatingSourceDeliveryHMACSigner:
+    """Atomically replace one client credential under a fixed proof contract."""
+
+    def __init__(
+        self,
+        credential: HMACCredential,
+        *,
+        origin: str,
+        sidecar_capabilities_sha256: str,
+        remote_capabilities_sha256: str,
+        clock: Callable[[], float | int] = time.time,
+        nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24),
+        allow_loopback_http: bool = False,
+    ):
+        self._configuration = {
+            "origin": origin,
+            "sidecar_capabilities_sha256": sidecar_capabilities_sha256,
+            "remote_capabilities_sha256": remote_capabilities_sha256,
+            "clock": clock,
+            "nonce_factory": nonce_factory,
+            "allow_loopback_http": allow_loopback_http,
+        }
+        try:
+            self._signer = SourceDeliveryHMACSigner(
+                credential, **self._configuration,
+            )
+        except Exception:
+            raise _unavailable("signer_configuration_invalid") from None
+        self._lock = threading.RLock()
+        self._owner_pid = os.getpid()
+
+    def __repr__(self) -> str:
+        return "RotatingSourceDeliveryHMACSigner(configured=True, secret=<redacted>)"
+
+    def _assert_owner(self) -> None:
+        if os.getpid() != self._owner_pid:
+            raise _unavailable("signer_foreign_process")
+
+    def __call__(self, context: Mapping[str, Any]) -> Mapping[str, str]:
+        self._assert_owner()
+        with self._lock:
+            return self._signer(context)
+
+    def replace_credential(self, credential: HMACCredential) -> None:
+        """Replace the signer only after the complete new credential validates."""
+
+        self._assert_owner()
+        with self._lock:
+            try:
+                replacement = SourceDeliveryHMACSigner(
+                    credential, **self._configuration,
+                )
+            except Exception:
+                raise _unavailable("signer_configuration_invalid") from None
+            self._signer = replacement
 
 
 class SourceDeliveryHMACVerifier:

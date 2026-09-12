@@ -854,6 +854,15 @@ canonical proof binds those values together with the exact method, live
 contract path, route scope, body hash, site, event, request and payload
 identities, and the actual idempotency and source-payload headers.
 
+For a long-lived client, use `RotatingSourceDeliveryHMACSigner` directly as
+the `authentication_headers` callback. Its origin, sidecar capability digest,
+downstream capability digest, clock policy, nonce source, and transport policy
+are fixed when it is constructed. `replace_credential()` validates one entire
+new `HMACCredential` and atomically replaces only the credential-bound signer
+under the same lock used to create proofs. Invalid replacement state keeps the
+last valid signer. The wrapper is process-bound and rejects inherited use after
+fork; each child must obtain its own host-supplied credential and signer.
+
 Every proof has a short bounded timestamp and a random nonce. The verifier
 checks the HMAC with constant-time comparison and then calls
 `DurableHMACReplayStore.consume()` before returning a principal. Construct the
@@ -908,8 +917,19 @@ the delivery runtime parses or persists protected content.
 
 Use `replace_credentials()` on either the composite runtime or its
 `authentication` member to rotate without stopping the delivery worker. A
-safe rollout first supplies the old and new generations together, moves every
-client to the new signer, and then supplies only the new generation. The
+safe rollout proceeds in this order:
+
+1. Supply the old and new server generations together.
+2. Call `replace_credential()` on every client instance and verify traffic.
+3. Drain requests already emitted with the old credential and wait out the
+   configured proof validity and clock-skew window, unless an equivalent
+   deployment traffic barrier proves that none remain.
+4. Supply only the new server generation.
+
+The client signer lock serializes proof creation in one process. It cannot
+recall a proof already returned to the HTTP client, synchronize other fleet
+instances, or prove that a request has left the network. The server must
+therefore keep the old generation during the bounded drain window. The
 method materializes and validates the complete iterable, checks the replay
 database and process lifecycle, waits behind any in-flight authentication,
 and swaps exactly one fully constructed verifier. Invalid or unavailable

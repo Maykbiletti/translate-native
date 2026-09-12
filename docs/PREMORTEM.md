@@ -1,5 +1,25 @@
 # Version 6 premortem
 
+## Uninterrupted source-delivery client rotation (12 September 2026)
+
+Assume the server accepted an overlap generation, but a long-lived source
+worker could not move its HMAC signer safely without a restart.
+
+- Concurrent requests could observe a partially replaced credential or change
+  generation halfway through proof creation.
+- Invalid secret-manager output could destroy the last working client signer.
+- A forked process could inherit signer state and silently reuse parent-owned
+  secret material and synchronization.
+- Retiring the old server generation immediately after one client swap could
+  reject proofs already emitted or leave other client instances behind.
+
+The client now owns one process-bound rotating signer. It validates a complete
+replacement under the same lock used for proof creation and swaps only after
+success, preserving the previous signer on failure. Rotation never changes the
+fixed origin or capability pins. Deployments overlap generations server-side,
+rotate every client instance, drain already emitted requests and the proof
+validity window, and only then retire the old generation.
+
 ## Uninterrupted source-delivery credential rotation (12 September 2026)
 
 Assume a running source-delivery sidecar rotated credentials but briefly

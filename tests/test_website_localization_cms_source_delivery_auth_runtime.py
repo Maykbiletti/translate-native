@@ -173,6 +173,16 @@ class SourceDeliveryHMACRuntimeTests(unittest.TestCase):
             nonce_factory=self.nonces,
         )
 
+    def rotating_signer(self, credential=None, *, nonce_factory=None):
+        return RUNTIME.RotatingSourceDeliveryHMACSigner(
+            self.credential if credential is None else credential,
+            origin="https://delivery.example",
+            sidecar_capabilities_sha256=self.sidecar_digest,
+            remote_capabilities_sha256=self.remote_digest,
+            clock=lambda: self.now,
+            nonce_factory=self.nonces if nonce_factory is None else nonce_factory,
+        )
+
     def http_client(self, runtime, credential=None):
         transport = WSGITransport(runtime.http)
         client = CLIENT.CMSSourceDeliverySidecarHTTPClient(
@@ -360,6 +370,122 @@ class SourceDeliveryHMACRuntimeTests(unittest.TestCase):
         self.assertEqual(
             closed.exception.code,
             "source_delivery_hmac_runtime.closed",
+        )
+
+    def test_client_and_server_rotate_without_restarting_the_worker(self):
+        runtime = self.open()
+        rotating = self.rotating_signer()
+        transport = WSGITransport(runtime.http)
+        client = CLIENT.CMSSourceDeliverySidecarHTTPClient(
+            "https://delivery.example",
+            self.sidecar_digest,
+            self.remote_digest,
+            rotating,
+            transport=transport,
+        )
+        second_credential = self.make_credential("2")
+        worker = runtime.delivery._worker_thread
+
+        client.capabilities()
+        runtime.replace_credentials((self.credential, second_credential))
+        rotating.replace_credential(second_credential)
+        self.assertIs(runtime.delivery._worker_thread, worker)
+        runtime.replace_credentials((second_credential,))
+
+        self.assertEqual(
+            client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+        self.assertIs(runtime.delivery._worker_thread, worker)
+
+    def test_failed_client_rotation_keeps_the_last_valid_signer(self):
+        runtime = self.open()
+        rotating = self.rotating_signer()
+        transport = WSGITransport(runtime.http)
+        client = CLIENT.CMSSourceDeliverySidecarHTTPClient(
+            "https://delivery.example",
+            self.sidecar_digest,
+            self.remote_digest,
+            rotating,
+            transport=transport,
+        )
+
+        with self.assertRaises(
+            AUTH.SourceDeliveryHMACAuthenticationUnavailable,
+        ) as caught:
+            rotating.replace_credential(object())
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_hmac.signer_configuration_invalid",
+        )
+        self.assertEqual(
+            client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+
+    def test_client_rotation_waits_for_inflight_proof_generation(self):
+        runtime = self.open()
+        second_credential = self.make_credential("2")
+        runtime.replace_credentials((self.credential, second_credential))
+        entered = threading.Event()
+        release = threading.Event()
+        generated = Nonces()
+
+        def blocking_nonce():
+            entered.set()
+            release.wait(2)
+            return generated()
+
+        rotating = self.rotating_signer(nonce_factory=blocking_nonce)
+        transport = WSGITransport(runtime.http)
+        client = CLIENT.CMSSourceDeliverySidecarHTTPClient(
+            "https://delivery.example",
+            self.sidecar_digest,
+            self.remote_digest,
+            rotating,
+            transport=transport,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            inflight = pool.submit(client.capabilities)
+            self.assertTrue(entered.wait(1))
+            rotation = pool.submit(
+                rotating.replace_credential, second_credential,
+            )
+            time.sleep(0.02)
+            self.assertFalse(rotation.done())
+            release.set()
+            self.assertEqual(
+                inflight.result()["capabilities"]["sha256"],
+                self.sidecar_digest,
+            )
+            self.assertIsNone(rotation.result())
+
+        runtime.replace_credentials((second_credential,))
+        self.assertEqual(
+            client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+
+    def test_rotating_client_signer_is_process_bound_and_secret_free(self):
+        rotating = self.rotating_signer()
+        rendered = repr(rotating)
+
+        self.assertNotIn(self.credential.secret.hex(), rendered)
+        self.assertNotIn("site-1", rendered)
+        self.assertIs(
+            RUNTIME.RotatingSourceDeliveryHMACSigner,
+            AUTH.RotatingSourceDeliveryHMACSigner,
+        )
+        rotating._owner_pid -= 1
+        with self.assertRaises(
+            AUTH.SourceDeliveryHMACAuthenticationUnavailable,
+        ) as caught:
+            rotating.replace_credential(self.make_credential("2"))
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_hmac.signer_foreign_process",
         )
 
     def test_invalid_configuration_creates_neither_database(self):

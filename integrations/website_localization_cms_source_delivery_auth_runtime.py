@@ -37,6 +37,7 @@ _DELIVERY_RUNTIME = _load_module(
     _ROOT / "integrations" / "website_localization_cms_source_delivery_runtime.py",
 )
 HMACCredential = _AUTH.HMACCredential
+RotatingSourceDeliveryHMACSigner = _AUTH.RotatingSourceDeliveryHMACSigner
 
 
 class SourceDeliveryHMACRuntimeBlocked(RuntimeError):
