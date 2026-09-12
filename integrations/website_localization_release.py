@@ -22,7 +22,7 @@ from typing import Any, Iterator, Protocol
 
 SCHEMA_VERSION = 1
 APPROVAL_SCHEMA = "blun.website-localization-approval.v3"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v2"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v3"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v2"
 MAX_TEXT_BYTES = 2_000_000

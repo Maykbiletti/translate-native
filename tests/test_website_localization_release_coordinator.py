@@ -221,6 +221,13 @@ def completed_result(job, target_text, *, review_confidence=None):
             "locale": payload["target"]["locale"],
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
+            **({
+                "commercial": {
+                    "profile": payload["commercial_profile"],
+                    "version": payload["commercial_quality_profile"]["version"],
+                    "sha256": payload["commercial_quality_profile"]["sha256"],
+                },
+            } if payload["content_type"] == "commercial" else {}),
         },
         "commercial_review": (
             {
@@ -412,6 +419,17 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertEqual(
             commercial_request.as_payload()["commercial_profile"],
             PLANNER.COMMERCIAL_PROFILE,
+        )
+        commercial_quality = commercial_job.as_payload()[
+            "commercial_quality_profile"
+        ]
+        self.assertEqual(
+            commercial_request.as_payload()["quality_profile"]["commercial"],
+            {
+                "profile": PLANNER.COMMERCIAL_PROFILE,
+                "version": commercial_quality["version"],
+                "sha256": commercial_quality["sha256"],
+            },
         )
         self.assertEqual(
             commercial_request.as_payload()["commercial_review"][

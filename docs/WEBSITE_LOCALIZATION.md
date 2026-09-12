@@ -1031,12 +1031,13 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v2` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v3` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
-confidence, locale quality profile, optional commercial profile, its exact
-content-free targeted-review summary, and the human/independent-review
+confidence, locale quality profile, and, for commercial content, the exact
+nested locale-specific commercial profile plus its content-free targeted-review
+summary and the human/independent-review
 requirements. The verifier must cryptographically
 bind every field. It must reject a receipt issued for another result, policy,
 model, profile, software version, locale, or review purpose. In particular, a

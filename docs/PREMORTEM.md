@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Commercial evidence HTTP profile binding (12 September 2026)
+
+Assume a valid commercial worker result could not reach the remote quality
+service, or a remote receipt was accepted without the exact locale-specific
+commercial profile that produced it.
+
+- The worker's nested commercial profile could be rejected by an older HTTP
+  validator that only permits the three base locale-profile fields.
+- Accepting an optional nested object would let commercial requests omit it or
+  let non-commercial requests smuggle unrelated commercial scope.
+- Checking only token and digest shapes would allow a different commercial
+  profile identifier to travel beside an otherwise valid review summary.
+- Keeping the old evidence and receipt schema generations would let durable
+  retries silently reuse pre-binding requests or receipts.
+
+Version both contracts, require the exact compact commercial profile binding
+inside `quality_profile` only when `content_type` is `commercial`, and require
+its profile identifier to match the top-level commercial policy and review
+summary before any authentication or network access. End-to-end tests carry a
+real commercial coordinator request through both HTTPS adapters and prove that
+missing, extra, stale-shaped, or cross-profile bindings fail closed locally.
+
 ## Locale-bound commercial publication evidence (12 September 2026)
 
 Assume a CMS replaced its current localized offer with a signed bundle whose
