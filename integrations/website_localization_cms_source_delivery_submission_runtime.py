@@ -144,6 +144,36 @@ class HMACCMSSourceDeliverySubmissionReadiness:
 
 
 @dataclass(frozen=True)
+class HMACCMSSourceDeliverySubmissionPipelineReadiness:
+    """Content-free intake and source-processing readiness kept separate."""
+
+    schema: str
+    status: str
+    intake_readiness: Mapping[str, Any]
+    source_readiness: Mapping[str, Any] | None
+    sidecar_capabilities_sha256: str
+    source_capabilities_sha256: str
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "status": self.status,
+            "intake_readiness": copy.deepcopy(dict(self.intake_readiness)),
+            "source_readiness": (
+                None
+                if self.source_readiness is None
+                else copy.deepcopy(dict(self.source_readiness))
+            ),
+            "sidecar_capabilities_sha256": (
+                self.sidecar_capabilities_sha256
+            ),
+            "source_capabilities_sha256": (
+                self.source_capabilities_sha256
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class HMACCMSSourceDeliverySubmissionHealth:
     """Content-free health across both durable submission outboxes."""
 
@@ -581,6 +611,85 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             ),
         )
 
+    def submission_pipeline_readiness(
+        self,
+    ) -> HMACCMSSourceDeliverySubmissionPipelineReadiness:
+        """Require website, sidecar, and source processing to be ready."""
+
+        self._assert_open()
+        intake = self.submission_readiness()
+        intake_payload = intake.as_payload()
+        if intake.status != "ready":
+            return HMACCMSSourceDeliverySubmissionPipelineReadiness(
+                schema=(
+                    "blun.cms-source-delivery-submission-pipeline-readiness.v1"
+                ),
+                status="not_ready",
+                intake_readiness=intake_payload,
+                source_readiness=None,
+                sidecar_capabilities_sha256=(
+                    self._client.expected_capabilities_sha256
+                ),
+                source_capabilities_sha256=(
+                    self._client.expected_remote_capabilities_sha256
+                ),
+            )
+
+        try:
+            response = self._client.source_readiness()
+        except Exception:
+            raise _blocked("pipeline_readiness_unavailable") from None
+        try:
+            if (
+                not isinstance(response, Mapping)
+                or set(response) != {
+                    "schema", "source_readiness",
+                    "source_capabilities_sha256", "capabilities_sha256",
+                }
+                or response.get("schema")
+                != _AUTH._HTTP.SOURCE_READINESS_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self._client.expected_capabilities_sha256
+                or response.get("source_capabilities_sha256")
+                != self._client.expected_remote_capabilities_sha256
+            ):
+                raise ValueError
+            source_readiness = _AUTH._HTTP._source_readiness_response(
+                {
+                    "schema": (
+                        _AUTH._HTTP._SOURCE_HTTP.READINESS_RESPONSE_SCHEMA
+                    ),
+                    "readiness": response["source_readiness"],
+                    "capabilities_sha256": (
+                        response["source_capabilities_sha256"]
+                    ),
+                },
+                expected_capabilities_sha256=(
+                    self._client.expected_remote_capabilities_sha256
+                ),
+            )
+            if source_readiness != response["source_readiness"]:
+                raise ValueError
+        except Exception:
+            raise _blocked("pipeline_readiness_invalid") from None
+
+        return HMACCMSSourceDeliverySubmissionPipelineReadiness(
+            schema="blun.cms-source-delivery-submission-pipeline-readiness.v1",
+            status=(
+                "ready"
+                if source_readiness["status"] == "ready"
+                else "not_ready"
+            ),
+            intake_readiness=intake_payload,
+            source_readiness=source_readiness,
+            sidecar_capabilities_sha256=(
+                self._client.expected_capabilities_sha256
+            ),
+            source_capabilities_sha256=(
+                self._client.expected_remote_capabilities_sha256
+            ),
+        )
+
     def run_once(self) -> Any:
         self._assert_open()
         return self._delivery.run_once()
@@ -633,6 +742,12 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         return self._client.source_status(
             event_id, site_id, payload_sha256,
         )
+
+    def sidecar_source_readiness(self) -> Mapping[str, Any]:
+        """Read source processing readiness through the owned sidecar."""
+
+        self._assert_open()
+        return self._client.source_readiness()
 
     def sidecar_health(self) -> Mapping[str, Any]:
         self._assert_open()

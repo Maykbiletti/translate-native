@@ -544,6 +544,73 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "source_delivery_submission_runtime.readiness_invalid",
         )
 
+    def test_pipeline_readiness_covers_intake_and_source_processing(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+
+        readiness = runtime.submission_pipeline_readiness()
+
+        self.assertEqual(readiness.status, "ready")
+        self.assertEqual(readiness.intake_readiness["status"], "ready")
+        self.assertEqual(readiness.source_readiness, {
+            "schema": "blun.cms-source-worker-readiness.v1",
+            "status": "ready",
+            "worker_state": "running",
+            "service_status": "ok",
+            "error_code": None,
+        })
+        self.assertEqual(
+            readiness.sidecar_capabilities_sha256, self.sidecar_digest,
+        )
+        self.assertEqual(
+            readiness.source_capabilities_sha256, self.remote_digest,
+        )
+        payload = readiness.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "status", "intake_readiness", "source_readiness",
+            "sidecar_capabilities_sha256", "source_capabilities_sha256",
+        })
+        self.assertNotIn("delivery.example", repr(payload))
+        self.assertNotIn("website-credential", repr(payload))
+
+        def not_ready():
+            return {
+                "schema": "blun.cms-source-readiness-response.v2",
+                "readiness": {
+                    "schema": "blun.cms-source-worker-readiness.v1",
+                    "status": "not_ready",
+                    "worker_state": "stopped",
+                    "service_status": "blocked",
+                    "error_code": "source_runtime.worker_not_ready",
+                },
+                "capabilities_sha256": self.remote_digest,
+            }
+
+        self.remote.readiness = not_ready
+        blocked = runtime.submission_pipeline_readiness()
+        self.assertEqual(blocked.status, "not_ready")
+        self.assertEqual(blocked.intake_readiness["status"], "ready")
+        self.assertEqual(blocked.source_readiness["status"], "not_ready")
+        self.assertEqual(
+            blocked.source_readiness["error_code"],
+            "source_runtime.worker_not_ready",
+        )
+
+    def test_pipeline_readiness_stays_local_when_intake_is_not_ready(self):
+        runtime = self.open()
+        before = len(self.transport.calls)
+
+        readiness = runtime.submission_pipeline_readiness()
+
+        self.assertEqual(readiness.status, "not_ready")
+        self.assertEqual(readiness.intake_readiness["status"], "not_ready")
+        self.assertIsNone(readiness.source_readiness)
+        self.assertEqual(len(self.transport.calls), before)
+
     def test_submission_status_stays_local_until_sidecar_acceptance(self):
         runtime = self.open()
         change = cms_support.event()

@@ -767,18 +767,20 @@ The sidecar exposes these independently authorized operations:
 - `POST /v1/localization/source-delivery/changes`
 - `POST /v1/localization/source-delivery/removals`
 - `POST /v1/localization/source-delivery/status`
+- `POST /v1/localization/source-delivery/source-status`
 - `GET /v1/localization/source-delivery/health`
 - `GET /v1/localization/source-delivery/readiness`
+- `GET /v1/localization/source-delivery/source-readiness`
 - `GET /v1/localization/source-delivery/capabilities`
 
 The authenticator receives schema
 `blun.cms-source-delivery-sidecar-auth-request.v1` with the exact method, path,
 sorted request headers, and SHA-256 of the received body. It returns a stable
 principal, credential identity and version, and the route's exact scope.
-Change, removal, and status routes additionally require the authorized
-`site_id`; the sidecar compares it independently with the request and the
-runtime result. An unknown request and one belonging to another website both
-return the same content-free `404` response.
+Change, removal, status, and source-status routes additionally require the
+authorized `site_id`; the sidecar compares it independently with the request
+and the runtime result. An unknown request and one belonging to another
+website both return the same content-free `404` response.
 
 Change and removal bodies carry the complete immutable payload plus distinct
 `source_max_attempts` and `delivery_max_attempts` values. The
@@ -788,10 +790,13 @@ hash. HTTP `202` is returned only after the exact binding has been persisted.
 The sidecar performs no delivery attempt itself; the managed worker retains
 the single-attempt, durable-backoff, and crash-recovery semantics.
 
-Status, health, and readiness never return website text. Every outgoing
-runtime object is checked for its exact field set, types, hashes, state
-invariants, request identity, and tenant before serialization. The capability
-route describes all six schemas, methods, paths, scopes, limits, and safety
+Status, lifecycle, health, and readiness operations never return website text.
+The source-status route is gated on an exact durably accepted sidecar row; the
+body-free source-readiness route keeps downstream processing availability
+separate from sidecar intake readiness. Every outgoing runtime object is
+checked for its exact field set, types, hashes, state invariants, request
+identity, and applicable tenant before serialization. The capability route
+describes all eight schemas, methods, paths, scopes, limits, and safety
 semantics under one canonical SHA-256. That digest is repeated on every
 operational response, and any internal contract drift blocks the complete
 response instead of advertising a rehashed weakened interface.
@@ -799,7 +804,7 @@ response instead of advertising a rehashed weakened interface.
 #### Contract-pinned source-delivery sidecar client
 
 `integrations/website_localization_cms_source_delivery_client.py` is the
-provider-neutral HTTPS reference client for all six sidecar operations.
+provider-neutral HTTPS reference client for all eight sidecar operations.
 Construct `CMSSourceDeliverySidecarHTTPClient` with one exact HTTPS origin, the
 trusted sidecar capability SHA-256, the separately trusted downstream
 source-service capability SHA-256, and a callback that returns authentication
@@ -825,9 +830,11 @@ retry-policy, sidecar-contract, and downstream-contract bindings.
 
 `status()` requires the caller's already known operation, request, event,
 tenant, and payload hash; a response cannot silently substitute another
-durable item. `health()` and `readiness()` accept HTTP `503` only as an exactly
-validated blocked snapshot. Transport and server failures expose stable
-content-free codes plus retryability, but the client never schedules a retry.
+durable item. `source_status()` adds the complete validated localization
+lifecycle only after exact durable source acceptance. `health()`, `readiness()`,
+and `source_readiness()` accept HTTP `503` only as an exactly validated blocked
+snapshot. Transport and server failures expose stable content-free codes plus
+retryability, but the client never schedules a retry.
 
 For the authenticated production path, construct
 `RotatingHMACCMSSourceDeliveryClient` from
@@ -840,13 +847,14 @@ Invalid construction is reduced to
 `source_delivery_hmac.client_configuration_invalid` before any network call.
 
 The composed surface exposes `capabilities()`, `submit_change()`,
-`submit_removal()`, `status()`, `health()`, and `readiness()` with the original
-contract signatures. `replace_credential()` updates the exact signer used by
-all six routes. The client is process-bound before delegation, so a forked
-worker cannot reach its inherited transport; create a fresh client in the child
-from host-owned secret state. Client errors retain the underlying stable
-content-free retry decision, and neither the wrapper nor its representation
-exposes the credential, tenant, endpoint, or website content.
+`submit_removal()`, `status()`, `source_status()`, `health()`, `readiness()`, and
+`source_readiness()` with the original contract signatures.
+`replace_credential()` updates the exact signer used by all eight routes. The
+client is process-bound before delegation, so a forked worker cannot reach its
+inherited transport; create a fresh client in the child from host-owned secret
+state. Client errors retain the underlying stable content-free retry decision,
+and neither the wrapper nor its representation exposes the credential, tenant,
+endpoint, or website content.
 
 #### Owned authenticated website submission runtime
 
@@ -870,8 +878,9 @@ Their `delivery_max_attempts` controls only website-to-sidecar acceptance;
 their `source_max_attempts` remains the final processing ceiling; the factory's
 middle limit controls sidecar delivery. `status()` and `health()` describe the
 local acceptance outbox. `sidecar_status()`, `sidecar_health()`,
-`sidecar_readiness()`, and `sidecar_capabilities()` perform separately
-authenticated lifecycle reads and never reinterpret local success as
+`sidecar_readiness()`, `sidecar_source_status()`,
+`sidecar_source_readiness()`, and `sidecar_capabilities()` perform separately
+authenticated operational reads and never reinterpret local success as
 downstream completion.
 
 Use `submission_status(operation, request_id)` for a single content-free
@@ -906,6 +915,22 @@ hashes. Overall status is `ready` only when both workers report `running`, both
 outboxes report `ok`, both component error codes are absent, and the sidecar
 response matches the currently pinned contract. This is intake readiness; it
 does not assert that a particular localization or publication has completed.
+
+Use `submission_pipeline_readiness()` when the website must also prove that the
+source localization service can process accepted work. The method evaluates
+the existing intake projection first. If the website worker or sidecar is not
+ready, `source_readiness` remains `null` and no request reaches the next layer.
+Only fully ready intake performs the separately authenticated, body-free
+`source_readiness()` operation through the sidecar.
+
+The resulting
+`blun.cms-source-delivery-submission-pipeline-readiness.v1` object keeps the
+complete intake projection and source-worker projection separate, binds the
+current sidecar and source-service capability hashes, and reports overall
+`ready` only when both projections are independently ready. A stopped source
+worker, transport failure, malformed status combination, or capability drift
+blocks fail-closed. This operational probe is content-free and makes no claim
+that any particular locale has passed review or publication.
 
 Use `submission_health()` for one content-free operational view of both
 durable acceptance outboxes. The runtime validates its local health object

@@ -40,6 +40,9 @@ STATUS_RESPONSE_SCHEMA = "blun.cms-source-delivery-status-response.v1"
 SOURCE_STATUS_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-source-status-response.v1"
 )
+SOURCE_READINESS_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-source-readiness-response.v1"
+)
 HEALTH_RESPONSE_SCHEMA = "blun.cms-source-delivery-health-response.v1"
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-readiness-response.v1"
@@ -53,6 +56,7 @@ CHANGE_PATH = "/v1/localization/source-delivery/changes"
 REMOVAL_PATH = "/v1/localization/source-delivery/removals"
 STATUS_PATH = "/v1/localization/source-delivery/status"
 SOURCE_STATUS_PATH = "/v1/localization/source-delivery/source-status"
+SOURCE_READINESS_PATH = "/v1/localization/source-delivery/source-readiness"
 HEALTH_PATH = "/v1/localization/source-delivery/health"
 READINESS_PATH = "/v1/localization/source-delivery/readiness"
 CAPABILITIES_PATH = "/v1/localization/source-delivery/capabilities"
@@ -74,6 +78,7 @@ SCOPES = {
     REMOVAL_PATH: "source-delivery-removal:write",
     STATUS_PATH: "source-delivery-status:read",
     SOURCE_STATUS_PATH: "source-delivery-source-status:read",
+    SOURCE_READINESS_PATH: "source-delivery-source-readiness:read",
     HEALTH_PATH: "source-delivery-health:read",
     READINESS_PATH: "source-delivery-readiness:read",
     CAPABILITIES_PATH: "source-delivery-capabilities:read",
@@ -83,6 +88,7 @@ METHODS = {
     REMOVAL_PATH: "POST",
     STATUS_PATH: "POST",
     SOURCE_STATUS_PATH: "POST",
+    SOURCE_READINESS_PATH: "GET",
     HEALTH_PATH: "GET",
     READINESS_PATH: "GET",
     CAPABILITIES_PATH: "GET",
@@ -381,6 +387,32 @@ def _source_status_response(
         ) from None
 
 
+def _source_readiness_response(
+    value: Any,
+    *,
+    expected_capabilities_sha256: str,
+) -> dict[str, Any]:
+    """Validate the source-service readiness envelope without weakening it."""
+
+    try:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"schema", "readiness", "capabilities_sha256"}
+            or value.get("schema") != _SOURCE_HTTP.READINESS_RESPONSE_SCHEMA
+            or value.get("capabilities_sha256")
+            != expected_capabilities_sha256
+        ):
+            raise ValueError
+        normalized = _SOURCE_HTTP._readiness_payload(value["readiness"])
+        if normalized != value["readiness"]:
+            raise ValueError
+        return normalized
+    except Exception:
+        raise CMSSourceDeliveryHTTPBlocked(
+            "source_delivery_http.runtime_response_invalid", 503,
+        ) from None
+
+
 def _health_payload(value: Any) -> dict[str, Any]:
     try:
         payload = value.as_payload()
@@ -536,6 +568,11 @@ def _capabilities_payload() -> dict[str, Any]:
             "source-delivery-source-status:read", TENANT_PRINCIPAL_SCHEMA,
             SOURCE_STATUS_REQUEST_SCHEMA, SOURCE_STATUS_RESPONSE_SCHEMA, 200,
         ),
+        (
+            "source_readiness", "GET", SOURCE_READINESS_PATH,
+            "source-delivery-source-readiness:read", PRINCIPAL_SCHEMA,
+            None, SOURCE_READINESS_RESPONSE_SCHEMA, 200,
+        ),
     )
     try:
         operations = {}
@@ -575,6 +612,7 @@ def _capabilities_payload() -> dict[str, Any]:
                 "delivery_retries_are_durable": True,
                 "status_is_site_bound": True,
                 "source_status_requires_accepted_submission": True,
+                "source_readiness_is_independently_validated": True,
                 "write_requires_ready_worker": True,
             },
         }
@@ -594,7 +632,7 @@ class CMSSourceDeliveryHTTPApplication:
     def __init__(self, runtime: Any, authenticator: Callable[[dict[str, Any]], Any]):
         if not all(callable(getattr(runtime, name, None)) for name in (
             "enqueue_change", "enqueue_removal", "status", "health",
-            "worker_readiness",
+            "source_readiness", "worker_readiness",
         )):
             raise TypeError("runtime must provide source delivery operations")
         if not callable(authenticator):
@@ -800,7 +838,8 @@ class CMSSourceDeliveryHTTPApplication:
                     "source_delivery_http.query_rejected", 400,
                 )
             bodyless = path in {
-                HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH,
+                HEALTH_PATH, READINESS_PATH, SOURCE_READINESS_PATH,
+                CAPABILITIES_PATH,
             }
             if bodyless:
                 body = self._body(environ, required=False)
@@ -852,6 +891,32 @@ class CMSSourceDeliveryHTTPApplication:
                 return self._send(start_response, status, {
                     "schema": READINESS_RESPONSE_SCHEMA,
                     "readiness": readiness,
+                    "capabilities_sha256": capabilities["sha256"],
+                })
+            if path == SOURCE_READINESS_PATH:
+                try:
+                    source_response = self.runtime.source_readiness()
+                except CMSSourceDeliveryHTTPBlocked:
+                    raise
+                except Exception:
+                    raise CMSSourceDeliveryHTTPBlocked(
+                        "source_delivery_http.runtime_blocked", 503,
+                    ) from None
+                source_readiness = _source_readiness_response(
+                    source_response,
+                    expected_capabilities_sha256=(
+                        self.runtime.expected_capabilities_sha256
+                    ),
+                )
+                status = (
+                    200 if source_readiness["status"] == "ready" else 503
+                )
+                return self._send(start_response, status, {
+                    "schema": SOURCE_READINESS_RESPONSE_SCHEMA,
+                    "source_readiness": source_readiness,
+                    "source_capabilities_sha256": (
+                        self.runtime.expected_capabilities_sha256
+                    ),
                     "capabilities_sha256": capabilities["sha256"],
                 })
 

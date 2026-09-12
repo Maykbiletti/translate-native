@@ -737,6 +737,47 @@ class CMSSourceDeliverySidecarHTTPClient:
             _fail("source_status_binding")
         return response
 
+    def source_readiness(self) -> Mapping[str, Any]:
+        """Read the downstream processing readiness through the sidecar."""
+
+        contract = self._contract("source_readiness")
+        result, response = self._request(
+            contract["method"], contract["path"], None, {200, 503}, {},
+        )
+        if (
+            set(response) != {
+                "schema", "source_readiness", "source_capabilities_sha256",
+                "capabilities_sha256",
+            }
+            or response.get("schema") != contract["response_schema"]
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("source_capabilities_sha256")
+            != self.expected_remote_capabilities_sha256
+        ):
+            _fail("source_readiness_binding")
+        try:
+            normalized = _HTTP._source_readiness_response(
+                {
+                    "schema": _HTTP._SOURCE_HTTP.READINESS_RESPONSE_SCHEMA,
+                    "readiness": response["source_readiness"],
+                    "capabilities_sha256": (
+                        response["source_capabilities_sha256"]
+                    ),
+                },
+                expected_capabilities_sha256=(
+                    self.expected_remote_capabilities_sha256
+                ),
+            )
+        except Exception:
+            _fail("source_readiness_binding")
+        if (
+            normalized != response["source_readiness"]
+            or (result.status == 200) != (normalized["status"] == "ready")
+        ):
+            _fail("source_readiness_binding")
+        return response
+
     def health(self) -> Mapping[str, Any]:
         contract = self._contract("health")
         result, response = self._request(

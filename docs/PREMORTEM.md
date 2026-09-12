@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## End-to-end processing readiness (12 September 2026)
+
+Assume a website accepted localization work while the source service could not
+actually process it.
+
+- A healthy website worker and sidecar could hide a stopped or blocked source
+  worker.
+- Combining all readiness data into one object could erase which operated
+  boundary is unavailable.
+- A local failure could still trigger an unnecessary downstream request and
+  create misleading network noise.
+- A valid source readiness response from another capability generation could
+  be accepted after configuration drift.
+
+The sidecar exposes a distinct authenticated, body-free source-readiness
+operation and validates the complete source response against its pinned
+contract. The website runtime first verifies local and sidecar intake; it
+contacts the source layer only when both are ready, preserves both readiness
+objects separately, binds both capability hashes, and fails closed on every
+transport, schema, status, or contract inconsistency.
+
 ## End-to-end localization lifecycle status (12 September 2026)
 
 Assume a website followed a durably accepted submission into localization but

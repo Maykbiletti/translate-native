@@ -687,6 +687,44 @@ class DurableCMSSourceDeliveryOutbox:
             "capabilities_sha256": response["capabilities_sha256"],
         }
 
+    def source_readiness(self) -> Mapping[str, Any]:
+        """Read the pinned source-service readiness without changing work."""
+
+        self._validate_schema()
+        client_readiness = getattr(self.client, "readiness", None)
+        if not callable(client_readiness):
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.client_failure"
+            )
+        try:
+            response = client_readiness()
+            if (
+                not isinstance(response, Mapping)
+                or set(response)
+                != {"schema", "readiness", "capabilities_sha256"}
+                or response.get("schema")
+                != _CLIENT._HTTP.READINESS_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self.capabilities_sha256
+            ):
+                raise ValueError
+            normalized = _CLIENT._HTTP._readiness_payload(
+                response["readiness"]
+            )
+            if normalized != response["readiness"]:
+                raise ValueError
+        except Exception as error:
+            if getattr(error, "cms_source_client_failure", False) is True:
+                raise
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.source_readiness_invalid"
+            ) from None
+        return {
+            "schema": response["schema"],
+            "readiness": dict(normalized),
+            "capabilities_sha256": response["capabilities_sha256"],
+        }
+
     def claim(
         self,
         worker_id: str,

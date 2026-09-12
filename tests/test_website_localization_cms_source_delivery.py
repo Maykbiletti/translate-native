@@ -143,6 +143,20 @@ class ScriptedClient:
             "capabilities_sha256": self.expected_capabilities_sha256,
         }
 
+    def readiness(self):
+        self.calls.append(("readiness",))
+        return {
+            "schema": "blun.cms-source-readiness-response.v2",
+            "readiness": {
+                "schema": "blun.cms-source-worker-readiness.v1",
+                "status": "ready",
+                "worker_state": "running",
+                "service_status": "ok",
+                "error_code": None,
+            },
+            "capabilities_sha256": self.expected_capabilities_sha256,
+        }
+
 
 class SourceDeliveryTests(unittest.TestCase):
     def setUp(self):
@@ -210,6 +224,39 @@ class SourceDeliveryTests(unittest.TestCase):
             self.outbox.source_status(
                 change["event_id"], change["site_id"], "f" * 64,
             )
+
+    def test_source_readiness_is_exact_content_free_and_read_only(self):
+        response = self.outbox.source_readiness()
+
+        self.assertEqual(response["readiness"], {
+            "schema": "blun.cms-source-worker-readiness.v1",
+            "status": "ready",
+            "worker_state": "running",
+            "service_status": "ok",
+            "error_code": None,
+        })
+        self.assertEqual(response["capabilities_sha256"], "a" * 64)
+        self.assertEqual(self.client.calls, [("readiness",)])
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM cms_source_delivery_outbox"
+            ).fetchone()[0],
+            0,
+        )
+
+        self.client.readiness = lambda: {
+            "schema": "blun.cms-source-readiness-response.v2",
+            "readiness": {
+                "schema": "blun.cms-source-worker-readiness.v1",
+                "status": "ready",
+            },
+            "capabilities_sha256": "a" * 64,
+        }
+        with self.assertRaisesRegex(
+            DELIVERY.CMSSourceDeliveryBlocked,
+            "source_delivery.source_readiness_invalid",
+        ):
+            self.outbox.source_readiness()
 
     def test_removals_are_delivered_before_older_changes(self):
         change = cms_support.event()

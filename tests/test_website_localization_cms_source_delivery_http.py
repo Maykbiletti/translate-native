@@ -208,11 +208,16 @@ class SourceDeliveryHTTPTests(unittest.TestCase):
         ).hexdigest())
         self.assertEqual(set(capabilities["operations"]), {
             "capabilities", "change", "health", "readiness", "removal",
-            "source_status", "status",
+            "source_readiness", "source_status", "status",
         })
         self.assertTrue(
             capabilities["semantics"][
                 "source_status_requires_accepted_submission"
+            ]
+        )
+        self.assertTrue(
+            capabilities["semantics"][
+                "source_readiness_is_independently_validated"
             ]
         )
         self.assertTrue(
