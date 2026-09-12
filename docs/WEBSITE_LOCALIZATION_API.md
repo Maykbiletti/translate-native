@@ -907,6 +907,20 @@ outboxes report `ok`, both component error codes are absent, and the sidecar
 response matches the currently pinned contract. This is intake readiness; it
 does not assert that a particular localization or publication has completed.
 
+Use `submission_health()` for one content-free operational view of both
+durable acceptance outboxes. The runtime validates its local health object
+before making any network request, then retrieves the sidecar health through
+the owned authenticated, contract-pinned client. Invalid local state therefore
+blocks offline; malformed remote counters, contradictory status, and changed
+capability bindings also block fail-closed.
+
+The `blun.cms-source-delivery-submission-health.v1` projection retains the
+complete whitelisted website and sidecar health snapshots separately,
+including counts, operation totals, due work, expired leases, terminal
+failures, contract mismatches, and stable error codes. Its overall status is
+`ok` only when both snapshots independently report `ok`. A blocked component
+can never be hidden by the other component's healthy state.
+
 Call `replace_credential()` only during a server-side generation overlap. It
 updates the exact signer owned by the worker without reopening the outbox or
 changing either contract pin. The wrapper blocks network and storage access

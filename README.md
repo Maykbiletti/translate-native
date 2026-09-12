@@ -107,6 +107,18 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.77.0: end-to-end submission health
+
+Version 6.77.0 adds one content-free `submission_health()` projection across
+the website and sidecar acceptance outboxes. It validates local storage before
+network access and then uses the owned authenticated, capability-pinned client
+to retrieve the downstream snapshot.
+
+Both health objects remain distinct with their counters, due work, expired
+leases, failures, contract mismatches, and stable error codes. Overall health
+is `ok` only when both outboxes independently report `ok`; malformed state or
+contract substitution blocks fail-closed.
+
 ### Version 6.76.0: end-to-end submission readiness
 
 Version 6.76.0 adds one content-free `submission_readiness()` projection for
@@ -1233,7 +1245,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.76.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.77.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

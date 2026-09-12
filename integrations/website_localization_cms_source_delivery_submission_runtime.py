@@ -142,6 +142,35 @@ class HMACCMSSourceDeliverySubmissionReadiness:
         }
 
 
+@dataclass(frozen=True)
+class HMACCMSSourceDeliverySubmissionHealth:
+    """Content-free health across both durable submission outboxes."""
+
+    schema: str
+    status: str
+    website_health: Mapping[str, Any]
+    sidecar_health: Mapping[str, Any]
+    sidecar_capabilities_sha256: str
+    source_capabilities_sha256: str
+
+    @staticmethod
+    def _copy_health(value: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(value)
+        result["counts"] = dict(value["counts"])
+        result["operations"] = dict(value["operations"])
+        return result
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "status": self.status,
+            "website_health": self._copy_health(self.website_health),
+            "sidecar_health": self._copy_health(self.sidecar_health),
+            "sidecar_capabilities_sha256": self.sidecar_capabilities_sha256,
+            "source_capabilities_sha256": self.source_capabilities_sha256,
+        }
+
+
 class HMACCMSSourceDeliverySubmissionRuntime:
     """Own one signer, sidecar client, adapter, outbox, and optional worker."""
 
@@ -312,6 +341,51 @@ class HMACCMSSourceDeliverySubmissionRuntime:
     def health(self) -> Any:
         self._assert_open()
         return self._delivery.health()
+
+    def submission_health(self) -> HMACCMSSourceDeliverySubmissionHealth:
+        """Project exact health across both durable acceptance outboxes."""
+
+        self._assert_open()
+        try:
+            website = _AUTH._HTTP._health_payload(self._delivery.health())
+        except Exception:
+            raise _blocked("health_invalid") from None
+
+        response = self._client.health()
+        try:
+            if (
+                not isinstance(response, Mapping)
+                or set(response)
+                != {"schema", "health", "capabilities_sha256"}
+                or response.get("schema") != _AUTH._HTTP.HEALTH_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self._client.expected_capabilities_sha256
+            ):
+                raise ValueError
+            sidecar = _AUTH._HTTP._health_payload(
+                _AUTH._CLIENT._PayloadView(response["health"]),
+            )
+            if sidecar != response["health"]:
+                raise ValueError
+        except Exception:
+            raise _blocked("health_invalid") from None
+
+        return HMACCMSSourceDeliverySubmissionHealth(
+            schema="blun.cms-source-delivery-submission-health.v1",
+            status=(
+                "ok"
+                if website["status"] == sidecar["status"] == "ok"
+                else "blocked"
+            ),
+            website_health=website,
+            sidecar_health=sidecar,
+            sidecar_capabilities_sha256=(
+                self._client.expected_capabilities_sha256
+            ),
+            source_capabilities_sha256=(
+                self._client.expected_remote_capabilities_sha256
+            ),
+        )
 
     def submission_readiness(
         self,

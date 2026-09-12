@@ -1,5 +1,24 @@
 # Version 6 premortem
 
+## End-to-end submission health (12 September 2026)
+
+Assume one durable submission outbox appeared healthy while the other was
+blocked, corrupt, or bound to a changed sidecar contract.
+
+- A website-only health check could stay green while sidecar delivery is
+  permanently failed or holding an expired lease.
+- A healthy sidecar could hide failed or stale work in the website outbox if a
+  deployment reduced both states to one averaged signal.
+- Malformed counters or a substituted capability hash could be normalized into
+  a plausible healthy response.
+- Probing the sidecar before validating local storage could send an
+  authenticated request from a runtime whose own state cannot be trusted.
+
+The combined projection validates the local health snapshot before network
+access, then uses the owned authenticated client and requires the exact
+sidecar schema and capability binding. It preserves both complete content-free
+snapshots and reports `ok` only when both independently report `ok`.
+
 ## End-to-end submission readiness (12 September 2026)
 
 Assume the website worker appeared healthy while the authenticated sidecar

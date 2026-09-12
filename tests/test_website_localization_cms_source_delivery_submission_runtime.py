@@ -253,6 +253,123 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(readiness["status"], "ready")
         self.assertEqual(len(self.transport.calls), 5)
 
+    def test_submission_health_requires_both_outboxes_to_be_healthy(self):
+        runtime = self.open()
+
+        health = runtime.submission_health()
+
+        self.assertEqual(health.status, "ok")
+        self.assertEqual(health.website_health["status"], "ok")
+        self.assertEqual(health.sidecar_health["status"], "ok")
+        self.assertEqual(
+            health.sidecar_capabilities_sha256, self.sidecar_digest,
+        )
+        self.assertEqual(
+            health.source_capabilities_sha256, self.remote_digest,
+        )
+        payload = health.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "status", "website_health", "sidecar_health",
+            "sidecar_capabilities_sha256", "source_capabilities_sha256",
+        })
+        self.assertNotIn("delivery.example", repr(payload))
+        self.assertNotIn("website-credential", repr(payload))
+
+    def test_submission_health_keeps_local_failure_separate(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change, delivery_max_attempts=1)
+        original = self.transport.request
+
+        def fail_once(*_args, **_kwargs):
+            self.transport.request = original
+            raise SUBMISSION._AUTH._CLIENT.CMSSourceDeliveryClientBlocked(
+                "source_delivery_client.network", retryable=True,
+            )
+
+        self.transport.request = fail_once
+        failed = runtime.run_once()
+
+        health = runtime.submission_health()
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(health.status, "blocked")
+        self.assertEqual(health.website_health["status"], "blocked")
+        self.assertEqual(
+            health.website_health["error_code"], "source_delivery.failed",
+        )
+        self.assertEqual(health.sidecar_health["status"], "ok")
+
+    def test_submission_health_keeps_sidecar_failure_separate(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change)
+        runtime.run_once()
+        self.remote.failures.append(delivery_support.ClientFailure(
+            "source_client.denied", retryable=False,
+        ))
+        failed = self.sidecar.delivery.run_once()
+
+        health = runtime.submission_health()
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(health.status, "blocked")
+        self.assertEqual(health.website_health["status"], "ok")
+        self.assertEqual(health.sidecar_health["status"], "blocked")
+        self.assertEqual(
+            health.sidecar_health["error_code"], "source_delivery.failed",
+        )
+
+    def test_submission_health_rejects_malformed_local_state_offline(self):
+        runtime = self.open()
+        runtime._delivery.health = lambda: {"status": "ok"}
+        before = len(self.transport.calls)
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_health()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.health_invalid",
+        )
+        self.assertEqual(len(self.transport.calls), before)
+
+    def test_submission_health_rejects_malformed_remote_state(self):
+        runtime = self.open()
+        response = runtime.sidecar_health()
+        altered = copy.deepcopy(response)
+        altered["health"]["failed"] = 1
+        runtime._client.health = lambda: altered
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_health()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.health_invalid",
+        )
+
+    def test_submission_health_rejects_sidecar_capability_substitution(self):
+        runtime = self.open()
+        response = runtime.sidecar_health()
+        altered = copy.deepcopy(response)
+        altered["capabilities_sha256"] = "f" * 64
+        runtime._client.health = lambda: altered
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_health()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.health_invalid",
+        )
+
     def test_submission_readiness_requires_both_owned_workers(self):
         runtime = self.open(
             hosted=True,
