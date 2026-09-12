@@ -906,14 +906,27 @@ linked, permission-weakened, corrupt, closed, or foreign-process replay store
 makes the sidecar return retryable HTTP `503` during authentication, before
 the delivery runtime parses or persists protected content.
 
+Use `replace_credentials()` on either the composite runtime or its
+`authentication` member to rotate without stopping the delivery worker. A
+safe rollout first supplies the old and new generations together, moves every
+client to the new signer, and then supplies only the new generation. The
+method materializes and validates the complete iterable, checks the replay
+database and process lifecycle, waits behind any in-flight authentication,
+and swaps exactly one fully constructed verifier. Invalid or unavailable
+replacement state leaves the previous verifier untouched. The same replay
+ledger remains open throughout, so a consumed proof stays consumed even if
+its credential generation is removed and later accepted again.
+
+The host remains responsible for fetching trusted secret-manager values and
+for deciding the overlap window. The runtime does not log, persist, return, or
+rotate secret material, and it never reads a key file or environment variable.
+
 Call `close()` only after the external HTTP server has stopped accepting new
 requests. The composite first signals and joins the delivery worker and closes
 the outbox, then closes the replay connection. If a provider call exceeds the
 configured worker-stop bound, the replay runtime deliberately remains open;
 the caller must resolve the still-running worker and retry shutdown rather
-than invalidating authentication underneath it. Credential rotation remains a
-trusted deployment restart: overlap only the explicitly accepted generations,
-then remove the retired generation from the next runtime configuration.
+than invalidating authentication underneath it.
 
 Premortem: an invalid deployment could create state before discovering a bad
 worker or timeout; two paths could alias one database; a pre-fork service could

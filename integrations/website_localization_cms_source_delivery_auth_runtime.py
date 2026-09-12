@@ -195,7 +195,7 @@ def _credential_values(
 ) -> tuple[Any, ...]:
     try:
         values = tuple(credentials)
-    except TypeError:
+    except Exception:
         raise _blocked("configuration_invalid") from None
     if not values:
         raise _blocked("configuration_invalid")
@@ -242,11 +242,13 @@ class DurableSourceDeliveryHMACRuntime:
         guard: Callable[[], None],
         store: Any,
         verifier: Any,
+        verifier_configuration: Mapping[str, Any],
     ):
         self._connection = connection
         self._guard = guard
         self._store = store
         self._verifier = verifier
+        self._verifier_configuration = dict(verifier_configuration)
         self._lock = threading.RLock()
         self._owner_pid = os.getpid()
         self._closed = False
@@ -280,6 +282,26 @@ class DurableSourceDeliveryHMACRuntime:
 
     def __call__(self, request: Mapping[str, Any]) -> Mapping[str, str] | None:
         return self._call(lambda: self._verifier(request))
+
+    def replace_credentials(self, credentials: Iterable[Any]) -> None:
+        """Atomically replace accepted generations without resetting replay state."""
+
+        self._assert_owner()
+        values = _credential_values(credentials)
+        with self._lock:
+            if self._closed:
+                raise _blocked("closed")
+            self._guard()
+            try:
+                replacement = _AUTH.SourceDeliveryHMACVerifier(
+                    values,
+                    self._store,
+                    **self._verifier_configuration,
+                )
+            except Exception as error:
+                raise _blocked("configuration_invalid") from error
+            self._guard()
+            self._verifier = replacement
 
     def health(self) -> Mapping[str, Any]:
         try:
@@ -377,16 +399,17 @@ def open_durable_source_delivery_hmac_runtime(
         )
         guard()
         store = _AUTH.DurableHMACReplayStore(connection)
+        verifier_configuration = {
+            "origin": origin,
+            "sidecar_capabilities_sha256": sidecar_capabilities_sha256,
+            "remote_capabilities_sha256": remote_capabilities_sha256,
+            "clock": clock,
+            "max_age_seconds": max_age_seconds,
+            "future_skew_seconds": future_skew_seconds,
+            "allow_loopback_http": allow_loopback_http,
+        }
         verifier = _AUTH.SourceDeliveryHMACVerifier(
-            values,
-            store,
-            origin=origin,
-            sidecar_capabilities_sha256=sidecar_capabilities_sha256,
-            remote_capabilities_sha256=remote_capabilities_sha256,
-            clock=clock,
-            max_age_seconds=max_age_seconds,
-            future_skew_seconds=future_skew_seconds,
-            allow_loopback_http=allow_loopback_http,
+            values, store, **verifier_configuration,
         )
         guard()
     except Exception as error:
@@ -399,7 +422,7 @@ def open_durable_source_delivery_hmac_runtime(
             raise
         raise _blocked("initialization_failed") from error
     return DurableSourceDeliveryHMACRuntime(
-        connection, guard, store, verifier,
+        connection, guard, store, verifier, verifier_configuration,
     )
 
 
@@ -442,6 +465,9 @@ class HostedHMACAuthenticatedCMSSourceDelivery:
 
     def authentication_health(self) -> Mapping[str, Any]:
         return self.authentication.health()
+
+    def replace_credentials(self, credentials: Iterable[Any]) -> None:
+        self.authentication.replace_credentials(credentials)
 
     def close(self, *, worker_timeout_seconds: float | int = 30) -> None:
         self.delivery.close(worker_timeout_seconds=worker_timeout_seconds)

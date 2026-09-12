@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Uninterrupted source-delivery credential rotation (12 September 2026)
+
+Assume a running source-delivery sidecar rotated credentials but briefly
+accepted an incomplete set, lost its last working verifier, or weakened replay
+protection.
+
+- An in-flight request could race the replacement and observe a partially
+  updated credential map.
+- Invalid secret-manager output could remove every valid generation before the
+  configuration error became visible.
+- Removing and later re-adding a generation could make an already consumed
+  proof usable again if rotation also reset replay state.
+- A failed update could bypass storage, process, or lifecycle guards, while its
+  private exception or secret value escaped through a stable error.
+
+The runtime now materializes and validates one complete replacement verifier,
+then swaps it atomically under the same lock used by authentication. The prior
+verifier remains active until the replacement and replay-path guard both pass.
+All generations share the unchanged durable nonce ledger, so retirement and
+re-enrollment do not restore consumed proofs. Closed, inherited, replaced, or
+permission-weakened runtimes reject the update; failures are reduced to stable
+content-free codes.
+
 ## Durable terminal-processing reconciliation (11 September 2026)
 
 Assume the source CMS received a valid intake acknowledgement but later lost

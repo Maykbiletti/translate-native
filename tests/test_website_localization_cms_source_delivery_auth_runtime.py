@@ -221,6 +221,147 @@ class SourceDeliveryHMACRuntimeTests(unittest.TestCase):
             resumed.authentication_health()["consumed_nonces"], 1,
         )
 
+    def test_live_rotation_overlaps_then_retires_one_generation(self):
+        runtime = self.open()
+        first_client, _first_transport = self.http_client(runtime)
+        second_credential = self.make_credential("2")
+        second_client, _second_transport = self.http_client(
+            runtime, second_credential,
+        )
+
+        first_client.capabilities()
+        runtime.replace_credentials((self.credential, second_credential))
+        first_client.capabilities()
+        second_client.capabilities()
+        runtime.replace_credentials((second_credential,))
+
+        with self.assertRaises(CLIENT.CMSSourceDeliveryClientBlocked) as retired:
+            first_client.capabilities()
+        self.assertEqual(retired.exception.code, "source_delivery_client.http_status")
+        self.assertFalse(retired.exception.retryable)
+        self.assertEqual(
+            second_client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+        self.assertEqual(
+            runtime.authentication_health()["consumed_nonces"], 4,
+        )
+
+    def test_failed_rotation_preserves_the_last_valid_generation(self):
+        runtime = self.open()
+        client, _transport = self.http_client(runtime)
+        private = "must-not-escape"
+
+        def broken_credentials():
+            yield self.make_credential("2")
+            raise RuntimeError(private)
+
+        with self.assertRaises(RUNTIME.SourceDeliveryHMACRuntimeBlocked) as caught:
+            runtime.replace_credentials(broken_credentials())
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_hmac_runtime.configuration_invalid",
+        )
+        self.assertNotIn(private, str(caught.exception))
+        self.assertEqual(
+            client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+
+    def test_rotation_keeps_consumed_nonces_across_remove_and_readd(self):
+        runtime = self.open()
+        client, transport = self.http_client(runtime)
+        client.capabilities()
+        captured = transport.calls[0]
+        second_credential = self.make_credential("2")
+
+        runtime.replace_credentials((second_credential,))
+        runtime.replace_credentials((self.credential, second_credential))
+        replay_transport = WSGITransport(runtime.http)
+        response = replay_transport.request(
+            captured[0], captured[1], captured[2], captured[3],
+            timeout=captured[4],
+        )
+
+        self.assertEqual(response.status, 401)
+        self.assertEqual(
+            runtime.authentication_health()["consumed_nonces"], 1,
+        )
+
+    def test_rotation_waits_for_an_inflight_authentication(self):
+        runtime = self.open()
+        first_client, _first_transport = self.http_client(runtime)
+        second_credential = self.make_credential("2")
+        second_client, _second_transport = self.http_client(
+            runtime, second_credential,
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        original = runtime.authentication._verifier
+
+        def blocking_verifier(request):
+            entered.set()
+            release.wait(2)
+            return original(request)
+
+        runtime.authentication._verifier = blocking_verifier
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            inflight = pool.submit(first_client.capabilities)
+            self.assertTrue(entered.wait(1))
+            rotation = pool.submit(
+                runtime.replace_credentials, (second_credential,),
+            )
+            time.sleep(0.02)
+            self.assertFalse(rotation.done())
+            release.set()
+            self.assertEqual(
+                inflight.result()["capabilities"]["sha256"],
+                self.sidecar_digest,
+            )
+            self.assertIsNone(rotation.result())
+
+        with self.assertRaises(CLIENT.CMSSourceDeliveryClientBlocked):
+            first_client.capabilities()
+        self.assertEqual(
+            second_client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+
+    def test_rotation_obeys_storage_process_and_lifecycle_guards(self):
+        runtime = self.open()
+        client, _transport = self.http_client(runtime)
+        second_credential = self.make_credential("2")
+        os.chmod(self.replay, 0o644)
+
+        with self.assertRaises(RUNTIME.SourceDeliveryHMACRuntimeBlocked) as unsafe:
+            runtime.replace_credentials((second_credential,))
+        self.assertEqual(
+            unsafe.exception.code,
+            "source_delivery_hmac_runtime.database_unsafe",
+        )
+        os.chmod(self.replay, 0o600)
+        self.assertEqual(
+            client.capabilities()["capabilities"]["sha256"],
+            self.sidecar_digest,
+        )
+
+        runtime.authentication._owner_pid -= 1
+        with self.assertRaises(RUNTIME.SourceDeliveryHMACRuntimeBlocked) as foreign:
+            runtime.replace_credentials((second_credential,))
+        self.assertEqual(
+            foreign.exception.code,
+            "source_delivery_hmac_runtime.foreign_process",
+        )
+        runtime.authentication._owner_pid = os.getpid()
+        runtime.close()
+        with self.assertRaises(RUNTIME.SourceDeliveryHMACRuntimeBlocked) as closed:
+            runtime.replace_credentials((second_credential,))
+        self.assertEqual(
+            closed.exception.code,
+            "source_delivery_hmac_runtime.closed",
+        )
+
     def test_invalid_configuration_creates_neither_database(self):
         cases = (
             {"origin": "http://delivery.example"},
