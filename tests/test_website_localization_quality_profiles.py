@@ -91,6 +91,24 @@ class WebsiteLocalizationQualityProfileTests(unittest.TestCase):
                     list(PROFILES.COMMERCIAL_REVIEW_CHECKS),
                 )
                 self.assertEqual(item["source_refs"], general["source_refs"])
+                rendering = item["rendering_reference"]
+                self.assertEqual(
+                    rendering["schema"], PROFILES.COMMERCIAL_RENDERING_SCHEMA,
+                )
+                self.assertEqual(rendering["locale"], item["locale"])
+                self.assertEqual(rendering["source"]["authority"], "Unicode CLDR")
+                self.assertEqual(rendering["source"]["version"], "48")
+                self.assertIn("/48.0.0/", rendering["source"]["url"])
+                self.assertEqual(rendering["numbering_system"], "latn")
+                self.assertEqual(rendering["native_numbering_system"], "latn")
+                self.assertFalse(rendering["application"]["semantic_proof"])
+                self.assertTrue(
+                    rendering["application"]["allow_equivalent_number_words"]
+                )
+                self.assertEqual(
+                    rendering["application"]["ambiguous_values"],
+                    "targeted-review",
+                )
                 for field in (
                     "creation_focus", "native_review_focus",
                     "fidelity_review_focus", "adversarial_focus",
@@ -99,6 +117,40 @@ class WebsiteLocalizationQualityProfileTests(unittest.TestCase):
                 self.assertTrue(
                     unicodedata.is_normalized("NFC", canonical.decode("utf-8"))
                 )
+
+    def test_cldr_48_commercial_patterns_preserve_exact_locale_overrides(self):
+        maltese = PROFILES.commercial_quality_profile_for(
+            "mt-MT", PLANNER.COMMERCIAL_PROFILE,
+        )["rendering_reference"]
+        finnish = PROFILES.commercial_quality_profile_for(
+            "fi-FI", PLANNER.COMMERCIAL_PROFILE,
+        )["rendering_reference"]
+        austrian = PROFILES.commercial_quality_profile_for(
+            "de-AT", PLANNER.COMMERCIAL_PROFILE,
+        )["rendering_reference"]
+        portuguese = PROFILES.commercial_quality_profile_for(
+            "pt-PT", PLANNER.COMMERCIAL_PROFILE,
+        )["rendering_reference"]
+
+        self.assertEqual(maltese["source"]["locale"], "mt")
+        self.assertEqual(maltese["symbols"], {"decimal": ".", "group": ","})
+        self.assertEqual(maltese["patterns"]["currency"], "¤#,##0.00")
+        self.assertEqual(maltese["patterns"]["percent"], "#,##0%")
+
+        self.assertEqual(finnish["source"]["locale"], "fi")
+        self.assertEqual(finnish["symbols"]["group"], "\N{NO-BREAK SPACE}")
+        self.assertEqual(finnish["patterns"]["percent"], "#,##0\N{NO-BREAK SPACE}%")
+        self.assertEqual(finnish["patterns"]["at_least"], "vähintään {0}")
+
+        self.assertEqual(austrian["source"]["locale"], "de-AT")
+        self.assertEqual(austrian["symbols"]["group"], "\N{NO-BREAK SPACE}")
+        self.assertEqual(
+            austrian["patterns"]["currency"],
+            "¤\N{NO-BREAK SPACE}#,##0.00",
+        )
+        self.assertEqual(portuguese["source"]["locale"], "pt-PT")
+        self.assertEqual(portuguese["minimum_grouping_digits"], 2)
+        self.assertEqual(portuguese["symbols"]["group"], "\N{NO-BREAK SPACE}")
 
     def test_maltese_and_finnish_profiles_cover_required_language_risks(self):
         maltese = PROFILES.quality_profile_for("mt-MT")
@@ -133,6 +185,13 @@ class WebsiteLocalizationQualityProfileTests(unittest.TestCase):
             "mt-MT", PLANNER.COMMERCIAL_PROFILE,
         )
         self.assertNotIn("tampered", fresh["native_review_focus"])
+        commercial["rendering_reference"]["patterns"]["currency"] = "tampered"
+        self.assertNotEqual(
+            commercial["rendering_reference"],
+            PROFILES.commercial_quality_profile_for(
+                "mt-MT", PLANNER.COMMERCIAL_PROFILE,
+            )["rendering_reference"],
+        )
         maltese = json.dumps(fresh, ensure_ascii=False).casefold()
         for marker in ("ċ", "ġ", "għ", "ħ", "ż", "english", "italian"):
             self.assertIn(marker, maltese)

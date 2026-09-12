@@ -1405,7 +1405,7 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v4` object. Its nested and separately
+`translate-native.commercial-capabilities.v5` object. Its nested and separately
 hashed `review_summary_contract` defines the exact content-free result schema,
 field set, verified/review-required state invariant, ten allowed ordered
 review dimensions, exact source/target/profile/evidence hash semantics, and
@@ -1416,12 +1416,22 @@ or reviewer prose. Any registry or digest drift blocks the whole discovery
 response rather than advertising a partial contract.
 
 The commercial capability additionally requires schema
-`translate-native.commercial-locale-quality-profile.v1` in every commercial
+`translate-native.commercial-locale-quality-profile.v2` in every commercial
 job. One distinct version and digest is derived for each advertised EU locale
 from that locale's native, fidelity, adversarial and source-reference profile.
 The full object is bound into the job ID and all three provider requests; its
 version and digest remain in signed quality evidence. A stale, substituted or
 mutated locale profile blocks before any provider call.
+
+The profile includes a canonical
+`translate-native.commercial-rendering-reference.v1` derived from the tagged
+Unicode CLDR 48 numbers data for that exact target profile. Its default and
+native numbering systems, grouping threshold, symbols, and decimal, percentage,
+currency, ISO-currency, approximation, limit, and range patterns are sent to
+all three provider phases and covered by the profile digest. This is rendering
+guidance only: deterministic punctuation or numeric regex matching is not
+semantic proof, equivalent written forms remain eligible, and uncertainty is
+routed to independent model or qualified native-domain review.
 
 For publication, `blun.website-localization-release-evidence.v3` carries the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
@@ -1443,11 +1453,12 @@ receipts, qualified-human identities and reviewer prose are never published.
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": {
-      "profile": "translate-native.commercial.v4",
+      "profile": "translate-native.commercial.v5",
       "locale_quality_profile": {
-        "schema": "translate-native.commercial-locale-quality-profile.v1",
+        "schema": "translate-native.commercial-locale-quality-profile.v2",
         "required": true,
-        "binding_fields": ["locale", "version", "commercial_profile", "quality_profile_version", "quality_profile_sha256", "sha256"],
+        "binding_fields": ["locale", "version", "commercial_profile", "quality_profile_version", "quality_profile_sha256", "rendering_reference", "sha256"],
+        "rendering_reference": {"schema": "translate-native.commercial-rendering-reference.v1", "authority": "Unicode CLDR", "version": "48", "purpose": "target-locale-rendering-guidance", "semantic_proof": false, "unresolved_route": "independent-model-or-qualified-native-domain-review"},
         "required_commercial_checks": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"],
         "provider_phases": ["transcreation", "target_native", "source_fidelity"],
         "tamper_policy": "block-before-provider"
@@ -1455,7 +1466,7 @@ receipts, qualified-human identities and reviewer prose are never published.
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
         "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v1", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-source-sha256", "exact-target-sha256", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
-        "profile": "translate-native.commercial.v4",
+        "profile": "translate-native.commercial.v5",
         "required_fields": ["schema", "profile", "status", "review_required_dimensions", "evidence_sha256"],
         "result_schema": "translate-native.commercial-review-summary.v2",
         "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
@@ -1463,7 +1474,7 @@ receipts, qualified-human identities and reviewer prose are never published.
         "sha256": "<sha256>",
         "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
       },
-      "schema": "translate-native.commercial-capabilities.v4",
+      "schema": "translate-native.commercial-capabilities.v5",
       "sha256": "<sha256>"
     },
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
@@ -1479,7 +1490,7 @@ receipts, qualified-human identities and reviewer prose are never published.
       "quality_profile_sha256": "<sha256>",
       "quality_profile_version": "eu-mt-MT-2026-09-1",
       "commercial_quality_profile_sha256": "<sha256>",
-      "commercial_quality_profile_version": "commercial-eu-mt-MT-2026-09-1",
+      "commercial_quality_profile_version": "commercial-eu-mt-MT-2026-09-2",
       "script": "Latn"
     }],
     "plan_schema": "blun.website-localization-plan.v2",

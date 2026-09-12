@@ -11,7 +11,7 @@ from pathlib import Path
 from commercial_localization_profile import CommercialReviewBlocked, review_contract, validate_review
 
 
-PROFILE = "translate-native.commercial.v4"
+PROFILE = "translate-native.commercial.v5"
 MAX_INPUT_BYTES = 2_000_000
 
 

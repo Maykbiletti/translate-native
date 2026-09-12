@@ -1,5 +1,31 @@
 # Version 6 premortem
 
+## Locale-exact commercial rendering references (12 September 2026)
+
+Assume every commercial provider phase received the correct language profile,
+but rendered amounts, percentages, ranges, and currency labels with conventions
+from a different EU locale.
+
+- A language name alone cannot distinguish Austrian grouping or Portuguese
+  spacing from a generic parent-language default.
+- Treating one punctuation spelling as semantic proof would reject equivalent
+  number words, native digits, or safely reformatted values.
+- An unversioned external reference could change without invalidating queued
+  jobs, cached targets, review evidence, or publication approvals.
+- Copying a formatting table by hand could silently transpose two locales or
+  normalize non-breaking spaces into ordinary spaces.
+
+Embed a canonical CLDR 48 number-format reference in each of the 24 commercial
+locale profiles, including the resolved CLDR locale, numbering system, decimal
+and grouping symbols, minimum grouping threshold, decimal, percent, currency,
+ISO-currency, approximation, limit, and range patterns. Bind the complete
+reference and its official tagged source URL into the profile digest and every
+provider phase. Treat these values as rendering guidance only: semantic review
+must accept meaning-preserving surface variants and route ambiguous values to
+independent model or qualified native-domain review. Tests cover all locales,
+exact Maltese and Finnish conventions, Austrian and Portuguese region overrides,
+Unicode spacing, profile tampering, and the ban on deterministic regex proof.
+
 ## Commercial escalation evidence at publication (12 September 2026)
 
 Assume a locale reached the CMS with a commercial review summary that still

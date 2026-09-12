@@ -111,6 +111,20 @@ class CommercialLocalizationTests(unittest.TestCase):
             contract["provider_phases"], list(WORKER.PHASES),
         )
         self.assertEqual(
+            contract["rendering_reference"],
+            {
+                "schema": PROFILE.COMMERCIAL_RENDERING_REFERENCE_SCHEMA,
+                "authority": "Unicode CLDR",
+                "version": "48",
+                "purpose": "target-locale-rendering-guidance",
+                "semantic_proof": False,
+                "unresolved_route": (
+                    "independent-model-or-qualified-native-domain-review"
+                ),
+            },
+        )
+        self.assertIn("rendering_reference", contract["binding_fields"])
+        self.assertEqual(
             tuple(PROFILE.DIMENSIONS),
             PLANNER._QUALITY_PROFILES.COMMERCIAL_REVIEW_CHECKS,
         )
@@ -227,7 +241,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v5"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v6"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -246,6 +260,9 @@ class CommercialLocalizationTests(unittest.TestCase):
             lambda value: value.update(version="stale"),
             lambda value: value.update(sha256="0" * 64),
             lambda value: value["native_review_focus"].append("weakened"),
+            lambda value: value["rendering_reference"]["patterns"].update(
+                currency="#,##0.00 ¤"
+            ),
         ):
             payload = job(SOURCE, "commercial")
             mutate(payload["commercial_quality_profile"])

@@ -104,7 +104,7 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v4` and the exact target-locale
+The planner binds `translate-native.commercial.v5` and the exact target-locale
 commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
@@ -121,6 +121,15 @@ text, spans, reviewer prose, project prices and project brands.
 Adapters therefore do not need to infer the targeted-review envelope from a
 schema name or prose. A changed, missing, reordered or unknown dimension makes
 the complete capability response unavailable.
+
+Every commercial locale profile also carries an exact Unicode CLDR 48 numbers
+reference. Use its resolved locale, numbering system, grouping threshold,
+symbols, and standard decimal, percent, currency, ISO-currency, approximation,
+limit, and range patterns as native rendering guidance. Do not use a surface
+pattern or cross-language regex as evidence that the value is semantically
+equal. Meaning-preserving number words, written percentages, and digit forms
+remain eligible; unresolved values require independent model or qualified
+native-domain review.
 The worker uses the existing three ordered passes; the source-fidelity response
 additionally requires `commercial_review`. It contains all ten named dimensions,
 coverage and per-offer evidence. Each item declares `matched`, `source_only`, or

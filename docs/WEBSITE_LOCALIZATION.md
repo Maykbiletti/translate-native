@@ -1657,8 +1657,8 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v4` profile plus one exact
-`translate-native.commercial-locale-quality-profile.v1` object to the job
+versioned `translate-native.commercial.v5` profile plus one exact
+`translate-native.commercial-locale-quality-profile.v2` object to the job
 payload, job ID and plan ID; the existing seven types retain their previous
 payloads and IDs. It is available for every planner locale, including `mt-MT`
 and `fi-FI`.
@@ -1675,6 +1675,21 @@ Its version and digest are retained in the result's signed quality-profile
 binding. Changing either locale policy or the generic commercial generation
 therefore invalidates jobs, cache entries, review receipts and publication
 authority.
+
+Each object also embeds `translate-native.commercial-rendering-reference.v1`
+from the tagged Unicode CLDR 48 JSON release. It records the resolved CLDR
+locale, default and native numbering systems, grouping threshold, decimal and
+grouping symbols, and the standard decimal, percent, currency, ISO-currency,
+approximation, limit, and range patterns. The explicit `de-AT`, `en-IE`, and
+`pt-PT` regional files are used where they exist; other profiles use the
+applicable language parent. Non-breaking and narrow non-breaking spaces remain
+exact Unicode data in the canonical profile and its digest.
+
+These patterns guide native rendering; they do not prove semantic fidelity.
+Equivalent number words, written percentages, and digit forms are permitted,
+while exact values and currency identities must survive without rounding or
+conversion. Any ambiguity is routed to an independent model or qualified
+native-domain review and remains blocked until resolved.
 
 The three provider calls stay ordered: transcreation, source-hidden native
 editing, source-aware fidelity. Commercial fidelity additionally returns

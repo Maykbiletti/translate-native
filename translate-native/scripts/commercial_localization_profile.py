@@ -12,14 +12,17 @@ import json
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v4"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v5"
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-summary-capabilities.v2"
 )
 REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
 EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v1"
 COMMERCIAL_LOCALE_PROFILE_SCHEMA = (
-    "translate-native.commercial-locale-quality-profile.v1"
+    "translate-native.commercial-locale-quality-profile.v2"
+)
+COMMERCIAL_RENDERING_REFERENCE_SCHEMA = (
+    "translate-native.commercial-rendering-reference.v1"
 )
 
 DIMENSIONS = {
@@ -165,8 +168,19 @@ def public_profile(profile: str) -> dict[str, Any]:
             "required": True,
             "binding_fields": [
                 "locale", "version", "commercial_profile",
-                "quality_profile_version", "quality_profile_sha256", "sha256",
+                "quality_profile_version", "quality_profile_sha256",
+                "rendering_reference", "sha256",
             ],
+            "rendering_reference": {
+                "schema": COMMERCIAL_RENDERING_REFERENCE_SCHEMA,
+                "authority": "Unicode CLDR",
+                "version": "48",
+                "purpose": "target-locale-rendering-guidance",
+                "semantic_proof": False,
+                "unresolved_route": (
+                    "independent-model-or-qualified-native-domain-review"
+                ),
+            },
             "required_commercial_checks": list(DIMENSIONS),
             "provider_phases": [
                 "transcreation", "target_native", "source_fidelity",

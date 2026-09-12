@@ -527,8 +527,21 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
                 "binding_fields": [
                     "locale", "version", "commercial_profile",
                     "quality_profile_version", "quality_profile_sha256",
+                    "rendering_reference",
                     "sha256",
                 ],
+                "rendering_reference": {
+                    "schema": (
+                        CMS._COMMERCIAL.COMMERCIAL_RENDERING_REFERENCE_SCHEMA
+                    ),
+                    "authority": "Unicode CLDR",
+                    "version": "48",
+                    "purpose": "target-locale-rendering-guidance",
+                    "semantic_proof": False,
+                    "unresolved_route": (
+                        "independent-model-or-qualified-native-domain-review"
+                    ),
+                },
                 "required_commercial_checks": list(
                     CMS._EXPECTED_COMMERCIAL_DIMENSIONS
                 ),
