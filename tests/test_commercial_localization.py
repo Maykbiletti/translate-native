@@ -94,9 +94,44 @@ class CommercialLocalizationTests(unittest.TestCase):
         for private_value in ("480", "vat", "blun", "offer-1"):
             self.assertNotIn(private_value, serialized)
 
+    def test_public_profile_requires_locale_bound_quality_in_all_phases(self):
+        value = PROFILE.public_profile(SCHEMA)
+        contract = value["locale_quality_profile"]
+        self.assertEqual(
+            contract["schema"], PROFILE.COMMERCIAL_LOCALE_PROFILE_SCHEMA,
+        )
+        self.assertEqual(
+            contract["schema"],
+            PLANNER._QUALITY_PROFILES.COMMERCIAL_SCHEMA,
+        )
+        self.assertEqual(
+            contract["required_commercial_checks"], list(PROFILE.DIMENSIONS),
+        )
+        self.assertEqual(
+            contract["provider_phases"], list(WORKER.PHASES),
+        )
+        self.assertEqual(
+            tuple(PROFILE.DIMENSIONS),
+            PLANNER._QUALITY_PROFILES.COMMERCIAL_REVIEW_CHECKS,
+        )
+        unsigned = dict(value)
+        digest = unsigned.pop("sha256")
+        self.assertEqual(
+            digest,
+            PROFILE.hashlib.sha256(PROFILE._canonical_json(unsigned)).hexdigest(),
+        )
+
     def test_ordered_review_preserves_source_blindness_and_hashes_full_evidence(self):
         result, adapter = self.run_worker()
         self.assertEqual([r.phase for r in adapter.requests], list(WORKER.PHASES))
+        expected_commercial_quality = PLANNER.commercial_quality_profile_for(
+            "sv-SE"
+        )
+        for request in adapter.requests:
+            self.assertEqual(
+                request.input["commercial_quality_profile"],
+                expected_commercial_quality,
+            )
         native = json.dumps(adapter.requests[1].as_payload())
         self.assertNotIn(SOURCE, native)
         self.assertNotIn('"source_span"', native)
@@ -119,6 +154,11 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertNotIn("480", json.dumps(summary_without_digest))
         self.assertNotIn("VAT", json.dumps(summary_without_digest))
         self.assertTrue(result["release_required"])
+        self.assertEqual(result["quality_profile"]["commercial"], {
+            "profile": SCHEMA,
+            "version": expected_commercial_quality["version"],
+            "sha256": expected_commercial_quality["sha256"],
+        })
 
     def test_review_digest_binds_exact_source_target_profile_and_evidence(self):
         report = evidence()
@@ -173,16 +213,49 @@ class CommercialLocalizationTests(unittest.TestCase):
                     result = WORKER.run_localization_job(payload, assets(), adapter)
                 self.assertEqual(result["target_locale"], locale.locale)
                 self.assertEqual(payload["commercial_profile"], SCHEMA)
+                locale_profile = PLANNER.commercial_quality_profile_for(
+                    locale.locale
+                )
+                self.assertEqual(
+                    payload["commercial_quality_profile"], locale_profile,
+                )
+                for request in adapter.requests:
+                    self.assertEqual(
+                        request.input["commercial_quality_profile"],
+                        locale_profile,
+                    )
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v4"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v5"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
+        self.assertNotEqual(
+            before["commercial_quality_profile"]["sha256"],
+            after["commercial_quality_profile"]["sha256"],
+        )
         with self.assertRaises(WORKER.LocalizationWorkerBlocked):
             WORKER._validated_job(after)
         self.assertNotIn("commercial_profile", job(SOURCE, "marketing"))
+        self.assertNotIn("commercial_quality_profile", job(SOURCE, "marketing"))
+
+    def test_commercial_locale_profile_tamper_blocks_before_provider(self):
+        for mutate in (
+            lambda value: value.update(locale="fi-FI"),
+            lambda value: value.update(version="stale"),
+            lambda value: value.update(sha256="0" * 64),
+            lambda value: value["native_review_focus"].append("weakened"),
+        ):
+            payload = job(SOURCE, "commercial")
+            mutate(payload["commercial_quality_profile"])
+            adapter = provider()
+            with self.subTest(payload=payload), self.assertRaises(
+                WORKER.LocalizationWorkerBlocked
+            ) as error:
+                WORKER.run_localization_job(payload, assets(), adapter)
+            self.assertEqual(error.exception.code, "job.binding_mismatch")
+            self.assertEqual(adapter.requests, [])
 
     def test_each_dimension_blocks_known_changes_and_routes_uncertainty(self):
         for dimension in PROFILE.DIMENSIONS:

@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Locale-bound commercial quality profiles (12 September 2026)
+
+Assume a commercial job advertised one of 24 EU locales while every provider
+phase still received the same universal pricing prompt.
+
+- A locale label without locale-specific evaluation guidance could accept
+  source-shaped price labels, interval wording, CTAs or contract terms.
+- A profile omitted from the job digest could change without invalidating cache
+  entries, review evidence or publication authority.
+- A caller-controlled profile could weaken one difficult language while still
+  presenting a valid generic commercial profile identifier.
+- Passing the source into the target-only phase through profile data would
+  destroy the required independence of the native-language review.
+
+Derive one canonical commercial profile from each existing locale quality
+generation, bind the generic commercial policy plus locale profile version and
+digest, and hash the complete object into the job identity. Recompute it before
+provider access, pass the content-free profile to all three ordered phases, and
+retain its version and digest in signed release evidence. Tests cover all 24
+locales, Maltese and Finnish risk markers, phase separation, profile drift,
+mutation before provider access, cache invalidation and release tampering.
+
 ## End-to-end processing health (12 September 2026)
 
 Assume every intake worker appeared healthy while the source processing queues

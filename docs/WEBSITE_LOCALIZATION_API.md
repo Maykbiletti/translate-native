@@ -1397,7 +1397,7 @@ disabled, so a CMS can fail closed before submitting work. The object uses
 over every other canonical field. Paths and schemas come from the same runtime
 constants used for routing; they are not copied into a second configuration.
 
-The nested `blun.website-localization-capabilities.v3` object carries a
+The nested `blun.website-localization-capabilities.v4` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
 runtime rebuilds and validates the complete registry on every read; duplicate,
@@ -1405,7 +1405,7 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v3` object. Its nested and separately
+`translate-native.commercial-capabilities.v4` object. Its nested and separately
 hashed `review_summary_contract` defines the exact content-free result schema,
 field set, verified/review-required state invariant, ten allowed ordered
 review dimensions, exact source/target/profile/evidence hash semantics, and
@@ -1415,17 +1415,33 @@ escalation without receiving project prices, brands, source/target text, spans,
 or reviewer prose. Any registry or digest drift blocks the whole discovery
 response rather than advertising a partial contract.
 
+The commercial capability additionally requires schema
+`translate-native.commercial-locale-quality-profile.v1` in every commercial
+job. One distinct version and digest is derived for each advertised EU locale
+from that locale's native, fidelity, adversarial and source-reference profile.
+The full object is bound into the job ID and all three provider requests; its
+version and digest remain in signed quality evidence. A stale, substituted or
+mutated locale profile blocks before any provider call.
+
 ```json
 {
   "capabilities": {
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": {
-      "profile": "translate-native.commercial.v3",
+      "profile": "translate-native.commercial.v4",
+      "locale_quality_profile": {
+        "schema": "translate-native.commercial-locale-quality-profile.v1",
+        "required": true,
+        "binding_fields": ["locale", "version", "commercial_profile", "quality_profile_version", "quality_profile_sha256", "sha256"],
+        "required_commercial_checks": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"],
+        "provider_phases": ["transcreation", "target_native", "source_fidelity"],
+        "tamper_policy": "block-before-provider"
+      },
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
         "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v1", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-source-sha256", "exact-target-sha256", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
-        "profile": "translate-native.commercial.v3",
+        "profile": "translate-native.commercial.v4",
         "required_fields": ["schema", "profile", "status", "review_required_dimensions", "evidence_sha256"],
         "result_schema": "translate-native.commercial-review-summary.v2",
         "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
@@ -1433,7 +1449,7 @@ response rather than advertising a partial contract.
         "sha256": "<sha256>",
         "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
       },
-      "schema": "translate-native.commercial-capabilities.v3",
+      "schema": "translate-native.commercial-capabilities.v4",
       "sha256": "<sha256>"
     },
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
@@ -1448,6 +1464,8 @@ response rather than advertising a partial contract.
       "native_name": "Malti",
       "quality_profile_sha256": "<sha256>",
       "quality_profile_version": "eu-mt-MT-2026-09-1",
+      "commercial_quality_profile_sha256": "<sha256>",
+      "commercial_quality_profile_version": "commercial-eu-mt-MT-2026-09-1",
       "script": "Latn"
     }],
     "plan_schema": "blun.website-localization-plan.v2",
@@ -1480,7 +1498,7 @@ response rather than advertising a partial contract.
     },
     "publication_schema": "blun.cms-localization-publication.v3",
     "quality_passes": ["target_native", "source_fidelity"],
-    "schema": "blun.website-localization-capabilities.v3",
+    "schema": "blun.website-localization-capabilities.v4",
     "sha256": "<sha256>"
   },
   "api_contract": {

@@ -10,6 +10,7 @@ from typing import Any
 
 
 SCHEMA = "blun.website-localization-quality-profile.v1"
+COMMERCIAL_SCHEMA = "translate-native.commercial-locale-quality-profile.v1"
 CLDR_VERSION = "48"
 CLDR_SUMMARY = "https://www.unicode.org/cldr/charts/48/summary/{language}.html"
 MALTESE_ORTHOGRAPHY_SOURCE = (
@@ -25,6 +26,18 @@ REQUIRED_RED_TEAM_CHECKS = (
     "meaning_omission",
     "unnatural_cta",
     "marketing_calque",
+)
+COMMERCIAL_REVIEW_CHECKS = (
+    "amount_currency",
+    "discount_basis",
+    "qualifiers",
+    "tax_status",
+    "billing_interval",
+    "commitment",
+    "renewal",
+    "cancellation",
+    "conditions",
+    "offer_assignment",
 )
 
 
@@ -233,3 +246,67 @@ def quality_profile_for(locale: str) -> dict[str, Any]:
     except (KeyError, TypeError):
         raise ValueError("unsupported quality-profile locale") from None
     return profile.as_payload()
+
+
+def commercial_quality_profile_for(
+    locale: str,
+    commercial_profile: str,
+) -> dict[str, Any]:
+    """Bind commercial evaluation to one exact locale quality generation."""
+
+    try:
+        profile = _BY_LOCALE[locale]
+    except (KeyError, TypeError):
+        raise ValueError("unsupported commercial quality-profile locale") from None
+    if (
+        not isinstance(commercial_profile, str)
+        or not commercial_profile
+        or commercial_profile != commercial_profile.strip()
+        or len(commercial_profile) > 256
+    ):
+        raise ValueError("commercial profile is invalid")
+    quality = profile.as_payload()
+    body = {
+        "schema": COMMERCIAL_SCHEMA,
+        "locale": locale,
+        "version": f"commercial-eu-{locale}-2026-09-1",
+        "commercial_profile": commercial_profile,
+        "quality_profile_version": quality["version"],
+        "quality_profile_sha256": quality["sha256"],
+        "creation_focus": [
+            *quality["native_review_focus"],
+            (
+                "Write prices, offers, billing intervals, commitments, renewal, "
+                "cancellation and conditions as natural native commercial copy "
+                "without changing any proposition or its offer assignment."
+            ),
+        ],
+        "native_review_focus": [
+            *quality["native_review_focus"],
+            (
+                "Reject source-shaped price labels, interval phrases, CTAs and "
+                "terms; allow locale-appropriate number, currency, spacing and "
+                "punctuation conventions when the commercial meaning is exact."
+            ),
+        ],
+        "fidelity_review_focus": [
+            *quality["fidelity_review_focus"],
+            (
+                "Check every commercial proposition and footnote against its own "
+                "offer, including values, limits, timing, tax status and conditions."
+            ),
+        ],
+        "adversarial_focus": [
+            *quality["adversarial_focus"],
+            (
+                "Reject swapped offer terms, hidden qualifiers, changed billing "
+                "or commitment periods, strengthened discounts, and invented tax, "
+                "renewal or cancellation claims."
+            ),
+        ],
+        "required_commercial_checks": list(COMMERCIAL_REVIEW_CHECKS),
+        "source_refs": quality["source_refs"],
+    }
+    detached = json.loads(_canonical_json(body))
+    detached["sha256"] = hashlib.sha256(_canonical_json(detached)).hexdigest()
+    return detached

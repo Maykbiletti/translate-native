@@ -1648,11 +1648,24 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v3` profile to the job payload, job ID
-and plan ID; the existing seven types retain their previous payloads and IDs.
-It is available for every planner locale, including `mt-MT` and `fi-FI`.
+versioned `translate-native.commercial.v4` profile plus one exact
+`translate-native.commercial-locale-quality-profile.v1` object to the job
+payload, job ID and plan ID; the existing seven types retain their previous
+payloads and IDs. It is available for every planner locale, including `mt-MT`
+and `fi-FI`.
 The public skill's [commercial guide](../translate-native/references/commercial-localization.md)
 applies to all languages, with no hardcoded project prices, brands or products.
+
+The 24 locale objects are not aliases for one universal prompt. Each has a
+distinct version and canonical SHA-256, binds the corresponding general locale
+quality generation, preserves that profile's native, fidelity, adversarial and
+institutional-reference focus, and adds the ten commercial checks. The worker
+reconstructs the object before provider access and supplies it to
+transcreation, source-hidden native review and source-aware fidelity review.
+Its version and digest are retained in the result's signed quality-profile
+binding. Changing either locale policy or the generic commercial generation
+therefore invalidates jobs, cache entries, review receipts and publication
+authority.
 
 The three provider calls stay ordered: transcreation, source-hidden native
 editing, source-aware fidelity. Commercial fidelity additionally returns
@@ -1705,9 +1718,10 @@ allows equivalent locale forms, and converts unresolved evidence into a bound
 low-confidence review route. Keeping source evidence out of the native pass
 prevents source-shaped copy from receiving an
 artificial advantage. Version-bound job IDs prevent old policy/cache reuse.
-Tests exercise the contract across all 24 locale routes, ten defect dimensions,
-native digit/number-word representations, multiple offers, source blindness,
-queue terminal failures and the actual worker-to-signed-publication path.
+Tests exercise distinct canonical profiles across all 24 locale routes, ten
+defect dimensions, native digit/number-word representations, multiple offers,
+source blindness, locale-profile tampering, queue terminal failures and the
+actual worker-to-signed-publication path.
 Scripted adapters test enforcement, not real native quality or DeepL superiority.
 
 ## One-transition service loop

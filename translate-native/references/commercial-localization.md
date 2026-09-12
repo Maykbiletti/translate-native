@@ -104,7 +104,8 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v3` into the job and plan IDs.
+The planner binds `translate-native.commercial.v4` and the exact target-locale
+commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
 semantic dimensions, exact preservation rules, permitted locale-aware

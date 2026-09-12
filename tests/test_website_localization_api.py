@@ -519,6 +519,25 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(
             commercial["verification"]["ambiguous_values"], "unresolved",
         )
+        self.assertEqual(
+            commercial["locale_quality_profile"],
+            {
+                "schema": CMS._COMMERCIAL.COMMERCIAL_LOCALE_PROFILE_SCHEMA,
+                "required": True,
+                "binding_fields": [
+                    "locale", "version", "commercial_profile",
+                    "quality_profile_version", "quality_profile_sha256",
+                    "sha256",
+                ],
+                "required_commercial_checks": list(
+                    CMS._EXPECTED_COMMERCIAL_DIMENSIONS
+                ),
+                "provider_phases": [
+                    "transcreation", "target_native", "source_fidelity",
+                ],
+                "tamper_policy": "block-before-provider",
+            },
+        )
         unsigned_commercial = dict(commercial)
         commercial_digest = unsigned_commercial.pop("sha256")
         self.assertEqual(
@@ -664,6 +683,18 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             maltese["quality_profile_sha256"],
             CMS._PLANNER.quality_profile_for("mt-MT")["sha256"],
         )
+        for item in capabilities["locales"]:
+            locale_profile = CMS._PLANNER.commercial_quality_profile_for(
+                item["locale"],
+            )
+            self.assertEqual(
+                item["commercial_quality_profile_version"],
+                locale_profile["version"],
+            )
+            self.assertEqual(
+                item["commercial_quality_profile_sha256"],
+                locale_profile["sha256"],
+            )
         claimed = capabilities.pop("sha256")
         self.assertEqual(claimed, CMS._hash(CMS._canonical_json(capabilities)))
         self.assertEqual(headers["Cache-Control"], "no-store")

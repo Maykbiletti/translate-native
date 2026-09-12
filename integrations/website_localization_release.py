@@ -379,6 +379,12 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "version": job["target"]["quality_profile_version"],
         "sha256": job["target"]["quality_profile_sha256"],
     }
+    if job["content_type"] == "commercial":
+        expected_quality_profile["commercial"] = {
+            "profile": job["commercial_profile"],
+            "version": job["commercial_quality_profile"]["version"],
+            "sha256": job["commercial_quality_profile"]["sha256"],
+        }
     if result.get("quality_profile") != expected_quality_profile:
         raise LocalizationReleaseBlocked("result.quality_profile.invalid")
     if result.get("schema") != _WORKER.RESULT_SCHEMA or result.get("worker_schema") != _WORKER.WORKER_SCHEMA:

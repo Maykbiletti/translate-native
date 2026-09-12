@@ -210,6 +210,19 @@ def completed_result(job, candidate):
             "locale": payload["target"]["locale"],
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
+            **(
+                {
+                    "commercial": {
+                        "profile": payload["commercial_profile"],
+                        "version": payload["commercial_quality_profile"]
+                        ["version"],
+                        "sha256": payload["commercial_quality_profile"]
+                        ["sha256"],
+                    }
+                }
+                if payload["content_type"] == "commercial"
+                else {}
+            ),
         },
         "commercial_review": commercial_review,
         "human_review_required": False,

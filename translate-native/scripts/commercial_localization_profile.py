@@ -12,12 +12,15 @@ import json
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v3"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v4"
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-summary-capabilities.v2"
 )
 REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
 EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v1"
+COMMERCIAL_LOCALE_PROFILE_SCHEMA = (
+    "translate-native.commercial-locale-quality-profile.v1"
+)
 
 DIMENSIONS = {
     "amount_currency": "Amounts, currency identity, units and price-to-product association; no conversion or rounding.",
@@ -156,6 +159,19 @@ def public_profile(profile: str) -> dict[str, Any]:
             "ambiguous_values": "unresolved",
             "unresolved_route": "independent-model-or-qualified-native-domain-review",
             "automatic_publication_when_unresolved": False,
+        },
+        "locale_quality_profile": {
+            "schema": COMMERCIAL_LOCALE_PROFILE_SCHEMA,
+            "required": True,
+            "binding_fields": [
+                "locale", "version", "commercial_profile",
+                "quality_profile_version", "quality_profile_sha256", "sha256",
+            ],
+            "required_commercial_checks": list(DIMENSIONS),
+            "provider_phases": [
+                "transcreation", "target_native", "source_fidelity",
+            ],
+            "tamper_policy": "block-before-provider",
         },
         "protected_terms": "project-configuration-only",
     }

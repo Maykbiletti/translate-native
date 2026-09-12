@@ -456,7 +456,7 @@ def _base_context(job: dict[str, Any], assets: LocalizationAssets) -> dict[str, 
     }
     if any(quality_profile[name] != value for name, value in expected_quality.items()):
         raise LocalizationWorkerBlocked("quality_profile.binding_mismatch", retryable=False)
-    return {
+    context = {
         "job_id": job["job_id"],
         "target": job["target"],
         "content_type": job["content_type"],
@@ -468,6 +468,17 @@ def _base_context(job: dict[str, Any], assets: LocalizationAssets) -> dict[str, 
         "protected_terms": list(assets.protected_terms),
         "quality_profile": quality_profile,
     }
+    if job["content_type"] == "commercial":
+        commercial_quality = _PLANNER.commercial_quality_profile_for(
+            job["target"]["locale"]
+        )
+        if job.get("commercial_quality_profile") != commercial_quality:
+            raise LocalizationWorkerBlocked(
+                "commercial_quality_profile.binding_mismatch",
+                retryable=False,
+            )
+        context["commercial_quality_profile"] = commercial_quality
+    return context
 
 
 def run_localization_job(
@@ -625,6 +636,18 @@ def run_localization_job(
         )
     progress("integrity")
 
+    quality_result = {
+        "locale": locale,
+        "version": job["target"]["quality_profile_version"],
+        "sha256": job["target"]["quality_profile_sha256"],
+    }
+    if commercial:
+        quality_result["commercial"] = {
+            "profile": job["commercial_profile"],
+            "version": job["commercial_quality_profile"]["version"],
+            "sha256": job["commercial_quality_profile"]["sha256"],
+        }
+
     return {
         "schema": RESULT_SCHEMA,
         "worker_schema": WORKER_SCHEMA,
@@ -648,11 +671,7 @@ def run_localization_job(
             "target_native": native_confidence,
             "source_fidelity": fidelity_confidence,
         },
-        "quality_profile": {
-            "locale": locale,
-            "version": job["target"]["quality_profile_version"],
-            "sha256": job["target"]["quality_profile_sha256"],
-        },
+        "quality_profile": quality_result,
         "commercial_review": commercial_summary,
         "human_review_required": job["content_type"] == "legal",
         "independent_review_required": (

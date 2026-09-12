@@ -59,6 +59,47 @@ class WebsiteLocalizationQualityProfileTests(unittest.TestCase):
             with self.subTest(locale=profile.locale):
                 self.assertEqual(profile.as_payload()["required_red_team_checks"], expected)
 
+    def test_all_eu_locales_have_distinct_bound_commercial_profiles(self):
+        payloads = [
+            PROFILES.commercial_quality_profile_for(
+                profile.locale,
+                PLANNER.COMMERCIAL_PROFILE,
+            )
+            for profile in PROFILES.PROFILES
+        ]
+        self.assertEqual(len(payloads), 24)
+        self.assertEqual(len({item["version"] for item in payloads}), 24)
+        self.assertEqual(len({item["sha256"] for item in payloads}), 24)
+        for item in payloads:
+            with self.subTest(locale=item["locale"]):
+                general = PROFILES.quality_profile_for(item["locale"])
+                claimed = item.pop("sha256")
+                canonical = json.dumps(
+                    item, ensure_ascii=False, allow_nan=False,
+                    sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+                self.assertEqual(claimed, hashlib.sha256(canonical).hexdigest())
+                self.assertEqual(item["schema"], PROFILES.COMMERCIAL_SCHEMA)
+                self.assertEqual(
+                    item["commercial_profile"], PLANNER.COMMERCIAL_PROFILE,
+                )
+                self.assertEqual(
+                    item["quality_profile_sha256"], general["sha256"],
+                )
+                self.assertEqual(
+                    item["required_commercial_checks"],
+                    list(PROFILES.COMMERCIAL_REVIEW_CHECKS),
+                )
+                self.assertEqual(item["source_refs"], general["source_refs"])
+                for field in (
+                    "creation_focus", "native_review_focus",
+                    "fidelity_review_focus", "adversarial_focus",
+                ):
+                    self.assertGreaterEqual(len(item[field]), 2)
+                self.assertTrue(
+                    unicodedata.is_normalized("NFC", canonical.decode("utf-8"))
+                )
+
     def test_maltese_and_finnish_profiles_cover_required_language_risks(self):
         maltese = PROFILES.quality_profile_for("mt-MT")
         finnish = PROFILES.quality_profile_for("fi-FI")
@@ -83,6 +124,23 @@ class WebsiteLocalizationQualityProfileTests(unittest.TestCase):
         for invalid in ("fi", "fi-fi", "sv-FI", None):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 PROFILES.quality_profile_for(invalid)
+
+        commercial = PROFILES.commercial_quality_profile_for(
+            "mt-MT", PLANNER.COMMERCIAL_PROFILE,
+        )
+        commercial["native_review_focus"].append("tampered")
+        fresh = PROFILES.commercial_quality_profile_for(
+            "mt-MT", PLANNER.COMMERCIAL_PROFILE,
+        )
+        self.assertNotIn("tampered", fresh["native_review_focus"])
+        maltese = json.dumps(fresh, ensure_ascii=False).casefold()
+        for marker in ("ċ", "ġ", "għ", "ħ", "ż", "english", "italian"):
+            self.assertIn(marker, maltese)
+        for invalid in ("mt", "mt-mt", "it-MT", None):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                PROFILES.commercial_quality_profile_for(
+                    invalid, PLANNER.COMMERCIAL_PROFILE,
+                )
 
 
 if __name__ == "__main__":
