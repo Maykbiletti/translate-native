@@ -1,5 +1,25 @@
 # Version 6 premortem
 
+## End-to-end submission readiness (12 September 2026)
+
+Assume the website worker appeared healthy while the authenticated sidecar
+worker was stopped, blocked, or reporting an incompatible state.
+
+- A local-only readiness check could allow an operator to declare the complete
+  submission path available while accepted work cannot advance downstream.
+- Querying the sidecar when the website worker is already unavailable could
+  waste credentials and present an irrelevant remote success as overall health.
+- Averaging two states could let one healthy outbox conceal the other boundary's
+  blocking error.
+- A malformed readiness response or changed capability contract could be
+  normalized into a positive result.
+
+The combined projection validates local readiness first and remains offline
+unless that boundary is ready. It then uses the owned authenticated client,
+requires the exact response schema and capability binding, preserves both
+worker and outbox states independently, and reports ready only when both
+durable intake workers are running with healthy outboxes.
+
 ## Bound submission progress (12 September 2026)
 
 Assume an operator polled a successfully queued website event and mistook one

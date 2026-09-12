@@ -253,6 +253,123 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(readiness["status"], "ready")
         self.assertEqual(len(self.transport.calls), 5)
 
+    def test_submission_readiness_requires_both_owned_workers(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+
+        readiness = runtime.submission_readiness()
+
+        self.assertEqual(readiness.status, "ready")
+        self.assertEqual((
+            readiness.website_status,
+            readiness.website_worker_state,
+            readiness.website_outbox_status,
+            readiness.sidecar_status,
+            readiness.sidecar_worker_state,
+            readiness.sidecar_outbox_status,
+        ), ("ready", "running", "ok", "ready", "running", "ok"))
+        self.assertEqual(
+            readiness.sidecar_capabilities_sha256, self.sidecar_digest,
+        )
+        self.assertEqual(
+            readiness.source_capabilities_sha256, self.remote_digest,
+        )
+        payload = readiness.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "status", "website_status", "website_worker_state",
+            "website_outbox_status", "website_error_code", "sidecar_status",
+            "sidecar_worker_state", "sidecar_outbox_status",
+            "sidecar_error_code", "sidecar_capabilities_sha256",
+            "source_capabilities_sha256",
+        })
+        self.assertNotIn("delivery.example", repr(payload))
+        self.assertNotIn("website-credential", repr(payload))
+
+    def test_submission_readiness_stays_local_when_website_is_not_ready(self):
+        runtime = self.open()
+        before = len(self.transport.calls)
+
+        readiness = runtime.submission_readiness()
+
+        self.assertEqual(len(self.transport.calls), before)
+        self.assertEqual((
+            readiness.status,
+            readiness.website_status,
+            readiness.website_worker_state,
+            readiness.sidecar_status,
+        ), ("not_ready", "not_ready", "unmanaged", None))
+        self.assertEqual(
+            readiness.website_error_code,
+            "source_delivery_runtime.worker_not_ready",
+        )
+
+    def test_submission_readiness_surfaces_sidecar_worker_failure(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        self.sidecar.delivery.stop_worker(timeout_seconds=1)
+
+        readiness = runtime.submission_readiness()
+
+        self.assertEqual((
+            readiness.status,
+            readiness.website_status,
+            readiness.sidecar_status,
+            readiness.sidecar_worker_state,
+        ), ("not_ready", "ready", "not_ready", "stopped"))
+        self.assertEqual(
+            readiness.sidecar_error_code,
+            "source_delivery_runtime.worker_not_ready",
+        )
+
+    def test_submission_readiness_rejects_malformed_local_state_offline(self):
+        runtime = self.open()
+        runtime._delivery.worker_readiness = lambda: {
+            "schema": "blun.cms-source-delivery-worker-readiness.v1",
+            "status": "ready",
+        }
+        before = len(self.transport.calls)
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_readiness()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.readiness_invalid",
+        )
+        self.assertEqual(len(self.transport.calls), before)
+
+    def test_submission_readiness_rejects_malformed_remote_state(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        response = runtime.sidecar_readiness()
+        altered = copy.deepcopy(response)
+        altered["readiness"]["outbox_status"] = "blocked"
+        runtime._client.readiness = lambda: altered
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_readiness()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.readiness_invalid",
+        )
+
     def test_submission_status_stays_local_until_sidecar_acceptance(self):
         runtime = self.open()
         change = cms_support.event()

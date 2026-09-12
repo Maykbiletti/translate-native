@@ -108,6 +108,40 @@ class HMACCMSSourceDeliverySubmissionStatus:
         }
 
 
+@dataclass(frozen=True)
+class HMACCMSSourceDeliverySubmissionReadiness:
+    """Content-free readiness across both durable submission workers."""
+
+    schema: str
+    status: str
+    website_status: str
+    website_worker_state: str
+    website_outbox_status: str | None
+    website_error_code: str | None
+    sidecar_status: str | None
+    sidecar_worker_state: str | None
+    sidecar_outbox_status: str | None
+    sidecar_error_code: str | None
+    sidecar_capabilities_sha256: str
+    source_capabilities_sha256: str
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "status": self.status,
+            "website_status": self.website_status,
+            "website_worker_state": self.website_worker_state,
+            "website_outbox_status": self.website_outbox_status,
+            "website_error_code": self.website_error_code,
+            "sidecar_status": self.sidecar_status,
+            "sidecar_worker_state": self.sidecar_worker_state,
+            "sidecar_outbox_status": self.sidecar_outbox_status,
+            "sidecar_error_code": self.sidecar_error_code,
+            "sidecar_capabilities_sha256": self.sidecar_capabilities_sha256,
+            "source_capabilities_sha256": self.source_capabilities_sha256,
+        }
+
+
 class HMACCMSSourceDeliverySubmissionRuntime:
     """Own one signer, sidecar client, adapter, outbox, and optional worker."""
 
@@ -278,6 +312,78 @@ class HMACCMSSourceDeliverySubmissionRuntime:
     def health(self) -> Any:
         self._assert_open()
         return self._delivery.health()
+
+    def submission_readiness(
+        self,
+    ) -> HMACCMSSourceDeliverySubmissionReadiness:
+        """Project readiness without confusing durable intake with delivery."""
+
+        self._assert_open()
+        local = self._delivery.worker_readiness()
+        try:
+            website = _AUTH._HTTP._readiness_payload(local)
+            if website != local:
+                raise ValueError
+        except Exception:
+            raise _blocked("readiness_invalid") from None
+
+        if website["status"] != "ready":
+            return HMACCMSSourceDeliverySubmissionReadiness(
+                schema="blun.cms-source-delivery-submission-readiness.v1",
+                status="not_ready",
+                website_status=website["status"],
+                website_worker_state=website["worker_state"],
+                website_outbox_status=website["outbox_status"],
+                website_error_code=website["error_code"],
+                sidecar_status=None,
+                sidecar_worker_state=None,
+                sidecar_outbox_status=None,
+                sidecar_error_code=None,
+                sidecar_capabilities_sha256=(
+                    self._client.expected_capabilities_sha256
+                ),
+                source_capabilities_sha256=(
+                    self._client.expected_remote_capabilities_sha256
+                ),
+            )
+
+        response = self._client.readiness()
+        try:
+            if (
+                not isinstance(response, Mapping)
+                or set(response)
+                != {"schema", "readiness", "capabilities_sha256"}
+                or response.get("schema")
+                != _AUTH._HTTP.READINESS_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self._client.expected_capabilities_sha256
+            ):
+                raise ValueError
+            sidecar = _AUTH._HTTP._readiness_payload(response["readiness"])
+            if sidecar != response["readiness"]:
+                raise ValueError
+        except Exception:
+            raise _blocked("readiness_invalid") from None
+
+        ready = sidecar["status"] == "ready"
+        return HMACCMSSourceDeliverySubmissionReadiness(
+            schema="blun.cms-source-delivery-submission-readiness.v1",
+            status="ready" if ready else "not_ready",
+            website_status=website["status"],
+            website_worker_state=website["worker_state"],
+            website_outbox_status=website["outbox_status"],
+            website_error_code=website["error_code"],
+            sidecar_status=sidecar["status"],
+            sidecar_worker_state=sidecar["worker_state"],
+            sidecar_outbox_status=sidecar["outbox_status"],
+            sidecar_error_code=sidecar["error_code"],
+            sidecar_capabilities_sha256=(
+                self._client.expected_capabilities_sha256
+            ),
+            source_capabilities_sha256=(
+                self._client.expected_remote_capabilities_sha256
+            ),
+        )
 
     def run_once(self) -> Any:
         self._assert_open()

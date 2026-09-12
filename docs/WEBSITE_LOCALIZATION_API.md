@@ -891,6 +891,22 @@ lease-expiry flag, and a stable content-free error code. `accepted` means the
 source service has durably accepted the event. It does not mean translation,
 quality review, release approval, or publication succeeded.
 
+Use `submission_readiness()` to inspect the complete durable intake path
+without collapsing its two independently operated workers. The method first
+validates the website worker's local readiness object. If that worker or its
+outbox is not ready, it returns `not_ready` without making a network request.
+Only a locally ready runtime performs the authenticated, contract-pinned
+sidecar readiness request.
+
+The content-free
+`blun.cms-source-delivery-submission-readiness.v1` projection retains separate
+website and sidecar readiness, worker state, outbox state, and stable error
+code fields. It also carries the trusted sidecar and source-service capability
+hashes. Overall status is `ready` only when both workers report `running`, both
+outboxes report `ok`, both component error codes are absent, and the sidecar
+response matches the currently pinned contract. This is intake readiness; it
+does not assert that a particular localization or publication has completed.
+
 Call `replace_credential()` only during a server-side generation overlap. It
 updates the exact signer owned by the worker without reopening the outbox or
 changing either contract pin. The wrapper blocks network and storage access
