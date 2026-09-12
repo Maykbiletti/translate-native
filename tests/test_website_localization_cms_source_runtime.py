@@ -189,12 +189,13 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
             try:
                 self.assertEqual(len(transport.calls), 1)
                 self.assertEqual(runtime.capability_binding(), {
-                    "schema": "blun.cms-source-capability-binding.v1",
+                    "schema": "blun.cms-source-capability-binding.v2",
                     "status": "verified",
                     "capabilities_sha256": current["sha256"],
                     "commercial_rendering_registry_sha256": current[
                         "commercial_rendering_registry"
                     ]["sha256"],
+                    "database_roles": ["changes", "removals", "lifecycle"],
                 })
                 self.assertTrue(all(path.exists() for path in paths))
             finally:
@@ -299,6 +300,226 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_pinned_restart_preserves_exact_database_roles_and_pending_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            first_client, _, current = self.pinned_client()
+            first = self.open(
+                paths, client=first_client, capability_preflight=True,
+            )
+            change = cms_support.event()
+            first.enqueue_change(change)
+            first.close()
+
+            # Simulate a crash after two database bindings were committed.
+            partial = sqlite3.connect(paths[2])
+            try:
+                partial.execute(
+                    "DROP TABLE cms_source_runtime_capability_binding"
+                )
+                partial.commit()
+            finally:
+                partial.close()
+
+            second_client, transport, _ = self.pinned_client()
+            second = self.open(
+                paths, client=second_client, capability_preflight=True,
+            )
+            try:
+                self.assertEqual(len(transport.calls), 1)
+                self.assertEqual(
+                    second.status(change["event_id"], change["site_id"])
+                    .dispatch_status,
+                    "pending",
+                )
+                for role, connection in zip(
+                    RUNTIME.CAPABILITY_DATABASE_ROLES,
+                    second._connections,
+                ):
+                    row = connection.execute(
+                        "SELECT database_role, capabilities_sha256, "
+                        "commercial_rendering_registry_sha256 "
+                        "FROM cms_source_runtime_capability_binding"
+                    ).fetchone()
+                    self.assertEqual(tuple(row), (
+                        role,
+                        current["sha256"],
+                        current["commercial_rendering_registry"]["sha256"],
+                    ))
+            finally:
+                second.close()
+
+    def test_pinned_restart_rejects_other_binding_and_swapped_roles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            client, _, current = self.pinned_client()
+            runtime = self.open(
+                paths, client=client, capability_preflight=True,
+            )
+            runtime.close()
+
+            changed_binding = (
+                "0" * 64,
+                current["commercial_rendering_registry"]["sha256"],
+            )
+            for role, path in zip(RUNTIME.CAPABILITY_DATABASE_ROLES, paths):
+                connection = sqlite3.connect(path)
+                try:
+                    row = RUNTIME._capability_binding_row(
+                        role, changed_binding,
+                    )
+                    connection.execute(
+                        "UPDATE cms_source_runtime_capability_binding SET "
+                        "capabilities_sha256 = ?, binding_sha256 = ?",
+                        (row[3], row[5]),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+            current_client, transport, _ = self.pinned_client()
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as mismatch:
+                self.open(
+                    paths,
+                    client=current_client,
+                    capability_preflight=True,
+                )
+            self.assertEqual(
+                mismatch.exception.code,
+                "source_runtime.capability_database_mismatch",
+            )
+            self.assertEqual(len(transport.calls), 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            client, _, _ = self.pinned_client()
+            runtime = self.open(
+                paths, client=client, capability_preflight=True,
+            )
+            runtime.close()
+            before = []
+            for path in paths[:2]:
+                connection = sqlite3.connect(path)
+                try:
+                    before.append(tuple(
+                        row[0] for row in connection.execute(
+                            "SELECT name FROM sqlite_master "
+                            "WHERE type = 'table' ORDER BY name"
+                        )
+                    ))
+                finally:
+                    connection.close()
+
+            swapped_client, transport, _ = self.pinned_client()
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as swapped:
+                self.open(
+                    (paths[1], paths[0], paths[2]),
+                    client=swapped_client,
+                    capability_preflight=True,
+                )
+            self.assertEqual(
+                swapped.exception.code,
+                "source_runtime.capability_database_mismatch",
+            )
+            self.assertEqual(len(transport.calls), 1)
+            after = []
+            for path in paths[:2]:
+                connection = sqlite3.connect(path)
+                try:
+                    after.append(tuple(
+                        row[0] for row in connection.execute(
+                            "SELECT name FROM sqlite_master "
+                            "WHERE type = 'table' ORDER BY name"
+                        )
+                    ))
+                finally:
+                    connection.close()
+            self.assertEqual(after, before)
+
+    def test_pinned_startup_adopts_only_empty_unbound_databases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            legacy = self.open(paths)
+            legacy.close()
+
+            client, _, _ = self.pinned_client()
+            adopted = self.open(
+                paths, client=client, capability_preflight=True,
+            )
+            try:
+                self.assertEqual(
+                    adopted.capability_binding()["status"], "verified",
+                )
+            finally:
+                adopted.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            change = cms_support.event()
+            legacy = self.open(paths)
+            legacy.enqueue_change(change)
+            legacy.close()
+
+            client, transport, _ = self.pinned_client()
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as unbound:
+                self.open(
+                    paths, client=client, capability_preflight=True,
+                )
+            self.assertEqual(
+                unbound.exception.code,
+                "source_runtime.capability_database_unbound",
+            )
+            self.assertEqual(len(transport.calls), 1)
+            connection = sqlite3.connect(paths[0])
+            try:
+                row = connection.execute(
+                    "SELECT status FROM cms_source_change_outbox "
+                    "WHERE event_id = ?",
+                    (change["event_id"],),
+                ).fetchone()
+                self.assertEqual(row, ("pending",))
+                self.assertIsNone(connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name = ?",
+                    (RUNTIME.CAPABILITY_BINDING_TABLE,),
+                ).fetchone())
+            finally:
+                connection.close()
+
+    def test_runtime_blocks_tampered_durable_binding_before_queue_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            client, transport, _ = self.pinned_client()
+            runtime = self.open(
+                paths, client=client, capability_preflight=True,
+            )
+            runtime._connections[0].execute(
+                "UPDATE cms_source_runtime_capability_binding "
+                "SET binding_sha256 = ?",
+                ("0" * 64,),
+            )
+            try:
+                with self.assertRaises(
+                    RUNTIME.DurableCMSSourceRuntimeBlocked,
+                ) as altered:
+                    runtime.enqueue_change(cms_support.event())
+                self.assertEqual(
+                    altered.exception.code,
+                    "source_runtime.capability_database_mismatch",
+                )
+                self.assertEqual(len(transport.calls), 1)
+                count = runtime._connections[0].execute(
+                    "SELECT COUNT(*) FROM cms_source_change_outbox"
+                ).fetchone()[0]
+                self.assertEqual(count, 0)
+            finally:
+                runtime.close()
+
     def test_runtime_persists_complete_lifecycle_across_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self.paths(directory)
@@ -382,10 +603,11 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
                 self.assertEqual(rendered, "DurableCMSSourceRuntime(state='open')")
                 self.assertNotIn(directory, rendered)
                 self.assertEqual(runtime.capability_binding(), {
-                    "schema": "blun.cms-source-capability-binding.v1",
+                    "schema": "blun.cms-source-capability-binding.v2",
                     "status": "not_configured",
                     "capabilities_sha256": None,
                     "commercial_rendering_registry_sha256": None,
+                    "database_roles": [],
                 })
             finally:
                 runtime.close()

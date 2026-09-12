@@ -3,14 +3,15 @@
 
 The composition root validates the complete service configuration before it
 opens three private SQLite databases. An explicit production preflight can
-also verify both CMS capability pins before persistence. One runtime belongs
-to one process and serializes every local state transition. Separate processes
-may safely open the same files because the underlying outboxes and monitor use
-durable leases.
+also verify both CMS capability pins before persistence and durably bind the
+verified pair plus each database role. One runtime belongs to one process and
+serializes every local state transition. Separate processes may safely open the
+same files because the underlying outboxes and monitor use durable leases.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import math
 import os
@@ -41,6 +42,30 @@ _SERVICE = _load_module(
 _HTTP = _load_module(
     "blun_website_localization_composed_cms_source_http",
     _ROOT / "integrations" / "website_localization_cms_source_http.py",
+)
+
+
+CAPABILITY_BINDING_SCHEMA = "blun.cms-source-runtime-capability-binding.v1"
+CAPABILITY_BINDING_TABLE = "cms_source_runtime_capability_binding"
+CAPABILITY_DATABASE_ROLES = ("changes", "removals", "lifecycle")
+CAPABILITY_BINDING_SQL = (
+    "CREATE TABLE cms_source_runtime_capability_binding ("
+    "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+    "schema TEXT NOT NULL CHECK ("
+    "schema = 'blun.cms-source-runtime-capability-binding.v1'), "
+    "database_role TEXT NOT NULL CHECK ("
+    "database_role IN ('changes', 'removals', 'lifecycle')), "
+    "capabilities_sha256 TEXT NOT NULL, "
+    "commercial_rendering_registry_sha256 TEXT NOT NULL, "
+    "binding_sha256 TEXT NOT NULL)"
+)
+CAPABILITY_BINDING_COLUMNS = (
+    ("singleton", "INTEGER", 0, 1),
+    ("schema", "TEXT", 1, 0),
+    ("database_role", "TEXT", 1, 0),
+    ("capabilities_sha256", "TEXT", 1, 0),
+    ("commercial_rendering_registry_sha256", "TEXT", 1, 0),
+    ("binding_sha256", "TEXT", 1, 0),
 )
 
 
@@ -297,6 +322,149 @@ def _preflight_capabilities(client: Any) -> tuple[str, str]:
     return capabilities_sha256, rendering_sha256
 
 
+def _capability_binding_row(
+    role: str,
+    binding: tuple[str, str],
+) -> tuple[Any, ...]:
+    capabilities_sha256, rendering_sha256 = binding
+    digest = hashlib.sha256("\x00".join((
+        CAPABILITY_BINDING_SCHEMA,
+        role,
+        capabilities_sha256,
+        rendering_sha256,
+    )).encode("utf-8")).hexdigest()
+    return (
+        1,
+        CAPABILITY_BINDING_SCHEMA,
+        role,
+        capabilities_sha256,
+        rendering_sha256,
+        digest,
+    )
+
+
+def _capability_table_exists(connection: sqlite3.Connection) -> bool:
+    rows = connection.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name = ?",
+        (CAPABILITY_BINDING_TABLE,),
+    ).fetchall()
+    if not rows:
+        return False
+    if len(rows) != 1 or tuple(rows[0]) != (
+        "table",
+        CAPABILITY_BINDING_TABLE,
+        CAPABILITY_BINDING_TABLE,
+        CAPABILITY_BINDING_SQL,
+    ):
+        raise _blocked("source_runtime.capability_database_invalid")
+    return True
+
+
+def _validate_capability_database(
+    connection: sqlite3.Connection,
+    role: str,
+    binding: tuple[str, str],
+) -> None:
+    try:
+        if not _capability_table_exists(connection):
+            raise _blocked("source_runtime.capability_database_unbound")
+        columns = tuple(
+            (row[1], row[2], row[3], row[5])
+            for row in connection.execute(
+                f"PRAGMA table_info({CAPABILITY_BINDING_TABLE})"
+            ).fetchall()
+        )
+        rows = connection.execute(
+            f"SELECT singleton, schema, database_role, capabilities_sha256, "
+            f"commercial_rendering_registry_sha256, binding_sha256 "
+            f"FROM {CAPABILITY_BINDING_TABLE}"
+        ).fetchall()
+    except DurableCMSSourceRuntimeBlocked:
+        raise
+    except sqlite3.Error as error:
+        raise _blocked("source_runtime.capability_database_invalid") from error
+    if columns != CAPABILITY_BINDING_COLUMNS or len(rows) != 1:
+        raise _blocked("source_runtime.capability_database_invalid")
+    if tuple(rows[0]) != _capability_binding_row(role, binding):
+        raise _blocked("source_runtime.capability_database_mismatch")
+
+
+def _unbound_database_has_work(connection: sqlite3.Connection) -> bool:
+    try:
+        tables = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name LIKE 'cms_source_%' "
+            "AND name <> ? ORDER BY name",
+            (CAPABILITY_BINDING_TABLE,),
+        ).fetchall()
+        for (name,) in tables:
+            if (
+                not isinstance(name, str)
+                or not name.startswith("cms_source_")
+                or any(
+                    character not in "abcdefghijklmnopqrstuvwxyz_"
+                    for character in name
+                )
+            ):
+                raise _blocked("source_runtime.capability_database_invalid")
+            if name.endswith("_meta"):
+                continue
+            if connection.execute(
+                f'SELECT 1 FROM "{name}" LIMIT 1'
+            ).fetchone() is not None:
+                return True
+    except DurableCMSSourceRuntimeBlocked:
+        raise
+    except sqlite3.Error as error:
+        raise _blocked("source_runtime.capability_database_invalid") from error
+    return False
+
+
+def _precheck_capability_databases(
+    connections: tuple[sqlite3.Connection, ...],
+    binding: tuple[str, str],
+) -> None:
+    for role, connection in zip(CAPABILITY_DATABASE_ROLES, connections):
+        try:
+            exists = _capability_table_exists(connection)
+        except sqlite3.Error as error:
+            raise _blocked(
+                "source_runtime.capability_database_invalid",
+            ) from error
+        if exists:
+            _validate_capability_database(connection, role, binding)
+        elif _unbound_database_has_work(connection):
+            raise _blocked("source_runtime.capability_database_unbound")
+
+
+def _bind_capability_databases(
+    connections: tuple[sqlite3.Connection, ...],
+    binding: tuple[str, str],
+) -> None:
+    for role, connection in zip(CAPABILITY_DATABASE_ROLES, connections):
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if not _capability_table_exists(connection):
+                connection.execute(CAPABILITY_BINDING_SQL)
+            connection.execute(
+                f"INSERT OR IGNORE INTO {CAPABILITY_BINDING_TABLE} VALUES "
+                "(?, ?, ?, ?, ?, ?)",
+                _capability_binding_row(role, binding),
+            )
+            _validate_capability_database(connection, role, binding)
+            connection.commit()
+        except DurableCMSSourceRuntimeBlocked:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise _blocked(
+                "source_runtime.capability_database_invalid",
+            ) from error
+
+
 class DurableCMSSourceRuntime:
     """One process-owned and thread-safe source-CMS service runtime."""
 
@@ -371,6 +539,15 @@ class DurableCMSSourceRuntime:
             or current_rendering != expected_rendering
         ):
             raise _blocked("source_runtime.capability_binding_changed")
+        for role, connection in zip(
+            CAPABILITY_DATABASE_ROLES,
+            self._connections,
+        ):
+            _validate_capability_database(
+                connection,
+                role,
+                self._capability_binding,
+            )
 
     def _call(self, name: str, *args: Any, **kwargs: Any) -> Any:
         self._assert_owner()
@@ -416,17 +593,19 @@ class DurableCMSSourceRuntime:
             self._guard_capability_binding()
             if self._capability_binding is None:
                 return {
-                    "schema": "blun.cms-source-capability-binding.v1",
+                    "schema": "blun.cms-source-capability-binding.v2",
                     "status": "not_configured",
                     "capabilities_sha256": None,
                     "commercial_rendering_registry_sha256": None,
+                    "database_roles": [],
                 }
             capabilities_sha256, rendering_sha256 = self._capability_binding
             return {
-                "schema": "blun.cms-source-capability-binding.v1",
+                "schema": "blun.cms-source-capability-binding.v2",
                 "status": "verified",
                 "capabilities_sha256": capabilities_sha256,
                 "commercial_rendering_registry_sha256": rendering_sha256,
+                "database_roles": list(CAPABILITY_DATABASE_ROLES),
             }
 
     @staticmethod
@@ -751,11 +930,21 @@ def open_durable_cms_source(
             ))
         for guard in guards:
             guard()
+        if capability_binding is not None:
+            _precheck_capability_databases(
+                tuple(connections),
+                capability_binding,
+            )
         service = _SERVICE.CMSLocalizationSourceService(
             *connections,
             client,
             **service_options,
         )
+        if capability_binding is not None:
+            _bind_capability_databases(
+                tuple(connections),
+                capability_binding,
+            )
         for guard in guards:
             guard()
     except Exception as error:

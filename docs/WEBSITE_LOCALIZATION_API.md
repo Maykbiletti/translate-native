@@ -239,6 +239,20 @@ network request. This startup proof is deliberately not a hidden retry or a
 claim that the remote service will remain available indefinitely; supervisors
 must construct a new pinned runtime after an approved contract deployment.
 
+Pinned startup also writes an independent canonical binding row into the
+change, removal, and lifecycle databases. Each row binds the database role,
+complete capability digest, commercial rendering-registry digest, and a
+derived binding digest. Existing rows are validated before the service may add
+or alter any queue schema. A restart may reuse only the same exact binding;
+swapped database files and another capability generation block with stable
+content-free errors. An unbound database can be adopted only when every
+existing source queue is empty. This permits a safe first pinned deployment
+without allowing pending legacy work to cross the policy boundary. If a crash
+leaves only part of an otherwise matching empty set unbound, the next startup
+converges the missing binding. `capability_binding()` uses its v2 response to
+report all three verified database roles, and every later state transition
+revalidates the canonical rows before queue access.
+
 ### Durable terminal notification callback
 
 Polling remains sufficient, but a deployment can pass `terminal_notifier` and
