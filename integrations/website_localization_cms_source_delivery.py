@@ -25,6 +25,31 @@ from typing import Any, Callable, Iterator, Mapping
 
 
 SCHEMA_VERSION = 1
+CAPABILITY_BINDING_SCHEMA = (
+    "blun.cms-source-delivery-runtime-capability-binding.v1"
+)
+CAPABILITY_BINDING_TABLE = "cms_source_delivery_runtime_capability_binding"
+CAPABILITY_DATABASE_ROLE = "source_delivery"
+CAPABILITY_BINDING_SQL = (
+    "CREATE TABLE cms_source_delivery_runtime_capability_binding ("
+    "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+    "schema TEXT NOT NULL CHECK (schema = "
+    "'blun.cms-source-delivery-runtime-capability-binding.v1'), "
+    "database_role TEXT NOT NULL CHECK (database_role = 'source_delivery'), "
+    "delivery_capabilities_sha256 TEXT NOT NULL, "
+    "runtime_capabilities_sha256 TEXT NOT NULL, "
+    "commercial_rendering_registry_sha256 TEXT NOT NULL, "
+    "binding_sha256 TEXT NOT NULL)"
+)
+CAPABILITY_BINDING_COLUMNS = (
+    ("singleton", "INTEGER", 0, 1),
+    ("schema", "TEXT", 1, 0),
+    ("database_role", "TEXT", 1, 0),
+    ("delivery_capabilities_sha256", "TEXT", 1, 0),
+    ("runtime_capabilities_sha256", "TEXT", 1, 0),
+    ("commercial_rendering_registry_sha256", "TEXT", 1, 0),
+    ("binding_sha256", "TEXT", 1, 0),
+)
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
 MAX_DELAY_SECONDS = 86_400.0
@@ -326,6 +351,113 @@ class DurableCMSSourceDeliveryOutbox:
             raise CMSSourceDeliveryBlocked("source_delivery.delay_invalid")
         self._initialize()
 
+    def _capability_binding_row(self) -> tuple[Any, ...]:
+        if (
+            self.runtime_capabilities_sha256 is None
+            or self.commercial_rendering_registry_sha256 is None
+        ):
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.capability_binding_required"
+            )
+        binding_hash = hashlib.sha256("\x00".join((
+            CAPABILITY_BINDING_SCHEMA,
+            CAPABILITY_DATABASE_ROLE,
+            self.capabilities_sha256,
+            self.runtime_capabilities_sha256,
+            self.commercial_rendering_registry_sha256,
+        )).encode("utf-8")).hexdigest()
+        return (
+            1,
+            CAPABILITY_BINDING_SCHEMA,
+            CAPABILITY_DATABASE_ROLE,
+            self.capabilities_sha256,
+            self.runtime_capabilities_sha256,
+            self.commercial_rendering_registry_sha256,
+            binding_hash,
+        )
+
+    def _capability_table_exists(self) -> bool:
+        try:
+            rows = self.connection.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                "WHERE name = ?",
+                (CAPABILITY_BINDING_TABLE,),
+            ).fetchall()
+        except sqlite3.Error as error:
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.capability_database_invalid"
+            ) from error
+        if not rows:
+            return False
+        if len(rows) != 1 or tuple(rows[0]) != (
+            "table",
+            CAPABILITY_BINDING_TABLE,
+            CAPABILITY_BINDING_TABLE,
+            CAPABILITY_BINDING_SQL,
+        ):
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.capability_database_invalid"
+            )
+        return True
+
+    def _validate_capability_database(self) -> None:
+        configured = self.runtime_capabilities_sha256 is not None
+        if not self._capability_table_exists():
+            if configured:
+                raise CMSSourceDeliveryBlocked(
+                    "source_delivery.capability_database_unbound"
+                )
+            return
+        if not configured:
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.capability_binding_required"
+            )
+        try:
+            columns = tuple(
+                (row[1], row[2], row[3], row[5])
+                for row in self.connection.execute(
+                    f"PRAGMA table_info({CAPABILITY_BINDING_TABLE})"
+                ).fetchall()
+            )
+            rows = self.connection.execute(
+                f"SELECT singleton, schema, database_role, "
+                f"delivery_capabilities_sha256, "
+                f"runtime_capabilities_sha256, "
+                f"commercial_rendering_registry_sha256, binding_sha256 "
+                f"FROM {CAPABILITY_BINDING_TABLE}"
+            ).fetchall()
+        except sqlite3.Error as error:
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.capability_database_invalid"
+            ) from error
+        if columns != CAPABILITY_BINDING_COLUMNS or len(rows) != 1:
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.capability_database_invalid"
+            )
+        if tuple(rows[0]) != self._capability_binding_row():
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.capability_database_mismatch"
+            )
+
+    def _guard_capability_binding(self) -> None:
+        if self.runtime_capabilities_sha256 is not None and (
+            getattr(
+                self.client, "expected_runtime_capabilities_sha256", None,
+            ) != self.runtime_capabilities_sha256
+            or getattr(
+                self.client,
+                "expected_commercial_rendering_registry_sha256",
+                None,
+            ) != self.commercial_rendering_registry_sha256
+            or getattr(
+                self.client, "expected_capabilities_sha256", None,
+            ) != self.capabilities_sha256
+        ):
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.capability_binding_changed"
+            )
+        self._validate_capability_database()
+
     def _now(self, value: float | int | None = None) -> float:
         try:
             supplied = self.clock() if value is None else value
@@ -396,6 +528,22 @@ class DurableCMSSourceDeliveryOutbox:
                     status, next_attempt_at, created_at, operation, request_id
                 )
             """)
+            if self.runtime_capabilities_sha256 is not None:
+                if not self._capability_table_exists():
+                    has_work = self.connection.execute(
+                        "SELECT 1 FROM cms_source_delivery_outbox LIMIT 1"
+                    ).fetchone()
+                    if has_work is not None:
+                        raise CMSSourceDeliveryBlocked(
+                            "source_delivery.capability_database_unbound"
+                        )
+                    self.connection.execute(CAPABILITY_BINDING_SQL)
+                self.connection.execute(
+                    f"INSERT OR IGNORE INTO {CAPABILITY_BINDING_TABLE} "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    self._capability_binding_row(),
+                )
+            self._guard_capability_binding()
         self._validate_schema()
 
     def _validate_schema(self) -> None:
@@ -417,20 +565,9 @@ class DurableCMSSourceDeliveryOutbox:
             or len(meta) != 1
             or tuple(meta[0]) != (1, SCHEMA_VERSION)
             or columns != _COLUMNS
-            or self.runtime_capabilities_sha256 is not None and (
-                getattr(
-                    self.client,
-                    "expected_runtime_capabilities_sha256",
-                    None,
-                ) != self.runtime_capabilities_sha256
-                or getattr(
-                    self.client,
-                    "expected_commercial_rendering_registry_sha256",
-                    None,
-                ) != self.commercial_rendering_registry_sha256
-            )
         ):
             raise CMSSourceDeliveryBlocked("source_delivery.schema_altered")
+        self._guard_capability_binding()
 
     def _verified_source_binding(self, value: Any) -> dict[str, Any]:
         try:

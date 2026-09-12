@@ -506,21 +506,136 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "source_delivery.integrity")
         self.assertEqual(self.client.calls, [])
 
-    def test_contract_change_blocks_active_rows(self):
+    def test_contract_change_blocks_restart_before_network(self):
         change = cms_support.event()
         self.outbox.enqueue_change(change)
         replacement = ScriptedClient("b" * 64)
-        restarted = DELIVERY.DurableCMSSourceDeliveryOutbox(
-            self.connection, replacement, clock=lambda: self.now,
-        )
 
-        health = restarted.health()
         with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
-            restarted.run_once("worker-1", lease_seconds=60)
+            DELIVERY.DurableCMSSourceDeliveryOutbox(
+                self.connection, replacement, clock=lambda: self.now,
+            )
 
-        self.assertEqual(health.contract_mismatches, 1)
-        self.assertEqual(caught.exception.code, "source_delivery.contract_changed")
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery.capability_database_mismatch",
+        )
         self.assertEqual(replacement.calls, [])
+
+    def test_pinned_restart_preserves_exact_generation_and_pending_work(self):
+        change = cms_support.event()
+        self.outbox.enqueue_change(change)
+        stored = self.connection.execute(
+            "SELECT singleton, schema, database_role, "
+            "delivery_capabilities_sha256, runtime_capabilities_sha256, "
+            "commercial_rendering_registry_sha256, binding_sha256 "
+            "FROM cms_source_delivery_runtime_capability_binding"
+        ).fetchone()
+
+        restarted_client = ScriptedClient()
+        restarted = DELIVERY.DurableCMSSourceDeliveryOutbox(
+            self.connection, restarted_client, clock=lambda: self.now,
+        )
+        outcome = restarted.run_once("restarted-worker", lease_seconds=60)
+
+        self.assertEqual(tuple(stored)[:6], (
+            1,
+            DELIVERY.CAPABILITY_BINDING_SCHEMA,
+            "source_delivery",
+            "a" * 64,
+            "c" * 64,
+            "d" * 64,
+        ))
+        self.assertRegex(stored[6], r"^[0-9a-f]{64}$")
+        self.assertEqual((outcome.status, outcome.attempt), ("succeeded", 1))
+        self.assertEqual(len(restarted_client.calls), 1)
+
+    def test_changed_runtime_generation_blocks_restart_before_network(self):
+        self.outbox.enqueue_change(cms_support.event())
+        replacement = ScriptedClient()
+        replacement.expected_runtime_capabilities_sha256 = "e" * 64
+
+        with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
+            DELIVERY.DurableCMSSourceDeliveryOutbox(
+                self.connection, replacement, clock=lambda: self.now,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery.capability_database_mismatch",
+        )
+        self.assertEqual(replacement.calls, [])
+
+    def test_capability_metadata_tampering_blocks_before_network(self):
+        change = cms_support.event()
+        self.outbox.enqueue_change(change)
+        self.connection.execute(
+            "UPDATE cms_source_delivery_runtime_capability_binding "
+            "SET binding_sha256 = ?",
+            ("0" * 64,),
+        )
+        self.connection.commit()
+
+        with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
+            self.outbox.run_once("worker-1", lease_seconds=60)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery.capability_database_mismatch",
+        )
+        self.assertEqual(self.client.calls, [])
+
+    def test_pinned_startup_adopts_only_empty_unbound_database(self):
+        def unpinned_client():
+            client = ScriptedClient()
+            client.expected_runtime_capabilities_sha256 = None
+            client.expected_commercial_rendering_registry_sha256 = None
+            return client
+
+        empty = sqlite3.connect(":memory:")
+        active = sqlite3.connect(":memory:")
+        try:
+            DELIVERY.DurableCMSSourceDeliveryOutbox(
+                empty, unpinned_client(), clock=lambda: self.now,
+            )
+            adopted = DELIVERY.DurableCMSSourceDeliveryOutbox(
+                empty, ScriptedClient(), clock=lambda: self.now,
+            )
+            self.assertEqual(adopted.health().status, "ok")
+
+            legacy = DELIVERY.DurableCMSSourceDeliveryOutbox(
+                active, unpinned_client(), clock=lambda: self.now,
+            )
+            legacy.enqueue_change(cms_support.event())
+            replacement = ScriptedClient()
+            with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
+                DELIVERY.DurableCMSSourceDeliveryOutbox(
+                    active, replacement, clock=lambda: self.now,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "source_delivery.capability_database_unbound",
+            )
+            self.assertEqual(replacement.calls, [])
+        finally:
+            empty.close()
+            active.close()
+
+    def test_bound_database_cannot_be_reopened_without_generation_pins(self):
+        unpinned = ScriptedClient()
+        unpinned.expected_runtime_capabilities_sha256 = None
+        unpinned.expected_commercial_rendering_registry_sha256 = None
+
+        with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
+            DELIVERY.DurableCMSSourceDeliveryOutbox(
+                self.connection, unpinned, clock=lambda: self.now,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery.capability_binding_required",
+        )
+        self.assertEqual(unpinned.calls, [])
 
     def test_too_short_lease_blocks_before_claim(self):
         self.outbox.enqueue_removal(cms_support.tombstone())

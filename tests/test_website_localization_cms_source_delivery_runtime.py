@@ -354,23 +354,16 @@ class SourceDeliveryRuntimeTests(unittest.TestCase):
         self.assertIsNone(idle)
         self.assertEqual(len(self.client.calls), 1)
 
-    def test_active_contract_change_is_visible_and_fail_closed(self):
+    def test_active_contract_change_blocks_runtime_startup(self):
         change = cms_support.event()
         first = self.open()
         first.enqueue_change(change)
         replacement = delivery_support.ScriptedClient("b" * 64)
-        changed = self.open(client=replacement)
 
-        readiness = changed.worker_readiness()
-        self.assertEqual(readiness["worker_state"], "unmanaged")
-        health = changed.health()
-        self.assertEqual((health.status, health.contract_mismatches), (
-            "blocked", 1,
-        ))
         with self.assertRaises(
             RUNTIME.DurableCMSSourceDeliveryRuntimeBlocked
         ) as caught:
-            changed.run_once()
+            self.open(client=replacement)
         self.assertEqual(
             caught.exception.code,
             "source_delivery_runtime.outbox_blocked",

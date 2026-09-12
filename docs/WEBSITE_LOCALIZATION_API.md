@@ -799,6 +799,17 @@ keeps the database connection open; close it only after the worker finishes.
 Worker exceptions are reduced to `source_delivery_runtime.worker_blocked`, and
 the failed runtime cannot accept more managed source events.
 
+When the source client supplies the verified runtime-capability and commercial
+rendering-registry pins, the durable outbox also creates one canonical
+`source_delivery` binding record. It binds those two generations together with
+the source-delivery contract hash and validates the table shape, exact row, and
+derived digest before every queue operation. A same-generation restart resumes
+pending work. Only an empty unbound legacy database may be bound automatically;
+a non-empty legacy queue, changed generation, altered metadata, or unpinned
+reopen of an already bound database blocks before queue or network access. The
+outer website-to-sidecar adapter remains intentionally unbound and must use a
+separate database.
+
 #### Website-source delivery HTTP sidecar
 
 `integrations/website_localization_cms_source_delivery_http.py` makes the
