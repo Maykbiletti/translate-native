@@ -468,6 +468,7 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 hashlib.sha256(b"quality-receipt").hexdigest(),
             )
             self.assertIsNone(evidence["commercial_profile"])
+            self.assertIsNone(evidence["commercial_quality_profile"])
             self.assertIsNone(evidence["commercial_review"])
         self.assertTrue(self.publication_authority.verify(
             CMS._canonical_json(first.payload).encode("utf-8"),
@@ -494,11 +495,17 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 "schema", "job_id", "target_locale", "content_type",
                 "target_sha256", "result_sha256", "quality_receipt_sha256",
                 "approval_id", "approval_sha256", "commercial_profile",
-                "commercial_review",
+                "commercial_quality_profile", "commercial_review",
             })
             self.assertEqual(
                 evidence["commercial_profile"], PLANNER.COMMERCIAL_PROFILE,
             )
+            canonical = PLANNER.commercial_quality_profile_for(item["locale"])
+            self.assertEqual(evidence["commercial_quality_profile"], {
+                "profile": canonical["commercial_profile"],
+                "version": canonical["version"],
+                "sha256": canonical["sha256"],
+            })
             self.assertEqual(set(evidence["commercial_review"]), {
                 "schema", "profile", "status", "review_required_dimensions",
                 "evidence_sha256",

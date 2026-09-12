@@ -1304,10 +1304,12 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v1` object. That content-free
+a `blun.website-localization-release-evidence.v2` object. That content-free
 object binds the signed approval and worker-result hashes, quality-receipt
-hash, and either a null commercial scope or the exact commercial-profile ID
-and validated review summary. It contains no source text, target text, amount,
+hash, and either a null commercial scope or the exact commercial-profile ID,
+locale-specific commercial quality-profile version and digest, and validated
+review summary. The receiver recomputes that binding for each locale before
+the host commit. It contains no source text, target text, amount,
 currency, tax wording, brand, or reviewer explanation. A CMS can therefore
 pin the advertised profile and reject missing, malformed, or drifted evidence
 before replacing its current content, without treating a cross-language regex
@@ -1399,8 +1401,11 @@ signed payload with a host-supplied
 `PublicationExpectation`. That expectation binds the exact current event,
 site, website version, plan, source identity, source generation and hash,
 complete sorted required-locale set, content type, and commercial profile.
-A correctly signed but partial, stale, or differently scoped publication is
-therefore rejected before any CMS write.
+For commercial content, the receiver also recomputes each locale's canonical
+commercial quality-profile version and digest and requires the signed v2
+release evidence to match it exactly. A correctly signed but partial, stale,
+cross-locale, or differently scoped publication is therefore rejected before
+any CMS write.
 
 The host supplies one commit callback. It must atomically and idempotently bind
 the stable `(delivery_id, payload_sha256)` pair to the expected source revision,

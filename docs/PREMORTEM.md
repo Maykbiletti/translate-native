@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Locale-bound commercial publication evidence (12 September 2026)
+
+Assume a CMS replaced its current localized offer with a signed bundle whose
+generic commercial profile was correct but whose locale-specific profile was
+stale or belonged to another EU language.
+
+- A generic profile ID cannot prove that Finnish, Maltese, or another locale
+  used the intended native-language commercial quality generation.
+- Adding an optional digest would let old senders silently bypass the binding.
+- Comparing only well-formed tokens and hashes would accept a valid-looking but
+  obsolete or cross-locale profile.
+- Applying commercial requirements to ordinary content would create false
+  publication blocks.
+
+Version the release-evidence schema, require a compact commercial quality
+binding only for commercial content, and derive it from the already approved
+worker result. The CMS receiver recomputes the canonical binding for each exact
+locale before its commit callback; the durable store independently rejects
+missing or structurally inconsistent bindings during its atomic recheck. Tests
+cover all 24 EU locales, non-commercial compatibility, malformed evidence, and
+stale version, digest, and profile substitution before commit.
+
 ## Locale-bound commercial quality profiles (12 September 2026)
 
 Assume a commercial job advertised one of 24 EU locales while every provider

@@ -1423,6 +1423,15 @@ The full object is bound into the job ID and all three provider requests; its
 version and digest remain in signed quality evidence. A stale, substituted or
 mutated locale profile blocks before any provider call.
 
+For publication, `blun.website-localization-release-evidence.v2` carries the
+compact `commercial_quality_profile` binding `{profile, version, sha256}` for
+commercial content and requires all three fields to be null for every other
+content type. The reference CMS receiver recomputes the canonical version and
+digest for each exact target locale before calling host code. A syntactically
+valid digest, a binding from another EU locale, or a prior profile generation
+is therefore not accepted merely because the generic commercial profile still
+matches.
+
 ```json
 {
   "capabilities": {
@@ -1491,7 +1500,7 @@ mutated locale profile blocks before any provider call.
         "response_schema": "blun.cms-localization-publication-http-ack.v1"
       }],
       "request_content_type": "application/json; charset=utf-8",
-      "release_evidence_schema": "blun.website-localization-release-evidence.v1",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v2",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v2",
       "sha256": "<sha256>"

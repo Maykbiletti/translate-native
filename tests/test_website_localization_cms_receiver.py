@@ -64,10 +64,17 @@ def release_evidence(target: str, *, locale="fi-FI", commercial=True):
     target_sha256 = hashlib.sha256(target.encode("utf-8")).hexdigest()
     review = None
     profile = None
+    quality_profile = None
     content_type = "cta"
     if commercial:
         content_type = "commercial"
         profile = CMS._PLANNER.COMMERCIAL_PROFILE
+        canonical = CMS._PLANNER.commercial_quality_profile_for(locale)
+        quality_profile = {
+            "profile": canonical["commercial_profile"],
+            "version": canonical["version"],
+            "sha256": canonical["sha256"],
+        }
         review = {
             "schema": CMS._RELEASE._WORKER._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
             "profile": profile,
@@ -86,6 +93,7 @@ def release_evidence(target: str, *, locale="fi-FI", commercial=True):
         "approval_sha256": "4" * 64,
         "quality_receipt_sha256": "6" * 64,
         "commercial_profile": profile,
+        "commercial_quality_profile": quality_profile,
         "commercial_review": review,
     }
 
@@ -116,6 +124,14 @@ def publication_payload(*, expires_at=2000):
         RECEIVER._canonical_json(unsigned, maximum=RECEIVER.MAX_REQUEST_BYTES)
     ).hexdigest()
     return {**unsigned, "delivery_id": delivery_id}
+
+
+def rebind_publication(payload):
+    unsigned = {key: value for key, value in payload.items() if key != "delivery_id"}
+    payload["delivery_id"] = "blun-cms-delivery-" + hashlib.sha256(
+        RECEIVER._canonical_json(unsigned, maximum=RECEIVER.MAX_REQUEST_BYTES)
+    ).hexdigest()
+    return payload
 
 
 def expectation(
@@ -473,7 +489,40 @@ class CMSPublicationReceiverTests(unittest.TestCase):
         self.assertEqual(committed.payload, payload)
         evidence = committed.payload["localizations"][0]["release_evidence"]
         self.assertEqual(evidence["commercial_profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
+        canonical = CMS._PLANNER.commercial_quality_profile_for("fi-FI")
+        self.assertEqual(evidence["commercial_quality_profile"], {
+            "profile": canonical["commercial_profile"],
+            "version": canonical["version"],
+            "sha256": canonical["sha256"],
+        })
         self.assertEqual(evidence["commercial_review"]["status"], "verified")
+
+    def test_every_eu_locale_uses_its_exact_commercial_quality_binding(self):
+        for locale in sorted(
+            profile.locale for profile in CMS._PLANNER.EU_OFFICIAL_LOCALES
+        ):
+            payload = publication_payload()
+            item = payload["localizations"][0]
+            item["locale"] = locale
+            item["release_evidence"] = release_evidence(
+                item["target_text"], locale=locale,
+            )
+            item["target_sha256"] = item["release_evidence"]["target_sha256"]
+            item["approval_id"] = item["release_evidence"]["approval_id"]
+            rebind_publication(payload)
+            body, headers, _, _ = wire(payload, self.publication_authority)
+
+            response = RECEIVER.receive_publication(
+                body, headers, self.publication_authority,
+                self.acknowledgement_authority, expectation(payload),
+                self.commit, now=1000,
+            )
+
+            with self.subTest(locale=locale):
+                self.assertEqual(
+                    json.loads(response.body)["acknowledgement"]["status"],
+                    "accepted",
+                )
 
     def test_exact_replay_uses_the_same_host_idempotency_binding(self):
         payload = publication_payload()
@@ -514,6 +563,7 @@ class CMSPublicationReceiverTests(unittest.TestCase):
             payload = publication_payload()
             expected = expectation(payload)
             mutation(payload)
+            rebind_publication(payload)
             body, headers, _, _ = wire(payload, self.publication_authority)
             with self.subTest(mutation=mutation), self.assertRaises(
                 RECEIVER.CMSReceiverBlocked,
@@ -546,6 +596,44 @@ class CMSPublicationReceiverTests(unittest.TestCase):
 
         for expected, code in cases:
             with self.subTest(code=code), self.assertRaises(
+                RECEIVER.CMSReceiverBlocked,
+            ) as caught:
+                RECEIVER.receive_publication(
+                    body, headers, self.publication_authority,
+                    self.acknowledgement_authority, expected, self.commit,
+                    now=1000,
+                )
+            self.assertEqual(caught.exception.code, code)
+
+    def test_locale_commercial_quality_profile_drift_blocks_before_commit(self):
+        mutations = (
+            (
+                lambda value: value["localizations"][0]["release_evidence"]
+                ["commercial_quality_profile"].update(
+                    version="commercial-eu-fi-FI-old"
+                ),
+                "receiver.release_scope",
+            ),
+            (
+                lambda value: value["localizations"][0]["release_evidence"]
+                ["commercial_quality_profile"].update(sha256="9" * 64),
+                "receiver.release_scope",
+            ),
+            (
+                lambda value: value["localizations"][0]["release_evidence"]
+                ["commercial_quality_profile"].update(
+                    profile="commercial-offer-v2"
+                ),
+                "receiver.localization_invalid",
+            ),
+        )
+        for mutation, code in mutations:
+            payload = publication_payload()
+            expected = expectation(payload)
+            mutation(payload)
+            rebind_publication(payload)
+            body, headers, _, _ = wire(payload, self.publication_authority)
+            with self.subTest(mutation=mutation), self.assertRaises(
                 RECEIVER.CMSReceiverBlocked,
             ) as caught:
                 RECEIVER.receive_publication(
