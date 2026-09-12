@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## End-to-end localization lifecycle status (12 September 2026)
+
+Assume a website followed a durably accepted submission into localization but
+read the wrong tenant, an event that had not reached the source service, or an
+obsolete status contract.
+
+- A source-status request before sidecar acceptance could probe or invent
+  downstream state for work still owned by an upstream outbox.
+- A valid response for another site, event, payload, or capability generation
+  could be attached to the local submission.
+- Collapsing source acceptance and the localization lifecycle into one success
+  could make processing, review, or publication appear complete too early.
+- Reformatting the rich source status at each hop could silently omit a failed
+  locale, retry counter, terminal notification, or receiver state.
+
+The sidecar exposes a distinct authenticated source-status operation only for
+an exact locally succeeded outbox row. Every hop binds the site, event, stored
+payload hash, sidecar capability hash, and source-service capability hash. The
+website runtime keeps acceptance and localization as separate nested status
+objects, validates the complete source payload without lossy normalization,
+and fails closed on missing, premature, malformed, or stale state.
+
 ## End-to-end submission health (12 September 2026)
 
 Assume one durable submission outbox appeared healthy while the other was

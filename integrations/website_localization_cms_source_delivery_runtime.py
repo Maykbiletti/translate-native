@@ -74,6 +74,8 @@ def _delivery_failure(error: Exception) -> DurableCMSSourceDeliveryRuntimeBlocke
         return _blocked("source_delivery_runtime.idempotency_collision")
     if code == "source_delivery.status_not_found":
         return _blocked("source_delivery_runtime.status_not_found")
+    if code == "source_delivery.source_status_unavailable":
+        return _blocked("source_delivery_runtime.source_status_unavailable")
     return _blocked("source_delivery_runtime.outbox_blocked")
 
 
@@ -364,8 +366,24 @@ class DurableCMSSourceDeliveryRuntime:
     def status(self, operation: str, request_id: str) -> Any:
         return self._call("status", operation, request_id)
 
+    def source_status(
+        self, event_id: str, site_id: str, payload_sha256: str,
+    ) -> Mapping[str, Any]:
+        """Read the source lifecycle through the exact accepted outbox row."""
+
+        return self._call(
+            "source_status", event_id, site_id, payload_sha256,
+        )
+
     def health(self) -> Any:
         return self._call("health")
+
+    @property
+    def expected_capabilities_sha256(self) -> str:
+        """Return the immutable source-service contract pinned by the outbox."""
+
+        self._assert_owner()
+        return self._outbox.capabilities_sha256
 
     def run_once(self) -> Any:
         return self._call(

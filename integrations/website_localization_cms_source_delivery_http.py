@@ -11,11 +11,14 @@ hashes, counters, states, and stable error codes.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import re
+import sys
 import unicodedata
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
@@ -29,8 +32,14 @@ TENANT_PRINCIPAL_SCHEMA = (
 CHANGE_REQUEST_SCHEMA = "blun.cms-source-delivery-change-request.v1"
 REMOVAL_REQUEST_SCHEMA = "blun.cms-source-delivery-removal-request.v1"
 STATUS_REQUEST_SCHEMA = "blun.cms-source-delivery-status-request.v1"
+SOURCE_STATUS_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-source-status-request.v1"
+)
 QUEUE_RESPONSE_SCHEMA = "blun.cms-source-delivery-queue-response.v1"
 STATUS_RESPONSE_SCHEMA = "blun.cms-source-delivery-status-response.v1"
+SOURCE_STATUS_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-source-status-response.v1"
+)
 HEALTH_RESPONSE_SCHEMA = "blun.cms-source-delivery-health-response.v1"
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-readiness-response.v1"
@@ -43,6 +52,7 @@ CAPABILITIES_RESPONSE_SCHEMA = (
 CHANGE_PATH = "/v1/localization/source-delivery/changes"
 REMOVAL_PATH = "/v1/localization/source-delivery/removals"
 STATUS_PATH = "/v1/localization/source-delivery/status"
+SOURCE_STATUS_PATH = "/v1/localization/source-delivery/source-status"
 HEALTH_PATH = "/v1/localization/source-delivery/health"
 READINESS_PATH = "/v1/localization/source-delivery/readiness"
 CAPABILITIES_PATH = "/v1/localization/source-delivery/capabilities"
@@ -63,6 +73,7 @@ SCOPES = {
     CHANGE_PATH: "source-delivery-change:write",
     REMOVAL_PATH: "source-delivery-removal:write",
     STATUS_PATH: "source-delivery-status:read",
+    SOURCE_STATUS_PATH: "source-delivery-source-status:read",
     HEALTH_PATH: "source-delivery-health:read",
     READINESS_PATH: "source-delivery-readiness:read",
     CAPABILITIES_PATH: "source-delivery-capabilities:read",
@@ -71,11 +82,33 @@ METHODS = {
     CHANGE_PATH: "POST",
     REMOVAL_PATH: "POST",
     STATUS_PATH: "POST",
+    SOURCE_STATUS_PATH: "POST",
     HEALTH_PATH: "GET",
     READINESS_PATH: "GET",
     CAPABILITIES_PATH: "GET",
 }
-TENANT_PATHS = {CHANGE_PATH, REMOVAL_PATH, STATUS_PATH}
+TENANT_PATHS = {
+    CHANGE_PATH, REMOVAL_PATH, STATUS_PATH, SOURCE_STATUS_PATH,
+}
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"cannot load source-delivery HTTP dependency: {path.name}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+_SOURCE_HTTP = _load_module(
+    "blun_website_localization_cms_source_delivery_http_source",
+    _ROOT / "integrations" / "website_localization_cms_source_http.py",
+)
 
 
 class CMSSourceDeliveryHTTPBlocked(RuntimeError):
@@ -308,6 +341,46 @@ def _status_payload(
         ) from None
 
 
+class _PayloadView:
+    def __init__(self, value: Mapping[str, Any]):
+        self.value = value
+
+    def as_payload(self) -> Mapping[str, Any]:
+        return self.value
+
+
+def _source_status_response(
+    value: Any,
+    *,
+    expected_event_id: str,
+    expected_site_id: str,
+    expected_capabilities_sha256: str,
+) -> dict[str, Any]:
+    """Validate the complete source-service envelope without dropping fields."""
+
+    try:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"schema", "status", "capabilities_sha256"}
+            or value.get("schema") != _SOURCE_HTTP.STATUS_RESPONSE_SCHEMA
+            or value.get("capabilities_sha256")
+            != expected_capabilities_sha256
+        ):
+            raise ValueError
+        normalized = _SOURCE_HTTP._source_status_payload(
+            _PayloadView(value["status"]),
+            expected_event_id=expected_event_id,
+            expected_site_id=expected_site_id,
+        )
+        if normalized != value["status"]:
+            raise ValueError
+        return normalized
+    except Exception:
+        raise CMSSourceDeliveryHTTPBlocked(
+            "source_delivery_http.runtime_response_invalid", 503,
+        ) from None
+
+
 def _health_payload(value: Any) -> dict[str, Any]:
     try:
         payload = value.as_payload()
@@ -458,6 +531,11 @@ def _capabilities_payload() -> dict[str, Any]:
             TENANT_PRINCIPAL_SCHEMA, STATUS_REQUEST_SCHEMA,
             STATUS_RESPONSE_SCHEMA, 200,
         ),
+        (
+            "source_status", "POST", SOURCE_STATUS_PATH,
+            "source-delivery-source-status:read", TENANT_PRINCIPAL_SCHEMA,
+            SOURCE_STATUS_REQUEST_SCHEMA, SOURCE_STATUS_RESPONSE_SCHEMA, 200,
+        ),
     )
     try:
         operations = {}
@@ -496,6 +574,7 @@ def _capabilities_payload() -> dict[str, Any]:
                 "content_free_operational_reads": True,
                 "delivery_retries_are_durable": True,
                 "status_is_site_bound": True,
+                "source_status_requires_accepted_submission": True,
                 "write_requires_ready_worker": True,
             },
         }
@@ -777,6 +856,72 @@ class CMSSourceDeliveryHTTPApplication:
                 })
 
             request = self._request(body)
+            if path == SOURCE_STATUS_PATH:
+                if (
+                    not isinstance(request, Mapping)
+                    or set(request) != {
+                        "schema", "event_id", "site_id", "payload_sha256",
+                    }
+                    or request.get("schema") != SOURCE_STATUS_REQUEST_SCHEMA
+                ):
+                    raise CMSSourceDeliveryHTTPBlocked(
+                        "source_delivery_http.request_invalid", 400,
+                    )
+                try:
+                    event_id = _token(request["event_id"])
+                    site_id = _token(request["site_id"])
+                    payload_sha256 = _sha256(request["payload_sha256"])
+                except (KeyError, TypeError, ValueError):
+                    raise CMSSourceDeliveryHTTPBlocked(
+                        "source_delivery_http.request_invalid", 400,
+                    ) from None
+                if site_id != principal["site_id"]:
+                    raise CMSSourceDeliveryHTTPBlocked(
+                        "source_delivery_http.status_not_found", 404,
+                    )
+                try:
+                    source_response = self.runtime.source_status(
+                        event_id,
+                        site_id,
+                        payload_sha256,
+                    )
+                except Exception as error:
+                    code = getattr(error, "code", None)
+                    if code == "source_delivery_runtime.request_invalid":
+                        raise CMSSourceDeliveryHTTPBlocked(
+                            "source_delivery_http.request_invalid", 400,
+                        ) from None
+                    if code == "source_delivery_runtime.status_not_found":
+                        raise CMSSourceDeliveryHTTPBlocked(
+                            "source_delivery_http.status_not_found", 404,
+                        ) from None
+                    if code == (
+                        "source_delivery_runtime.source_status_unavailable"
+                    ):
+                        raise CMSSourceDeliveryHTTPBlocked(
+                            "source_delivery_http.source_status_unavailable",
+                            409,
+                        ) from None
+                    raise CMSSourceDeliveryHTTPBlocked(
+                        "source_delivery_http.runtime_blocked", 503,
+                    ) from None
+                source_status = _source_status_response(
+                    source_response,
+                    expected_event_id=event_id,
+                    expected_site_id=site_id,
+                    expected_capabilities_sha256=(
+                        self.runtime.expected_capabilities_sha256
+                    ),
+                )
+                return self._send(start_response, 200, {
+                    "schema": SOURCE_STATUS_RESPONSE_SCHEMA,
+                    "source_status": source_status,
+                    "source_capabilities_sha256": (
+                        self.runtime.expected_capabilities_sha256
+                    ),
+                    "capabilities_sha256": capabilities["sha256"],
+                })
+
             if path == STATUS_PATH:
                 if (
                     not isinstance(request, Mapping)

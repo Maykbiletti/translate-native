@@ -670,6 +670,73 @@ class CMSSourceDeliverySidecarHTTPClient:
         )
         return response
 
+    def source_status(
+        self,
+        event_id: str,
+        site_id: str,
+        payload_sha256: str,
+    ) -> Mapping[str, Any]:
+        """Read the complete source lifecycle through the accepted sidecar row."""
+
+        if (
+            not _token(event_id)
+            or not _token(site_id)
+            or not _sha256(payload_sha256)
+        ):
+            _fail("request_invalid")
+        contract = self._contract("source_status")
+        request = {
+            "schema": contract["request_schema"],
+            "event_id": event_id,
+            "site_id": site_id,
+            "payload_sha256": payload_sha256,
+        }
+        body = _canonical(request)
+        _result, response = self._request(
+            contract["method"],
+            contract["path"],
+            body,
+            {contract["success_status"]},
+            {
+                "site_id": site_id,
+                "event_id": event_id,
+                "request_id": event_id,
+                "payload_sha256": payload_sha256,
+            },
+        )
+        if (
+            set(response) != {
+                "schema", "source_status", "source_capabilities_sha256",
+                "capabilities_sha256",
+            }
+            or response.get("schema") != contract["response_schema"]
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("source_capabilities_sha256")
+            != self.expected_remote_capabilities_sha256
+        ):
+            _fail("source_status_binding")
+        try:
+            normalized = _HTTP._source_status_response(
+                {
+                    "schema": _HTTP._SOURCE_HTTP.STATUS_RESPONSE_SCHEMA,
+                    "status": response["source_status"],
+                    "capabilities_sha256": (
+                        response["source_capabilities_sha256"]
+                    ),
+                },
+                expected_event_id=event_id,
+                expected_site_id=site_id,
+                expected_capabilities_sha256=(
+                    self.expected_remote_capabilities_sha256
+                ),
+            )
+        except Exception:
+            _fail("source_status_binding")
+        if normalized != response["source_status"]:
+            _fail("source_status_binding")
+        return response
+
     def health(self) -> Mapping[str, Any]:
         contract = self._contract("health")
         result, response = self._request(

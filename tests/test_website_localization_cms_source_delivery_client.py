@@ -177,7 +177,7 @@ class SourceDeliveryClientTests(unittest.TestCase):
         self.assertEqual(response["capabilities"]["sha256"], self.digest)
         self.assertEqual(set(response["capabilities"]["operations"]), {
             "capabilities", "change", "health", "readiness", "removal",
-            "status",
+            "source_status", "status",
         })
         self.assertEqual(len(self.transport.calls), 1)
         self.assertEqual(self.contexts[0], {
@@ -245,6 +245,62 @@ class SourceDeliveryClientTests(unittest.TestCase):
                 queue["payload_sha256"],
             )
         self.assertEqual(caught.exception.code, "source_delivery_client.status_binding")
+
+    def test_source_status_waits_for_acceptance_and_validates_full_lifecycle(self):
+        change = cms_support.event()
+        queued = self.client.submit_change(change)["queue"]
+
+        with self.assertRaises(CLIENT.CMSSourceDeliveryClientBlocked) as caught:
+            self.client.source_status(
+                change["event_id"], change["site_id"],
+                queued["payload_sha256"],
+            )
+        self.assertEqual(caught.exception.code, "source_delivery_client.http_status")
+        self.assertFalse(caught.exception.retryable)
+
+        self.runtime.run_once()
+        response = self.client.source_status(
+            change["event_id"], change["site_id"], queued["payload_sha256"],
+        )
+
+        self.assertEqual(response["source_status"]["remote_status"], "processing")
+        self.assertEqual(response["source_status"]["required_locales"], [
+            "fi-FI", "mt-MT",
+        ])
+        self.assertEqual(
+            response["source_capabilities_sha256"], self.remote_digest,
+        )
+        context = self.contexts[-1]
+        self.assertEqual(context["path"], HTTP.SOURCE_STATUS_PATH)
+        self.assertEqual(context["event_id"], change["event_id"])
+        self.assertEqual(context["payload_sha256"], queued["payload_sha256"])
+        self.assertNotIn(
+            change["localization"]["source_text"], json.dumps(response),
+        )
+
+        def substitute_event(call_number, result):
+            if call_number == 2:
+                return replace_json(
+                    result,
+                    lambda value: value["source_status"].update(
+                        event_id="other-event"
+                    ),
+                )
+            return result
+
+        tampering_transport = TransformingTransport(
+            WSGITransport(self.runtime.http), substitute_event,
+        )
+        tampered_client = self.make_client(transport=tampering_transport)
+        with self.assertRaises(CLIENT.CMSSourceDeliveryClientBlocked) as caught:
+            tampered_client.source_status(
+                change["event_id"], change["site_id"],
+                queued["payload_sha256"],
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_client.source_status_binding",
+        )
 
     def test_health_and_readiness_accept_only_consistent_blocked_state(self):
         self.assertEqual(self.client.health()["health"]["status"], "ok")

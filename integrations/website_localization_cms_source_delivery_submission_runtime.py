@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import os
 import secrets
@@ -168,6 +169,38 @@ class HMACCMSSourceDeliverySubmissionHealth:
             "sidecar_health": self._copy_health(self.sidecar_health),
             "sidecar_capabilities_sha256": self.sidecar_capabilities_sha256,
             "source_capabilities_sha256": self.source_capabilities_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class HMACCMSSourceDeliverySubmissionLifecycle:
+    """Content-free acceptance and source localization state kept separate."""
+
+    schema: str
+    status: str
+    stage: str
+    submission: Mapping[str, Any]
+    source_status: Mapping[str, Any] | None
+    sidecar_capabilities_sha256: str
+    source_capabilities_sha256: str
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "status": self.status,
+            "stage": self.stage,
+            "submission": copy.deepcopy(dict(self.submission)),
+            "source_status": (
+                None
+                if self.source_status is None
+                else copy.deepcopy(dict(self.source_status))
+            ),
+            "sidecar_capabilities_sha256": (
+                self.sidecar_capabilities_sha256
+            ),
+            "source_capabilities_sha256": (
+                self.source_capabilities_sha256
+            ),
         }
 
 
@@ -338,6 +371,95 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             error_code=sidecar["last_error_code"],
         )
 
+    def submission_lifecycle(
+        self, operation: str, request_id: str,
+    ) -> HMACCMSSourceDeliverySubmissionLifecycle:
+        """Read acceptance first, then the complete source localization state."""
+
+        self._assert_open()
+        submission = self.submission_status(operation, request_id)
+        submission_payload = submission.as_payload()
+        if submission.status != "accepted":
+            return HMACCMSSourceDeliverySubmissionLifecycle(
+                schema="blun.cms-source-delivery-submission-lifecycle.v1",
+                status=submission.status,
+                stage=submission.stage,
+                submission=submission_payload,
+                source_status=None,
+                sidecar_capabilities_sha256=(
+                    self._client.expected_capabilities_sha256
+                ),
+                source_capabilities_sha256=(
+                    self._client.expected_remote_capabilities_sha256
+                ),
+            )
+
+        try:
+            response = self._client.source_status(
+                submission.event_id,
+                submission.site_id,
+                submission.payload_sha256,
+            )
+        except Exception:
+            raise _blocked("lifecycle_unavailable") from None
+        try:
+            if (
+                not isinstance(response, Mapping)
+                or set(response) != {
+                    "schema", "source_status",
+                    "source_capabilities_sha256", "capabilities_sha256",
+                }
+                or response.get("schema")
+                != _AUTH._HTTP.SOURCE_STATUS_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self._client.expected_capabilities_sha256
+                or response.get("source_capabilities_sha256")
+                != self._client.expected_remote_capabilities_sha256
+            ):
+                raise ValueError
+            source_status = _AUTH._HTTP._source_status_response(
+                {
+                    "schema": _AUTH._HTTP._SOURCE_HTTP.STATUS_RESPONSE_SCHEMA,
+                    "status": response["source_status"],
+                    "capabilities_sha256": (
+                        response["source_capabilities_sha256"]
+                    ),
+                },
+                expected_event_id=submission.event_id,
+                expected_site_id=submission.site_id,
+                expected_capabilities_sha256=(
+                    self._client.expected_remote_capabilities_sha256
+                ),
+            )
+            if source_status != response["source_status"]:
+                raise ValueError
+        except Exception:
+            raise _blocked("lifecycle_invalid") from None
+
+        remote_status = source_status["remote_status"]
+        if remote_status is not None:
+            status = remote_status
+            stage = "localization_lifecycle"
+        elif source_status["dispatch_status"] == "failed":
+            status = "failed"
+            stage = "source_processing"
+        else:
+            status = "accepted"
+            stage = "source_processing"
+        return HMACCMSSourceDeliverySubmissionLifecycle(
+            schema="blun.cms-source-delivery-submission-lifecycle.v1",
+            status=status,
+            stage=stage,
+            submission=submission_payload,
+            source_status=source_status,
+            sidecar_capabilities_sha256=(
+                self._client.expected_capabilities_sha256
+            ),
+            source_capabilities_sha256=(
+                self._client.expected_remote_capabilities_sha256
+            ),
+        )
+
     def health(self) -> Any:
         self._assert_open()
         return self._delivery.health()
@@ -500,6 +622,16 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         self._assert_open()
         return self._client.status(
             operation, request_id, event_id, site_id, payload_sha256,
+        )
+
+    def sidecar_source_status(
+        self, event_id: str, site_id: str, payload_sha256: str,
+    ) -> Mapping[str, Any]:
+        """Read source lifecycle through the owned authenticated sidecar."""
+
+        self._assert_open()
+        return self._client.source_status(
+            event_id, site_id, payload_sha256,
         )
 
     def sidecar_health(self) -> Mapping[str, Any]:

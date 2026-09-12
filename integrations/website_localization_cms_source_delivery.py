@@ -622,6 +622,71 @@ class DurableCMSSourceDeliveryOutbox:
             response_sha256=row["response_sha256"],
         )
 
+    def source_status(
+        self,
+        event_id: str,
+        site_id: str,
+        payload_sha256: str,
+    ) -> Mapping[str, Any]:
+        """Read downstream lifecycle only for an exact accepted submission."""
+
+        self._validate_schema()
+        event_id = _token(event_id, "source_delivery.status_invalid")
+        site_id = _token(site_id, "source_delivery.status_invalid")
+        payload_sha256 = _sha256(
+            payload_sha256, "source_delivery.status_invalid",
+        )
+        rows = self.connection.execute("""
+            SELECT * FROM cms_source_delivery_outbox
+            WHERE event_id = ? AND site_id = ? AND payload_sha256 = ?
+            ORDER BY created_at, operation, request_id
+        """, (event_id, site_id, payload_sha256)).fetchall()
+        if not rows:
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.status_not_found"
+            )
+        for row in rows:
+            self._validated_row(row)
+        if len(rows) != 1 or rows[0]["status"] != "succeeded":
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.source_status_unavailable"
+            )
+        client_status = getattr(self.client, "status", None)
+        if not callable(client_status):
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.client_failure"
+            )
+        try:
+            response = client_status(event_id, site_id)
+            if (
+                not isinstance(response, Mapping)
+                or set(response)
+                != {"schema", "status", "capabilities_sha256"}
+                or response.get("schema")
+                != _CLIENT._HTTP.STATUS_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self.capabilities_sha256
+            ):
+                raise ValueError
+            normalized = _CLIENT._HTTP._source_status_payload(
+                _CLIENT._PayloadView(response["status"]),
+                expected_event_id=event_id,
+                expected_site_id=site_id,
+            )
+            if normalized != response["status"]:
+                raise ValueError
+        except Exception as error:
+            if getattr(error, "cms_source_client_failure", False) is True:
+                raise
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.source_status_invalid"
+            ) from None
+        return {
+            "schema": response["schema"],
+            "status": dict(normalized),
+            "capabilities_sha256": response["capabilities_sha256"],
+        }
+
     def claim(
         self,
         worker_id: str,

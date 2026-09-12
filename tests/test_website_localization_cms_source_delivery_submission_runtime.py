@@ -253,6 +253,63 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(readiness["status"], "ready")
         self.assertEqual(len(self.transport.calls), 5)
 
+    def test_submission_lifecycle_reaches_source_without_collapsing_stages(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change, source_max_attempts=3)
+
+        local = runtime.submission_lifecycle("change", change["event_id"])
+        self.assertEqual((local.status, local.stage), (
+            "pending", "website_acceptance",
+        ))
+        self.assertIsNone(local.source_status)
+        self.assertEqual(len(self.transport.calls), 0)
+
+        runtime.run_once()
+        sidecar = runtime.submission_lifecycle("change", change["event_id"])
+        self.assertEqual((sidecar.status, sidecar.stage), (
+            "pending", "sidecar_delivery",
+        ))
+        self.assertIsNone(sidecar.source_status)
+
+        self.sidecar.delivery.run_once()
+        lifecycle = runtime.submission_lifecycle(
+            "change", change["event_id"],
+        )
+
+        self.assertEqual((lifecycle.status, lifecycle.stage), (
+            "processing", "localization_lifecycle",
+        ))
+        self.assertEqual(lifecycle.source_status["required_locales"], [
+            "fi-FI", "mt-MT",
+        ])
+        self.assertEqual(lifecycle.submission["status"], "accepted")
+        payload = lifecycle.as_payload()
+        self.assertEqual(payload["source_status"]["remote_status"], "processing")
+        self.assertNotIn(
+            change["localization"]["source_text"], repr(payload),
+        )
+
+    def test_submission_lifecycle_rejects_tampered_source_state(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change)
+        runtime.run_once()
+        self.sidecar.delivery.run_once()
+        original = self.remote.status
+
+        def tampered(event_id, site_id):
+            response = copy.deepcopy(original(event_id, site_id))
+            response["status"]["site_id"] = "other-site"
+            return response
+
+        self.remote.status = tampered
+        with self.assertRaisesRegex(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+            "source_delivery_submission_runtime.lifecycle_unavailable",
+        ):
+            runtime.submission_lifecycle("change", change["event_id"])
+
     def test_submission_health_requires_both_outboxes_to_be_healthy(self):
         runtime = self.open()
 

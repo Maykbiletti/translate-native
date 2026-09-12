@@ -45,6 +45,7 @@ class ScriptedClient:
         self.timeout = 30
         self.calls = []
         self.failures = []
+        self.events = {}
 
     @staticmethod
     def _canonical(value):
@@ -61,6 +62,7 @@ class ScriptedClient:
         if operation == "change":
             request_id = copied["event_id"]
             schema = "blun.cms-source-change-enqueue-response.v2"
+            self.events[copied["event_id"]] = copied
         else:
             if copied["schema"].endswith("cancellation.v1"):
                 operation = "cancellation"
@@ -88,6 +90,58 @@ class ScriptedClient:
 
     def submit_removal(self, value, *, max_attempts):
         return self._submit("removal", value, max_attempts)
+
+    def status(self, event_id, site_id):
+        self.calls.append(("status", event_id, site_id))
+        change = self.events[event_id]
+        return {
+            "schema": "blun.cms-source-status-response.v4",
+            "status": {
+                "schema": "blun.cms-source-service-status.v3",
+                "event_id": event_id,
+                "site_id": site_id,
+                "website_version": change["website_version"],
+                "source_sequence": change["source_sequence"],
+                "change_sha256": "b" * 64,
+                "dispatch_status": "succeeded",
+                "dispatch_attempts": 1,
+                "dispatch_max_attempts": 5,
+                "dispatch_error_code": None,
+                "plan_id": "plan-" + event_id,
+                "job_count": 2,
+                "lifecycle_state": "watching",
+                "lifecycle_poll_attempts": 1,
+                "lifecycle_error_code": None,
+                "remote_status": "processing",
+                "lifecycle_sha256": "c" * 64,
+                "required_locales": ["fi-FI", "mt-MT"],
+                "approved_locales": [],
+                "blocked_locales": [],
+                "queue_counts": {
+                    "failed": 0,
+                    "leased": 0,
+                    "pending": 2,
+                    "retry_wait": 0,
+                    "succeeded": 0,
+                },
+                "notification_state": "awaiting_terminal",
+                "notification_id": None,
+                "notification_sha256": None,
+                "notification_attempts": 0,
+                "notification_max_attempts": None,
+                "notification_error_code": None,
+                "terminal_processing_state": "disabled",
+                "terminal_processing_poll_attempts": 0,
+                "terminal_processing_failures": 0,
+                "terminal_processing_error_code": None,
+                "receiver_processing_state": None,
+                "receiver_processing_attempts": None,
+                "receiver_processing_max_attempts": None,
+                "receiver_processing_error_code": None,
+                "receiver_processed_at": None,
+            },
+            "capabilities_sha256": self.expected_capabilities_sha256,
+        }
 
 
 class SourceDeliveryTests(unittest.TestCase):
@@ -120,6 +174,42 @@ class SourceDeliveryTests(unittest.TestCase):
         stored = self.outbox.status("change", change["event_id"])
         self.assertIsNotNone(stored.response_sha256)
         self.assertEqual(self.outbox.health().status, "ok")
+
+    def test_source_status_requires_exact_succeeded_submission(self):
+        change = cms_support.event()
+        payload_hash = hashlib.sha256(
+            self.client._canonical(change)
+        ).hexdigest()
+        self.outbox.enqueue_change(change)
+
+        with self.assertRaisesRegex(
+            DELIVERY.CMSSourceDeliveryBlocked,
+            "source_delivery.source_status_unavailable",
+        ):
+            self.outbox.source_status(
+                change["event_id"], change["site_id"], payload_hash,
+            )
+        self.assertEqual(self.client.calls, [])
+
+        self.outbox.run_once("worker-1", lease_seconds=60)
+        response = self.outbox.source_status(
+            change["event_id"], change["site_id"], payload_hash,
+        )
+
+        self.assertEqual(response["status"]["remote_status"], "processing")
+        self.assertEqual(response["status"]["required_locales"], [
+            "fi-FI", "mt-MT",
+        ])
+        self.assertEqual(self.client.calls[-1], (
+            "status", change["event_id"], change["site_id"],
+        ))
+        with self.assertRaisesRegex(
+            DELIVERY.CMSSourceDeliveryBlocked,
+            "source_delivery.status_not_found",
+        ):
+            self.outbox.source_status(
+                change["event_id"], change["site_id"], "f" * 64,
+            )
 
     def test_removals_are_delivered_before_older_changes(self):
         change = cms_support.event()

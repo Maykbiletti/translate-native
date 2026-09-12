@@ -687,6 +687,16 @@ class RotatingHMACCMSSourceDeliveryClient:
             "status", operation, request_id, event_id, site_id, payload_sha256,
         )
 
+    def source_status(
+        self,
+        event_id: str,
+        site_id: str,
+        payload_sha256: str,
+    ) -> Mapping[str, Any]:
+        return self._call(
+            "source_status", event_id, site_id, payload_sha256,
+        )
+
     def health(self) -> Mapping[str, Any]:
         return self._call("health")
 

@@ -208,8 +208,13 @@ class SourceDeliveryHTTPTests(unittest.TestCase):
         ).hexdigest())
         self.assertEqual(set(capabilities["operations"]), {
             "capabilities", "change", "health", "readiness", "removal",
-            "status",
+            "source_status", "status",
         })
+        self.assertTrue(
+            capabilities["semantics"][
+                "source_status_requires_accepted_submission"
+            ]
+        )
         self.assertTrue(
             capabilities["semantics"]["write_requires_ready_worker"]
         )
