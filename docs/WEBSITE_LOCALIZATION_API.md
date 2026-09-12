@@ -848,6 +848,39 @@ from host-owned secret state. Client errors retain the underlying stable
 content-free retry decision, and neither the wrapper nor its representation
 exposes the credential, tenant, endpoint, or website content.
 
+#### Owned authenticated website submission runtime
+
+`integrations/website_localization_cms_source_delivery_submission_runtime.py`
+is the production composition root for a website process that submits through
+the authenticated sidecar. Use
+`open_durable_hmac_cms_source_delivery_submission()` for an externally driven
+loop or `open_hosted_hmac_cms_source_delivery_submission()` to start the owned
+non-daemon worker. Both construct one `RotatingHMACCMSSourceDeliveryClient`,
+one `CMSSourceDeliverySidecarOutboxAdapter`, and one guarded SQLite runtime.
+
+Supply the initial `HMACCredential`, exact HTTPS origin, trusted sidecar and
+downstream capability hashes, worker identity, and the middle
+`sidecar_delivery_max_attempts` once. The hosted factory validates all loop
+delays before creating the database; the remaining client, adapter, lease,
+backoff, and path checks also finish before the first request. The SQLite file
+retains the existing owner-only, process-bound, inode-guarded lifecycle.
+
+`enqueue_change()` and `enqueue_removal()` persist work before transport.
+Their `delivery_max_attempts` controls only website-to-sidecar acceptance;
+their `source_max_attempts` remains the final processing ceiling; the factory's
+middle limit controls sidecar delivery. `status()` and `health()` describe the
+local acceptance outbox. `sidecar_status()`, `sidecar_health()`,
+`sidecar_readiness()`, and `sidecar_capabilities()` perform separately
+authenticated lifecycle reads and never reinterpret local success as
+downstream completion.
+
+Call `replace_credential()` only during a server-side generation overlap. It
+updates the exact signer owned by the worker without reopening the outbox or
+changing either contract pin. The wrapper blocks network and storage access
+after close or from a forked process; each child must create a fresh runtime
+from host-owned configuration. Representations and stable failures contain no
+secret, endpoint, tenant, source text, or provider response.
+
 #### Durable website submission through the sidecar
 
 `integrations/website_localization_cms_source_delivery_sidecar_adapter.py`

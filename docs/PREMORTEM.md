@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Owned authenticated submission runtime (12 September 2026)
+
+Assume a website operator assembled the valid HMAC client, sidecar adapter,
+SQLite outbox, and worker separately but still lost a source event or confused
+durable acceptance with downstream completion.
+
+- The rotating client could omit the public immutable contract needed by the
+  outbox adapter and fail only when production wiring starts.
+- A credential replacement could update a signer other than the one used by
+  the durable worker.
+- Invalid worker or middle-retry configuration could create persistent state
+  before failing, or trigger an early network request.
+- A local succeeded row could be presented as completed source processing even
+  though the sidecar still reports pending or failed work.
+
+The owned submission runtime constructs one rotating signer, pinned client,
+adapter, guarded outbox, and optional worker from one configuration. It exposes
+the client's immutable contract to the adapter, validates hosted delays before
+opening SQLite, routes rotation through the owned client, and gives local
+acceptance and authenticated sidecar lifecycle reads separate method names.
+Process and close guards run before either storage or transport access.
+
 ## Durable authenticated sidecar submission (12 September 2026)
 
 Assume a website persisted an event but mixed the retry policy for reaching the

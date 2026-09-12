@@ -618,6 +618,16 @@ class RotatingHMACCMSSourceDeliveryClient:
             raise _unavailable("client_configuration_invalid") from None
         self._signer = signer
         self._client = client
+        # Preserve the immutable public contract required by durable client
+        # adapters without exposing the signer or credential.
+        self.origin = client.origin
+        self.expected_capabilities_sha256 = (
+            client.expected_capabilities_sha256
+        )
+        self.expected_remote_capabilities_sha256 = (
+            client.expected_remote_capabilities_sha256
+        )
+        self.timeout = client.timeout
 
     def __repr__(self) -> str:
         return f"RotatingHMACCMSSourceDeliveryClient(state={self.state!r})"
