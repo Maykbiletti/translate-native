@@ -778,6 +778,47 @@ class CMSSourceDeliverySidecarHTTPClient:
             _fail("source_readiness_binding")
         return response
 
+    def source_health(self) -> Mapping[str, Any]:
+        """Read the downstream queue health through the sidecar."""
+
+        contract = self._contract("source_health")
+        result, response = self._request(
+            contract["method"], contract["path"], None, {200, 503}, {},
+        )
+        if (
+            set(response) != {
+                "schema", "source_health", "source_capabilities_sha256",
+                "capabilities_sha256",
+            }
+            or response.get("schema") != contract["response_schema"]
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("source_capabilities_sha256")
+            != self.expected_remote_capabilities_sha256
+        ):
+            _fail("source_health_binding")
+        try:
+            normalized = _HTTP._source_health_response(
+                {
+                    "schema": _HTTP._SOURCE_HTTP.HEALTH_RESPONSE_SCHEMA,
+                    "health": response["source_health"],
+                    "capabilities_sha256": (
+                        response["source_capabilities_sha256"]
+                    ),
+                },
+                expected_capabilities_sha256=(
+                    self.expected_remote_capabilities_sha256
+                ),
+            )
+        except Exception:
+            _fail("source_health_binding")
+        if (
+            normalized != response["source_health"]
+            or (result.status == 503) != (normalized["status"] == "blocked")
+        ):
+            _fail("source_health_binding")
+        return response
+
     def health(self) -> Mapping[str, Any]:
         contract = self._contract("health")
         result, response = self._request(

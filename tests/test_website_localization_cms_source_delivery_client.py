@@ -177,7 +177,7 @@ class SourceDeliveryClientTests(unittest.TestCase):
         self.assertEqual(response["capabilities"]["sha256"], self.digest)
         self.assertEqual(set(response["capabilities"]["operations"]), {
             "capabilities", "change", "health", "readiness", "removal",
-            "source_readiness", "source_status", "status",
+            "source_health", "source_readiness", "source_status", "status",
         })
         self.assertEqual(len(self.transport.calls), 1)
         self.assertEqual(self.contexts[0], {
@@ -350,6 +350,42 @@ class SourceDeliveryClientTests(unittest.TestCase):
         self.assertEqual(
             caught.exception.code,
             "source_delivery_client.source_readiness_binding",
+        )
+
+    def test_source_health_is_separate_and_validates_both_contracts(self):
+        response = self.client.source_health()
+
+        self.assertEqual(response["source_health"]["status"], "ok")
+        self.assertEqual(
+            response["source_capabilities_sha256"], self.remote_digest,
+        )
+        self.assertEqual(self.contexts[-1], {
+            "schema": CLIENT.AUTH_CONTEXT_SCHEMA,
+            "method": "GET",
+            "origin": "https://delivery.example",
+            "path": HTTP.SOURCE_HEALTH_PATH,
+            "scope": HTTP.SCOPES[HTTP.SOURCE_HEALTH_PATH],
+            "body_sha256": hashlib.sha256(b"").hexdigest(),
+        })
+
+        def alter_source_state(call_number, result):
+            if call_number == 2:
+                return replace_json(
+                    result,
+                    lambda value: value["source_health"]["changes"][
+                        "counts"
+                    ].pop("pending"),
+                )
+            return result
+
+        tampered = self.make_client(transport=TransformingTransport(
+            WSGITransport(self.runtime.http), alter_source_state,
+        ))
+        with self.assertRaises(CLIENT.CMSSourceDeliveryClientBlocked) as caught:
+            tampered.source_health()
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_client.source_health_binding",
         )
 
     def test_invalid_input_and_configuration_block_before_network(self):

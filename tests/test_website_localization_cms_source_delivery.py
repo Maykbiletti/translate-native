@@ -157,6 +157,54 @@ class ScriptedClient:
             "capabilities_sha256": self.expected_capabilities_sha256,
         }
 
+    def health(self):
+        self.calls.append(("health",))
+        states = {
+            "failed": 0,
+            "leased": 0,
+            "pending": 0,
+            "retry_wait": 0,
+            "succeeded": 0,
+        }
+        component = {
+            "status": "ok",
+            "counts": states,
+            "due": 0,
+            "expired_leases": 0,
+            "failed": 0,
+        }
+        return {
+            "schema": "blun.cms-source-health-response.v4",
+            "health": {
+                "schema": "blun.cms-source-service-health.v3",
+                "status": "ok",
+                "pending_lifecycle_registrations": 0,
+                "pending_terminal_notifications": 0,
+                "pending_terminal_processing": 0,
+                "changes": copy.deepcopy(component),
+                "removals": {
+                    **copy.deepcopy(component),
+                    "operations": {"cancellation": 0, "tombstone": 0},
+                },
+                "lifecycle": {
+                    **copy.deepcopy(component),
+                    "counts": {
+                        "failed": 0,
+                        "leased": 0,
+                        "pending": 0,
+                        "retry_wait": 0,
+                        "terminal": 0,
+                        "watching": 0,
+                    },
+                    "remote_failures": 0,
+                },
+                "notifications": {},
+                "terminal_processing": {},
+                "error_code": None,
+            },
+            "capabilities_sha256": self.expected_capabilities_sha256,
+        }
+
 
 class SourceDeliveryTests(unittest.TestCase):
     def setUp(self):
@@ -257,6 +305,30 @@ class SourceDeliveryTests(unittest.TestCase):
             "source_delivery.source_readiness_invalid",
         ):
             self.outbox.source_readiness()
+
+    def test_source_health_is_exact_content_free_and_read_only(self):
+        response = self.outbox.source_health()
+
+        self.assertEqual(response["health"]["status"], "ok")
+        self.assertEqual(response["health"]["changes"]["failed"], 0)
+        self.assertEqual(response["capabilities_sha256"], "a" * 64)
+        self.assertEqual(self.client.calls, [("health",)])
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM cms_source_delivery_outbox"
+            ).fetchone()[0],
+            0,
+        )
+
+        malformed = self.client.health()
+        del malformed["health"]["changes"]["counts"]["pending"]
+        self.client.calls.clear()
+        self.client.health = lambda: malformed
+        with self.assertRaisesRegex(
+            DELIVERY.CMSSourceDeliveryBlocked,
+            "source_delivery.source_health_invalid",
+        ):
+            self.outbox.source_health()
 
     def test_removals_are_delivered_before_older_changes(self):
         change = cms_support.event()

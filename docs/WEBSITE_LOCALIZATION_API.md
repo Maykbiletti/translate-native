@@ -770,6 +770,7 @@ The sidecar exposes these independently authorized operations:
 - `POST /v1/localization/source-delivery/source-status`
 - `GET /v1/localization/source-delivery/health`
 - `GET /v1/localization/source-delivery/readiness`
+- `GET /v1/localization/source-delivery/source-health`
 - `GET /v1/localization/source-delivery/source-readiness`
 - `GET /v1/localization/source-delivery/capabilities`
 
@@ -792,11 +793,12 @@ the single-attempt, durable-backoff, and crash-recovery semantics.
 
 Status, lifecycle, health, and readiness operations never return website text.
 The source-status route is gated on an exact durably accepted sidecar row; the
-body-free source-readiness route keeps downstream processing availability
-separate from sidecar intake readiness. Every outgoing runtime object is
-checked for its exact field set, types, hashes, state invariants, request
+body-free source-health and source-readiness routes keep downstream queue state
+and processing availability separate from sidecar intake. Every outgoing
+runtime object is checked for its exact field set, types, hashes, state
+invariants, request
 identity, and applicable tenant before serialization. The capability route
-describes all eight schemas, methods, paths, scopes, limits, and safety
+describes all nine schemas, methods, paths, scopes, limits, and safety
 semantics under one canonical SHA-256. That digest is repeated on every
 operational response, and any internal contract drift blocks the complete
 response instead of advertising a rehashed weakened interface.
@@ -804,7 +806,7 @@ response instead of advertising a rehashed weakened interface.
 #### Contract-pinned source-delivery sidecar client
 
 `integrations/website_localization_cms_source_delivery_client.py` is the
-provider-neutral HTTPS reference client for all eight sidecar operations.
+provider-neutral HTTPS reference client for all nine sidecar operations.
 Construct `CMSSourceDeliverySidecarHTTPClient` with one exact HTTPS origin, the
 trusted sidecar capability SHA-256, the separately trusted downstream
 source-service capability SHA-256, and a callback that returns authentication
@@ -832,9 +834,9 @@ retry-policy, sidecar-contract, and downstream-contract bindings.
 tenant, and payload hash; a response cannot silently substitute another
 durable item. `source_status()` adds the complete validated localization
 lifecycle only after exact durable source acceptance. `health()`, `readiness()`,
-and `source_readiness()` accept HTTP `503` only as an exactly validated blocked
-snapshot. Transport and server failures expose stable content-free codes plus
-retryability, but the client never schedules a retry.
+`source_health()`, and `source_readiness()` accept HTTP `503` only as an exactly
+validated blocked snapshot. Transport and server failures expose stable
+content-free codes plus retryability, but the client never schedules a retry.
 
 For the authenticated production path, construct
 `RotatingHMACCMSSourceDeliveryClient` from
@@ -847,12 +849,13 @@ Invalid construction is reduced to
 `source_delivery_hmac.client_configuration_invalid` before any network call.
 
 The composed surface exposes `capabilities()`, `submit_change()`,
-`submit_removal()`, `status()`, `source_status()`, `health()`, `readiness()`, and
-`source_readiness()` with the original contract signatures.
-`replace_credential()` updates the exact signer used by all eight routes. The
-client is process-bound before delegation, so a forked worker cannot reach its
-inherited transport; create a fresh client in the child from host-owned secret
-state. Client errors retain the underlying stable content-free retry decision,
+`submit_removal()`, `status()`, `source_status()`, `health()`, `readiness()`,
+`source_health()`, and `source_readiness()` with the original contract
+signatures. `replace_credential()` updates the exact signer used by all nine
+routes. The client is process-bound before delegation, so a forked worker
+cannot reach its inherited transport; create a fresh client in the child from
+host-owned secret state. Client errors retain the underlying stable
+content-free retry decision,
 and neither the wrapper nor its representation exposes the credential, tenant,
 endpoint, or website content.
 
@@ -879,9 +882,9 @@ their `source_max_attempts` remains the final processing ceiling; the factory's
 middle limit controls sidecar delivery. `status()` and `health()` describe the
 local acceptance outbox. `sidecar_status()`, `sidecar_health()`,
 `sidecar_readiness()`, `sidecar_source_status()`,
-`sidecar_source_readiness()`, and `sidecar_capabilities()` perform separately
-authenticated operational reads and never reinterpret local success as
-downstream completion.
+`sidecar_source_health()`, `sidecar_source_readiness()`, and
+`sidecar_capabilities()` perform separately authenticated operational reads and
+never reinterpret local success as downstream completion.
 
 Use `submission_status(operation, request_id)` for a single content-free
 projection across both acceptance queues. While the website row is pending,
@@ -945,6 +948,18 @@ including counts, operation totals, due work, expired leases, terminal
 failures, contract mismatches, and stable error codes. Its overall status is
 `ok` only when both snapshots independently report `ok`. A blocked component
 can never be hidden by the other component's healthy state.
+
+Use `submission_pipeline_health()` to extend that health view through every
+durable source-processing queue. The runtime evaluates the website and sidecar
+intake projection first. If either intake outbox is blocked, `source_health`
+remains `null` and no source-health request is made. Healthy intake performs a
+separately authenticated, body-free source-health request through the sidecar.
+
+The resulting `blun.cms-source-delivery-submission-pipeline-health.v1` object
+keeps the intake projection and complete source-service projection separate,
+binds both current capability hashes, and preserves `ok`, `degraded`, or
+`blocked` source state. Invalid counters, contradictory HTTP status, transport
+failure, or capability drift block fail-closed without returning content.
 
 Call `replace_credential()` only during a server-side generation overlap. It
 updates the exact signer owned by the worker without reopening the outbox or

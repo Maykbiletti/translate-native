@@ -208,7 +208,7 @@ class SourceDeliveryHTTPTests(unittest.TestCase):
         ).hexdigest())
         self.assertEqual(set(capabilities["operations"]), {
             "capabilities", "change", "health", "readiness", "removal",
-            "source_readiness", "source_status", "status",
+            "source_health", "source_readiness", "source_status", "status",
         })
         self.assertTrue(
             capabilities["semantics"][
@@ -218,6 +218,11 @@ class SourceDeliveryHTTPTests(unittest.TestCase):
         self.assertTrue(
             capabilities["semantics"][
                 "source_readiness_is_independently_validated"
+            ]
+        )
+        self.assertTrue(
+            capabilities["semantics"][
+                "source_health_is_independently_validated"
             ]
         )
         self.assertTrue(
@@ -436,9 +441,18 @@ class SourceDeliveryHTTPTests(unittest.TestCase):
     def test_health_and_readiness_are_bound_and_fail_closed(self):
         ready = self.call(HTTP.READINESS_PATH, method="GET")
         health = self.call(HTTP.HEALTH_PATH, method="GET")
-        self.assertEqual((ready[0], health[0]), ("200 OK", "200 OK"))
+        source = self.call(HTTP.SOURCE_HEALTH_PATH, method="GET")
+        self.assertEqual(
+            (ready[0], health[0], source[0]),
+            ("200 OK", "200 OK", "200 OK"),
+        )
         self.assertEqual(ready[2]["readiness"]["status"], "ready")
         self.assertEqual(health[2]["health"]["status"], "ok")
+        self.assertEqual(source[2]["source_health"]["status"], "ok")
+        self.assertEqual(
+            source[2]["source_capabilities_sha256"],
+            self.client.expected_capabilities_sha256,
+        )
         self.assertEqual(
             ready[2]["capabilities_sha256"],
             health[2]["capabilities_sha256"],

@@ -203,6 +203,36 @@ class HMACCMSSourceDeliverySubmissionHealth:
 
 
 @dataclass(frozen=True)
+class HMACCMSSourceDeliverySubmissionPipelineHealth:
+    """Content-free intake and source queue health kept separate."""
+
+    schema: str
+    status: str
+    intake_health: Mapping[str, Any]
+    source_health: Mapping[str, Any] | None
+    sidecar_capabilities_sha256: str
+    source_capabilities_sha256: str
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "status": self.status,
+            "intake_health": copy.deepcopy(dict(self.intake_health)),
+            "source_health": (
+                None
+                if self.source_health is None
+                else copy.deepcopy(dict(self.source_health))
+            ),
+            "sidecar_capabilities_sha256": (
+                self.sidecar_capabilities_sha256
+            ),
+            "source_capabilities_sha256": (
+                self.source_capabilities_sha256
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class HMACCMSSourceDeliverySubmissionLifecycle:
     """Content-free acceptance and source localization state kept separate."""
 
@@ -539,6 +569,77 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             ),
         )
 
+    def submission_pipeline_health(
+        self,
+    ) -> HMACCMSSourceDeliverySubmissionPipelineHealth:
+        """Project exact health through intake and source processing."""
+
+        self._assert_open()
+        intake = self.submission_health()
+        intake_payload = intake.as_payload()
+        if intake.status != "ok":
+            return HMACCMSSourceDeliverySubmissionPipelineHealth(
+                schema="blun.cms-source-delivery-submission-pipeline-health.v1",
+                status="blocked",
+                intake_health=intake_payload,
+                source_health=None,
+                sidecar_capabilities_sha256=(
+                    self._client.expected_capabilities_sha256
+                ),
+                source_capabilities_sha256=(
+                    self._client.expected_remote_capabilities_sha256
+                ),
+            )
+
+        try:
+            response = self._client.source_health()
+        except Exception:
+            raise _blocked("pipeline_health_unavailable") from None
+        try:
+            if (
+                not isinstance(response, Mapping)
+                or set(response) != {
+                    "schema", "source_health",
+                    "source_capabilities_sha256", "capabilities_sha256",
+                }
+                or response.get("schema")
+                != _AUTH._HTTP.SOURCE_HEALTH_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self._client.expected_capabilities_sha256
+                or response.get("source_capabilities_sha256")
+                != self._client.expected_remote_capabilities_sha256
+            ):
+                raise ValueError
+            source_health = _AUTH._HTTP._source_health_response(
+                {
+                    "schema": _AUTH._HTTP._SOURCE_HTTP.HEALTH_RESPONSE_SCHEMA,
+                    "health": response["source_health"],
+                    "capabilities_sha256": (
+                        response["source_capabilities_sha256"]
+                    ),
+                },
+                expected_capabilities_sha256=(
+                    self._client.expected_remote_capabilities_sha256
+                ),
+            )
+            if source_health != response["source_health"]:
+                raise ValueError
+        except Exception:
+            raise _blocked("pipeline_health_invalid") from None
+
+        return HMACCMSSourceDeliverySubmissionPipelineHealth(
+            schema="blun.cms-source-delivery-submission-pipeline-health.v1",
+            status=source_health["status"],
+            intake_health=intake_payload,
+            source_health=source_health,
+            sidecar_capabilities_sha256=(
+                self._client.expected_capabilities_sha256
+            ),
+            source_capabilities_sha256=(
+                self._client.expected_remote_capabilities_sha256
+            ),
+        )
+
     def submission_readiness(
         self,
     ) -> HMACCMSSourceDeliverySubmissionReadiness:
@@ -748,6 +849,12 @@ class HMACCMSSourceDeliverySubmissionRuntime:
 
         self._assert_open()
         return self._client.source_readiness()
+
+    def sidecar_source_health(self) -> Mapping[str, Any]:
+        """Read source queue health through the owned sidecar."""
+
+        self._assert_open()
+        return self._client.source_health()
 
     def sidecar_health(self) -> Mapping[str, Any]:
         self._assert_open()

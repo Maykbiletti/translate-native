@@ -43,6 +43,9 @@ SOURCE_STATUS_RESPONSE_SCHEMA = (
 SOURCE_READINESS_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-source-readiness-response.v1"
 )
+SOURCE_HEALTH_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-source-health-response.v1"
+)
 HEALTH_RESPONSE_SCHEMA = "blun.cms-source-delivery-health-response.v1"
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-readiness-response.v1"
@@ -57,6 +60,7 @@ REMOVAL_PATH = "/v1/localization/source-delivery/removals"
 STATUS_PATH = "/v1/localization/source-delivery/status"
 SOURCE_STATUS_PATH = "/v1/localization/source-delivery/source-status"
 SOURCE_READINESS_PATH = "/v1/localization/source-delivery/source-readiness"
+SOURCE_HEALTH_PATH = "/v1/localization/source-delivery/source-health"
 HEALTH_PATH = "/v1/localization/source-delivery/health"
 READINESS_PATH = "/v1/localization/source-delivery/readiness"
 CAPABILITIES_PATH = "/v1/localization/source-delivery/capabilities"
@@ -79,6 +83,7 @@ SCOPES = {
     STATUS_PATH: "source-delivery-status:read",
     SOURCE_STATUS_PATH: "source-delivery-source-status:read",
     SOURCE_READINESS_PATH: "source-delivery-source-readiness:read",
+    SOURCE_HEALTH_PATH: "source-delivery-source-health:read",
     HEALTH_PATH: "source-delivery-health:read",
     READINESS_PATH: "source-delivery-readiness:read",
     CAPABILITIES_PATH: "source-delivery-capabilities:read",
@@ -89,6 +94,7 @@ METHODS = {
     STATUS_PATH: "POST",
     SOURCE_STATUS_PATH: "POST",
     SOURCE_READINESS_PATH: "GET",
+    SOURCE_HEALTH_PATH: "GET",
     HEALTH_PATH: "GET",
     READINESS_PATH: "GET",
     CAPABILITIES_PATH: "GET",
@@ -413,6 +419,45 @@ def _source_readiness_response(
         ) from None
 
 
+class _SourcePayloadView:
+    """Expose an immutable decoded payload to the source HTTP validator."""
+
+    def __init__(self, payload: Mapping[str, Any]):
+        self._payload = payload
+
+    def as_payload(self) -> dict[str, Any]:
+        return dict(self._payload)
+
+
+def _source_health_response(
+    value: Any,
+    *,
+    expected_capabilities_sha256: str,
+) -> dict[str, Any]:
+    """Validate the source-service health envelope without weakening it."""
+
+    try:
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"schema", "health", "capabilities_sha256"}
+            or value.get("schema") != _SOURCE_HTTP.HEALTH_RESPONSE_SCHEMA
+            or value.get("capabilities_sha256")
+            != expected_capabilities_sha256
+            or not isinstance(value.get("health"), Mapping)
+        ):
+            raise ValueError
+        normalized = _SOURCE_HTTP._health_payload(
+            _SourcePayloadView(value["health"])
+        )
+        if normalized != value["health"]:
+            raise ValueError
+        return normalized
+    except Exception:
+        raise CMSSourceDeliveryHTTPBlocked(
+            "source_delivery_http.runtime_response_invalid", 503,
+        ) from None
+
+
 def _health_payload(value: Any) -> dict[str, Any]:
     try:
         payload = value.as_payload()
@@ -573,6 +618,11 @@ def _capabilities_payload() -> dict[str, Any]:
             "source-delivery-source-readiness:read", PRINCIPAL_SCHEMA,
             None, SOURCE_READINESS_RESPONSE_SCHEMA, 200,
         ),
+        (
+            "source_health", "GET", SOURCE_HEALTH_PATH,
+            "source-delivery-source-health:read", PRINCIPAL_SCHEMA,
+            None, SOURCE_HEALTH_RESPONSE_SCHEMA, 200,
+        ),
     )
     try:
         operations = {}
@@ -613,6 +663,7 @@ def _capabilities_payload() -> dict[str, Any]:
                 "status_is_site_bound": True,
                 "source_status_requires_accepted_submission": True,
                 "source_readiness_is_independently_validated": True,
+                "source_health_is_independently_validated": True,
                 "write_requires_ready_worker": True,
             },
         }
@@ -632,7 +683,7 @@ class CMSSourceDeliveryHTTPApplication:
     def __init__(self, runtime: Any, authenticator: Callable[[dict[str, Any]], Any]):
         if not all(callable(getattr(runtime, name, None)) for name in (
             "enqueue_change", "enqueue_removal", "status", "health",
-            "source_readiness", "worker_readiness",
+            "source_health", "source_readiness", "worker_readiness",
         )):
             raise TypeError("runtime must provide source delivery operations")
         if not callable(authenticator):
@@ -838,8 +889,8 @@ class CMSSourceDeliveryHTTPApplication:
                     "source_delivery_http.query_rejected", 400,
                 )
             bodyless = path in {
-                HEALTH_PATH, READINESS_PATH, SOURCE_READINESS_PATH,
-                CAPABILITIES_PATH,
+                HEALTH_PATH, READINESS_PATH, SOURCE_HEALTH_PATH,
+                SOURCE_READINESS_PATH, CAPABILITIES_PATH,
             }
             if bodyless:
                 body = self._body(environ, required=False)
@@ -914,6 +965,30 @@ class CMSSourceDeliveryHTTPApplication:
                 return self._send(start_response, status, {
                     "schema": SOURCE_READINESS_RESPONSE_SCHEMA,
                     "source_readiness": source_readiness,
+                    "source_capabilities_sha256": (
+                        self.runtime.expected_capabilities_sha256
+                    ),
+                    "capabilities_sha256": capabilities["sha256"],
+                })
+            if path == SOURCE_HEALTH_PATH:
+                try:
+                    source_response = self.runtime.source_health()
+                except CMSSourceDeliveryHTTPBlocked:
+                    raise
+                except Exception:
+                    raise CMSSourceDeliveryHTTPBlocked(
+                        "source_delivery_http.runtime_blocked", 503,
+                    ) from None
+                source_health = _source_health_response(
+                    source_response,
+                    expected_capabilities_sha256=(
+                        self.runtime.expected_capabilities_sha256
+                    ),
+                )
+                status = 503 if source_health["status"] == "blocked" else 200
+                return self._send(start_response, status, {
+                    "schema": SOURCE_HEALTH_RESPONSE_SCHEMA,
+                    "source_health": source_health,
                     "source_capabilities_sha256": (
                         self.runtime.expected_capabilities_sha256
                     ),

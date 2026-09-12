@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## End-to-end processing health (12 September 2026)
+
+Assume every intake worker appeared healthy while the source processing queues
+were blocked or damaged.
+
+- A healthy website outbox and sidecar could hide exhausted source retries,
+  corrupt queue counters, or incomplete terminal processing.
+- One aggregate health flag could erase which operated boundary is degraded or
+  blocked.
+- Continuing to the source layer after an earlier intake failure could create
+  misleading secondary network errors.
+- A structurally valid health response from another capability generation could
+  be accepted after configuration drift.
+
+The sidecar exposes a distinct authenticated, body-free source-health operation
+and validates the complete source response against its pinned contract. The
+website runtime first validates website and sidecar intake health, stops before
+the source call when intake is blocked, preserves both projections and their
+error details separately, binds both capability hashes, and fails closed on
+every transport, schema, status, or contract inconsistency.
+
 ## End-to-end processing readiness (12 September 2026)
 
 Assume a website accepted localization work while the source service could not

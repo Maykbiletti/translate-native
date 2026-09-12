@@ -380,6 +380,11 @@ class DurableCMSSourceDeliveryRuntime:
 
         return self._call("source_readiness")
 
+    def source_health(self) -> Mapping[str, Any]:
+        """Read the immutable downstream source-service health contract."""
+
+        return self._call("source_health")
+
     def health(self) -> Any:
         return self._call("health")
 

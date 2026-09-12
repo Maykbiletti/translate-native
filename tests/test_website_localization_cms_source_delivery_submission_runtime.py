@@ -427,6 +427,83 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "source_delivery_submission_runtime.health_invalid",
         )
 
+    def test_pipeline_health_covers_intake_and_source_queues(self):
+        runtime = self.open()
+
+        health = runtime.submission_pipeline_health()
+
+        self.assertEqual(health.status, "ok")
+        self.assertEqual(health.intake_health["status"], "ok")
+        self.assertEqual(health.source_health["status"], "ok")
+        self.assertEqual(
+            health.sidecar_capabilities_sha256, self.sidecar_digest,
+        )
+        self.assertEqual(
+            health.source_capabilities_sha256, self.remote_digest,
+        )
+        payload = health.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "status", "intake_health", "source_health",
+            "sidecar_capabilities_sha256", "source_capabilities_sha256",
+        })
+        self.assertNotIn("delivery.example", repr(payload))
+        self.assertNotIn("website-credential", repr(payload))
+
+        original = self.remote.health
+
+        def degraded():
+            response = original()
+            response["health"].update({
+                "status": "degraded",
+                "pending_lifecycle_registrations": 1,
+                "error_code": "source_service.lifecycle_registration_pending",
+            })
+            return response
+
+        self.remote.health = degraded
+        degraded_health = runtime.submission_pipeline_health()
+        self.assertEqual(degraded_health.status, "degraded")
+        self.assertEqual(degraded_health.intake_health["status"], "ok")
+        self.assertEqual(degraded_health.source_health["status"], "degraded")
+
+        def blocked():
+            response = original()
+            response["health"].update({
+                "status": "blocked",
+                "error_code": "source_service.component_blocked",
+            })
+            response["health"]["changes"]["status"] = "blocked"
+            return response
+
+        self.remote.health = blocked
+        blocked_health = runtime.submission_pipeline_health()
+        self.assertEqual(blocked_health.status, "blocked")
+        self.assertEqual(blocked_health.intake_health["status"], "ok")
+        self.assertEqual(blocked_health.source_health["status"], "blocked")
+
+    def test_pipeline_health_stops_before_source_when_intake_is_blocked(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change, delivery_max_attempts=1)
+        original = self.transport.request
+
+        def fail_once(*_args, **_kwargs):
+            self.transport.request = original
+            raise SUBMISSION._AUTH._CLIENT.CMSSourceDeliveryClientBlocked(
+                "source_delivery_client.network", retryable=True,
+            )
+
+        self.transport.request = fail_once
+        self.assertEqual(runtime.run_once().status, "failed")
+        self.remote.calls.clear()
+
+        health = runtime.submission_pipeline_health()
+
+        self.assertEqual(health.status, "blocked")
+        self.assertEqual(health.intake_health["status"], "blocked")
+        self.assertIsNone(health.source_health)
+        self.assertNotIn(("health",), self.remote.calls)
+
     def test_submission_readiness_requires_both_owned_workers(self):
         runtime = self.open(
             hosted=True,

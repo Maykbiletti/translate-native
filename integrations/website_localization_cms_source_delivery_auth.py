@@ -700,6 +700,9 @@ class RotatingHMACCMSSourceDeliveryClient:
     def source_readiness(self) -> Mapping[str, Any]:
         return self._call("source_readiness")
 
+    def source_health(self) -> Mapping[str, Any]:
+        return self._call("source_health")
+
     def health(self) -> Mapping[str, Any]:
         return self._call("health")
 

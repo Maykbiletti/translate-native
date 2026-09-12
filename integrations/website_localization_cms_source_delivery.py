@@ -725,6 +725,40 @@ class DurableCMSSourceDeliveryOutbox:
             "capabilities_sha256": response["capabilities_sha256"],
         }
 
+    def source_health(self) -> Mapping[str, Any]:
+        """Read the pinned source-service queue health without changing work."""
+
+        self._validate_schema()
+        client_health = getattr(self.client, "health", None)
+        if not callable(client_health):
+            raise CMSSourceDeliveryBlocked("source_delivery.client_failure")
+        try:
+            response = client_health()
+            if (
+                not isinstance(response, Mapping)
+                or set(response) != {"schema", "health", "capabilities_sha256"}
+                or response.get("schema") != _CLIENT._HTTP.HEALTH_RESPONSE_SCHEMA
+                or response.get("capabilities_sha256")
+                != self.capabilities_sha256
+            ):
+                raise ValueError
+            normalized = _CLIENT._HTTP._health_payload(
+                _CLIENT._PayloadView(response["health"])
+            )
+            if normalized != response["health"]:
+                raise ValueError
+        except Exception as error:
+            if getattr(error, "cms_source_client_failure", False) is True:
+                raise
+            raise CMSSourceDeliveryBlocked(
+                "source_delivery.source_health_invalid"
+            ) from None
+        return {
+            "schema": response["schema"],
+            "health": normalized,
+            "capabilities_sha256": response["capabilities_sha256"],
+        }
+
     def claim(
         self,
         worker_id: str,
