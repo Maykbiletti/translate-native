@@ -226,6 +226,19 @@ never enter the runtime representation or stable failure codes. A deployment
 may therefore choose its own secret manager and supervisor without weakening
 the provider-neutral contract.
 
+Set `capability_preflight=True` for a pinned production startup. The runtime
+then requires both constructor-fixed client pins described above and performs
+one signed capability request after all in-memory configuration and existing
+path checks, but before creating any database file. Missing pins, a network or
+contract failure, and either pin mismatch leave all three paths absent and
+return only a stable content-free failure code. `capability_binding()` reports
+the two verified public digests or the explicit `not_configured` state. Every
+later runtime transition rechecks that the client still exposes the exact
+verified pair before reading or writing persistent state or making another
+network request. This startup proof is deliberately not a hidden retry or a
+claim that the remote service will remain available indefinitely; supervisors
+must construct a new pinned runtime after an approved contract deployment.
+
 ### Durable terminal notification callback
 
 Polling remains sufficient, but a deployment can pass `terminal_notifier` and

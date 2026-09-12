@@ -2,9 +2,11 @@
 """Owned, durable runtime for the source side of the CMS localization API.
 
 The composition root validates the complete service configuration before it
-opens three private SQLite databases. One runtime belongs to one process and
-serializes every local state transition. Separate processes may safely open
-the same files because the underlying outboxes and monitor use durable leases.
+opens three private SQLite databases. An explicit production preflight can
+also verify both CMS capability pins before persistence. One runtime belongs
+to one process and serializes every local state transition. Separate processes
+may safely open the same files because the underlying outboxes and monitor use
+durable leases.
 """
 
 from __future__ import annotations
@@ -240,6 +242,61 @@ def _preflight_service(
             connection.close()
 
 
+def _sha256(value: Any) -> str | None:
+    if (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    ):
+        return value
+    return None
+
+
+def _preflight_capabilities(client: Any) -> tuple[str, str]:
+    """Verify both deployment pins through one bounded capability request."""
+
+    try:
+        capabilities_sha256 = _sha256(
+            getattr(client, "capabilities_sha256", None),
+        )
+        rendering_sha256 = _sha256(
+            getattr(client, "commercial_rendering_registry_sha256", None),
+        )
+        capabilities = getattr(client, "capabilities", None)
+    except Exception as error:
+        raise _blocked("source_runtime.capability_preflight_failed") from error
+    if (
+        capabilities_sha256 is None
+        or rendering_sha256 is None
+        or not callable(capabilities)
+    ):
+        raise _blocked("source_runtime.capability_pins_required")
+    try:
+        response = capabilities()
+    except Exception as error:
+        if getattr(error, "code", None) in {
+            "capabilities_pin_mismatch",
+            "commercial_rendering_registry_pin_mismatch",
+        }:
+            raise _blocked("source_runtime.capability_pin_mismatch") from error
+        raise _blocked("source_runtime.capability_preflight_failed") from error
+    try:
+        capability_payload = response["capabilities"]
+        client_type = _SERVICE._DISPATCH._CLIENT.CMSLocalizationHTTPClient
+        valid = (
+            isinstance(response, Mapping)
+            and client_type._valid_capabilities(response)
+            and capability_payload["sha256"] == capabilities_sha256
+            and capability_payload["commercial_rendering_registry"]["sha256"]
+            == rendering_sha256
+        )
+    except Exception:
+        valid = False
+    if not valid:
+        raise _blocked("source_runtime.capability_preflight_failed")
+    return capabilities_sha256, rendering_sha256
+
+
 class DurableCMSSourceRuntime:
     """One process-owned and thread-safe source-CMS service runtime."""
 
@@ -249,10 +306,12 @@ class DurableCMSSourceRuntime:
         guards: tuple[Callable[[], None], Callable[[], None], Callable[[], None]],
         service: Any,
         http_authenticator: Callable[[dict[str, Any]], Any] | None,
+        capability_binding: tuple[str, str] | None,
     ):
         self._connections = connections
         self._guards = guards
         self._service = service
+        self._capability_binding = capability_binding
         self._lock = threading.RLock()
         self._closed = False
         self._owner_pid = os.getpid()
@@ -288,11 +347,37 @@ class DurableCMSSourceRuntime:
         for guard in self._guards:
             guard()
 
+    def _guard_capability_binding(self) -> None:
+        if self._capability_binding is None:
+            return
+        expected_capabilities, expected_rendering = self._capability_binding
+        try:
+            current_capabilities = _sha256(getattr(
+                self._service.client,
+                "capabilities_sha256",
+                None,
+            ))
+            current_rendering = _sha256(getattr(
+                self._service.client,
+                "commercial_rendering_registry_sha256",
+                None,
+            ))
+        except Exception as error:
+            raise _blocked(
+                "source_runtime.capability_binding_changed",
+            ) from error
+        if (
+            current_capabilities != expected_capabilities
+            or current_rendering != expected_rendering
+        ):
+            raise _blocked("source_runtime.capability_binding_changed")
+
     def _call(self, name: str, *args: Any, **kwargs: Any) -> Any:
         self._assert_owner()
         with self._lock:
             if self._closed:
                 raise _blocked("source_runtime.closed")
+            self._guard_capability_binding()
             self._guard_databases()
             try:
                 result = getattr(self._service, name)(*args, **kwargs)
@@ -320,6 +405,29 @@ class DurableCMSSourceRuntime:
 
     def health(self) -> Any:
         return self._call("health")
+
+    def capability_binding(self) -> dict[str, Any]:
+        """Return the content-free startup capability verification state."""
+
+        self._assert_owner()
+        with self._lock:
+            if self._closed:
+                raise _blocked("source_runtime.closed")
+            self._guard_capability_binding()
+            if self._capability_binding is None:
+                return {
+                    "schema": "blun.cms-source-capability-binding.v1",
+                    "status": "not_configured",
+                    "capabilities_sha256": None,
+                    "commercial_rendering_registry_sha256": None,
+                }
+            capabilities_sha256, rendering_sha256 = self._capability_binding
+            return {
+                "schema": "blun.cms-source-capability-binding.v1",
+                "status": "verified",
+                "capabilities_sha256": capabilities_sha256,
+                "commercial_rendering_registry_sha256": rendering_sha256,
+            }
 
     @staticmethod
     def _loop_delays(
@@ -402,6 +510,7 @@ class DurableCMSSourceRuntime:
                 return
             if self._worker_state in {"stopping", "failed"}:
                 raise _blocked("source_runtime.worker_blocked")
+            self._guard_capability_binding()
             self._guard_databases()
             stop = threading.Event()
             thread = threading.Thread(
@@ -576,13 +685,20 @@ def open_durable_cms_source(
     terminal_processing_poll_interval_seconds: float | int = 30,
     terminal_processing_base_delay_seconds: float | int = 5,
     terminal_processing_max_delay_seconds: float | int = 300,
+    capability_preflight: bool = False,
 ) -> DurableCMSSourceRuntime:
-    """Validate and open the complete durable source-side CMS worker."""
+    """Validate and open the complete durable source-side CMS worker.
+
+    Set ``capability_preflight`` to require both client deployment pins and one
+    successful, exact capability read before any persistent database exists.
+    """
 
     paths = tuple(_database_path(value) for value in (
         change_database, removal_database, lifecycle_database,
     ))
     timeout = _sqlite_timeout(sqlite_timeout_seconds)
+    if not isinstance(capability_preflight, bool):
+        raise _blocked("source_runtime.capability_preflight_invalid")
     if http_authenticator is not None and not callable(http_authenticator):
         raise _blocked("source_runtime.http_authenticator_invalid")
     service_options = {
@@ -620,6 +736,9 @@ def open_durable_cms_source(
     }
     _preflight_service(client, service_options)
     _validate_paths(paths)
+    capability_binding = (
+        _preflight_capabilities(client) if capability_preflight else None
+    )
     guards = tuple(_prepare_database_file(path) for path in paths)
     connections: list[sqlite3.Connection] = []
     try:
@@ -650,6 +769,7 @@ def open_durable_cms_source(
         raise _blocked("source_runtime.initialization_failed") from error
     return DurableCMSSourceRuntime(
         tuple(connections), guards, service, http_authenticator,
+        capability_binding,
     )
 
 

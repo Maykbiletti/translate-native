@@ -107,6 +107,20 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.88.0: pinned durable CMS startup
+
+Version 6.88.0 carries both commercial capability pins into the durable
+source-CMS composition root. An explicit production preflight performs one
+signed capability read before any queue database is created, requires the
+complete capability and commercial rendering-registry pins, and retains only
+their public digests.
+
+Missing pins, transport failure, contract substitution, and either mismatch
+leave persistent state untouched and return stable content-free errors. The
+runtime exposes the verified binding separately and rechecks it before every
+later state transition, so an altered client cannot enqueue or deliver website
+content under another commercial contract.
+
 ### Version 6.87.0: pinned commercial capability client
 
 Version 6.87.0 completes the public commercial rendering registry at the
@@ -1396,7 +1410,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.87.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.88.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

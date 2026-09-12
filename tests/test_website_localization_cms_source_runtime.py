@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -136,6 +137,168 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
         values.update(overrides)
         return RUNTIME.open_durable_cms_source(**values)
 
+    def pinned_client(self, **overrides):
+        queue_connection = sqlite3.connect(":memory:")
+        release_connection = sqlite3.connect(":memory:")
+        cms_connection = sqlite3.connect(":memory:")
+        self.addCleanup(queue_connection.close)
+        self.addCleanup(release_connection.close)
+        self.addCleanup(cms_connection.close)
+        queue = cms_support.CMS._QUEUE.LocalizationQueue(queue_connection)
+        release = cms_support.CMS._RELEASE.LocalizationReleaseStore(
+            release_connection, queue,
+        )
+        bridge = cms_support.CMS.WebsiteLocalizationCMSBridge(
+            cms_connection, queue, release,
+        )
+        authority = cms_support.Authority()
+        api = cms_support.API.WebsiteLocalizationAPI(
+            bridge,
+            authority,
+            clock=lambda: self.now,
+            approval_authority=authority,
+            publication_authority=authority,
+        )
+        transport = cms_support.WSGITransport(api)
+        current = bridge.localization_capabilities()
+        options = {
+            "capabilities_sha256": current["sha256"],
+            "commercial_rendering_registry_sha256": (
+                current["commercial_rendering_registry"]["sha256"]
+            ),
+        }
+        options.update(overrides)
+        client = cms_support.CLIENT.CMSLocalizationHTTPClient(
+            "https://localization.example.test",
+            lambda: {"Authorization": "Bearer host-token"},
+            authority,
+            transport=transport,
+            clock=lambda: self.now,
+            **options,
+        )
+        return client, transport, current
+
+    def test_capability_preflight_verifies_both_pins_before_persistence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            client, transport, current = self.pinned_client()
+
+            runtime = self.open(
+                paths, client=client, capability_preflight=True,
+            )
+            try:
+                self.assertEqual(len(transport.calls), 1)
+                self.assertEqual(runtime.capability_binding(), {
+                    "schema": "blun.cms-source-capability-binding.v1",
+                    "status": "verified",
+                    "capabilities_sha256": current["sha256"],
+                    "commercial_rendering_registry_sha256": current[
+                        "commercial_rendering_registry"
+                    ]["sha256"],
+                })
+                self.assertTrue(all(path.exists() for path in paths))
+            finally:
+                runtime.close()
+
+    def test_capability_preflight_failure_creates_no_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as missing:
+                self.open(paths, capability_preflight=True)
+            self.assertEqual(
+                missing.exception.code,
+                "source_runtime.capability_pins_required",
+            )
+            self.assertFalse(any(path.exists() for path in paths))
+            self.assertEqual(self.client.calls, [])
+
+        class BrokenPins(ScriptedClient):
+            @property
+            def capabilities_sha256(self):
+                raise RuntimeError("private secret-manager detail")
+
+            commercial_rendering_registry_sha256 = "0" * 64
+
+            def capabilities(self):
+                raise AssertionError("capability transport must not run")
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as unreadable:
+                self.open(
+                    paths,
+                    client=BrokenPins(),
+                    capability_preflight=True,
+                )
+            self.assertEqual(
+                unreadable.exception.code,
+                "source_runtime.capability_preflight_failed",
+            )
+            self.assertNotIn("secret", str(unreadable.exception))
+            self.assertFalse(any(path.exists() for path in paths))
+
+        for option in (
+            {"capabilities_sha256": "0" * 64},
+            {"commercial_rendering_registry_sha256": "0" * 64},
+        ):
+            with self.subTest(wrong_pin=tuple(option)):
+                with tempfile.TemporaryDirectory() as directory:
+                    paths = self.paths(directory)
+                    client, transport, _ = self.pinned_client(**option)
+                    with self.assertRaises(
+                        RUNTIME.DurableCMSSourceRuntimeBlocked,
+                    ) as mismatch:
+                        self.open(
+                            paths, client=client, capability_preflight=True,
+                        )
+                    self.assertEqual(
+                        mismatch.exception.code,
+                        "source_runtime.capability_pin_mismatch",
+                    )
+                    self.assertEqual(len(transport.calls), 1)
+                    self.assertFalse(any(path.exists() for path in paths))
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            with self.assertRaises(
+                RUNTIME.DurableCMSSourceRuntimeBlocked,
+            ) as invalid:
+                self.open(paths, capability_preflight="yes")
+            self.assertEqual(
+                invalid.exception.code,
+                "source_runtime.capability_preflight_invalid",
+            )
+            self.assertFalse(any(path.exists() for path in paths))
+
+    def test_verified_client_binding_change_blocks_before_persistence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.paths(directory)
+            client, transport, _ = self.pinned_client()
+            runtime = self.open(
+                paths, client=client, capability_preflight=True,
+            )
+            client._capabilities_sha256 = "0" * 64
+            try:
+                with self.assertRaises(
+                    RUNTIME.DurableCMSSourceRuntimeBlocked,
+                ) as changed:
+                    runtime.enqueue_change(cms_support.event())
+                self.assertEqual(
+                    changed.exception.code,
+                    "source_runtime.capability_binding_changed",
+                )
+                self.assertEqual(len(transport.calls), 1)
+                count = runtime._connections[0].execute(
+                    "SELECT COUNT(*) FROM cms_source_change_outbox"
+                ).fetchone()[0]
+                self.assertEqual(count, 0)
+            finally:
+                runtime.close()
+
     def test_runtime_persists_complete_lifecycle_across_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self.paths(directory)
@@ -218,6 +381,12 @@ class DurableCMSSourceRuntimeTests(unittest.TestCase):
                 rendered = repr(runtime)
                 self.assertEqual(rendered, "DurableCMSSourceRuntime(state='open')")
                 self.assertNotIn(directory, rendered)
+                self.assertEqual(runtime.capability_binding(), {
+                    "schema": "blun.cms-source-capability-binding.v1",
+                    "status": "not_configured",
+                    "capabilities_sha256": None,
+                    "commercial_rendering_registry_sha256": None,
+                })
             finally:
                 runtime.close()
 
