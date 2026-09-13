@@ -107,6 +107,23 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.102.0: supervised public submission runtime
+
+Version 6.102.0 turns the caller-owned public submission outbox into a safe
+production composition root. It validates the client capability pin, retry
+policy, worker identity, clock, loop timing, and any existing SQLite generation
+before operational schema mutation. The resulting process-owned runtime uses an
+owner-only identity-guarded database, serializes connection access, and checks
+client, file, parent-directory, process, and schema identity around every call.
+
+The optional hosted factory owns one supervised non-daemon worker. Managed
+intake is accepted only while that worker is alive; readiness reports worker,
+outbox, and exact capability generation without content. Shutdown signals and
+joins the worker before closing SQLite, and a timed-out network call leaves the
+database open for deliberate recovery. Restarts resume committed requests,
+while permission changes, links, inode replacement, schema injection,
+capability drift, and post-fork use block before transport.
+
 ### Version 6.101.0: durable public submission handoff
 
 Version 6.101.0 gives CMS and website backends a caller-owned durable outbox
@@ -1606,7 +1623,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.101.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.102.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

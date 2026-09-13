@@ -1116,6 +1116,32 @@ block fail-closed. Local `accepted` records only durable website intake and
 does not mean source acceptance, quality approval, translation completion, or
 publication readiness.
 
+#### Owned public-submission runtime
+
+`integrations/website_localization_cms_source_delivery_submission_dispatch_runtime.py`
+is the production composition root for that caller-side outbox. Use
+`open_durable_cms_source_delivery_submission_dispatch()` for an externally
+scheduled worker, or `open_hosted_cms_source_delivery_submission_dispatch()`
+to own one supervised non-daemon worker. Both factories validate the complete
+client pin, retry and lease policy, clock, worker identity, and—on restart—the
+exact stored schema and every durable row before operational schema mutation.
+
+For file-backed operation, pass a normalized absolute path below an owner-held
+safe directory. The runtime creates the SQLite file with mode `0600`, binds its
+device and inode, rejects links and replacements, checks the current process
+before acquiring locks, and serializes all connection access. It rechecks the
+file, parent directories, and client capability pin around every enqueue,
+status, health, or delivery transition. A stale or malformed generation is
+therefore rejected locally before the public HTTPS client can make a request.
+
+Hosted intake is gated on a live supervised worker. `worker_readiness()` is a
+content-free snapshot containing only worker state, outbox state, a stable
+error code, and the pinned capability digest; it grants no publication
+authority. `close()` first signals and joins the worker. If a transport call
+does not return within the configured bound, shutdown fails closed and leaves
+SQLite open so the caller can recover deliberately instead of closing storage
+beneath an active attempt.
+
 A successful response uses schema
 `blun.cms-source-delivery-submission-capabilities-response.v1` and includes the
 HTTP API schema plus the complete freshly verified capability. The adapter
