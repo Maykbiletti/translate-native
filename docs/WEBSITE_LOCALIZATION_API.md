@@ -344,6 +344,22 @@ failures are retryable by the outbox. Other statuses and malformed or
 cross-bound successful responses are permanent protocol failures. Response
 bodies and private exceptions are never copied into durable error state.
 
+When terminal-status observation is enabled, the source service derives the
+receiver's exact `expected_capabilities_sha256` from the full terminal receiver
+client. A custom notifier/status-reader pair must instead provide the same
+digest explicitly as `terminal_receiver_capabilities_sha256`; missing or
+conflicting pins block configuration before the processing-monitor schema is
+created. The source service rechecks an exposed client pin before status,
+health, or worker progress, while every returned receiver status must carry the
+same exact capability SHA-256.
+
+The terminal-processing monitor stores this expected digest in its v2 metadata
+and returns it in content-free health. Restarts may therefore reuse durable
+monitoring work only under the same receiver contract. An empty v1 monitor is
+upgraded transactionally. A v1 monitor containing unbound work is deliberately
+not assigned a guessed generation and remains fail-closed; operators must
+resolve that legacy work with independently verified deployment evidence.
+
 #### Reference terminal-notification receiver
 
 `integrations/website_localization_cms_terminal_notification_receiver.py`

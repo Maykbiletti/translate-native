@@ -23,6 +23,7 @@ MONITOR = load(
     "blun_test_website_localization_cms_terminal_processing_monitor",
     ROOT / "integrations" / "website_localization_cms_terminal_processing_monitor.py",
 )
+CAPABILITIES_SHA256 = "c" * 64
 
 
 def notification(**overrides):
@@ -60,7 +61,7 @@ def response(**overrides):
         "lease_expired": False,
         "last_error_code": None,
         "processed_at": None,
-        "capabilities_sha256": "c" * 64,
+        "capabilities_sha256": CAPABILITIES_SHA256,
     }
     value.update(overrides)
     return value
@@ -77,6 +78,7 @@ class DurableTerminalProcessingMonitorTests(unittest.TestCase):
         self.connection = sqlite3.connect(":memory:")
         self.monitor = MONITOR.DurableTerminalProcessingMonitor(
             self.connection,
+            CAPABILITIES_SHA256,
             poll_interval_seconds=10,
             base_delay_seconds=2,
             max_delay_seconds=8,
@@ -132,6 +134,24 @@ class DurableTerminalProcessingMonitorTests(unittest.TestCase):
             "terminal_processing_monitor.response_invalid",
         )
         self.assertEqual(self.monitor.health(now=100).status, "blocked")
+
+    def test_receiver_capability_mismatch_fails_before_state_adoption(self):
+        outcome = self.monitor.run_once(
+            lambda _event, _site: response(capabilities_sha256="d" * 64),
+            "observer", now=100, lease_seconds=30,
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(
+            outcome.error_code,
+            "terminal_processing_monitor.response_invalid",
+        )
+        status = self.monitor.status("cms-event-184", now=100)
+        self.assertIsNone(status.receiver_status)
+        self.assertEqual(
+            self.monitor.health(now=100).expected_capabilities_sha256,
+            CAPABILITIES_SHA256,
+        )
 
     def test_remote_failure_is_visible_without_private_data(self):
         outcome = self.monitor.run_once(
@@ -193,6 +213,82 @@ class DurableTerminalProcessingMonitorTests(unittest.TestCase):
         )
         with self.assertRaises(MONITOR.TerminalProcessingMonitorBlocked):
             self.monitor.health(now=101)
+
+    def test_empty_legacy_store_is_bound_but_work_is_not_guessed(self):
+        empty = sqlite3.connect(":memory:")
+        empty.row_factory = sqlite3.Row
+        first = MONITOR.DurableTerminalProcessingMonitor(
+            empty, CAPABILITIES_SHA256,
+        )
+        del first
+        empty.execute("DROP TABLE cms_source_terminal_processing_meta")
+        empty.execute("""
+            CREATE TABLE cms_source_terminal_processing_meta (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+            )
+        """)
+        empty.execute(
+            "INSERT INTO cms_source_terminal_processing_meta VALUES (1, 1)"
+        )
+        empty.commit()
+        migrated = MONITOR.DurableTerminalProcessingMonitor(
+            empty, CAPABILITIES_SHA256,
+        )
+        self.assertEqual(
+            tuple(empty.execute(
+                "SELECT * FROM cms_source_terminal_processing_meta"
+            ).fetchone()),
+            (1, 2, CAPABILITIES_SHA256),
+        )
+        self.assertEqual(migrated.health(now=100).status, "ok")
+        empty.close()
+
+        self.connection.execute(
+            "DROP TABLE cms_source_terminal_processing_meta"
+        )
+        self.connection.execute("""
+            CREATE TABLE cms_source_terminal_processing_meta (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+            )
+        """)
+        self.connection.execute(
+            "INSERT INTO cms_source_terminal_processing_meta VALUES (1, 1)"
+        )
+        self.connection.commit()
+        with self.assertRaises(
+            MONITOR.TerminalProcessingMonitorBlocked
+        ) as blocked:
+            MONITOR.DurableTerminalProcessingMonitor(
+                self.connection, CAPABILITIES_SHA256,
+            )
+        self.assertEqual(
+            blocked.exception.code,
+            "terminal_processing_monitor.legacy_unbound",
+        )
+        self.assertEqual(
+            tuple(self.connection.execute(
+                "SELECT * FROM cms_source_terminal_processing_meta"
+            ).fetchone()),
+            (1, 1),
+        )
+
+    def test_restart_with_another_receiver_generation_is_blocked(self):
+        with self.assertRaises(
+            MONITOR.TerminalProcessingMonitorBlocked
+        ) as blocked:
+            MONITOR.DurableTerminalProcessingMonitor(
+                self.connection, "d" * 64,
+            )
+        self.assertEqual(
+            blocked.exception.code,
+            "terminal_processing_monitor.schema_altered",
+        )
+        self.assertEqual(
+            self.monitor.status("cms-event-184", now=100).status,
+            "pending",
+        )
 
 
 if __name__ == "__main__":

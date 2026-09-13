@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Mapping
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATUS_SCHEMA = "blun.cms-terminal-receiver-status-response.v1"
 NOTIFICATION_SCHEMA = "blun.cms-source-terminal-notification.v1"
 NOTIFICATION_FIELDS = {
@@ -87,6 +87,7 @@ class TerminalProcessingHealth:
     due: int
     expired_leases: int
     failed: int
+    expected_capabilities_sha256: str
 
 
 def _blocked(code: str) -> None:
@@ -169,6 +170,7 @@ class DurableTerminalProcessingMonitor:
     def __init__(
         self,
         connection: sqlite3.Connection,
+        expected_capabilities_sha256: str,
         *,
         poll_interval_seconds: float | int = 30,
         base_delay_seconds: float | int = 5,
@@ -178,6 +180,9 @@ class DurableTerminalProcessingMonitor:
             raise TypeError("connection must be sqlite3.Connection")
         self.connection = connection
         self.connection.row_factory = sqlite3.Row
+        if not _sha(expected_capabilities_sha256):
+            _blocked("capabilities_invalid")
+        self.expected_capabilities_sha256 = expected_capabilities_sha256
         self.poll_interval_seconds = _duration(
             poll_interval_seconds, "poll_interval_invalid"
         )
@@ -189,15 +194,68 @@ class DurableTerminalProcessingMonitor:
 
     def _initialize(self) -> None:
         with _transaction(self.connection):
+            tables = {
+                row[0] for row in self.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('cms_source_terminal_processing_meta', "
+                    "'cms_source_terminal_processing')"
+                ).fetchall()
+            }
+            if len(tables) == 1:
+                _blocked("schema_altered")
+            if tables:
+                meta_columns = tuple(
+                    row["name"] for row in self.connection.execute(
+                        "PRAGMA table_info(cms_source_terminal_processing_meta)"
+                    ).fetchall()
+                )
+                columns = tuple(
+                    row["name"] for row in self.connection.execute(
+                        "PRAGMA table_info(cms_source_terminal_processing)"
+                    ).fetchall()
+                )
+                meta = self.connection.execute(
+                    "SELECT * FROM cms_source_terminal_processing_meta"
+                ).fetchall()
+                legacy = (
+                    meta_columns == ("singleton", "schema_version")
+                    and columns == _COLUMNS
+                    and len(meta) == 1
+                    and tuple(meta[0]) == (1, 1)
+                )
+                current = (
+                    meta_columns == (
+                        "singleton", "schema_version",
+                        "expected_capabilities_sha256",
+                    )
+                    and columns == _COLUMNS
+                    and len(meta) == 1
+                    and tuple(meta[0]) == (
+                        1, SCHEMA_VERSION,
+                        self.expected_capabilities_sha256,
+                    )
+                )
+                if legacy:
+                    if self.connection.execute(
+                        "SELECT 1 FROM cms_source_terminal_processing LIMIT 1"
+                    ).fetchone() is not None:
+                        _blocked("legacy_unbound")
+                    self.connection.execute(
+                        "DROP TABLE cms_source_terminal_processing_meta"
+                    )
+                elif not current:
+                    _blocked("schema_altered")
             self.connection.execute("""
                 CREATE TABLE IF NOT EXISTS cms_source_terminal_processing_meta (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                    schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+                    schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+                    expected_capabilities_sha256 TEXT NOT NULL
                 )
             """)
             self.connection.execute("""
-                INSERT OR IGNORE INTO cms_source_terminal_processing_meta VALUES (1, 1)
-            """)
+                INSERT OR IGNORE INTO cms_source_terminal_processing_meta
+                VALUES (1, 2, ?)
+            """, (self.expected_capabilities_sha256,))
             self.connection.execute("""
                 CREATE TABLE IF NOT EXISTS cms_source_terminal_processing (
                     event_id TEXT PRIMARY KEY, notification_id TEXT NOT NULL UNIQUE,
@@ -236,12 +294,17 @@ class DurableTerminalProcessingMonitor:
             "PRAGMA table_info(cms_source_terminal_processing)"
         ).fetchall())
         meta = self.connection.execute(
-            "SELECT singleton, schema_version FROM cms_source_terminal_processing_meta"
+            "SELECT singleton, schema_version, expected_capabilities_sha256 "
+            "FROM cms_source_terminal_processing_meta"
         ).fetchall()
         if (
-            meta_columns != ("singleton", "schema_version")
+            meta_columns != (
+                "singleton", "schema_version", "expected_capabilities_sha256",
+            )
             or columns != _COLUMNS or len(meta) != 1
-            or tuple(meta[0]) != (1, SCHEMA_VERSION)
+            or tuple(meta[0]) != (
+                1, SCHEMA_VERSION, self.expected_capabilities_sha256,
+            )
         ):
             _blocked("schema_altered")
 
@@ -417,6 +480,8 @@ class DurableTerminalProcessingMonitor:
             and (error is None or _error(error))
             and _valid_time(value.get("processed_at"), nullable=True)
             and _sha(value.get("capabilities_sha256"))
+            and value.get("capabilities_sha256")
+            == self.expected_capabilities_sha256
             and (remote == "leased") == (value.get("lease_expires_at") is not None)
             and (remote == "succeeded") == (value.get("processed_at") is not None)
             and (error is None or remote in {"retry_wait", "failed"})
@@ -532,6 +597,7 @@ class DurableTerminalProcessingMonitor:
         return TerminalProcessingHealth(
             "blocked" if expired or counts["failed"] else "ok",
             counts, due, expired, counts["failed"],
+            self.expected_capabilities_sha256,
         )
 
     def _require_claim(self, claim: sqlite3.Row, now: float) -> sqlite3.Row:

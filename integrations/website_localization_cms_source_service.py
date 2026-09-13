@@ -263,6 +263,7 @@ class CMSLocalizationSourceService:
         lifecycle_worker_id: str,
         terminal_notifier: Callable[[Mapping[str, Any]], Any] | None = None,
         terminal_status_reader: Callable[[str, str], Any] | None = None,
+        terminal_receiver_capabilities_sha256: str | None = None,
         notification_worker_id: str | None = None,
         clock: Callable[[], float | int] = time.time,
         change_lease_seconds: float | int = 600,
@@ -305,6 +306,33 @@ class CMSLocalizationSourceService:
             terminal_notifier is None or not callable(terminal_status_reader)
         ):
             raise CMSSourceServiceBlocked("source_service.processing_monitor_invalid")
+        discovered_receiver_capabilities = None
+        if terminal_status_reader is not None:
+            try:
+                discovered_receiver_capabilities = getattr(
+                    terminal_notifier, "expected_capabilities_sha256", None,
+                )
+            except Exception as error:
+                raise CMSSourceServiceBlocked(
+                    "source_service.processing_capabilities_invalid"
+                ) from error
+            if terminal_receiver_capabilities_sha256 is None:
+                terminal_receiver_capabilities_sha256 = (
+                    discovered_receiver_capabilities
+                )
+            if (
+                not _PROCESSING._sha(terminal_receiver_capabilities_sha256)
+                or discovered_receiver_capabilities is not None
+                and discovered_receiver_capabilities
+                != terminal_receiver_capabilities_sha256
+            ):
+                raise CMSSourceServiceBlocked(
+                    "source_service.processing_capabilities_invalid"
+                )
+        elif terminal_receiver_capabilities_sha256 is not None:
+            raise CMSSourceServiceBlocked(
+                "source_service.processing_capabilities_invalid"
+            )
         if not callable(clock):
             raise CMSSourceServiceBlocked("source_service.clock_invalid")
         timeout = getattr(client, "timeout", None)
@@ -379,6 +407,13 @@ class CMSLocalizationSourceService:
         self.client = client
         self.terminal_notifier = terminal_notifier
         self.terminal_status_reader = terminal_status_reader
+        self.terminal_receiver_capabilities_sha256 = (
+            terminal_receiver_capabilities_sha256
+        )
+        self.terminal_receiver_capabilities_exposed = (
+            terminal_status_reader is not None
+            and discovered_receiver_capabilities is not None
+        )
 
         # All configuration is validated before the first schema write.
         for value, code in (
@@ -436,6 +471,7 @@ class CMSLocalizationSourceService:
             if terminal_status_reader is None
             else _PROCESSING.DurableTerminalProcessingMonitor(
                 lifecycle_connection,
+                terminal_receiver_capabilities_sha256,
                 poll_interval_seconds=terminal_processing_poll_interval_seconds,
                 base_delay_seconds=terminal_processing_base_delay_seconds,
                 max_delay_seconds=terminal_processing_max_delay_seconds,
@@ -459,6 +495,24 @@ class CMSLocalizationSourceService:
             raise CMSSourceServiceBlocked("source_service.clock_invalid")
         return float(value)
 
+    def _guard_terminal_receiver_capabilities(self) -> None:
+        if self.terminal_processing is None:
+            return
+        try:
+            current = getattr(
+                self.terminal_notifier, "expected_capabilities_sha256", None,
+            )
+        except Exception as error:
+            raise CMSSourceServiceBlocked(
+                "source_service.processing_capabilities_changed"
+            ) from error
+        if self.terminal_receiver_capabilities_exposed and (
+            current != self.terminal_receiver_capabilities_sha256
+        ):
+            raise CMSSourceServiceBlocked(
+                "source_service.processing_capabilities_changed"
+            )
+
     def enqueue_change(
         self,
         change: Mapping[str, Any],
@@ -481,6 +535,7 @@ class CMSLocalizationSourceService:
 
     def status(self, event_id: str, site_id: str) -> CMSSourceServiceStatus:
         """Return a content-free snapshot without repairing or leasing work."""
+        self._guard_terminal_receiver_capabilities()
         event_id = _identifier(event_id, "source_service.status_invalid")
         site_id = _identifier(site_id, "source_service.status_invalid")
         now = self._now()
@@ -820,6 +875,7 @@ class CMSLocalizationSourceService:
     def run_once(self) -> CMSSourceTickOutcome:
         """Advance at most one external operation and one local handoff."""
         try:
+            self._guard_terminal_receiver_capabilities()
             now = self._now()
         except Exception as error:
             return self._outcome(
@@ -1037,6 +1093,7 @@ class CMSLocalizationSourceService:
 
     def health(self) -> CMSSourceServiceHealth:
         try:
+            self._guard_terminal_receiver_capabilities()
             now = self._now()
             changes = _health_payload(self.changes.health(now=now))
             removals = _health_payload(self.removals.health(now=now))

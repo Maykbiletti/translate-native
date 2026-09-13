@@ -214,6 +214,8 @@ class CMSLocalizationSourceServiceTests(unittest.TestCase):
         service_test = self
 
         class ReceiverClient:
+            expected_capabilities_sha256 = "d" * 64
+
             def __init__(self):
                 self.notification = None
                 self.status_calls = []
@@ -292,6 +294,67 @@ class CMSLocalizationSourceServiceTests(unittest.TestCase):
         self.assertEqual(status.receiver_processing_attempts, 1)
         self.assertEqual(status.receiver_processed_at, self.now)
         self.assertEqual(self.service.health().status, "ok")
+        self.assertEqual(
+            self.service.health().terminal_processing[
+                "expected_capabilities_sha256"
+            ],
+            receiver.expected_capabilities_sha256,
+        )
+
+        receiver.expected_capabilities_sha256 = "e" * 64
+        calls = len(receiver.status_calls)
+        blocked = self.service.run_once()
+        self.assertEqual((blocked.phase, blocked.status), ("source", "blocked"))
+        self.assertEqual(
+            blocked.error_code,
+            "source_service.processing_capabilities_changed",
+        )
+        self.assertEqual(len(receiver.status_calls), calls)
+        self.assertEqual(self.service.health().status, "blocked")
+
+        receiver.expected_capabilities_sha256 = None
+        missing = self.service.run_once()
+        self.assertEqual((missing.phase, missing.status), ("source", "blocked"))
+        self.assertEqual(
+            missing.error_code,
+            "source_service.processing_capabilities_changed",
+        )
+        self.assertEqual(len(receiver.status_calls), calls)
+
+    def test_processing_monitor_requires_one_exact_receiver_capability_pin(self):
+        callback = lambda payload: self.notification_ack(payload)
+        reader = lambda _event_id, _site_id: None
+
+        with self.assertRaises(SERVICE.CMSSourceServiceBlocked) as missing:
+            self.build(
+                terminal_notifier=callback,
+                terminal_status_reader=reader,
+                notification_worker_id="notification-worker",
+            )
+        self.assertEqual(
+            missing.exception.code,
+            "source_service.processing_capabilities_invalid",
+        )
+
+        class PinnedCallback:
+            expected_capabilities_sha256 = "d" * 64
+
+            def __call__(self, payload):
+                return self.notification_ack(payload)
+
+        pinned = PinnedCallback()
+        pinned.notification_ack = self.notification_ack
+        with self.assertRaises(SERVICE.CMSSourceServiceBlocked) as mismatch:
+            self.build(
+                terminal_notifier=pinned,
+                terminal_status_reader=reader,
+                terminal_receiver_capabilities_sha256="e" * 64,
+                notification_worker_id="notification-worker",
+            )
+        self.assertEqual(
+            mismatch.exception.code,
+            "source_service.processing_capabilities_invalid",
+        )
 
     def test_restart_recovers_terminal_notification_registration_gap(self):
         notifications = []

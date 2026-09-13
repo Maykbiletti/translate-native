@@ -842,6 +842,7 @@ def open_durable_cms_source(
     lifecycle_worker_id: str,
     terminal_notifier: Callable[[Mapping[str, Any]], Any] | None = None,
     terminal_status_reader: Callable[[str, str], Any] | None = None,
+    terminal_receiver_capabilities_sha256: str | None = None,
     notification_worker_id: str | None = None,
     http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
     clock: Callable[[], float | int] = time.time,
@@ -888,6 +889,9 @@ def open_durable_cms_source(
         "lifecycle_worker_id": lifecycle_worker_id,
         "terminal_notifier": terminal_notifier,
         "terminal_status_reader": terminal_status_reader,
+        "terminal_receiver_capabilities_sha256": (
+            terminal_receiver_capabilities_sha256
+        ),
         "notification_worker_id": notification_worker_id,
         "clock": clock,
         "change_lease_seconds": change_lease_seconds,
