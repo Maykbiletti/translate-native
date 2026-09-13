@@ -1,5 +1,30 @@
 # Version 6 premortem
 
+## Contract-pinned public submission sidecar client (13 September 2026)
+
+Assume a remote CMS successfully called the durable submission sidecar, but
+used a stale contract, duplicated a write, or trusted a response belonging to
+another deployment or tenant.
+
+- A modified capability document could be rehashed and presented as current.
+- The sidecar contract hash could be confused with its downstream public
+  website capability pin.
+- Credential construction could overwrite framing, idempotency, or canonical
+  source-payload headers.
+- Redirects or implicit transport retries could duplicate a durable enqueue.
+- A plausible status, health, or readiness response could carry a substituted
+  tenant identity, retry budget, generation, or private field.
+
+The reference client now reconstructs the complete canonical sidecar contract
+from a separately supplied downstream pin and requires its digest to equal the
+deployment pin before any transport. It rediscovers that exact contract before
+each operation, reserves security-sensitive headers, performs one bounded
+attempt without redirects, and validates closed response shapes plus all
+identity, retry, state, and generation invariants. End-to-end WSGI tests cover
+all three submission kinds, exact replay, tenant isolation, altered contracts,
+response substitution, reserved-header injection, and terminal versus
+retryable failures.
+
 ## Public end-to-end pipeline monitoring (13 September 2026)
 
 Assume the composed runtime was safe, but its public operational view leaked

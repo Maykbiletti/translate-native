@@ -1180,6 +1180,33 @@ serialization. Invalid framing, authentication outage, capability or storage
 drift, a malformed runtime result, and a dead worker therefore block without
 returning stored source content or invoking the downstream public client.
 
+#### Public submission sidecar reference client
+
+`integrations/website_localization_cms_source_delivery_submission_dispatch_client.py`
+is the provider-neutral HTTPS reference adapter for backends that do not share
+the Python runtime. Construct it with one exact HTTPS origin, the expected
+sidecar capability SHA-256, the independently expected downstream public
+submission capability SHA-256, and a credential-header callback. The two pins
+must reconstruct the current canonical contract exactly; they are never
+interchangeable.
+
+`enqueue()` accepts one complete change, cancellation, or tombstone and keeps
+the source-, delivery-, and client-stage retry ceilings distinct. `status()`
+requires the complete previously known operation, request, event, site, and
+source-payload identity. `health()`, `readiness()`, and `capabilities()` use
+their separate operator scopes. Each operational method first fetches the live
+capability document, accepts only the exact current closed shape, then makes
+one bounded request without following redirects or retrying internally.
+
+The credential callback receives a content-free context containing the exact
+method, origin, path, scope, and body SHA-256 plus tenant identity where
+applicable. It cannot supply `Host`, framing, content, idempotency, or canonical
+payload-hash headers. Network and selected transient HTTP failures are marked
+retryable for the caller's durable scheduler; redirects, authentication,
+schema, identity, state, and capability failures are terminal. Every returned
+object is independently checked against both deployment generations and never
+grants localization approval or publication authority.
+
 A successful response uses schema
 `blun.cms-source-delivery-submission-capabilities-response.v1` and includes the
 HTTP API schema plus the complete freshly verified capability. The adapter
