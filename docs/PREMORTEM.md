@@ -1,5 +1,25 @@
 # Version 6 premortem
 
+## Public website capability discovery (13 September 2026)
+
+Assume the in-process website runtime had the correct end-to-end capability,
+but a public discovery boundary exposed a weaker or private variant.
+
+- A body, query, insecure transport, or wrong scope could reach the runtime.
+- Authentication could occur after the runtime had already read its database
+  or contacted the downstream sidecar.
+- A replaced runtime could add an endpoint, tenant, credential, or website
+  content under a nested field and recompute the outer hash.
+- A plausible but stale schema or changed publication semantic could be served
+  as if it were the active contract.
+
+The read-only WSGI adapter now requires exact HTTPS GET semantics and validates
+the host-supplied principal before any runtime access. It accepts only the
+closed V6.96 capability shape, exact nested operations and semantics, bounded
+retry policy, verified durable binding, and matching canonical digest. Tests
+prove authentication-before-runtime ordering, reject every alternate request
+shape and substituted contract, and require stable content-free failures.
+
 ## Authenticated source runtime binding (12 September 2026)
 
 Assume a sidecar reached a healthy source API whose static HTTP contract was

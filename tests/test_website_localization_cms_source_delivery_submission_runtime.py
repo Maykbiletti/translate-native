@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import sqlite3
 import stat
@@ -42,6 +43,12 @@ SERVER = load(
     ROOT
     / "integrations"
     / "website_localization_cms_source_delivery_auth_runtime.py",
+)
+CAPABILITIES_HTTP = load(
+    "blun_test_website_localization_submission_capabilities_http",
+    ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_submission_capabilities_http.py",
 )
 
 
@@ -328,6 +335,19 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.transport.calls), before + 1)
         self.assertEqual(payload["schema"], SUBMISSION.CAPABILITIES_SCHEMA)
         self.assertEqual(payload["operations"], {
+            "capabilities_http": {
+                "kind": "read",
+                "method": "GET",
+                "path": SUBMISSION.CAPABILITIES_HTTP_PATH,
+                "scope": SUBMISSION.CAPABILITIES_HTTP_SCOPE,
+                "principal_schema": (
+                    SUBMISSION.CAPABILITIES_HTTP_PRINCIPAL_SCHEMA
+                ),
+                "request_schema": None,
+                "response_schema": (
+                    SUBMISSION.CAPABILITIES_HTTP_RESPONSE_SCHEMA
+                ),
+            },
             "enqueue_change": {
                 "kind": "write",
                 "request_schemas": [SUBMISSION._ADAPTER.CHANGE_SCHEMA],
@@ -426,6 +446,56 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(
             caught.exception.code,
             "source_delivery_submission_runtime.capabilities_invalid",
+        )
+
+    def test_public_capability_route_uses_the_live_owned_runtime(self):
+        runtime = self.open()
+        authentication_requests = []
+
+        def authenticate(request):
+            authentication_requests.append(copy.deepcopy(request))
+            return {
+                "schema": CAPABILITIES_HTTP.PRINCIPAL_SCHEMA,
+                "principal_id": "deployment-operator",
+                "credential_id": "capability-reader",
+                "credential_version": "1",
+                "scope": CAPABILITIES_HTTP.CAPABILITIES_SCOPE,
+            }
+
+        application = CAPABILITIES_HTTP.build_submission_capabilities_http(
+            runtime, authenticate,
+        )
+        environ = {
+            "PATH_INFO": CAPABILITIES_HTTP.CAPABILITIES_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "GET",
+            "wsgi.url_scheme": "https",
+            "CONTENT_LENGTH": "0",
+            "wsgi.input": io.BytesIO(b""),
+        }
+        response_metadata = {}
+        before = len(self.transport.calls)
+        body = b"".join(application(
+            environ,
+            lambda status, headers: response_metadata.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        response = json.loads(body)
+
+        self.assertEqual(response_metadata["status"], "200 OK")
+        self.assertEqual(len(authentication_requests), 1)
+        self.assertEqual(len(self.transport.calls), before + 1)
+        self.assertEqual(
+            response["schema"], CAPABILITIES_HTTP.CAPABILITIES_RESPONSE_SCHEMA,
+        )
+        self.assertEqual(
+            response["capabilities"]["website_capability_binding"],
+            runtime.website_capability_binding(),
+        )
+        self.assertEqual(
+            response["capabilities"]["sidecar_capabilities_sha256"],
+            self.sidecar_digest,
         )
 
     def test_generation_tampering_blocks_projections_before_network(self):

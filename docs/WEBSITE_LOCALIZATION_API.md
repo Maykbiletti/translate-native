@@ -952,7 +952,7 @@ the existing owner-only, process-bound, inode-guarded lifecycle.
 
 Call `submission_capabilities()` to discover the exact live contract of this
 complete website edge. The content-free
-`blun.cms-source-delivery-submission-capabilities.v1` snapshot advertises the
+`blun.cms-source-delivery-submission-capabilities.v2` snapshot advertises the
 accepted change and removal schemas, all six composed operational projection
 schemas, the separately owned website, sidecar and source retry budgets, and
 the explicit rule that durable source acceptance is not publication. It also
@@ -967,6 +967,36 @@ binding therefore causes no network traffic. A stale, substituted or malformed
 sidecar contract blocks the whole snapshot; the runtime never returns partial
 capabilities. Returned nested maps are defensive copies and contain no
 endpoint, credential, tenant, source text, target text or project price.
+
+For a separately hosted website process, wrap that same runtime with
+`build_submission_capabilities_http()` from
+`integrations/website_localization_cms_source_delivery_submission_capabilities_http.py`.
+It exposes exactly one route:
+
+| Method | Path | Required scope |
+| --- | --- | --- |
+| `GET` | `/v1/localization/source-delivery/submission-capabilities` | `source-delivery-submission-capabilities:read` |
+
+The route requires HTTPS, no query, no request body, no content type, and no
+transfer encoding. Before any local database read or sidecar request, the
+adapter calls the deployment-owned authenticator with schema
+`blun.cms-source-delivery-submission-capabilities-auth-request.v1`, the exact
+method and path, normalized request headers, and the SHA-256 of the empty body.
+The authenticator must return only principal schema
+`blun.cms-source-delivery-submission-capabilities-principal.v1`, principal ID,
+credential ID and version, and the exact required scope. Deployments may use
+HMAC, mutual TLS, a bearer-token proxy, or another verifier; replay prevention,
+credential storage, and rotation remain host responsibilities.
+
+A successful response uses schema
+`blun.cms-source-delivery-submission-capabilities-response.v1` and includes the
+HTTP API schema plus the complete freshly verified capability. The adapter
+revalidates every operation, retry-policy field, publication semantic, both
+downstream pins, the exact durable website binding, and the canonical digest.
+It never serializes the authenticated principal. Authentication outage,
+runtime outage, stale hash, foreign schema, extra field, or altered semantic
+returns a `blun.cms-source-delivery-submission-capabilities-http-error.v1`
+envelope with only `BLOCK` and a stable error code.
 
 `enqueue_change()` and `enqueue_removal()` persist work before transport.
 Their `delivery_max_attempts` controls only website-to-sidecar acceptance;

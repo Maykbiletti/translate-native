@@ -47,7 +47,22 @@ _RUNTIME = _load_module(
 HMACCredential = _AUTH.HMACCredential
 
 CAPABILITIES_SCHEMA = (
-    "blun.cms-source-delivery-submission-capabilities.v1"
+    "blun.cms-source-delivery-submission-capabilities.v2"
+)
+CAPABILITIES_HTTP_PATH = (
+    "/v1/localization/source-delivery/submission-capabilities"
+)
+CAPABILITIES_HTTP_SCOPE = (
+    "source-delivery-submission-capabilities:read"
+)
+CAPABILITIES_HTTP_AUTH_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-submission-capabilities-auth-request.v1"
+)
+CAPABILITIES_HTTP_PRINCIPAL_SCHEMA = (
+    "blun.cms-source-delivery-submission-capabilities-principal.v1"
+)
+CAPABILITIES_HTTP_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-submission-capabilities-response.v1"
 )
 STATUS_SCHEMA = "blun.cms-source-delivery-submission-status.v2"
 LIFECYCLE_SCHEMA = "blun.cms-source-delivery-submission-lifecycle.v3"
@@ -449,6 +464,15 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             raise _blocked("capabilities_invalid") from None
 
         operations = {
+            "capabilities_http": {
+                "kind": "read",
+                "method": "GET",
+                "path": CAPABILITIES_HTTP_PATH,
+                "scope": CAPABILITIES_HTTP_SCOPE,
+                "principal_schema": CAPABILITIES_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "response_schema": CAPABILITIES_HTTP_RESPONSE_SCHEMA,
+            },
             "enqueue_change": {
                 "kind": "write",
                 "request_schemas": [_ADAPTER.CHANGE_SCHEMA],
