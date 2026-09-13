@@ -23,8 +23,8 @@ from typing import Any, Callable, Mapping
 
 
 SCHEMA = "blun.cms-source-service-tick.v1"
-HEALTH_SCHEMA = "blun.cms-source-service-health.v3"
-STATUS_SCHEMA = "blun.cms-source-service-status.v3"
+HEALTH_SCHEMA = "blun.cms-source-service-health.v4"
+STATUS_SCHEMA = "blun.cms-source-service-status.v4"
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 
@@ -96,6 +96,7 @@ class CMSSourceServiceHealth:
     lifecycle: Mapping[str, Any]
     notifications: Mapping[str, Any]
     terminal_processing: Mapping[str, Any]
+    terminal_receiver_capabilities_sha256: str | None
     error_code: str | None = None
 
     def as_payload(self) -> dict[str, Any]:
@@ -114,6 +115,9 @@ class CMSSourceServiceHealth:
             "lifecycle": dict(self.lifecycle),
             "notifications": dict(self.notifications),
             "terminal_processing": dict(self.terminal_processing),
+            "terminal_receiver_capabilities_sha256": (
+                self.terminal_receiver_capabilities_sha256
+            ),
             "error_code": self.error_code,
         }
 
@@ -147,6 +151,7 @@ class CMSSourceServiceStatus:
     notification_attempts: int
     notification_max_attempts: int | None
     notification_error_code: str | None
+    terminal_receiver_capabilities_sha256: str | None
     terminal_processing_state: str
     terminal_processing_poll_attempts: int
     terminal_processing_failures: int
@@ -186,6 +191,9 @@ class CMSSourceServiceStatus:
             "notification_attempts": self.notification_attempts,
             "notification_max_attempts": self.notification_max_attempts,
             "notification_error_code": self.notification_error_code,
+            "terminal_receiver_capabilities_sha256": (
+                self.terminal_receiver_capabilities_sha256
+            ),
             "terminal_processing_state": self.terminal_processing_state,
             "terminal_processing_poll_attempts": (
                 self.terminal_processing_poll_attempts
@@ -684,6 +692,9 @@ class CMSLocalizationSourceService:
             notification_error_code=(
                 None if notification is None else notification.last_error_code
             ),
+            terminal_receiver_capabilities_sha256=(
+                self.terminal_receiver_capabilities_sha256
+            ),
             terminal_processing_state=terminal_processing_state,
             terminal_processing_poll_attempts=(
                 0 if terminal_processing is None
@@ -1137,6 +1148,7 @@ class CMSLocalizationSourceService:
                 {},
                 {},
                 {},
+                self.terminal_receiver_capabilities_sha256,
                 _safe_code(error, "source_service.health_blocked"),
             )
         blocked = any(
@@ -1178,5 +1190,6 @@ class CMSLocalizationSourceService:
             lifecycle,
             notifications,
             terminal_processing,
+            self.terminal_receiver_capabilities_sha256,
             error_code,
         )

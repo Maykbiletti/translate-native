@@ -27,11 +27,11 @@ CHANGE_RESPONSE_SCHEMA = "blun.cms-source-change-enqueue-response.v3"
 REMOVAL_REQUEST_SCHEMA = "blun.cms-source-removal-enqueue-request.v1"
 REMOVAL_RESPONSE_SCHEMA = "blun.cms-source-removal-enqueue-response.v3"
 STATUS_REQUEST_SCHEMA = "blun.cms-source-status-request.v1"
-STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v5"
-HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v5"
+STATUS_RESPONSE_SCHEMA = "blun.cms-source-status-response.v6"
+HEALTH_RESPONSE_SCHEMA = "blun.cms-source-health-response.v6"
 READINESS_RESPONSE_SCHEMA = "blun.cms-source-readiness-response.v3"
-CAPABILITIES_SCHEMA = "blun.cms-source-runtime-capabilities.v1"
-CAPABILITIES_RESPONSE_SCHEMA = "blun.cms-source-capabilities-response.v1"
+CAPABILITIES_SCHEMA = "blun.cms-source-runtime-capabilities.v2"
+CAPABILITIES_RESPONSE_SCHEMA = "blun.cms-source-capabilities-response.v2"
 CAPABILITY_BINDING_SCHEMA = "blun.cms-source-capability-binding.v2"
 CAPABILITY_DATABASE_ROLES = ("changes", "removals", "lifecycle")
 
@@ -263,6 +263,7 @@ def _source_status_payload(
             "queue_counts", "notification_state", "notification_id",
             "notification_sha256", "notification_attempts",
             "notification_max_attempts", "notification_error_code",
+            "terminal_receiver_capabilities_sha256",
             "terminal_processing_state", "terminal_processing_poll_attempts",
             "terminal_processing_failures", "terminal_processing_error_code",
             "receiver_processing_state", "receiver_processing_attempts",
@@ -271,7 +272,7 @@ def _source_status_payload(
         }
         if not isinstance(payload, Mapping) or set(payload) != fields:
             raise ValueError
-        if payload["schema"] != "blun.cms-source-service-status.v3":
+        if payload["schema"] != "blun.cms-source-service-status.v4":
             raise ValueError
         event_id = _token(payload["event_id"])
         site_id = _token(payload["site_id"])
@@ -362,6 +363,16 @@ def _source_status_payload(
         notification_error = _optional_error(
             payload["notification_error_code"]
         )
+        terminal_receiver_capabilities_sha256 = payload[
+            "terminal_receiver_capabilities_sha256"
+        ]
+        if (
+            terminal_receiver_capabilities_sha256 is not None
+            and SHA256.fullmatch(
+                terminal_receiver_capabilities_sha256
+            ) is None
+        ):
+            raise ValueError
         durable_notification = notification_state in STATUSES
         if durable_notification != (notification_id is not None):
             raise ValueError
@@ -387,6 +398,10 @@ def _source_status_payload(
             "failed",
         }
         if terminal_processing_state not in processing_states:
+            raise ValueError
+        if (terminal_processing_state == "disabled") != (
+            terminal_receiver_capabilities_sha256 is None
+        ):
             raise ValueError
         terminal_processing_poll_attempts = _count(
             payload["terminal_processing_poll_attempts"]
@@ -533,6 +548,9 @@ def _source_status_payload(
             "notification_attempts": notification_attempts,
             "notification_max_attempts": notification_max_attempts,
             "notification_error_code": notification_error,
+            "terminal_receiver_capabilities_sha256": (
+                terminal_receiver_capabilities_sha256
+            ),
             "terminal_processing_state": terminal_processing_state,
             "terminal_processing_poll_attempts": (
                 terminal_processing_poll_attempts
@@ -559,12 +577,15 @@ def _component(
     *,
     operations: bool = False,
     remote_failures: bool = False,
+    receiver_capabilities: bool = False,
 ) -> dict[str, Any]:
     fields = {"status", "counts", "due", "expired_leases", "failed"}
     if operations:
         fields.add("operations")
     if remote_failures:
         fields.add("remote_failures")
+    if receiver_capabilities:
+        fields.add("expected_capabilities_sha256")
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ValueError
     if value["status"] not in {"ok", "blocked"}:
@@ -591,6 +612,11 @@ def _component(
         }
     if remote_failures:
         normalized["remote_failures"] = _count(value["remote_failures"])
+    if receiver_capabilities:
+        expected = value["expected_capabilities_sha256"]
+        if not isinstance(expected, str) or SHA256.fullmatch(expected) is None:
+            raise ValueError
+        normalized["expected_capabilities_sha256"] = expected
     return normalized
 
 
@@ -601,10 +627,11 @@ def _health_payload(value: Any) -> dict[str, Any]:
             "schema", "status", "pending_lifecycle_registrations",
             "pending_terminal_notifications", "changes", "removals",
             "pending_terminal_processing", "lifecycle", "notifications",
-            "terminal_processing", "error_code",
+            "terminal_processing", "terminal_receiver_capabilities_sha256",
+            "error_code",
         }:
             raise ValueError
-        if payload["schema"] != "blun.cms-source-service-health.v3":
+        if payload["schema"] != "blun.cms-source-service-health.v4":
             raise ValueError
         if payload["status"] not in HEALTH_STATUSES:
             raise ValueError
@@ -639,10 +666,34 @@ def _health_payload(value: Any) -> dict[str, Any]:
                 else _component(payload["terminal_processing"], {
                     "pending", "leased", "watching", "retry_wait",
                     "succeeded", "failed",
-                })
+                }, receiver_capabilities=True)
             ),
+            "terminal_receiver_capabilities_sha256": payload[
+                "terminal_receiver_capabilities_sha256"
+            ],
             "error_code": payload["error_code"],
         }
+        receiver_capabilities_sha256 = result[
+            "terminal_receiver_capabilities_sha256"
+        ]
+        if (
+            receiver_capabilities_sha256 is not None
+            and (
+                not isinstance(receiver_capabilities_sha256, str)
+                or SHA256.fullmatch(receiver_capabilities_sha256) is None
+            )
+        ):
+            raise ValueError
+        if result["terminal_processing"]:
+            if (
+                receiver_capabilities_sha256
+                != result["terminal_processing"][
+                    "expected_capabilities_sha256"
+                ]
+            ):
+                raise ValueError
+        elif receiver_capabilities_sha256 is not None and result["status"] != "blocked":
+            raise ValueError
         if result["error_code"] is not None and ERROR_CODE.fullmatch(
             result["error_code"]
         ) is None:

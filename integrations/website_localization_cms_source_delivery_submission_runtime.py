@@ -47,7 +47,7 @@ _RUNTIME = _load_module(
 HMACCredential = _AUTH.HMACCredential
 
 CAPABILITIES_SCHEMA = (
-    "blun.cms-source-delivery-submission-capabilities.v5"
+    "blun.cms-source-delivery-submission-capabilities.v6"
 )
 CAPABILITIES_HTTP_PATH = (
     "/v1/localization/source-delivery/submission-capabilities"
@@ -141,7 +141,7 @@ LIFECYCLE_HTTP_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-submission-lifecycle-response.v1"
 )
 STATUS_SCHEMA = "blun.cms-source-delivery-submission-status.v2"
-LIFECYCLE_SCHEMA = "blun.cms-source-delivery-submission-lifecycle.v3"
+LIFECYCLE_SCHEMA = "blun.cms-source-delivery-submission-lifecycle.v4"
 HEALTH_SCHEMA = "blun.cms-source-delivery-submission-health.v2"
 PIPELINE_HEALTH_SCHEMA = (
     "blun.cms-source-delivery-submission-pipeline-health.v3"

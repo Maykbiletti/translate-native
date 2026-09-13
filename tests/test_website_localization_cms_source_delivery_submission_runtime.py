@@ -945,7 +945,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         ))
         self.assertEqual(
             lifecycle.schema,
-            "blun.cms-source-delivery-submission-lifecycle.v3",
+            "blun.cms-source-delivery-submission-lifecycle.v4",
         )
         self.assertEqual(lifecycle.source_status["required_locales"], [
             "fi-FI", "mt-MT",

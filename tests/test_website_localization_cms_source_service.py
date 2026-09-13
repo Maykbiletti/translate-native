@@ -293,7 +293,15 @@ class CMSLocalizationSourceServiceTests(unittest.TestCase):
         self.assertEqual(status.receiver_processing_state, "succeeded")
         self.assertEqual(status.receiver_processing_attempts, 1)
         self.assertEqual(status.receiver_processed_at, self.now)
+        self.assertEqual(
+            status.terminal_receiver_capabilities_sha256,
+            receiver.expected_capabilities_sha256,
+        )
         self.assertEqual(self.service.health().status, "ok")
+        self.assertEqual(
+            self.service.health().terminal_receiver_capabilities_sha256,
+            receiver.expected_capabilities_sha256,
+        )
         self.assertEqual(
             self.service.health().terminal_processing[
                 "expected_capabilities_sha256"

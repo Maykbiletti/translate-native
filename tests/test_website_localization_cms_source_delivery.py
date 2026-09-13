@@ -44,6 +44,7 @@ class ScriptedClient:
         self.expected_capabilities_sha256 = digest
         self.expected_runtime_capabilities_sha256 = "c" * 64
         self.expected_commercial_rendering_registry_sha256 = "d" * 64
+        self.terminal_receiver_capabilities_sha256 = "e" * 64
         self.timeout = 30
         self.calls = []
         self.failures = []
@@ -100,7 +101,7 @@ class ScriptedClient:
         return {
             "schema": DELIVERY._CLIENT._HTTP.STATUS_RESPONSE_SCHEMA,
             "status": {
-                "schema": "blun.cms-source-service-status.v3",
+                "schema": "blun.cms-source-service-status.v4",
                 "event_id": event_id,
                 "site_id": site_id,
                 "website_version": change["website_version"],
@@ -133,7 +134,10 @@ class ScriptedClient:
                 "notification_attempts": 0,
                 "notification_max_attempts": None,
                 "notification_error_code": None,
-                "terminal_processing_state": "disabled",
+                "terminal_receiver_capabilities_sha256": (
+                    self.terminal_receiver_capabilities_sha256
+                ),
+                "terminal_processing_state": "awaiting_notification",
                 "terminal_processing_poll_attempts": 0,
                 "terminal_processing_failures": 0,
                 "terminal_processing_error_code": None,
@@ -192,7 +196,7 @@ class ScriptedClient:
         return {
             "schema": DELIVERY._CLIENT._HTTP.HEALTH_RESPONSE_SCHEMA,
             "health": {
-                "schema": "blun.cms-source-service-health.v3",
+                "schema": "blun.cms-source-service-health.v4",
                 "status": "ok",
                 "pending_lifecycle_registrations": 0,
                 "pending_terminal_notifications": 0,
@@ -215,7 +219,26 @@ class ScriptedClient:
                     "remote_failures": 0,
                 },
                 "notifications": {},
-                "terminal_processing": {},
+                "terminal_processing": {
+                    "status": "ok",
+                    "counts": {
+                        "failed": 0,
+                        "leased": 0,
+                        "pending": 0,
+                        "retry_wait": 0,
+                        "succeeded": 0,
+                        "watching": 0,
+                    },
+                    "due": 0,
+                    "expired_leases": 0,
+                    "failed": 0,
+                    "expected_capabilities_sha256": (
+                        self.terminal_receiver_capabilities_sha256
+                    ),
+                },
+                "terminal_receiver_capabilities_sha256": (
+                    self.terminal_receiver_capabilities_sha256
+                ),
                 "error_code": None,
             },
             "capabilities_sha256": self.expected_capabilities_sha256,
@@ -279,6 +302,10 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertEqual(response["status"]["required_locales"], [
             "fi-FI", "mt-MT",
         ])
+        self.assertEqual(
+            response["status"]["terminal_receiver_capabilities_sha256"],
+            self.client.terminal_receiver_capabilities_sha256,
+        )
         self.assertEqual(self.client.calls[-1], (
             "status", change["event_id"], change["site_id"],
         ))
@@ -328,6 +355,16 @@ class SourceDeliveryTests(unittest.TestCase):
 
         self.assertEqual(response["health"]["status"], "ok")
         self.assertEqual(response["health"]["changes"]["failed"], 0)
+        self.assertEqual(
+            response["health"]["terminal_receiver_capabilities_sha256"],
+            self.client.terminal_receiver_capabilities_sha256,
+        )
+        self.assertEqual(
+            response["health"]["terminal_processing"][
+                "expected_capabilities_sha256"
+            ],
+            self.client.terminal_receiver_capabilities_sha256,
+        )
         self.assertEqual(response["capabilities_sha256"], "a" * 64)
         self.assertEqual(self.client.calls, [("health",)])
         self.assertEqual(

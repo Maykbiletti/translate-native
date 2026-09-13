@@ -645,8 +645,8 @@ The exact routes are:
 
 Authenticated startup requires `capability_preflight=True`; omission blocks
 before any database is created. The capabilities route accepts no body or query. Its
-`blun.cms-source-capabilities-response.v1` response contains one
-`blun.cms-source-runtime-capabilities.v1` contract with the exact active
+`blun.cms-source-capabilities-response.v2` response contains one
+`blun.cms-source-runtime-capabilities.v2` contract with the exact active
 methods, paths, scopes, principal schemas, request and response schemas,
 required top-level fields, success statuses, retry limits, and transport
 bounds. The nested `sha256` is calculated over the canonical capability object
@@ -690,8 +690,8 @@ The status request is exact, query-free JSON and uses
 }
 ```
 
-Its `blun.cms-source-status-response.v5` response contains one nested
-`blun.cms-source-service-status.v3` snapshot. It binds the stored
+Its `blun.cms-source-status-response.v6` response contains one nested
+`blun.cms-source-service-status.v4` snapshot. It binds the stored
 `website_version`, `source_sequence`, canonical change hash, dispatch state and
 attempts, remote plan and job count, local lifecycle state, remote lifecycle
 status, lifecycle hash, required and approved locales, blocked locale reason
@@ -702,17 +702,22 @@ write. A caller can therefore distinguish queued work, a pending local
 registration, active localization, approval, publication, cancellation, and a
 terminal failure without accidentally advancing the worker.
 
-Version 2 additionally exposes only the terminal notification state, its
+The status projection additionally exposes only the terminal notification state, its
 content-free identity and hash, bounded attempt counters, and a public error
 code. When the terminal notifier exposes the pinned receiver `status` method,
 the snapshot also reports the independently durable processing observation,
-poll failures, receiver attempts, and stable local and receiver error codes.
-An intake acknowledgement is never presented as completed CMS processing.
+poll failures, receiver attempts, stable local and receiver error codes, and
+the exact terminal receiver capability SHA-256. Disabled observation uses an
+explicit `null` binding. An intake acknowledgement is never presented as
+completed CMS processing.
 
-The corresponding `blun.cms-source-health-response.v5` and nested
-`blun.cms-source-service-health.v3` report notification and processing-observer
-backlog plus component
-health without revealing website content or callback responses.
+The corresponding `blun.cms-source-health-response.v6` and nested
+`blun.cms-source-service-health.v4` report notification and processing-observer
+backlog plus component health without revealing website content or callback
+responses. The service-level receiver digest must exactly match the monitor
+component's stored digest. Missing, malformed, substituted, or contradictory
+bindings fail closed through the reference client and every outer lifecycle
+projection.
 
 Before parsing JSON or touching SQLite, the application calls the host-supplied
 authenticator with this content-free request:
@@ -752,7 +757,11 @@ credential, exception, source string, or target string.
 client for this complete ingress. Construct `CMSLocalizationSourceHTTPClient`
 with one exact HTTPS origin, the HTTP contract pin, and the source runtime's
 commercial capability and rendering-registry pins supplied through trusted
-deployment configuration. A callback provides authentication headers for the
+deployment configuration. When terminal observation is enabled, also supply
+the exact receiver generation as
+`expected_terminal_receiver_capabilities_sha256`; leaving it unset pins the
+client to the explicitly disabled `null` state. A callback provides
+authentication headers for the
 canonical request context and receives the method,
 origin, verified path and scope, body SHA-256, and the applicable event, site,
 or request identity; it cannot replace framing, idempotency, or binding headers.
@@ -769,8 +778,10 @@ runtime binding.
 
 `status()`, `health()`, and `readiness()` repeat discovery independently and
 then validate every returned field and cross-field invariant. Status is bound
-to the requested event and site. Health and readiness accept their documented
-`200` and `503` states only when the HTTP status agrees with the nested state.
+to the requested event, site, and configured terminal receiver generation.
+Health requires the same generation at service and monitor-component level;
+health and readiness accept their documented `200` and `503` states only when
+the HTTP status agrees with the nested state.
 All five operational response schemas carry `capabilities_sha256` and the
 runtime binding. A missing, malformed, substituted, or stale binding blocks
 even when the static HTTP schema still matches its separate contract pin.
@@ -1005,7 +1016,7 @@ the existing owner-only, process-bound, inode-guarded lifecycle.
 
 Call `submission_capabilities()` to discover the exact live contract of this
 complete website edge. The content-free
-`blun.cms-source-delivery-submission-capabilities.v5` snapshot advertises the
+`blun.cms-source-delivery-submission-capabilities.v6` snapshot advertises the
 public change, removal, acceptance-status, and lifecycle HTTPS contracts, all
 six composed operational
 projection schemas, the separately owned website, sidecar and source retry
@@ -1392,7 +1403,7 @@ status request.
 
 `submission_lifecycle()` extends that accepted state with the independently
 validated source lifecycle. Its
-`blun.cms-source-delivery-submission-lifecycle.v3` projection keeps submission,
+`blun.cms-source-delivery-submission-lifecycle.v4` projection keeps submission,
 source status, the verified website generation, and the verified source runtime
 binding separate. Missing or changed binding evidence blocks instead of
 returning a processing state.
