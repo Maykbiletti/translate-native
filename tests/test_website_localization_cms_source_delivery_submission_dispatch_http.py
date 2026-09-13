@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests import test_website_localization_cms_client as cms_support
 from tests import (
@@ -108,7 +109,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
 
     def call(
         self, path, *, method=None, body=None, headers=None, scheme="https",
-        query="",
+        query="", content_length=None,
     ):
         raw = b"" if body is None else (
             body if isinstance(body, bytes) else self.canonical(body)
@@ -119,7 +120,9 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             "QUERY_STRING": query,
             "wsgi.url_scheme": scheme,
             "wsgi.input": io.BytesIO(raw),
-            "CONTENT_LENGTH": str(len(raw)),
+            "CONTENT_LENGTH": (
+                str(len(raw)) if content_length is None else content_length
+            ),
             "HTTP_AUTHORIZATION": "Bearer test",
         }
         if body is not None:
@@ -191,6 +194,14 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             capabilities["operations"]["status"]["error_statuses"],
             [400, 401, 403, 404, 405, 411, 413, 415, 503],
         )
+        self.assertEqual(
+            capabilities["operations"]["capabilities"]["error_statuses"],
+            [400, 401, 403, 405, 411, 413, 503],
+        )
+        self.assertEqual(
+            capabilities["operations"]["enqueue"]["error_codes"]["409"],
+            ["submission_dispatch_http.idempotency_collision"],
+        )
         unsigned = dict(capabilities)
         digest = unsigned.pop("sha256")
         self.assertEqual(digest, hashlib.sha256(self.canonical(unsigned)).hexdigest())
@@ -231,6 +242,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             self.assertEqual(described["x-principal-schema"], operation["principal_schema"])
             self.assertEqual(described["x-success-status"], operation["success_status"])
             self.assertEqual(described["x-error-statuses"], operation["error_statuses"])
+            self.assertEqual(described["x-error-codes"], operation["error_codes"])
             self.assertEqual(
                 described["x-response-invariants"],
                 operation["response_invariants"],
@@ -364,16 +376,35 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
                 schema = described["responses"][str(status)]["content"][
                     "application/json"
                 ]["schema"]
+                codes = operation["error_codes"][str(status)]
+                self.assertEqual(
+                    described["responses"][str(status)]["x-error-codes"],
+                    codes,
+                )
                 if name in {"health", "readiness"} and status == 503:
                     expected = name.title() + "Response"
-                    self.assertEqual(schema["oneOf"], [
-                        {"$ref": "#/components/schemas/" + expected},
-                        {"$ref": "#/components/schemas/Error"},
-                    ])
-                else:
                     self.assertEqual(
-                        schema, {"$ref": "#/components/schemas/Error"}
+                        schema["oneOf"][0],
+                        {"$ref": "#/components/schemas/" + expected},
                     )
+                    error_schema = schema["oneOf"][1]
+                else:
+                    error_schema = schema
+                self.assertFalse(error_schema["additionalProperties"])
+                self.assertEqual(
+                    error_schema["properties"]["error_code"]["enum"], codes,
+                )
+        all_codes = sorted({
+            code
+            for operation in capabilities["operations"].values()
+            for codes in operation["error_codes"].values()
+            for code in codes
+        })
+        self.assertEqual(
+            document["components"]["schemas"]["Error"]["properties"]
+            ["error_code"]["enum"],
+            all_codes,
+        )
 
     def test_openapi_encodes_runtime_state_invariants(self):
         self.open()
@@ -634,6 +665,39 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             self.assertEqual(response["status"], expected)
             self.assertEqual(response["json"]["status"], "BLOCK")
             self.assertEqual(response["headers"]["Cache-Control"], "no-store")
+
+    def test_bodyless_framing_failures_match_advertised_statuses_and_codes(self):
+        self.open()
+        cases = (
+            ("invalid", 411, "submission_dispatch_http.content_length_required"),
+            (str(HTTP.MAX_BODY_BYTES + 1), 413, "submission_dispatch_http.body_too_large"),
+        )
+        contract = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )["operations"]["capabilities"]
+        for content_length, status, code in cases:
+            with self.subTest(status=status):
+                response = self.call(
+                    HTTP.CAPABILITIES_PATH, content_length=content_length,
+                )
+                self.assertEqual(response["status"], status)
+                self.assertEqual(response["json"]["error_code"], code)
+                self.assertIn(status, contract["error_statuses"])
+                self.assertIn(code, contract["error_codes"][str(status)])
+
+    def test_unadvertised_internal_error_is_not_serialized(self):
+        self.open()
+        with mock.patch.object(
+            HTTP, "_health_payload",
+            side_effect=HTTP._blocked("unadvertised_failure", 400),
+        ):
+            response = self.call(HTTP.HEALTH_PATH)
+
+        self.assertEqual(response["status"], 503)
+        self.assertEqual(
+            response["json"]["error_code"],
+            "submission_dispatch_http.runtime_blocked",
+        )
 
     def test_invalid_http_authenticator_creates_no_database(self):
         with self.assertRaises(

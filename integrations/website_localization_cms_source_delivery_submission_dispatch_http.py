@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v6"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v7"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -40,9 +40,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v6"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v7"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v6"
+    "blun.cms-public-submission-dispatch-capabilities-response.v7"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -72,13 +72,96 @@ METHODS = {
 }
 TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH}
 BODYLESS_PATHS = {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH}
+_AUTHENTICATION_ERRORS = {
+    401: ("submission_dispatch_http.authentication_failed",),
+    403: ("submission_dispatch_http.scope_rejected",),
+    405: ("submission_dispatch_http.method_not_allowed",),
+}
+_COMMON_503_ERRORS = (
+    "submission_dispatch_http.authentication_unavailable",
+    "submission_dispatch_http.capabilities_invalid",
+    "submission_dispatch_http.response_invalid",
+    "submission_dispatch_http.runtime_blocked",
+)
+_BODYLESS_400_ERRORS = (
+    "submission_dispatch_http.body_invalid",
+    "submission_dispatch_http.body_not_allowed",
+    "submission_dispatch_http.headers_invalid",
+    "submission_dispatch_http.https_required",
+    "submission_dispatch_http.query_rejected",
+    "submission_dispatch_http.transfer_encoding_rejected",
+)
+_BODY_400_ERRORS = (
+    "submission_dispatch_http.body_invalid",
+    "submission_dispatch_http.headers_invalid",
+    "submission_dispatch_http.https_required",
+    "submission_dispatch_http.json_invalid",
+    "submission_dispatch_http.query_rejected",
+    "submission_dispatch_http.request_invalid",
+    "submission_dispatch_http.transfer_encoding_rejected",
+)
+ERROR_CODES = {
+    CAPABILITIES_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: _COMMON_503_ERRORS,
+    },
+    ENQUEUE_PATH: {
+        400: tuple(sorted((
+            *_BODY_400_ERRORS, "submission_dispatch_http.binding_invalid",
+        ))),
+        **_AUTHENTICATION_ERRORS,
+        409: ("submission_dispatch_http.idempotency_collision",),
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        415: ("submission_dispatch_http.content_type_invalid",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_not_ready",
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
+    HEALTH_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
+    OPENAPI_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: _COMMON_503_ERRORS,
+    },
+    READINESS_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
+    STATUS_PATH: {
+        400: _BODY_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        404: ("submission_dispatch_http.submission_not_found",),
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        415: ("submission_dispatch_http.content_type_invalid",),
+        503: _COMMON_503_ERRORS,
+    },
+}
 ERROR_STATUSES = {
-    CAPABILITIES_PATH: (400, 401, 403, 405, 503),
-    ENQUEUE_PATH: (400, 401, 403, 405, 409, 411, 413, 415, 503),
-    HEALTH_PATH: (400, 401, 403, 405, 503),
-    OPENAPI_PATH: (400, 401, 403, 405, 503),
-    READINESS_PATH: (400, 401, 403, 405, 503),
-    STATUS_PATH: (400, 401, 403, 404, 405, 411, 413, 415, 503),
+    path: tuple(sorted(statuses)) for path, statuses in ERROR_CODES.items()
 }
 RESPONSE_INVARIANTS = {
     CAPABILITIES_PATH: (
@@ -510,6 +593,10 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "response_schema": response_schema,
                 "success_status": status,
                 "error_statuses": list(ERROR_STATUSES[path]),
+                "error_codes": {
+                    str(error_status): list(ERROR_CODES[path][error_status])
+                    for error_status in ERROR_STATUSES[path]
+                },
                 "response_invariants": list(RESPONSE_INVARIANTS[path]),
             }
         contract = {
@@ -601,12 +688,18 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
         return [raw]
 
     @classmethod
-    def _error(cls, start_response, error):
+    def _error(cls, start_response, error, path=None):
+        if path in ERROR_CODES and (
+            error.status not in ERROR_CODES[path]
+            or error.code not in ERROR_CODES[path][error.status]
+        ):
+            error = _blocked("runtime_blocked", 503)
         return cls._send(start_response, error.status, {
             "schema": ERROR_SCHEMA, "status": "BLOCK", "error_code": error.code,
         })
 
     def __call__(self, environ: Mapping[str, Any], start_response):
+        path = None
         try:
             if not isinstance(environ, Mapping):
                 raise _blocked("environment_invalid", 400)
@@ -770,9 +863,11 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                 "accepted_implies_publication": False,
             })
         except CMSSourceDeliverySubmissionDispatchHTTPBlocked as error:
-            return self._error(start_response, error)
+            return self._error(start_response, error, path)
         except Exception:
-            return self._error(start_response, _blocked("runtime_blocked", 503))
+            return self._error(
+                start_response, _blocked("runtime_blocked", 503), path,
+            )
 
 
 def build_submission_dispatch_http(runtime: Any, authenticator):

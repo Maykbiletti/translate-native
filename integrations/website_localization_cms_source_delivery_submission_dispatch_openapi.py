@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v5"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v6"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -179,13 +179,20 @@ def _operation(
         },
     }
     for status in contract["error_statuses"]:
-        schema: dict[str, Any] = _schema_ref("Error")
+        codes = list(contract["error_codes"][str(status)])
+        schema: dict[str, Any] = _closed_object({
+            "schema": {
+                "const": "blun.cms-public-submission-dispatch-http-error.v1",
+            },
+            "status": {"const": "BLOCK"},
+            "error_code": {"type": "string", "enum": codes},
+        })
         description = "Fail-closed content-free error."
         if status == 503 and degraded_response_component is not None:
             schema = {
                 "oneOf": [
                     _schema_ref(degraded_response_component),
-                    _schema_ref("Error"),
+                    schema,
                 ],
             }
             description = (
@@ -195,6 +202,7 @@ def _operation(
         responses[str(status)] = {
             "description": description,
             "content": {"application/json": {"schema": schema}},
+            "x-error-codes": codes,
         }
     operation: dict[str, Any] = {
         "operationId": operation_id,
@@ -205,6 +213,7 @@ def _operation(
         "x-principal-schema": contract["principal_schema"],
         "x-success-status": contract["success_status"],
         "x-error-statuses": list(contract["error_statuses"]),
+        "x-error-codes": dict(contract["error_codes"]),
         "x-response-invariants": list(contract["response_invariants"]),
         "responses": dict(sorted(responses.items(), key=lambda item: int(item[0]))),
     }
@@ -309,6 +318,12 @@ def _status_schema() -> dict[str, Any]:
 def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
     """Build one origin-free document from an already verified capability."""
     operations = capabilities["operations"]
+    all_error_codes = sorted({
+        code
+        for operation in operations.values()
+        for codes in operation["error_codes"].values()
+        for code in codes
+    })
     path_specs = {
         operations["capabilities"]["path"]: {
             "get": _operation(
@@ -404,7 +419,8 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
             "required": ["schema", "status", "error_code"],
             "properties": {
                 "schema": {"const": "blun.cms-public-submission-dispatch-http-error.v1"},
-                "status": {"const": "BLOCK"}, "error_code": _schema_ref("ErrorCode"),
+                "status": {"const": "BLOCK"},
+                "error_code": {"type": "string", "enum": all_error_codes},
             },
         },
         "Capabilities": {

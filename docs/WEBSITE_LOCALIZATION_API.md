@@ -1214,6 +1214,22 @@ cannot encode, including attempt-count comparisons, request-identity equality
 and queue-count sums; runtime and the pinned reference client remain
 authoritative for those relationships.
 
+The v7 capability generation and v6 OpenAPI document bind every fail-closed
+error code to its exact route and HTTP status. Each concrete non-success
+response carries a closed `x-error-codes` list and an identical schema enum;
+the complete per-operation map is part of the capability SHA-256. Bodyless
+discovery and monitor routes include `411` for an invalid declared length and
+`413` for an oversized body, matching the shared framing parser rather than an
+idealized GET-only path.
+
+The reference client validates a remote error as a three-field closed envelope
+before exposing `http_status` and `remote_error_code` on its content-free
+exception. Codes outside the pinned status-specific set, extra fields,
+mismatched schemas, malformed JSON, and undeclared statuses never become
+trusted reasons. Verified `503` errors remain retryable and a verified `409`
+idempotency collision remains terminal; the exception message itself contains
+only the stable local failure code.
+
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
 tenant principal must match the payload's `site_id`; `Idempotency-Key` must

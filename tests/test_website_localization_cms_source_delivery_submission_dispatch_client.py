@@ -292,6 +292,11 @@ class SubmissionDispatchClientTests(unittest.TestCase):
             self.client.status(*identity)
         self.assertEqual(tenant.exception.code, "source_delivery_submission_dispatch_client.http_status")
         self.assertFalse(tenant.exception.retryable)
+        self.assertEqual(tenant.exception.http_status, 404)
+        self.assertEqual(
+            tenant.exception.remote_error_code,
+            "submission_dispatch_http.submission_not_found",
+        )
 
         self.support.authenticator.site_id = "site-1"
         def mutate(number, result):
@@ -347,6 +352,55 @@ class SubmissionDispatchClientTests(unittest.TestCase):
                 with self.assertRaises(CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked):
                     client.enqueue(cms_support.event())
 
+    def test_exact_remote_errors_are_visible_without_exposing_private_details(self):
+        change = cms_support.event()
+        self.client.enqueue(change)
+        with self.assertRaises(
+            CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked
+        ) as conflict:
+            self.client.enqueue(change, client_max_attempts=4)
+
+        self.assertEqual(
+            conflict.exception.code,
+            "source_delivery_submission_dispatch_client.http_status",
+        )
+        self.assertEqual(conflict.exception.http_status, 409)
+        self.assertEqual(
+            conflict.exception.remote_error_code,
+            "submission_dispatch_http.idempotency_collision",
+        )
+        self.assertFalse(conflict.exception.retryable)
+        self.assertNotIn("site-1", str(conflict.exception))
+
+    def test_unadvertised_or_open_remote_error_envelopes_fail_closed(self):
+        self.runtime.stop_worker()
+        mutations = (
+            lambda value: value.update({
+                "error_code": "submission_dispatch_http.forged",
+            }),
+            lambda value: value.update({"private": "secret"}),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                def transform(number, result, mutation=mutation):
+                    return replace_json(result, mutation) if number == 2 else result
+
+                client = self.make_client(
+                    transport=TransformingTransport(self.transport, transform)
+                )
+                with self.assertRaises(
+                    CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked
+                ) as caught:
+                    client.enqueue(cms_support.event())
+                self.assertEqual(
+                    caught.exception.code,
+                    "source_delivery_submission_dispatch_client.error_response",
+                )
+                self.assertTrue(caught.exception.retryable)
+                self.assertIsNone(caught.exception.http_status)
+                self.assertIsNone(caught.exception.remote_error_code)
+                self.assertNotIn("secret", str(caught.exception))
+
     def test_sidecar_monitor_outage_is_retryable_but_blocked_health_is_valid(self):
         self.runtime.stop_worker()
         readiness = self.client.readiness()
@@ -357,6 +411,11 @@ class SubmissionDispatchClientTests(unittest.TestCase):
             self.client.health()
         self.assertEqual(caught.exception.code, "source_delivery_submission_dispatch_client.http_status")
         self.assertTrue(caught.exception.retryable)
+        self.assertEqual(caught.exception.http_status, 503)
+        self.assertEqual(
+            caught.exception.remote_error_code,
+            "submission_dispatch_http.authentication_unavailable",
+        )
         self.assertNotIn("private outage", str(caught.exception))
 
 

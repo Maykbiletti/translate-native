@@ -64,12 +64,31 @@ class CMSSourceDeliverySubmissionDispatchClientBlocked(RuntimeError):
 
     cms_source_delivery_submission_dispatch_client_failure = True
 
-    def __init__(self, code: str, *, retryable: bool):
-        if ERROR_CODE.fullmatch(code) is None or not isinstance(retryable, bool):
+    def __init__(
+        self, code: str, *, retryable: bool,
+        http_status: int | None = None, remote_error_code: str | None = None,
+    ):
+        remote_valid = (
+            remote_error_code is None
+            or isinstance(remote_error_code, str)
+            and ERROR_CODE.fullmatch(remote_error_code) is not None
+        )
+        status_valid = (
+            http_status is None
+            or isinstance(http_status, int) and not isinstance(http_status, bool)
+            and 400 <= http_status <= 599
+        )
+        if (
+            ERROR_CODE.fullmatch(code) is None or not isinstance(retryable, bool)
+            or not remote_valid or not status_valid
+            or (remote_error_code is None) != (http_status is None)
+        ):
             raise ValueError("submission sidecar client failure is invalid")
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+        self.http_status = http_status
+        self.remote_error_code = remote_error_code
 
 
 @dataclass(frozen=True)
@@ -118,10 +137,15 @@ class URLTransport:
             response.close()
 
 
-def _fail(code: str, *, retryable: bool = False) -> None:
+def _fail(
+    code: str, *, retryable: bool = False,
+    http_status: int | None = None, remote_error_code: str | None = None,
+) -> None:
     raise CMSSourceDeliverySubmissionDispatchClientBlocked(
         "source_delivery_submission_dispatch_client." + code,
         retryable=retryable,
+        http_status=http_status,
+        remote_error_code=remote_error_code,
     )
 
 
@@ -234,15 +258,42 @@ def _authentication_headers(provider, context) -> dict[str, str]:
     return result
 
 
-def _json_response(result: Any, allowed_statuses: set[int]) -> dict[str, Any]:
+def _remote_error(
+    value: Any, status: int, error_codes: Mapping[str, Any],
+) -> None:
+    allowed = error_codes.get(str(status))
+    code = value.get("error_code") if isinstance(value, Mapping) else None
+    if (
+        not isinstance(allowed, list) or not allowed
+        or not all(isinstance(item, str) for item in allowed)
+        or not isinstance(value, Mapping)
+        or set(value) != {"schema", "status", "error_code"}
+        or value.get("schema") != _HTTP.ERROR_SCHEMA
+        or value.get("status") != "BLOCK"
+        or not isinstance(code, str) or code not in allowed
+    ):
+        _fail("error_response", retryable=status >= 500)
+    _fail(
+        "http_status", retryable=status in {408, 425, 429} or status >= 500,
+        http_status=status, remote_error_code=code,
+    )
+
+
+def _json_response(
+    result: Any, allowed_statuses: set[int], error_codes: Mapping[str, Any],
+) -> dict[str, Any]:
     if (
         not isinstance(result, HTTPResult) or isinstance(result.status, bool)
         or not isinstance(result.status, int) or not 100 <= result.status <= 599
     ):
         _fail("transport_invalid", retryable=True)
-    if result.status not in allowed_statuses:
-        if 300 <= result.status <= 399:
-            _fail("redirect")
+    if 300 <= result.status <= 399:
+        _fail("redirect")
+    known_error = (
+        result.status not in allowed_statuses
+        and str(result.status) in error_codes
+    )
+    if result.status not in allowed_statuses and not known_error:
         _fail(
             "http_status",
             retryable=result.status in {408, 425, 429} or result.status >= 500,
@@ -284,6 +335,8 @@ def _json_response(result: Any, allowed_statuses: set[int]) -> dict[str, Any]:
         _fail("response_json")
     if not isinstance(value, dict):
         _fail("response_binding")
+    if known_error:
+        _remote_error(value, result.status, error_codes)
     return value
 
 
@@ -378,7 +431,10 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
     def __repr__(self) -> str:
         return "CMSSourceDeliverySubmissionDispatchHTTPClient(configured=True)"
 
-    def _request(self, method, path, scope, body, statuses, context, headers=None):
+    def _request(
+        self, method, path, scope, body, statuses, context,
+        error_codes, headers=None,
+    ):
         authentication = {
             "schema": AUTH_CONTEXT_SCHEMA, "method": method,
             "origin": self.origin, "path": path, "scope": scope,
@@ -402,12 +458,13 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             raise
         except Exception:
             _fail("network", retryable=True)
-        return _json_response(result, statuses)
+        return _json_response(result, statuses, error_codes)
 
     def capabilities(self) -> Mapping[str, Any]:
+        contract = self._expected_capabilities["operations"]["capabilities"]
         response = self._request(
             "GET", _HTTP.CAPABILITIES_PATH, _HTTP.SCOPES[_HTTP.CAPABILITIES_PATH],
-            None, {200}, {},
+            None, {200}, {}, contract["error_codes"],
         )
         if (
             set(response) != {"schema", "capabilities"}
@@ -443,6 +500,7 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
         response = self._request(
             contract["method"], contract["path"], contract["scope"], body,
             {contract["success_status"]}, identity,
+            contract["error_codes"],
             {
                 "Idempotency-Key": identity["request_id"],
                 "X-Localization-Source-Payload-Sha256": hashlib.sha256(
@@ -490,7 +548,7 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
         body = _canonical({"schema": contract["request_schema"], **identity})
         response = self._request(
             contract["method"], contract["path"], contract["scope"], body,
-            {contract["success_status"]}, identity,
+            {contract["success_status"]}, identity, contract["error_codes"],
         )
         if (
             set(response) != {
@@ -517,7 +575,7 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
         contract = self._contract("openapi")
         response = self._request(
             contract["method"], contract["path"], contract["scope"], None,
-            {contract["success_status"]}, {},
+            {contract["success_status"]}, {}, contract["error_codes"],
         )
         expected = _HTTP._OPENAPI.build_document(self._expected_capabilities)
         if (
@@ -538,10 +596,10 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
         contract = self._contract(name)
         response = self._request(
             contract["method"], contract["path"], contract["scope"], None,
-            {contract["success_status"], 503}, {},
+            {contract["success_status"], 503}, {}, contract["error_codes"],
         )
         if response.get("schema") == _HTTP.ERROR_SCHEMA:
-            _fail("http_status", retryable=True)
+            _remote_error(response, 503, contract["error_codes"])
         key = name
         if (
             set(response) != {"schema", key, "capabilities_sha256"}

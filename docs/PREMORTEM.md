@@ -1,5 +1,23 @@
 # Version 6 premortem
 
+## Exact CMS error reasons (13 September 2026)
+
+Assume a CMS handled the advertised success and failure statuses but made an
+unsafe decision from an unverified error body.
+
+- A peer could return a real status with an invented or stale error code.
+- An open error object could carry private fields into logs or user interfaces.
+- A transient `503` and terminal `409` could receive the wrong retry treatment.
+- Bodyless routes could still emit undocumented `411` or `413` framing errors.
+- A code-map change could escape the active capability and OpenAPI hashes.
+
+The v7 capability generation binds the complete error-code set for every
+route and status. The v6 OpenAPI document emits closed status-specific enums,
+including the real bodyless framing outcomes. The reference client accepts
+remote status and code metadata only after exact envelope validation and keeps
+unknown, extra, malformed, or mismatched errors fail-closed. Tests exercise
+valid terminal and retryable errors plus forged-code and private-field probes.
+
 ## Executable CMS state invariants (13 September 2026)
 
 Assume a generated CMS client rejected malformed fields but accepted a
