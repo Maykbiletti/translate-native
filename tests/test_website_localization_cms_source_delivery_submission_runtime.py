@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -308,6 +309,108 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         )
         self.assertFalse(self.website_database.exists())
         self.assertEqual(len(transport.calls), 1)
+
+    def test_restart_rejects_generation_mismatch_before_network(self):
+        runtime = self.open()
+        runtime.close()
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute(
+                "UPDATE cms_source_delivery_runtime_capability_binding "
+                "SET runtime_capabilities_sha256 = ?",
+                ("e" * 64,),
+            )
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime."
+            "local_database_generation_mismatch",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_rejects_tampered_schema_before_network(self):
+        runtime = self.open()
+        runtime.close()
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute("DROP TABLE cms_source_delivery_meta")
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.local_database_schema_altered",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_rejects_unsafe_database_before_network(self):
+        runtime = self.open()
+        runtime.close()
+        os.chmod(self.website_database, 0o640)
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.local_database_unsafe",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_rejects_nonempty_unbound_database_before_network(self):
+        runtime = self.open()
+        runtime.enqueue_change(cms_support.event())
+        runtime.close()
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute(
+                "DROP TABLE cms_source_delivery_runtime_capability_binding"
+            )
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime."
+            "local_database_generation_unbound",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_adopts_empty_unbound_database_after_remote_preflight(self):
+        runtime = self.open()
+        runtime.close()
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute(
+                "DROP TABLE cms_source_delivery_runtime_capability_binding"
+            )
+        before = len(self.transport.calls)
+
+        reopened = self.open()
+        stored = reopened._delivery._connection.execute(
+            "SELECT runtime_capabilities_sha256, "
+            "commercial_rendering_registry_sha256 "
+            "FROM cms_source_delivery_runtime_capability_binding"
+        ).fetchone()
+
+        self.assertEqual(tuple(stored), (
+            self.remote.expected_runtime_capabilities_sha256,
+            self.remote.expected_commercial_rendering_registry_sha256,
+        ))
+        self.assertEqual(len(self.transport.calls), before + 2)
 
     def test_sidecar_lifecycle_uses_the_owned_authenticated_client(self):
         runtime = self.open()

@@ -79,6 +79,31 @@ def _load_module(name: str, path: Path):
     return module
 
 
+def _capability_binding_row(
+    delivery_capabilities_sha256: str,
+    runtime_capabilities_sha256: str,
+    commercial_rendering_registry_sha256: str,
+) -> tuple[Any, ...]:
+    """Return the one canonical durable generation-binding row."""
+
+    binding_hash = hashlib.sha256("\x00".join((
+        CAPABILITY_BINDING_SCHEMA,
+        CAPABILITY_DATABASE_ROLE,
+        delivery_capabilities_sha256,
+        runtime_capabilities_sha256,
+        commercial_rendering_registry_sha256,
+    )).encode("utf-8")).hexdigest()
+    return (
+        1,
+        CAPABILITY_BINDING_SCHEMA,
+        CAPABILITY_DATABASE_ROLE,
+        delivery_capabilities_sha256,
+        runtime_capabilities_sha256,
+        commercial_rendering_registry_sha256,
+        binding_hash,
+    )
+
+
 _ROOT = Path(__file__).resolve().parents[1]
 _CLIENT = _load_module(
     "blun_website_localization_cms_source_delivery_client",
@@ -359,21 +384,10 @@ class DurableCMSSourceDeliveryOutbox:
             raise CMSSourceDeliveryBlocked(
                 "source_delivery.capability_binding_required"
             )
-        binding_hash = hashlib.sha256("\x00".join((
-            CAPABILITY_BINDING_SCHEMA,
-            CAPABILITY_DATABASE_ROLE,
+        return _capability_binding_row(
             self.capabilities_sha256,
             self.runtime_capabilities_sha256,
             self.commercial_rendering_registry_sha256,
-        )).encode("utf-8")).hexdigest()
-        return (
-            1,
-            CAPABILITY_BINDING_SCHEMA,
-            CAPABILITY_DATABASE_ROLE,
-            self.capabilities_sha256,
-            self.runtime_capabilities_sha256,
-            self.commercial_rendering_registry_sha256,
-            binding_hash,
         )
 
     def _capability_table_exists(self) -> bool:

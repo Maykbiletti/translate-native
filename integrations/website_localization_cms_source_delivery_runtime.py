@@ -215,6 +215,126 @@ def _prepare_database_file(database_path: str) -> Callable[[], None]:
     return guard
 
 
+def preflight_existing_durable_cms_source_delivery(
+    database: str | os.PathLike[str],
+    client: Any,
+) -> None:
+    """Validate an existing durable generation locally without changing it."""
+
+    path = _database_path(database)
+    if path == ":memory:":
+        return
+    _validate_database_parent(path)
+    try:
+        identity = _validate_database_file(path)
+    except FileNotFoundError:
+        return
+
+    delivery_digest = getattr(client, "expected_capabilities_sha256", None)
+    runtime_digest = getattr(
+        client, "expected_runtime_capabilities_sha256", None,
+    )
+    rendering_digest = getattr(
+        client, "expected_commercial_rendering_registry_sha256", None,
+    )
+    if not all(
+        isinstance(value, str) and _DELIVERY.SHA256.fullmatch(value) is not None
+        for value in (delivery_digest, runtime_digest, rendering_digest)
+    ):
+        raise _blocked("source_delivery_runtime.configuration_invalid")
+    expected_binding = _DELIVERY._capability_binding_row(
+        delivery_digest, runtime_digest, rendering_digest,
+    )
+
+    connection = None
+    try:
+        connection = sqlite3.connect(
+            Path(path).as_uri() + "?mode=ro",
+            uri=True,
+            timeout=0,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        _validate_database_file(path, identity)
+        binding_objects = connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name = ?",
+            (_DELIVERY.CAPABILITY_BINDING_TABLE,),
+        ).fetchall()
+
+        meta_columns = tuple(
+            row["name"] for row in connection.execute(
+                "PRAGMA table_info(cms_source_delivery_meta)"
+            ).fetchall()
+        )
+        outbox_columns = tuple(
+            row["name"] for row in connection.execute(
+                "PRAGMA table_info(cms_source_delivery_outbox)"
+            ).fetchall()
+        )
+        empty_file = not binding_objects and not meta_columns and not outbox_columns
+        if empty_file:
+            unexpected = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' "
+                "LIMIT 1"
+            ).fetchone()
+            if unexpected is None:
+                return
+
+        if (
+            meta_columns != _DELIVERY._META_COLUMNS
+            or outbox_columns != _DELIVERY._COLUMNS
+        ):
+            raise _blocked("source_delivery_runtime.database_schema_altered")
+        meta = connection.execute(
+            "SELECT singleton, schema_version FROM cms_source_delivery_meta"
+        ).fetchall()
+        if (
+            len(meta) != 1
+            or tuple(meta[0]) != (1, _DELIVERY.SCHEMA_VERSION)
+        ):
+            raise _blocked("source_delivery_runtime.database_schema_altered")
+
+        if not binding_objects:
+            has_work = connection.execute(
+                "SELECT 1 FROM cms_source_delivery_outbox LIMIT 1"
+            ).fetchone()
+            if has_work is not None:
+                raise _blocked("source_delivery_runtime.database_generation_unbound")
+            return
+        if len(binding_objects) != 1 or tuple(binding_objects[0]) != (
+            "table",
+            _DELIVERY.CAPABILITY_BINDING_TABLE,
+            _DELIVERY.CAPABILITY_BINDING_TABLE,
+            _DELIVERY.CAPABILITY_BINDING_SQL,
+        ):
+            raise _blocked("source_delivery_runtime.database_generation_invalid")
+        columns = tuple(
+            (row[1], row[2], row[3], row[5])
+            for row in connection.execute(
+                f"PRAGMA table_info({_DELIVERY.CAPABILITY_BINDING_TABLE})"
+            ).fetchall()
+        )
+        rows = connection.execute(
+            f"SELECT singleton, schema, database_role, "
+            f"delivery_capabilities_sha256, runtime_capabilities_sha256, "
+            f"commercial_rendering_registry_sha256, binding_sha256 "
+            f"FROM {_DELIVERY.CAPABILITY_BINDING_TABLE}"
+        ).fetchall()
+        if columns != _DELIVERY.CAPABILITY_BINDING_COLUMNS or len(rows) != 1:
+            raise _blocked("source_delivery_runtime.database_generation_invalid")
+        if tuple(rows[0]) != expected_binding:
+            raise _blocked("source_delivery_runtime.database_generation_mismatch")
+        _validate_database_file(path, identity)
+    except DurableCMSSourceDeliveryRuntimeBlocked:
+        raise
+    except sqlite3.Error:
+        raise _blocked("source_delivery_runtime.database_preflight_failed") from None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _duration(value: Any, code: str, *, maximum: float = 86_400) -> float:
     if (
         isinstance(value, bool)

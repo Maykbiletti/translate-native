@@ -107,6 +107,20 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.93.0: local-first website restart preflight
+
+Version 6.93.0 validates an existing outer website outbox locally and read-only
+before the authenticated sidecar preflight can make a network request. File
+ownership, mode and identity, the base outbox schema, the canonical generation
+table, its role-specific row, and its derived digest must all match the exact
+adapter, source-runtime, and commercial rendering-registry generation.
+
+A changed generation, altered schema, malformed binding, unsafe file, or
+non-empty unbound legacy outbox now blocks with a stable content-free reason and
+zero transport calls. A missing database is still created only after remote
+generation verification, while a provably empty unbound legacy database remains
+migratable and is bound only after that same verification succeeds.
+
 ### Version 6.92.0: authenticated website generation preflight
 
 Version 6.92.0 closes the remaining durable generation gap at the public
@@ -1468,7 +1482,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.92.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.93.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

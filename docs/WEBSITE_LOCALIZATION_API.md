@@ -807,8 +807,12 @@ derived digest before every queue operation. A same-generation restart resumes
 pending work. Only an empty unbound legacy database may be bound automatically;
 a non-empty legacy queue, changed generation, altered metadata, or unpinned
 reopen of an already bound database blocks before queue or network access. The
-outer website-to-sidecar adapter remains intentionally unbound and must use a
-separate database.
+production HMAC website-to-sidecar composition binds its separate outer database
+to the same verified runtime and rendering generations. On restart it checks the
+existing file and canonical binding read-only before any capability request. A
+local schema, file-safety, or generation failure therefore makes no network
+request; a new database or empty unbound legacy database proceeds to the
+authenticated downstream preflight before creation or migration.
 
 #### Website-source delivery HTTP sidecar
 

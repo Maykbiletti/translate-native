@@ -954,6 +954,7 @@ def _client_and_adapter(
     transport: Any,
     timeout: float | int,
     allow_loopback_http: bool,
+    local_preflight: Callable[[Any], None] | None = None,
 ) -> tuple[Any, Any]:
     client = _AUTH.RotatingHMACCMSSourceDeliveryClient(
         credential,
@@ -974,6 +975,17 @@ def _client_and_adapter(
             commercial_rendering_registry_sha256
         ),
     )
+    if local_preflight is not None:
+        try:
+            local_preflight(adapter)
+        except Exception as error:
+            code = getattr(error, "code", "")
+            if (
+                isinstance(code, str)
+                and code.startswith("source_delivery_runtime.")
+            ):
+                raise _blocked("local_" + code.split(".", 1)[1]) from None
+            raise _blocked("local_database_preflight_failed") from None
     try:
         response = client.source_readiness()
     except Exception:
@@ -1040,6 +1052,11 @@ def open_durable_hmac_cms_source_delivery_submission(
         transport=transport,
         timeout=timeout,
         allow_loopback_http=allow_loopback_http,
+        local_preflight=lambda adapter: (
+            _RUNTIME.preflight_existing_durable_cms_source_delivery(
+                database, adapter,
+            )
+        ),
     )
     delivery = _RUNTIME.open_durable_cms_source_delivery(
         database,
