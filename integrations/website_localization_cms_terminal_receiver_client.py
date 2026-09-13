@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import re
 import socket
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
@@ -37,7 +40,8 @@ OPENAPI_PATH = BASE_PATH + "/openapi"
 HEALTH_PATH = BASE_PATH + "/health"
 READINESS_PATH = BASE_PATH + "/readiness"
 STATUS_PATH = BASE_PATH + "/status"
-MAX_RESPONSE_BYTES = 16_384
+MAX_REQUEST_BYTES = 16_384
+MAX_RESPONSE_BYTES = 1_000_000
 MAX_ENDPOINT_LENGTH = 2_048
 MAX_HEADER_VALUE_LENGTH = 4_096
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -70,6 +74,26 @@ ACK_FIELDS = {
     "schema", "notification_id", "event_id", "site_id", "status",
     "notification_sha256",
 }
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            "cannot load terminal receiver client dependency: " + path.name
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_OPENAPI = _load_module(
+    "blun_website_localization_terminal_receiver_client_openapi",
+    Path(__file__).resolve().with_name(
+        "website_localization_cms_terminal_notification_receiver_openapi.py"
+    ),
+)
 
 
 class TerminalReceiverClientBlocked(RuntimeError):
@@ -150,7 +174,7 @@ def _canonical(value: Any) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError, RecursionError):
         _fail("request_invalid")
-    if not raw or len(raw) > MAX_RESPONSE_BYTES:
+    if not raw or len(raw) > MAX_REQUEST_BYTES:
         _fail("request_invalid")
     return raw
 
@@ -586,6 +610,29 @@ class HTTPTerminalReceiverClient:
 
     def _verify_contract(self) -> None:
         self.capabilities()
+
+    def openapi(self) -> Mapping[str, Any]:
+        """Return only the exact API document for the freshly pinned contract."""
+
+        capabilities = self.capabilities()["capabilities"]
+        _result, response = self._request(
+            "GET", OPENAPI_PATH, None, {200}, {},
+        )
+        expected = _OPENAPI.build_document(capabilities)
+        if (
+            set(response) != {
+                "schema", "openapi", "openapi_sha256",
+                "capabilities_sha256",
+            }
+            or response.get("schema") != OPENAPI_RESPONSE_SCHEMA
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("openapi") != expected
+            or response.get("openapi_sha256")
+            != _OPENAPI.document_sha256(expected)
+        ):
+            _fail("openapi_binding")
+        return response
 
     def notify(self, notification: Mapping[str, Any]) -> Mapping[str, Any]:
         """Send one immutable notification through its freshly pinned route."""

@@ -538,11 +538,20 @@ same untrusted connection that it is intended to authenticate.
 
 `capabilities()` verifies the response envelope, the canonical digest, every
 schema and limit, all six operation definitions, distinct scopes, and the
-configured notification path. `health()`, `readiness()`, and `status()` first
-repeat that live contract verification; a contract change therefore blocks the
-operational read until the deployment deliberately updates its pin. Every HTTP
-request is separately authenticated and uses exactly one bounded transport
-attempt with no redirects.
+configured notification path. `health()`, `readiness()`, `status()`, and
+`openapi()` first repeat that live contract verification; a contract change
+therefore blocks the operational read until the deployment deliberately
+updates its pin. Every HTTP request is separately authenticated and uses
+exactly one bounded transport attempt with no redirects.
+
+`openapi()` then reconstructs the complete origin-free OpenAPI 3.1 document
+from the freshly verified capability object and requires the remote document,
+its canonical SHA-256, and its capability binding to match exactly. Rehashing
+a substituted schema, changing the custom notification path between requests,
+or returning another capability generation cannot produce trusted evidence.
+The transport retains the 16,384-byte request limit while accepting at most
+the receiver contract's advertised 1,000,000-byte response limit. The read
+does not touch the inbox or worker state.
 
 `notify()` validates the complete immutable terminal notification before any
 network call, repeats the pinned discovery, and sends the canonical bytes to
@@ -569,7 +578,7 @@ response between the two requests from passing as current evidence.
 Malformed JSON, duplicate keys, unexpected fields, inconsistent counts,
 rehashed semantic contract drift, redirects, and private transport failures
 raise `TerminalReceiverClientBlocked` with only a stable code and retryability.
-The three read methods never claim work, mutate receiver state, process a
+The four read methods never claim work, mutate receiver state, process a
 notification, or contain website text. `notify()` performs only the documented
 durable intake operation and returns its content-free acknowledgement.
 
