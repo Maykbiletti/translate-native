@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-receipt-verification-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-receipt-verification-http-response.v1"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v2"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v3"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_TEXT_BYTES = 2_000_000
@@ -28,7 +28,7 @@ HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v1"
+COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
 COMMERCIAL_DIMENSIONS = (
     "amount_currency", "discount_basis", "qualifiers", "tax_status",
     "billing_interval", "commitment", "renewal", "cancellation",
@@ -253,6 +253,40 @@ def _provider(value: Any) -> bool:
     )
 
 
+def _quality_profile(
+    value: Any,
+    *,
+    target_locale: Any,
+    content_type: Any,
+    commercial_profile: Any,
+) -> bool:
+    commercial = commercial_profile is not None
+    expected_fields = {"locale", "version", "sha256"}
+    if commercial:
+        expected_fields.add("commercial")
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_fields
+        or value.get("locale") != target_locale
+        or not _token(value.get("version"))
+        or not isinstance(value.get("sha256"), str)
+        or SHA256.fullmatch(value["sha256"]) is None
+        or (content_type == "commercial") != commercial
+    ):
+        return False
+    if not commercial:
+        return True
+    nested = value.get("commercial")
+    return (
+        isinstance(nested, dict)
+        and set(nested) == {"profile", "version", "sha256"}
+        and nested.get("profile") == commercial_profile
+        and _token(nested.get("version"))
+        and isinstance(nested.get("sha256"), str)
+        and SHA256.fullmatch(nested["sha256"]) is not None
+    )
+
+
 def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
     if (
         not isinstance(value, dict)
@@ -303,12 +337,12 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         not isinstance(confidence, dict)
         or set(confidence) != {"target_native", "source_fidelity"}
         or any(result not in {"high", "low"} for result in confidence.values())
-        or not isinstance(profile, dict)
-        or set(profile) != {"locale", "version", "sha256"}
-        or profile["locale"] != binding["target_locale"]
-        or not _token(profile["version"])
-        or not isinstance(profile["sha256"], str)
-        or SHA256.fullmatch(profile["sha256"]) is None
+        or not _quality_profile(
+            profile,
+            target_locale=binding["target_locale"],
+            content_type=binding["content_type"],
+            commercial_profile=binding["commercial_profile"],
+        )
         or (
             binding["commercial_profile"] is not None
             and not _token(binding["commercial_profile"])

@@ -466,9 +466,36 @@ def _verify_expectation(
         )
     for item in localizations:
         evidence = item["release_evidence"]
+        expected_commercial_quality = None
+        if expectation.content_type == "commercial":
+            try:
+                profile = _CMS._PLANNER.commercial_quality_profile_for(
+                    item["locale"],
+                )
+                if (
+                    not isinstance(profile, dict)
+                    or not isinstance(profile.get("commercial_profile"), str)
+                    or TOKEN.fullmatch(profile["commercial_profile"]) is None
+                    or not isinstance(profile.get("version"), str)
+                    or TOKEN.fullmatch(profile["version"]) is None
+                    or not isinstance(profile.get("sha256"), str)
+                    or SHA256.fullmatch(profile["sha256"]) is None
+                ):
+                    raise ValueError("commercial quality profile is invalid")
+            except (KeyError, TypeError, ValueError):
+                raise CMSReceiverBlocked(
+                    "receiver.release_scope", retryable=False, http_status=409,
+                ) from None
+            expected_commercial_quality = {
+                "profile": profile["commercial_profile"],
+                "version": profile["version"],
+                "sha256": profile["sha256"],
+            }
         if (
             evidence["content_type"] != expectation.content_type
             or evidence["commercial_profile"] != expectation.commercial_profile
+            or evidence["commercial_quality_profile"]
+            != expected_commercial_quality
         ):
             raise CMSReceiverBlocked(
                 "receiver.release_scope", retryable=False, http_status=409,

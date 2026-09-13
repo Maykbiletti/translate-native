@@ -104,7 +104,8 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v2` into the job and plan IDs.
+The planner binds `translate-native.commercial.v5` and the exact target-locale
+commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
 semantic dimensions, exact preservation rules, permitted locale-aware
@@ -113,11 +114,22 @@ integrations can therefore preflight the implemented offer contract without
 receiving project prices, product lists, protected terms or deployment secrets.
 Its separately hashed `review_summary_contract` also declares the exact five
 summary fields, both valid statuses, the only permitted ordered dimension
-names, the evidence-hash canonicalization and the explicit exclusion of source
-text, target text, spans, reviewer prose, project prices and project brands.
+names, and the evidence-hash canonicalization. The digest input is a versioned
+binding containing the profile, exact UTF-8 source and target hashes, and the
+complete evidence. The summary still explicitly excludes source text, target
+text, spans, reviewer prose, project prices and project brands.
 Adapters therefore do not need to infer the targeted-review envelope from a
 schema name or prose. A changed, missing, reordered or unknown dimension makes
 the complete capability response unavailable.
+
+Every commercial locale profile also carries an exact Unicode CLDR 48 numbers
+reference. Use its resolved locale, numbering system, grouping threshold,
+symbols, and standard decimal, percent, currency, ISO-currency, approximation,
+limit, and range patterns as native rendering guidance. Do not use a surface
+pattern or cross-language regex as evidence that the value is semantically
+equal. Meaning-preserving number words, written percentages, and digit forms
+remain eligible; unresolved values require independent model or qualified
+native-domain review.
 The worker uses the existing three ordered passes; the source-fidelity response
 additionally requires `commercial_review`. It contains all ten named dimensions,
 coverage and per-offer evidence. Each item declares `matched`, `source_only`, or
@@ -134,8 +146,9 @@ secretly call an alternative provider.
 
 The worker retains a content-free `commercial_review` summary in result schema
 v5. It contains only the profile, verdict, ordered unresolved dimension names
-and a hash of the complete commercial evidence. Prices, text spans,
-interpretations and reviewer prose do not survive in the summary. The same
+and a hash binding the profile, exact source and target hashes, and complete
+commercial evidence. Prices, text spans, interpretations and reviewer prose do
+not survive in the summary. The same
 summary is bound into quality-evidence request schema v5 and receipt-binding
 schema v2, so an independent adapter receives the exact targeted scope and
 cannot replace it with a generic approval. Tampered, unknown, reordered or

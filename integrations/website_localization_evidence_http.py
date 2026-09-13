@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-quality-evidence-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-quality-evidence-http-response.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v5"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v6"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
@@ -29,7 +29,7 @@ REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v1"
+COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
 COMMERCIAL_DIMENSIONS = (
     "amount_currency", "discount_basis", "qualifiers", "tax_status",
     "billing_interval", "commitment", "renewal", "cancellation",
@@ -265,6 +265,40 @@ def _safe_text(value: Any) -> bool:
     )
 
 
+def _quality_profile(
+    value: Any,
+    *,
+    target_locale: Any,
+    content_type: Any,
+    commercial_profile: Any,
+) -> bool:
+    commercial = commercial_profile is not None
+    expected_fields = {"locale", "version", "sha256"}
+    if commercial:
+        expected_fields.add("commercial")
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_fields
+        or value.get("locale") != target_locale
+        or not _token(value.get("version"))
+        or not isinstance(value.get("sha256"), str)
+        or SHA256.fullmatch(value["sha256"]) is None
+        or (content_type == "commercial") != commercial
+    ):
+        return False
+    if not commercial:
+        return True
+    nested = value.get("commercial")
+    return (
+        isinstance(nested, dict)
+        and set(nested) == {"profile", "version", "sha256"}
+        and nested.get("profile") == commercial_profile
+        and _token(nested.get("version"))
+        and isinstance(nested.get("sha256"), str)
+        and SHA256.fullmatch(nested["sha256"]) is not None
+    )
+
+
 def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
     try:
         payload = request.as_payload()
@@ -310,12 +344,12 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
         or not isinstance(confidence, dict)
         or set(confidence) != {"target_native", "source_fidelity"}
         or any(value not in {"high", "low"} for value in confidence.values())
-        or not isinstance(profile, dict)
-        or set(profile) != {"locale", "version", "sha256"}
-        or profile["locale"] != payload["target_locale"]
-        or not _token(profile["version"])
-        or not isinstance(profile["sha256"], str)
-        or SHA256.fullmatch(profile["sha256"]) is None
+        or not _quality_profile(
+            profile,
+            target_locale=payload["target_locale"],
+            content_type=payload["content_type"],
+            commercial_profile=payload["commercial_profile"],
+        )
         or type(payload["human_review_required"]) is not bool
         or type(payload["independent_review_required"]) is not bool
         or (

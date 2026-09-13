@@ -29,11 +29,12 @@ Neither credentials nor remote response prose appears in adapter errors.
 ## Request
 
 The adapter accepts only the coordinator's exact immutable
-`blun.localization-quality-evidence-request.v5` object. It validates the
+`blun.localization-quality-evidence-request.v6` object. It validates the
 complete field set, request ID, SHA-256 values, locale profile, model identity,
-confidence decisions, optional commercial profile and its exact content-free
-targeted-review summary, UTF-8 size, Unicode NFC, and the source and target text
-hashes before authentication or transport.
+confidence decisions, and, for commercial content, the exact locale-specific
+commercial quality-profile binding plus its content-free targeted-review
+summary, UTF-8 size, Unicode NFC, and the source and target text hashes before
+authentication or transport.
 
 It sends one canonical UTF-8 JSON document:
 
@@ -43,7 +44,7 @@ It sends one canonical UTF-8 JSON document:
   "request_id": "blun-l10n-evidence-<64 lowercase hexadecimal characters>",
   "request_sha256": "<SHA-256 of the canonical inner request>",
   "request": {
-    "schema": "blun.localization-quality-evidence-request.v5",
+    "schema": "blun.localization-quality-evidence-request.v6",
     "request_id": "<same request ID>",
     "source_locale": "en-IE",
     "target_locale": "fi-FI",
@@ -63,9 +64,12 @@ It sends one canonical UTF-8 JSON document:
 ```
 
 The abbreviated example omits other required inner fields for readability.
-Production requests always contain exactly the full v5 field set. Commercial
-requests include `commercial_profile` and the matching `commercial_review`
-summary; non-commercial requests require both fields to be `null`. Source and
+Production requests always contain exactly the full v6 field set. Commercial
+requests include `commercial_profile`, the matching `commercial_review`
+summary, and `quality_profile.commercial` with the same profile identifier plus
+its exact locale-specific version and SHA-256 digest. Non-commercial requests
+require both commercial fields to be `null` and forbid that nested profile.
+Source and
 target text are intentionally present because this external step verifies the
 existing source-blind native review and the separate source-aware fidelity
 review. The service must preserve their confidentiality.
@@ -109,7 +113,7 @@ numbers, a UTF-8 byte-order mark, wrong bindings, ambiguous content types,
 incorrect lengths, and oversized bodies. The release coordinator then applies
 its existing independent receipt checks. Each opaque receipt must verify
 against the complete canonical
-`blun.localization-quality-receipt-binding.v2` object supplied by the release
+`blun.localization-quality-receipt-binding.v3` object supplied by the release
 coordinator, including the review purpose, job and result hashes, both texts
 and locales, content type, glossary and policy versions, provider/model and
 software identities, locale quality and commercial profiles, the exact

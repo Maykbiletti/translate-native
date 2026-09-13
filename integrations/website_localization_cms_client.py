@@ -192,6 +192,14 @@ def _valid_sha256(value: Any, *, optional: bool = False) -> bool:
     )
 
 
+def _capability_pin(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or SHA256.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+    return value
+
+
 def _valid_nonnegative_number(value: Any) -> bool:
     return (
         not isinstance(value, bool)
@@ -357,6 +365,8 @@ class CMSLocalizationHTTPClient:
         allow_loopback_http: bool = False,
         clock: Callable[[], float | int] = time.time,
         request_id_factory: Callable[[], str] | None = None,
+        capabilities_sha256: str | None = None,
+        commercial_rendering_registry_sha256: str | None = None,
     ):
         if not isinstance(allow_loopback_http, bool):
             raise TypeError("allow_loopback_http must be boolean")
@@ -380,12 +390,30 @@ class CMSLocalizationHTTPClient:
             raise TypeError("transport must provide post")
         self.timeout = float(timeout)
         self.clock = clock
+        self._capabilities_sha256 = _capability_pin(
+            capabilities_sha256,
+            "capabilities_sha256",
+        )
+        self._commercial_rendering_registry_sha256 = _capability_pin(
+            commercial_rendering_registry_sha256,
+            "commercial_rendering_registry_sha256",
+        )
         self.request_id_factory = (
             (lambda: secrets.token_hex(16))
             if request_id_factory is None else request_id_factory
         )
         if not callable(self.request_id_factory):
             raise TypeError("request_id_factory must be callable")
+
+    @property
+    def capabilities_sha256(self) -> str | None:
+        """Return the constructor-fixed complete capability deployment pin."""
+        return self._capabilities_sha256
+
+    @property
+    def commercial_rendering_registry_sha256(self) -> str | None:
+        """Return the constructor-fixed commercial rendering registry pin."""
+        return self._commercial_rendering_registry_sha256
 
     def submit_change(self, change: Mapping[str, Any]) -> Mapping[str, Any]:
         request = _copy_request(
@@ -520,6 +548,25 @@ class CMSLocalizationHTTPClient:
             or not self._valid_capabilities(response)
         ):
             raise CMSClientFailed("response_binding", retryable=True)
+        capabilities = response["capabilities"]
+        if (
+            self.capabilities_sha256 is not None
+            and capabilities["sha256"] != self.capabilities_sha256
+        ):
+            raise CMSClientFailed(
+                "capabilities_pin_mismatch",
+                retryable=False,
+            )
+        registry = capabilities["commercial_rendering_registry"]
+        if (
+            self.commercial_rendering_registry_sha256 is not None
+            and registry["sha256"]
+            != self.commercial_rendering_registry_sha256
+        ):
+            raise CMSClientFailed(
+                "commercial_rendering_registry_pin_mismatch",
+                retryable=False,
+            )
         return response
 
     def _read_request(
@@ -827,6 +874,42 @@ class CMSLocalizationHTTPClient:
         digest = unsigned_capabilities.pop("sha256", None)
         unsigned_contract = dict(contract)
         contract_digest = unsigned_contract.pop("sha256", None)
+        commercial = capabilities.get("commercial_profile")
+        rendering_registry = capabilities.get("commercial_rendering_registry")
+        expected_locales = []
+        try:
+            for profile in _CMS._PLANNER.EU_OFFICIAL_LOCALES:
+                commercial_quality = (
+                    _CMS._PLANNER.commercial_quality_profile_for(profile.locale)
+                )
+                expected_locales.append({
+                    "locale": profile.locale,
+                    "eu_code": profile.eu_code,
+                    "language": profile.language,
+                    "native_name": profile.native_name,
+                    "script": profile.script,
+                    "direction": profile.direction,
+                    "quality_profile_version": profile.quality_profile_version,
+                    "quality_profile_sha256": profile.quality_profile_sha256,
+                    "commercial_quality_profile_version": (
+                        commercial_quality["version"]
+                    ),
+                    "commercial_quality_profile_sha256": (
+                        commercial_quality["sha256"]
+                    ),
+                })
+            expected_commercial = _CMS._COMMERCIAL.public_profile(
+                _CMS._PLANNER.COMMERCIAL_PROFILE,
+            )
+            expected_rendering_registry = (
+                _CMS._PLANNER.commercial_rendering_registry()
+            )
+            expected_publication_http = (
+                _CMS.WebsiteLocalizationCMSBridge
+                ._publication_http_capabilities()
+            )
+        except Exception:
+            return False
         if (
             not isinstance(digest, str)
             or SHA256.fullmatch(digest) is None
@@ -846,6 +929,39 @@ class CMSLocalizationHTTPClient:
             or contract.get("schema") != _API.API_CAPABILITIES_SCHEMA
             or contract.get("api_schema") != _API.API_SCHEMA
             or contract.get("error_schema") != _API.API_SCHEMA
+            or set(capabilities) != {
+                "schema", "change_schema", "cancellation_schema",
+                "tombstone_schema", "publication_schema",
+                "tombstone_delivery_schema", "plan_schema", "job_schema",
+                "eu_language_source", "default_target_policy",
+                "content_types", "quality_passes", "commercial_profile",
+                "commercial_rendering_registry", "publication_http",
+                "locales", "sha256",
+            }
+            or capabilities.get("schema") != _CMS.CAPABILITIES_SCHEMA
+            or capabilities.get("change_schema") != _CMS.CHANGE_SCHEMA
+            or capabilities.get("cancellation_schema")
+            != _CMS.CANCELLATION_SCHEMA
+            or capabilities.get("tombstone_schema") != _CMS.TOMBSTONE_SCHEMA
+            or capabilities.get("publication_schema")
+            != _CMS.PUBLICATION_SCHEMA
+            or capabilities.get("tombstone_delivery_schema")
+            != _CMS.TOMBSTONE_DELIVERY_SCHEMA
+            or capabilities.get("plan_schema") != _CMS._PLANNER.SCHEMA
+            or capabilities.get("job_schema") != _CMS._PLANNER.JOB_SCHEMA
+            or capabilities.get("eu_language_source")
+            != _CMS._PLANNER.EU_LANGUAGE_SOURCE
+            or capabilities.get("default_target_policy")
+            != _CMS._DEFAULT_TARGET_POLICY
+            or capabilities.get("content_types")
+            != sorted(_CMS._PLANNER.CONTENT_TYPES)
+            or capabilities.get("quality_passes")
+            != list(_CMS._PLANNER.QUALITY_PASSES)
+            or commercial != expected_commercial
+            or rendering_registry != expected_rendering_registry
+            or capabilities.get("publication_http")
+            != expected_publication_http
+            or capabilities.get("locales") != expected_locales
         ):
             return False
         operations = contract.get("operations")

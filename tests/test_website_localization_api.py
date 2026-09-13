@@ -519,6 +519,38 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(
             commercial["verification"]["ambiguous_values"], "unresolved",
         )
+        self.assertEqual(
+            commercial["locale_quality_profile"],
+            {
+                "schema": CMS._COMMERCIAL.COMMERCIAL_LOCALE_PROFILE_SCHEMA,
+                "required": True,
+                "binding_fields": [
+                    "locale", "version", "commercial_profile",
+                    "quality_profile_version", "quality_profile_sha256",
+                    "rendering_reference",
+                    "sha256",
+                ],
+                "rendering_reference": {
+                    "schema": (
+                        CMS._COMMERCIAL.COMMERCIAL_RENDERING_REFERENCE_SCHEMA
+                    ),
+                    "authority": "Unicode CLDR",
+                    "version": "48",
+                    "purpose": "target-locale-rendering-guidance",
+                    "semantic_proof": False,
+                    "unresolved_route": (
+                        "independent-model-or-qualified-native-domain-review"
+                    ),
+                },
+                "required_commercial_checks": list(
+                    CMS._EXPECTED_COMMERCIAL_DIMENSIONS
+                ),
+                "provider_phases": [
+                    "transcreation", "target_native", "source_fidelity",
+                ],
+                "tamper_policy": "block-before-provider",
+            },
+        )
         unsigned_commercial = dict(commercial)
         commercial_digest = unsigned_commercial.pop("sha256")
         self.assertEqual(
@@ -526,6 +558,88 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             CMS._hash(CMS._canonical_json(unsigned_commercial)),
         )
         self.assertNotIn("blun", json.dumps(commercial).lower())
+        rendering_registry = capabilities["commercial_rendering_registry"]
+        self.assertEqual(
+            set(rendering_registry),
+            {
+                "schema", "commercial_profile", "source", "content_policy",
+                "locales", "sha256",
+            },
+        )
+        self.assertEqual(
+            rendering_registry["schema"],
+            CMS._PLANNER.COMMERCIAL_RENDERING_REGISTRY_SCHEMA,
+        )
+        self.assertEqual(
+            rendering_registry["commercial_profile"],
+            CMS._PLANNER.COMMERCIAL_PROFILE,
+        )
+        self.assertEqual(
+            rendering_registry["source"],
+            {"authority": "Unicode CLDR", "version": "48"},
+        )
+        self.assertTrue(all(
+            value is False
+            for value in rendering_registry["content_policy"].values()
+        ))
+        self.assertEqual(len(rendering_registry["locales"]), 24)
+        self.assertEqual(
+            [item["locale"] for item in rendering_registry["locales"]],
+            [profile.locale for profile in CMS._PLANNER.EU_OFFICIAL_LOCALES],
+        )
+        rendering_by_locale = {
+            item["locale"]: item for item in rendering_registry["locales"]
+        }
+        for locale_item in capabilities["locales"]:
+            rendering_item = rendering_by_locale[locale_item["locale"]]
+            self.assertEqual(
+                rendering_item["commercial_quality_profile"],
+                {
+                    "version": locale_item[
+                        "commercial_quality_profile_version"
+                    ],
+                    "sha256": locale_item[
+                        "commercial_quality_profile_sha256"
+                    ],
+                },
+            )
+            self.assertEqual(
+                rendering_item["rendering_reference"],
+                CMS._PLANNER.commercial_quality_profile_for(
+                    locale_item["locale"],
+                )["rendering_reference"],
+            )
+        self.assertEqual(
+            rendering_by_locale["mt-MT"]["rendering_reference"]["symbols"],
+            {"decimal": ".", "group": ","},
+        )
+        self.assertEqual(
+            rendering_by_locale["fi-FI"]["rendering_reference"]["patterns"]
+            ["at_least"],
+            "vähintään {0}",
+        )
+        self.assertEqual(
+            rendering_by_locale["de-AT"]["rendering_reference"]["patterns"]
+            ["currency"],
+            "¤\N{NO-BREAK SPACE}#,##0.00",
+        )
+        self.assertEqual(
+            rendering_by_locale["pt-PT"]["rendering_reference"]
+            ["minimum_grouping_digits"],
+            2,
+        )
+        unsigned_rendering_registry = dict(rendering_registry)
+        rendering_registry_digest = unsigned_rendering_registry.pop("sha256")
+        self.assertEqual(
+            rendering_registry_digest,
+            CMS._hash(CMS._canonical_json(unsigned_rendering_registry)),
+        )
+        serialized_rendering_registry = json.dumps(
+            rendering_registry,
+            ensure_ascii=False,
+        )
+        self.assertNotIn("pricing.hero", serialized_rendering_registry)
+        self.assertNotIn("€480", serialized_rendering_registry)
         publication_http = capabilities["publication_http"]
         self.assertEqual(
             publication_http["schema"], CMS.PUBLICATION_HTTP_CONTRACT_SCHEMA,
@@ -664,6 +778,18 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             maltese["quality_profile_sha256"],
             CMS._PLANNER.quality_profile_for("mt-MT")["sha256"],
         )
+        for item in capabilities["locales"]:
+            locale_profile = CMS._PLANNER.commercial_quality_profile_for(
+                item["locale"],
+            )
+            self.assertEqual(
+                item["commercial_quality_profile_version"],
+                locale_profile["version"],
+            )
+            self.assertEqual(
+                item["commercial_quality_profile_sha256"],
+                locale_profile["sha256"],
+            )
         claimed = capabilities.pop("sha256")
         self.assertEqual(claimed, CMS._hash(CMS._canonical_json(capabilities)))
         self.assertEqual(headers["Cache-Control"], "no-store")
@@ -758,6 +884,40 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         )
         self.assertNotIn("capabilities", payload)
         self.assertNotIn("locales", payload)
+
+    def test_capabilities_block_commercial_rendering_registry_drift(self):
+        current = CMS._PLANNER.commercial_rendering_registry
+
+        def rehashed(mutation):
+            value = json.loads(json.dumps(current(), ensure_ascii=False))
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "missing": lambda value: value["locales"].pop(),
+            "reordered": lambda value: value["locales"].reverse(),
+            "altered": lambda value: value["locales"][0][
+                "rendering_reference"
+            ]["patterns"].update(currency="¤0"),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._PLANNER,
+                "commercial_rendering_registry",
+                lambda mutation=mutation: rehashed(mutation),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-rendering-registry-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
+            self.assertNotIn("locales", payload)
 
     def test_capabilities_block_commercial_review_contract_drift(self):
         current = CMS._COMMERCIAL.public_review_summary_contract

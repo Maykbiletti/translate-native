@@ -518,11 +518,30 @@ class DurableCMSReceiverStore:
             raise CMSReceiverStoreBlocked("publication locale set is no longer current")
         for item in localizations:
             evidence = item.get("release_evidence")
+            commercial_quality = (
+                evidence.get("commercial_quality_profile")
+                if isinstance(evidence, dict)
+                else None
+            )
+            if expectation["content_type"] == "commercial":
+                quality_valid = (
+                    isinstance(commercial_quality, dict)
+                    and set(commercial_quality) == {"profile", "version", "sha256"}
+                    and commercial_quality.get("profile")
+                    == expectation["commercial_profile"]
+                    and isinstance(commercial_quality.get("version"), str)
+                    and TOKEN.fullmatch(commercial_quality["version"]) is not None
+                    and isinstance(commercial_quality.get("sha256"), str)
+                    and SHA256.fullmatch(commercial_quality["sha256"]) is not None
+                )
+            else:
+                quality_valid = commercial_quality is None
             if (
                 not isinstance(evidence, dict)
                 or evidence.get("content_type") != expectation["content_type"]
                 or evidence.get("commercial_profile")
                 != expectation["commercial_profile"]
+                or not quality_valid
             ):
                 raise CMSReceiverStoreBlocked("publication scope is no longer current")
 
