@@ -1082,6 +1082,40 @@ reports `retryable: true`, and must replay the identical immutable request.
 Representations and failures expose no origin, credential, tenant, source, or
 target text.
 
+#### Durable caller-side public submission
+
+`integrations/website_localization_cms_source_delivery_submission_dispatch.py`
+adds the crash-safe caller-owned handoff for that one-attempt client. Construct
+`DurableCMSSourceDeliverySubmissionDispatcher` over a dedicated SQLite
+connection and the same deployment-approved complete capability SHA-256 as the
+client. The database metadata permanently binds queued work to that generation;
+a restart with another pin blocks before a claim or network call.
+
+`enqueue()` accepts one complete change, cancellation, or tombstone and commits
+its canonical payload plus operation, request, event, site, payload hash, and
+all three retry ceilings before transport. `client_max_attempts` belongs only
+to the CMS-to-website hop. `delivery_max_attempts` remains the website-to-
+sidecar ceiling, and `source_max_attempts` remains the source-processing
+ceiling. An exact enqueue is idempotent; changed content or any changed retry
+budget under the same identity is a collision.
+
+`run_once()` validates the dispatcher's schema and the client's immutable pin,
+then claims at most one due row with a random token. It calls exactly one client
+method, prioritizing due cancellations and tombstones over equally old changes,
+and schedules exponential backoff only for a failure whose client
+contract explicitly marks it retryable. A permanent failure or exhausted local
+ceiling stays failed. If the process stops after remote HTTP 202 but before the
+local completion commit, lease expiry makes the next worker replay the exact
+stored request; the website edge's idempotency remains authoritative.
+
+`status()` and `health()` expose content-free identities, counters, stable
+failure codes, capability hashes, and response hashes. They never expose the
+stored payload. Every read revalidates the complete row; altered source text,
+hashes, retry limits, leases, response evidence, schema, or generation metadata
+block fail-closed. Local `accepted` records only durable website intake and
+does not mean source acceptance, quality approval, translation completion, or
+publication readiness.
+
 A successful response uses schema
 `blun.cms-source-delivery-submission-capabilities-response.v1` and includes the
 HTTP API schema plus the complete freshly verified capability. The adapter
