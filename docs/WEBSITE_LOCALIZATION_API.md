@@ -1142,6 +1142,44 @@ does not return within the configured bound, shutdown fails closed and leaves
 SQLite open so the caller can recover deliberately instead of closing storage
 beneath an active attempt.
 
+#### Authenticated CMS submission sidecar
+
+`integrations/website_localization_cms_source_delivery_submission_dispatch_http.py`
+wraps the owned runtime in a strict HTTPS/WSGI contract for non-Python CMS and
+website backends. Pass a callable `http_authenticator` to either runtime
+factory; the resulting application is available as `runtime.http`. A hosted
+runtime is required for public writes. An externally scheduled, unmanaged, or
+stopped worker remains observable but rejects enqueue before request parsing or
+outbox access.
+
+The canonical capability response at
+`GET /v1/localization/cms-submission-dispatch/capabilities` publishes the exact
+method, path, scope, principal schema, request schema, response schema, limits,
+retry ownership, non-publication semantics, and downstream public-submission
+capability pin. The complete object has its own canonical SHA-256. Health and
+readiness use separate body-free operator scopes. Health describes durable
+outbox integrity; readiness additionally requires the supervised worker to be
+alive and the outbox to be healthy.
+
+`POST /v1/localization/cms-submission-dispatch/requests` authenticates the
+method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
+tenant principal must match the payload's `site_id`; `Idempotency-Key` must
+match the immutable request identity; and
+`X-Localization-Source-Payload-SHA256` must match the canonical complete source
+payload. The request carries distinct `client_max_attempts`,
+`delivery_max_attempts`, and `source_max_attempts` values. HTTP 202 follows only
+after the local durable commit and explicitly means website intake only—not
+source acceptance, linguistic approval, or publication.
+
+`POST /v1/localization/cms-submission-dispatch/status` uses a distinct tenant
+read scope and requires the complete known operation, request, event, site, and
+payload-hash identity. A foreign tenant, altered identity, and absent request
+all produce the same content-free not-found response. Every operational result
+is independently revalidated against the active capability generation before
+serialization. Invalid framing, authentication outage, capability or storage
+drift, a malformed runtime result, and a dead worker therefore block without
+returning stored source content or invoking the downstream public client.
+
 A successful response uses schema
 `blun.cms-source-delivery-submission-capabilities-response.v1` and includes the
 HTTP API schema plus the complete freshly verified capability. The adapter

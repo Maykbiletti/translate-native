@@ -41,6 +41,12 @@ _FILE_RUNTIME = _load_module(
     "blun_website_localization_submission_dispatch_runtime_file",
     _ROOT / "integrations" / "website_localization_cms_source_delivery_runtime.py",
 )
+_HTTP = _load_module(
+    "blun_website_localization_submission_dispatch_runtime_http",
+    _ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_submission_dispatch_http.py",
+)
 
 
 class CMSSourceDeliverySubmissionDispatchRuntimeBlocked(RuntimeError):
@@ -210,6 +216,7 @@ class DurableCMSSourceDeliverySubmissionDispatchRuntime:
         lease_seconds: float,
         clock: Callable[[], float | int],
         expected_capabilities_sha256: str,
+        http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
     ):
         self._connection = connection
         self._guard = guard
@@ -226,6 +233,11 @@ class DurableCMSSourceDeliverySubmissionDispatchRuntime:
         self._worker_thread: threading.Thread | None = None
         self._worker_state = "unmanaged"
         self._worker_error_code: str | None = None
+        self.http = (
+            None
+            if http_authenticator is None
+            else _HTTP.build_submission_dispatch_http(self, http_authenticator)
+        )
 
     def __repr__(self) -> str:
         return f"DurableCMSSourceDeliverySubmissionDispatchRuntime(state={self.state!r})"
@@ -312,6 +324,21 @@ class DurableCMSSourceDeliverySubmissionDispatchRuntime:
             now=_now(self._clock),
             lease_seconds=self._lease_seconds,
         )
+
+    @property
+    def expected_capabilities_sha256(self) -> str:
+        """Return the locally verified public website contract pin."""
+
+        self._assert_owner()
+        with self._lock:
+            if self._closed:
+                raise _blocked("closed")
+            try:
+                self._guard()
+                self._guard_client()
+            except _FILE_RUNTIME.DurableCMSSourceDeliveryRuntimeBlocked as error:
+                raise _file_failure(error) from error
+            return self._expected_capabilities_sha256
 
     @staticmethod
     def _loop_delays(
@@ -494,9 +521,12 @@ def open_durable_cms_source_delivery_submission_dispatch(
     lease_seconds: float | int = 600,
     base_delay_seconds: float | int = 5,
     max_delay_seconds: float | int = 300,
+    http_authenticator: Callable[[dict[str, Any]], Any] | None = None,
 ) -> DurableCMSSourceDeliverySubmissionDispatchRuntime:
     """Validate everything, then open one guarded caller-owned outbox."""
 
+    if http_authenticator is not None and not callable(http_authenticator):
+        raise _blocked("configuration_invalid")
     options = {
         "base_delay_seconds": base_delay_seconds,
         "max_delay_seconds": max_delay_seconds,
@@ -547,6 +577,7 @@ def open_durable_cms_source_delivery_submission_dispatch(
         lease_seconds=lease,
         clock=clock,
         expected_capabilities_sha256=digest,
+        http_authenticator=http_authenticator,
     )
 
 
