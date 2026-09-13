@@ -952,10 +952,11 @@ the existing owner-only, process-bound, inode-guarded lifecycle.
 
 Call `submission_capabilities()` to discover the exact live contract of this
 complete website edge. The content-free
-`blun.cms-source-delivery-submission-capabilities.v2` snapshot advertises the
-accepted change and removal schemas, all six composed operational projection
-schemas, the separately owned website, sidecar and source retry budgets, and
-the explicit rule that durable source acceptance is not publication. It also
+`blun.cms-source-delivery-submission-capabilities.v3` snapshot advertises the
+public change and removal HTTPS contracts, all six composed operational
+projection schemas, the separately owned website, sidecar and source retry
+budgets, and the explicit rule that durable website-outbox acceptance is not
+source acceptance or publication. It also
 states that this edge neither generates translations nor grants publication
 authority. Its
 canonical SHA-256 binds the locally verified website generation to the current
@@ -969,17 +970,19 @@ capabilities. Returned nested maps are defensive copies and contain no
 endpoint, credential, tenant, source text, target text or project price.
 
 For a separately hosted website process, wrap that same runtime with
-`build_submission_capabilities_http()` from
-`integrations/website_localization_cms_source_delivery_submission_capabilities_http.py`.
-It exposes exactly one route:
+`build_submission_http()` from
+`integrations/website_localization_cms_source_delivery_submission_http.py`.
+It exposes the capability route plus two durable write routes:
 
 | Method | Path | Required scope |
 | --- | --- | --- |
 | `GET` | `/v1/localization/source-delivery/submission-capabilities` | `source-delivery-submission-capabilities:read` |
+| `POST` | `/v1/localization/source-delivery/submissions/changes` | `source-delivery-submission-change:write` |
+| `POST` | `/v1/localization/source-delivery/submissions/removals` | `source-delivery-submission-removal:write` |
 
-The route requires HTTPS, no query, no request body, no content type, and no
-transfer encoding. Before any local database read or sidecar request, the
-adapter calls the deployment-owned authenticator with schema
+The read route still requires HTTPS, no query, no request body, no content
+type, and no transfer encoding. Before any local database read or sidecar
+request, the adapter calls the deployment-owned authenticator with schema
 `blun.cms-source-delivery-submission-capabilities-auth-request.v1`, the exact
 method and path, normalized request headers, and the SHA-256 of the empty body.
 The authenticator must return only principal schema
@@ -987,6 +990,35 @@ The authenticator must return only principal schema
 credential ID and version, and the exact required scope. Deployments may use
 HMAC, mutual TLS, a bearer-token proxy, or another verifier; replay prevention,
 credential storage, and rotation remain host responsibilities.
+
+Each write route requires HTTPS, canonical UTF-8 JSON, an exact decimal
+`Content-Length`, no query or transfer encoding, and a body of at most
+4,000,000 bytes. Its envelope contains exactly one change or removal plus the
+independent `source_max_attempts` and `delivery_max_attempts` values, each from
+1 through 20. `Idempotency-Key` must equal the event, cancellation, or
+tombstone identity. `X-Localization-Source-Payload-Sha256` must equal the
+canonical SHA-256 of the nested source payload. Duplicate JSON keys,
+non-finite numbers, a UTF-8 BOM, wrong payload type, wrong identifier, wrong
+hash, or a different retry budget on replay blocks before persistence.
+
+The write authenticator receives only normalized request metadata and the
+whole-body SHA-256 under
+`blun.cms-source-delivery-submission-http-auth-request.v1`. It must return the
+exact write scope and an authorized `site_id` under
+`blun.cms-source-delivery-submission-write-principal.v1`. A foreign site is
+reported as not found and cannot reach readiness, generation, or queue state.
+The hosted worker and role-specific commercial capability generation must both
+be ready before enqueue. Only after SQLite commits the immutable outer-outbox
+row does the adapter return HTTP 202 with content-free identity, hashes,
+separate retry ceilings, current local queue status, and the verified website
+generation. That acknowledgement never means sidecar or source acceptance,
+quality approval, translation generation, or publication. An exact replay is
+safe; an identity collision returns a content-free conflict.
+
+Deployments that need read-only discovery may continue to use
+`build_submission_capabilities_http()` directly. Both builders validate the
+same v3 capability snapshot, so the advertised public routes cannot drift from
+the hosted write boundary.
 
 A successful response uses schema
 `blun.cms-source-delivery-submission-capabilities-response.v1` and includes the

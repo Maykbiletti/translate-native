@@ -50,6 +50,12 @@ CAPABILITIES_HTTP = load(
     / "integrations"
     / "website_localization_cms_source_delivery_submission_capabilities_http.py",
 )
+SUBMISSION_HTTP = load(
+    "blun_test_website_localization_submission_http",
+    ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_submission_http.py",
+)
 
 
 class Nonces:
@@ -350,14 +356,26 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             },
             "enqueue_change": {
                 "kind": "write",
-                "request_schemas": [SUBMISSION._ADAPTER.CHANGE_SCHEMA],
+                "method": "POST",
+                "path": SUBMISSION.CHANGE_HTTP_PATH,
+                "scope": SUBMISSION.CHANGE_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.CHANGE_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [SUBMISSION._ADAPTER.CHANGE_SCHEMA],
+                "response_schema": SUBMISSION.CHANGE_HTTP_RESPONSE_SCHEMA,
             },
             "enqueue_removal": {
                 "kind": "write",
-                "request_schemas": [
+                "method": "POST",
+                "path": SUBMISSION.REMOVAL_HTTP_PATH,
+                "scope": SUBMISSION.REMOVAL_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.REMOVAL_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [
                     SUBMISSION._ADAPTER.CANCELLATION_SCHEMA,
                     SUBMISSION._ADAPTER.TOMBSTONE_SCHEMA,
                 ],
+                "response_schema": SUBMISSION.REMOVAL_HTTP_RESPONSE_SCHEMA,
             },
             "submission_status": {
                 "kind": "read", "response_schema": SUBMISSION.STATUS_SCHEMA,
@@ -389,7 +407,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(payload["semantics"], {
             "content_free": True,
-            "accepted_means": "durable_source_acceptance",
+            "accepted_means": "durable_website_outbox_acceptance",
             "accepted_implies_publication": False,
             "translation_generation": False,
             "publication_authority": False,
@@ -497,6 +515,87 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             response["capabilities"]["sidecar_capabilities_sha256"],
             self.sidecar_digest,
         )
+
+    def test_public_change_route_persists_once_before_accepting(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        authentication_requests = []
+
+        def authenticate(request):
+            authentication_requests.append(copy.deepcopy(request))
+            return {
+                "schema": SUBMISSION_HTTP.PRINCIPAL_SCHEMA,
+                "principal_id": "website-backend",
+                "credential_id": "public-ingress",
+                "credential_version": "1",
+                "scope": SUBMISSION_HTTP.CHANGE_SCOPE,
+                "site_id": "site-1",
+            }
+
+        application = SUBMISSION_HTTP.build_submission_http(
+            runtime, authenticate,
+        )
+        change = cms_support.event()
+        request = {
+            "schema": SUBMISSION_HTTP.CHANGE_REQUEST_SCHEMA,
+            "change": change,
+            "source_max_attempts": 3,
+            "delivery_max_attempts": 4,
+        }
+        body = SUBMISSION._canonical(request)
+        payload_sha256 = self.payload_hash(change)
+        environ = {
+            "PATH_INFO": SUBMISSION_HTTP.CHANGE_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json; charset=utf-8",
+            "CONTENT_LENGTH": str(len(body)),
+            "HTTP_IDEMPOTENCY_KEY": change["event_id"],
+            "HTTP_X_LOCALIZATION_SOURCE_PAYLOAD_SHA256": payload_sha256,
+            "wsgi.input": io.BytesIO(body),
+        }
+
+        responses = []
+        for _attempt in range(2):
+            metadata = {}
+            environ["wsgi.input"] = io.BytesIO(body)
+            response_body = b"".join(application(
+                environ,
+                lambda status, headers: metadata.update(
+                    status=status, headers=dict(headers),
+                ),
+            ))
+            responses.append((metadata, json.loads(response_body)))
+
+        self.assertEqual(
+            [item[0]["status"] for item in responses],
+            ["202 Accepted", "202 Accepted"],
+        )
+        self.assertEqual(len(authentication_requests), 2)
+        self.assertTrue(all(
+            item["body_sha256"] == hashlib.sha256(body).hexdigest()
+            for item in authentication_requests
+        ))
+        self.assertTrue(all(
+            item[1]["request_id"] == change["event_id"]
+            and item[1]["payload_sha256"] == payload_sha256
+            and item[1]["accepted_implies_publication"] is False
+            for item in responses
+        ))
+        rows = runtime._delivery._connection.execute(
+            "SELECT operation, request_id, payload_sha256, "
+            "delivery_max_attempts, source_max_attempts "
+            "FROM cms_source_delivery_outbox"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(tuple(rows[0]), (
+            "change", change["event_id"], payload_sha256, 4, 3,
+        ))
 
     def test_generation_tampering_blocks_projections_before_network(self):
         runtime = self.open()

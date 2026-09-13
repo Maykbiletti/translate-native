@@ -81,16 +81,28 @@ def capability_payload():
             },
             "enqueue_change": {
                 "kind": "write",
-                "request_schemas": [
+                "method": "POST",
+                "path": SUBMISSION.CHANGE_HTTP_PATH,
+                "scope": SUBMISSION.CHANGE_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.CHANGE_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [
                     SUBMISSION._ADAPTER.CHANGE_SCHEMA,
                 ],
+                "response_schema": SUBMISSION.CHANGE_HTTP_RESPONSE_SCHEMA,
             },
             "enqueue_removal": {
                 "kind": "write",
-                "request_schemas": [
+                "method": "POST",
+                "path": SUBMISSION.REMOVAL_HTTP_PATH,
+                "scope": SUBMISSION.REMOVAL_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.REMOVAL_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [
                     SUBMISSION._ADAPTER.CANCELLATION_SCHEMA,
                     SUBMISSION._ADAPTER.TOMBSTONE_SCHEMA,
                 ],
+                "response_schema": SUBMISSION.REMOVAL_HTTP_RESPONSE_SCHEMA,
             },
             "submission_status": {
                 "kind": "read",
@@ -135,7 +147,7 @@ def capability_payload():
         },
         "semantics": {
             "content_free": True,
-            "accepted_means": "durable_source_acceptance",
+            "accepted_means": "durable_website_outbox_acceptance",
             "accepted_implies_publication": False,
             "translation_generation": False,
             "publication_authority": False,

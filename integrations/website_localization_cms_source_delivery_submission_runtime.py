@@ -47,7 +47,7 @@ _RUNTIME = _load_module(
 HMACCredential = _AUTH.HMACCredential
 
 CAPABILITIES_SCHEMA = (
-    "blun.cms-source-delivery-submission-capabilities.v2"
+    "blun.cms-source-delivery-submission-capabilities.v3"
 )
 CAPABILITIES_HTTP_PATH = (
     "/v1/localization/source-delivery/submission-capabilities"
@@ -63,6 +63,32 @@ CAPABILITIES_HTTP_PRINCIPAL_SCHEMA = (
 )
 CAPABILITIES_HTTP_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-submission-capabilities-response.v1"
+)
+CHANGE_HTTP_PATH = (
+    "/v1/localization/source-delivery/submissions/changes"
+)
+REMOVAL_HTTP_PATH = (
+    "/v1/localization/source-delivery/submissions/removals"
+)
+CHANGE_HTTP_SCOPE = "source-delivery-submission-change:write"
+REMOVAL_HTTP_SCOPE = "source-delivery-submission-removal:write"
+WRITE_HTTP_AUTH_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-submission-http-auth-request.v1"
+)
+WRITE_HTTP_PRINCIPAL_SCHEMA = (
+    "blun.cms-source-delivery-submission-write-principal.v1"
+)
+CHANGE_HTTP_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-submission-change-request.v1"
+)
+REMOVAL_HTTP_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-submission-removal-request.v1"
+)
+CHANGE_HTTP_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-submission-change-response.v1"
+)
+REMOVAL_HTTP_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-submission-removal-response.v1"
 )
 STATUS_SCHEMA = "blun.cms-source-delivery-submission-status.v2"
 LIFECYCLE_SCHEMA = "blun.cms-source-delivery-submission-lifecycle.v3"
@@ -475,14 +501,26 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             },
             "enqueue_change": {
                 "kind": "write",
-                "request_schemas": [_ADAPTER.CHANGE_SCHEMA],
+                "method": "POST",
+                "path": CHANGE_HTTP_PATH,
+                "scope": CHANGE_HTTP_SCOPE,
+                "principal_schema": WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": CHANGE_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [_ADAPTER.CHANGE_SCHEMA],
+                "response_schema": CHANGE_HTTP_RESPONSE_SCHEMA,
             },
             "enqueue_removal": {
                 "kind": "write",
-                "request_schemas": [
+                "method": "POST",
+                "path": REMOVAL_HTTP_PATH,
+                "scope": REMOVAL_HTTP_SCOPE,
+                "principal_schema": WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": REMOVAL_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [
                     _ADAPTER.CANCELLATION_SCHEMA,
                     _ADAPTER.TOMBSTONE_SCHEMA,
                 ],
+                "response_schema": REMOVAL_HTTP_RESPONSE_SCHEMA,
             },
             "submission_status": {
                 "kind": "read",
@@ -529,7 +567,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         }
         semantics = {
             "content_free": True,
-            "accepted_means": "durable_source_acceptance",
+            "accepted_means": "durable_website_outbox_acceptance",
             "accepted_implies_publication": False,
             "translation_generation": False,
             "publication_authority": False,

@@ -203,14 +203,26 @@ def _capabilities(value: Any) -> dict[str, Any]:
             },
             "enqueue_change": {
                 "kind": "write",
-                "request_schemas": [_SUBMISSION._ADAPTER.CHANGE_SCHEMA],
+                "method": "POST",
+                "path": _SUBMISSION.CHANGE_HTTP_PATH,
+                "scope": _SUBMISSION.CHANGE_HTTP_SCOPE,
+                "principal_schema": _SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": _SUBMISSION.CHANGE_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [_SUBMISSION._ADAPTER.CHANGE_SCHEMA],
+                "response_schema": _SUBMISSION.CHANGE_HTTP_RESPONSE_SCHEMA,
             },
             "enqueue_removal": {
                 "kind": "write",
-                "request_schemas": [
+                "method": "POST",
+                "path": _SUBMISSION.REMOVAL_HTTP_PATH,
+                "scope": _SUBMISSION.REMOVAL_HTTP_SCOPE,
+                "principal_schema": _SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": _SUBMISSION.REMOVAL_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [
                     _SUBMISSION._ADAPTER.CANCELLATION_SCHEMA,
                     _SUBMISSION._ADAPTER.TOMBSTONE_SCHEMA,
                 ],
+                "response_schema": _SUBMISSION.REMOVAL_HTTP_RESPONSE_SCHEMA,
             },
             "submission_status": {
                 "kind": "read",
@@ -267,7 +279,7 @@ def _capabilities(value: Any) -> dict[str, Any]:
             raise ValueError
         if payload["semantics"] != {
             "content_free": True,
-            "accepted_means": "durable_source_acceptance",
+            "accepted_means": "durable_website_outbox_acceptance",
             "accepted_implies_publication": False,
             "translation_generation": False,
             "publication_authority": False,
