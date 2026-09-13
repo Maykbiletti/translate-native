@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v4"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v5"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -40,9 +40,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v4"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v5"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v4"
+    "blun.cms-public-submission-dispatch-capabilities-response.v5"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -72,6 +72,14 @@ METHODS = {
 }
 TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH}
 BODYLESS_PATHS = {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH}
+ERROR_STATUSES = {
+    CAPABILITIES_PATH: (400, 401, 403, 405, 503),
+    ENQUEUE_PATH: (400, 401, 403, 405, 409, 411, 413, 415, 503),
+    HEALTH_PATH: (400, 401, 403, 405, 503),
+    OPENAPI_PATH: (400, 401, 403, 405, 503),
+    READINESS_PATH: (400, 401, 403, 405, 503),
+    STATUS_PATH: (400, 401, 403, 404, 405, 411, 413, 415, 503),
+}
 MAX_BODY_BYTES = 4_000_000
 MAX_HEADERS = 64
 MAX_HEADER_VALUE = 4096
@@ -469,6 +477,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "request_schema": request_schema,
                 "response_schema": response_schema,
                 "success_status": status,
+                "error_statuses": list(ERROR_STATUSES[path]),
             }
         contract = {
             "schema": CAPABILITIES_SCHEMA,

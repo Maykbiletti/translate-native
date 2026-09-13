@@ -1191,6 +1191,16 @@ semantic to the active generation. The v4 capability document additionally
 binds `openapi_document_schema`; therefore an older or replaced description
 cannot keep the same capability SHA-256 even if its routes appear compatible.
 
+The v5 capability generation additionally publishes the exact ordered
+`error_statuses` for every operation. The v4 OpenAPI document renders those as
+concrete responses and has no catch-all `default` response. Enqueue exposes
+conflict and body-framing outcomes, status exposes its tenant-safe not-found
+outcome, and all routes expose their authentication and availability failures.
+For health and readiness only, `503` is a `oneOf` between the route's normal
+content-free monitor envelope and the standard fail-closed error envelope;
+this matches the runtime distinction between a valid degraded state and an
+inability to produce trustworthy monitoring evidence.
+
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
 tenant principal must match the payload's `site_id`; `Idempotency-Key` must

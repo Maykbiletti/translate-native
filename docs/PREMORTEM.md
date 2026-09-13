@@ -1,5 +1,22 @@
 # Version 6 premortem
 
+## Exact CMS failure contracts (13 September 2026)
+
+Assume a generated CMS client handled successful requests correctly but made
+an unsafe retry or parsing decision on a non-success response.
+
+- A single OpenAPI `default` branch hid which failures each route can emit.
+- Conflict and tenant-safe not-found results could be mistaken for outages.
+- Health and readiness can return a valid degraded monitor body at `503`, not
+  only the ordinary error envelope.
+- New failure behavior could appear without changing the capability pin.
+
+Every operation now carries an exact ordered `error_statuses` list inside the
+v5 capability generation. OpenAPI emits only the success and those concrete
+statuses; health and readiness use an explicit `oneOf` for their two valid
+`503` bodies. Tests prove route-by-route parity, reject a catch-all response,
+and bind the new OpenAPI document generation into the capability digest.
+
 ## Self-describing CMS capability schema (13 September 2026)
 
 Assume a CMS generated correct source payload types but still accepted a stale

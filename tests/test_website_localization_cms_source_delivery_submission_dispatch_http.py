@@ -183,6 +183,14 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertTrue(
             capabilities["semantics"]["write_requires_ready_managed_worker"]
         )
+        self.assertEqual(
+            capabilities["operations"]["enqueue"]["error_statuses"],
+            [400, 401, 403, 405, 409, 411, 413, 415, 503],
+        )
+        self.assertEqual(
+            capabilities["operations"]["status"]["error_statuses"],
+            [400, 401, 403, 404, 405, 411, 413, 415, 503],
+        )
         unsigned = dict(capabilities)
         digest = unsigned.pop("sha256")
         self.assertEqual(digest, hashlib.sha256(self.canonical(unsigned)).hexdigest())
@@ -222,6 +230,12 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             self.assertEqual(described["x-authentication-scope"], operation["scope"])
             self.assertEqual(described["x-principal-schema"], operation["principal_schema"])
             self.assertEqual(described["x-success-status"], operation["success_status"])
+            self.assertEqual(described["x-error-statuses"], operation["error_statuses"])
+            self.assertEqual(
+                set(described["responses"]),
+                {str(operation["success_status"]), *map(str, operation["error_statuses"])},
+            )
+            self.assertNotIn("default", described["responses"])
         rendered = response["raw"].decode("utf-8")
         for private in (
             cms_support.event()["localization"]["source_text"],
@@ -299,6 +313,15 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             if value is None:
                 self.assertEqual(described, {"type": "null"})
                 return
+            if isinstance(value, list):
+                self.assertEqual(described["type"], "array")
+                self.assertFalse(described["items"])
+                self.assertEqual(described["minItems"], len(value))
+                self.assertEqual(described["maxItems"], len(value))
+                self.assertEqual(len(described["prefixItems"]), len(value))
+                for item_schema, item in zip(described["prefixItems"], value):
+                    assert_exact(item_schema, item)
+                return
             expected_type = (
                 "boolean" if isinstance(value, bool)
                 else "integer" if isinstance(value, int)
@@ -321,6 +344,32 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             capabilities["openapi_document_schema"], document["x-schema"]
         )
         self.assertEqual(schema["x-capabilities-sha256"], capabilities["sha256"])
+
+    def test_openapi_models_exact_errors_and_degraded_monitor_responses(self):
+        self.open()
+        document = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]
+        capabilities = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )
+
+        for name, operation in capabilities["operations"].items():
+            described = document["paths"][operation["path"]][
+                operation["method"].lower()
+            ]
+            for status in operation["error_statuses"]:
+                schema = described["responses"][str(status)]["content"][
+                    "application/json"
+                ]["schema"]
+                if name in {"health", "readiness"} and status == 503:
+                    expected = name.title() + "Response"
+                    self.assertEqual(schema["oneOf"], [
+                        {"$ref": "#/components/schemas/" + expected},
+                        {"$ref": "#/components/schemas/Error"},
+                    ])
+                else:
+                    self.assertEqual(
+                        schema, {"$ref": "#/components/schemas/Error"}
+                    )
 
     def test_enqueue_commits_before_202_and_status_requires_full_identity(self):
         self.open()

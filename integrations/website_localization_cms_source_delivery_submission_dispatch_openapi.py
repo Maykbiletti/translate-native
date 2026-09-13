@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v3"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v4"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -166,7 +166,36 @@ def _operation(
     contract: Mapping[str, Any], *, operation_id: str,
     tag: str, summary: str, request_schema: str | None,
     response_component: str, headers: bool = False,
+    degraded_response_component: str | None = None,
 ) -> dict[str, Any]:
+    responses = {
+        str(contract["success_status"]): {
+            "description": "Exact validated content-free response.",
+            "content": {
+                "application/json": {
+                    "schema": _schema_ref(response_component),
+                },
+            },
+        },
+    }
+    for status in contract["error_statuses"]:
+        schema: dict[str, Any] = _schema_ref("Error")
+        description = "Fail-closed content-free error."
+        if status == 503 and degraded_response_component is not None:
+            schema = {
+                "oneOf": [
+                    _schema_ref(degraded_response_component),
+                    _schema_ref("Error"),
+                ],
+            }
+            description = (
+                "Validated degraded monitor state or fail-closed "
+                "content-free error."
+            )
+        responses[str(status)] = {
+            "description": description,
+            "content": {"application/json": {"schema": schema}},
+        }
     operation: dict[str, Any] = {
         "operationId": operation_id,
         "summary": summary,
@@ -175,22 +204,8 @@ def _operation(
         "x-authentication-scope": contract["scope"],
         "x-principal-schema": contract["principal_schema"],
         "x-success-status": contract["success_status"],
-        "responses": {
-            str(contract["success_status"]): {
-                "description": "Exact validated content-free response.",
-                "content": {
-                    "application/json": {
-                        "schema": _schema_ref(response_component),
-                    },
-                },
-            },
-            "default": {
-                "description": "Fail-closed content-free error.",
-                "content": {
-                    "application/json": {"schema": _schema_ref("Error")},
-                },
-            },
-        },
+        "x-error-statuses": list(contract["error_statuses"]),
+        "responses": dict(sorted(responses.items(), key=lambda item: int(item[0]))),
     }
     if request_schema is not None:
         operation["requestBody"] = {
@@ -284,6 +299,7 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 operations["health"], operation_id="readHealth",
                 tag="Operations", summary="Read durable outbox health",
                 request_schema=None, response_component="HealthResponse",
+                degraded_response_component="HealthResponse",
             ),
         },
         operations["openapi"]["path"]: {
@@ -298,6 +314,7 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 operations["readiness"], operation_id="readReadiness",
                 tag="Operations", summary="Read supervised worker readiness",
                 request_schema=None, response_component="ReadinessResponse",
+                degraded_response_component="ReadinessResponse",
             ),
         },
         operations["status"]["path"]: {
