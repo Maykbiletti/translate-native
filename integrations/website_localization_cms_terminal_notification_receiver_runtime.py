@@ -381,6 +381,10 @@ class DurableTerminalNotificationReceiverRuntime:
         site_id: str | None,
         scope: str,
     ) -> None:
+        if request["path"] != _RECEIVER.CAPABILITIES_PATH:
+            request["capabilities_sha256"] = headers.get(
+                "x-localization-capabilities-sha256"
+            )
         try:
             principal = self.application.authenticate(
                 dict(request), dict(headers)
@@ -388,6 +392,19 @@ class DurableTerminalNotificationReceiverRuntime:
         except Exception:
             _RECEIVER._blocked("authentication_unavailable", 503)
         _RECEIVER._principal(principal, site_id, scope)
+        if request["path"] != _RECEIVER.CAPABILITIES_PATH:
+            supplied = request["capabilities_sha256"]
+            expected = _RECEIVER.capabilities_payload(
+                self.application.path
+            )["sha256"]
+            if supplied is None:
+                _RECEIVER._blocked(
+                    "capabilities_precondition_required", 428
+                )
+            if supplied != expected:
+                _RECEIVER._blocked(
+                    "capabilities_precondition_failed", 412
+                )
 
     def _capabilities_request(
         self,

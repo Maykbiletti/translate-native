@@ -19,12 +19,12 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 AUTH_SCHEMA = "blun.cms-source-terminal-notification-http-auth.v1"
-API_SCHEMA = "blun.cms-terminal-receiver-api.v2"
-CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v2"
+API_SCHEMA = "blun.cms-terminal-receiver-api.v3"
+CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v3"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-terminal-receiver-capabilities-response.v2"
+    "blun.cms-terminal-receiver-capabilities-response.v3"
 )
-OPENAPI_DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v1"
+OPENAPI_DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v2"
 OPENAPI_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-openapi-response.v1"
 HEALTH_SCHEMA = "blun.cms-terminal-receiver-health.v1"
 READINESS_SCHEMA = "blun.cms-terminal-receiver-readiness.v1"
@@ -40,6 +40,7 @@ OPENAPI_PATH = BASE_PATH + "/openapi"
 HEALTH_PATH = BASE_PATH + "/health"
 READINESS_PATH = BASE_PATH + "/readiness"
 STATUS_PATH = BASE_PATH + "/status"
+CAPABILITIES_PRECONDITION_HEADER = "X-Localization-Capabilities-SHA256"
 MAX_REQUEST_BYTES = 16_384
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_ENDPOINT_LENGTH = 2_048
@@ -64,6 +65,7 @@ RESERVED_HEADERS = {
     "x-localization-terminal-notification-id",
     "x-localization-terminal-notification-sha256",
     "x-localization-terminal-status-sha256",
+    "x-localization-capabilities-sha256",
 }
 NOTIFICATION_FIELDS = {
     "schema", "notification_id", "event_id", "site_id", "plan_id",
@@ -400,6 +402,10 @@ def _operation(name, method, path, scope, request_schema, request_fields,
         "request_fields": request_fields,
         "response_schema": response_schema,
         "response_fields": response_fields,
+        "capabilities_precondition_header": (
+            None if name == "capabilities"
+            else CAPABILITIES_PRECONDITION_HEADER
+        ),
         "success_status": 200,
     }
 
@@ -409,6 +415,7 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         "schema", "api_schema", "authentication_request_schema",
         "principal_schema", "error_schema", "limits", "processing_statuses",
         "terminal_statuses", "operations", "openapi_document_schema", "sha256",
+        "semantics",
     }:
         return False
     digest = value.get("sha256")
@@ -425,6 +432,9 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         or value.get("openapi_document_schema") != OPENAPI_DOCUMENT_SCHEMA
         or value.get("processing_statuses") != list(PROCESSING_STATUSES)
         or value.get("terminal_statuses") != sorted(TERMINAL_STATUSES)
+        or value.get("semantics") != {
+            "non_discovery_operations_require_exact_capability_precondition": True,
+        }
     ):
         return False
     limits = value.get("limits")
@@ -575,10 +585,18 @@ class HTTPTerminalReceiverClient:
             "body_sha256": body_sha256,
             **context,
         }
+        if path != CAPABILITIES_PATH:
+            authentication["capabilities_sha256"] = (
+                self.expected_capabilities_sha256
+            )
         headers = _authentication_headers(
             self.authentication_headers, authentication,
         )
         headers["Accept"] = "application/json"
+        if path != CAPABILITIES_PATH:
+            headers[CAPABILITIES_PRECONDITION_HEADER] = (
+                self.expected_capabilities_sha256
+            )
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
             headers["X-Localization-Terminal-Status-SHA256"] = body_sha256
@@ -652,6 +670,7 @@ class HTTPTerminalReceiverClient:
             "path": path,
             "body_sha256": body_sha256,
             **context,
+            "capabilities_sha256": self.expected_capabilities_sha256,
         }
         headers = _authentication_headers(
             self.authentication_headers, authentication,
@@ -664,6 +683,9 @@ class HTTPTerminalReceiverClient:
                 payload["notification_id"]
             ),
             "X-Localization-Terminal-Notification-Sha256": body_sha256,
+            CAPABILITIES_PRECONDITION_HEADER: (
+                self.expected_capabilities_sha256
+            ),
         })
         try:
             result = self.transport.request(

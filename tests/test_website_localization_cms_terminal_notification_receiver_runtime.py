@@ -141,9 +141,18 @@ class WSGITransport:
         )
 
 
-def control_request(runtime, path, *, method="GET", value=None, headers=None):
+def control_request(
+    runtime, path, *, method="GET", value=None, headers=None,
+    bind_capabilities=True,
+):
     body = b"" if value is None else RUNTIME._RECEIVER._canonical(value)
     request_headers = {"Authorization": "Bearer exact"}
+    if bind_capabilities and path != RUNTIME._RECEIVER.CAPABILITIES_PATH:
+        request_headers[
+            RUNTIME._RECEIVER.CAPABILITIES_PRECONDITION_HEADER
+        ] = RUNTIME._RECEIVER.capabilities_payload(
+            runtime.application.path
+        )["sha256"]
     if value is not None:
         request_headers.update({
             "Content-Type": "application/json; charset=utf-8",
@@ -162,6 +171,9 @@ def control_request(runtime, path, *, method="GET", value=None, headers=None):
 def adapter(application):
     return HTTP.HTTPTerminalNotifierAdapter(
         "https://cms.example.test/v1/localization/terminal-notifications",
+        RUNTIME._RECEIVER.capabilities_payload(
+            application.application.path
+        )["sha256"],
         lambda _request: {"Authorization": "Bearer exact"},
         transport=WSGITransport(application),
     )
@@ -232,6 +244,53 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
                 )
             ))
             runtime.close()
+
+    def test_control_preconditions_block_before_runtime_or_store_access(self):
+        runtime = open_runtime(":memory:")
+        payload = notification()
+        runtime.inbox.accept(
+            payload, RUNTIME._RECEIVER._canonical(payload),
+            hashlib.sha256(RUNTIME._RECEIVER._canonical(payload)).hexdigest(),
+            now=123.5,
+        )
+        changes = runtime._connection.total_changes
+        status_request = {
+            "schema": RUNTIME._RECEIVER.STATUS_REQUEST_SCHEMA,
+            "event_id": payload["event_id"],
+            "site_id": payload["site_id"],
+        }
+        routes = (
+            (RUNTIME._RECEIVER.HEALTH_PATH, None),
+            (RUNTIME._RECEIVER.OPENAPI_PATH, None),
+            (RUNTIME._RECEIVER.READINESS_PATH, None),
+            (RUNTIME._RECEIVER.STATUS_PATH, status_request),
+        )
+        for path, value in routes:
+            for supplied, expected_status, code in (
+                (None, 428, "notification_receiver.capabilities_precondition_required"),
+                ("0" * 64, 412, "notification_receiver.capabilities_precondition_failed"),
+            ):
+                with self.subTest(path=path, status=expected_status):
+                    headers = (
+                        None if supplied is None else {
+                            RUNTIME._RECEIVER.CAPABILITIES_PRECONDITION_HEADER:
+                            supplied,
+                        }
+                    )
+                    response = control_request(
+                        runtime, path,
+                        method="POST" if value is not None else "GET",
+                        value=value, headers=headers,
+                        bind_capabilities=False,
+                    )
+                    self.assertEqual(response.status, expected_status)
+                    self.assertEqual(
+                        json.loads(response.body)["error_code"], code,
+                    )
+                    self.assertEqual(
+                        runtime._connection.total_changes, changes,
+                    )
+        runtime.close()
 
     def test_restart_replays_the_original_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -592,6 +651,7 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
             {parameter["name"] for parameter in notification_operation["parameters"]},
             {
                 "Idempotency-Key",
+                RUNTIME._RECEIVER.CAPABILITIES_PRECONDITION_HEADER,
                 "X-Localization-Terminal-Notification-Id",
                 "X-Localization-Terminal-Notification-Sha256",
             },

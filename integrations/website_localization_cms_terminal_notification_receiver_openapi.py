@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v1"
+DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v2"
 RESPONSE_SCHEMA = "blun.cms-terminal-receiver-openapi-response.v1"
 
 
@@ -89,6 +89,9 @@ _COMMON = {
 
 def _errors(name: str) -> dict[int, tuple[str, ...]]:
     result = {status: tuple(codes) for status, codes in _COMMON.items()}
+    if name != "capabilities":
+        result[412] = ("notification_receiver.capabilities_precondition_failed",)
+        result[428] = ("notification_receiver.capabilities_precondition_required",)
     if name in {"capabilities", "health", "openapi", "readiness"}:
         result[415] = ("notification_receiver.content_type",)
     if name == "health":
@@ -163,6 +166,11 @@ def _operation(
             "content": {"application/json": {"schema": _ref(request)}},
         }
     parameters = []
+    if name != "capabilities":
+        parameters.append({
+            "name": contract["capabilities_precondition_header"],
+            "in": "header", "required": True, "schema": _ref("Sha256"),
+        })
     if name == "notification":
         parameters.extend([
             {"name": "Idempotency-Key", "in": "header", "required": True,

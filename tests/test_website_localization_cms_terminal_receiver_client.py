@@ -7,6 +7,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -228,12 +229,19 @@ class TerminalReceiverClientTests(unittest.TestCase):
         self.assertTrue(self.transport.calls[1][1].endswith(
             RECEIVER.OPENAPI_PATH
         ))
+        self.assertEqual(
+            self.transport.calls[1][2][
+                RECEIVER.CAPABILITIES_PRECONDITION_HEADER
+            ],
+            self.digest,
+        )
         self.assertEqual(self.authentication_requests[1], {
             "schema": RECEIVER.AUTH_SCHEMA,
             "method": "GET",
             "origin": "https://cms.example.test",
             "path": RECEIVER.OPENAPI_PATH,
             "body_sha256": hashlib.sha256(b"").hexdigest(),
+            "capabilities_sha256": self.digest,
         })
 
     def test_openapi_preserves_custom_notification_path(self):
@@ -411,6 +419,9 @@ class TerminalReceiverClientTests(unittest.TestCase):
         self.assertEqual(headers["X-Localization-Terminal-Status-SHA256"], (
             hashlib.sha256(body).hexdigest()
         ))
+        self.assertEqual(
+            headers[RECEIVER.CAPABILITIES_PRECONDITION_HEADER], self.digest,
+        )
         self.assertEqual(self.authentication_requests[1], {
             "schema": RECEIVER.AUTH_SCHEMA,
             "method": "POST",
@@ -419,6 +430,7 @@ class TerminalReceiverClientTests(unittest.TestCase):
             "body_sha256": hashlib.sha256(body).hexdigest(),
             "event_id": payload["event_id"],
             "site_id": payload["site_id"],
+            "capabilities_sha256": self.digest,
         })
         self.assertEqual(self.runtime._connection.total_changes, changes)
 
@@ -481,6 +493,9 @@ class TerminalReceiverClientTests(unittest.TestCase):
             headers["X-Localization-Terminal-Notification-Sha256"],
             body_sha256,
         )
+        self.assertEqual(
+            headers[RECEIVER.CAPABILITIES_PRECONDITION_HEADER], digest,
+        )
         self.assertEqual(authentication_requests[1], {
             "schema": RECEIVER.AUTH_SCHEMA,
             "method": "POST",
@@ -490,9 +505,30 @@ class TerminalReceiverClientTests(unittest.TestCase):
             "notification_id": payload["notification_id"],
             "event_id": payload["event_id"],
             "site_id": payload["site_id"],
+            "capabilities_sha256": digest,
         })
         stored = self.runtime.inbox.status(payload["event_id"])
         self.assertEqual(stored.payload_sha256, body_sha256)
+
+    def test_capability_race_blocks_notification_before_intake(self):
+        payload = notification()
+        current = RECEIVER.capabilities_payload()
+        changed = RECEIVER.capabilities_payload("/receiver/v2/terminal")
+        with mock.patch.object(
+            RECEIVER, "capabilities_payload", side_effect=(current, changed),
+        ):
+            with self.assertRaises(
+                CLIENT.TerminalReceiverClientBlocked
+            ) as caught:
+                self.client.notify(payload)
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.http_status"
+        ))
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(self.transport.calls), 2)
+        with self.assertRaises(RECEIVER.TerminalNotificationReceiverBlocked):
+            self.runtime.inbox.status(payload["event_id"])
 
     def test_notification_contract_drift_blocks_before_write(self):
         payload = notification()

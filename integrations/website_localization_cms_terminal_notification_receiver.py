@@ -30,13 +30,13 @@ PROCESSING_ACK_SCHEMA = "blun.cms-terminal-notification-processing-ack.v1"
 AUTH_SCHEMA = "blun.cms-source-terminal-notification-http-auth.v1"
 PRINCIPAL_SCHEMA = "blun.cms-source-terminal-notification-principal.v1"
 ERROR_SCHEMA = "blun.cms-source-terminal-notification-http-error.v1"
-API_SCHEMA = "blun.cms-terminal-receiver-api.v2"
-CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v2"
+API_SCHEMA = "blun.cms-terminal-receiver-api.v3"
+CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v3"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-terminal-receiver-capabilities-response.v2"
+    "blun.cms-terminal-receiver-capabilities-response.v3"
 )
 OPENAPI_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-openapi-response.v1"
-OPENAPI_DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v1"
+OPENAPI_DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v2"
 HEALTH_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-health.v1"
 HEALTH_RESPONSE_FIELDS = (
     "schema", "status", "runtime_state", "worker_state", "inbox_status",
@@ -55,6 +55,7 @@ READINESS_PATH = DEFAULT_PATH + "/readiness"
 CAPABILITIES_PATH = DEFAULT_PATH + "/capabilities"
 OPENAPI_PATH = DEFAULT_PATH + "/openapi"
 HEALTH_PATH = DEFAULT_PATH + "/health"
+CAPABILITIES_PRECONDITION_HEADER = "X-Localization-Capabilities-SHA256"
 STATUS_REQUEST_SCHEMA = "blun.cms-terminal-receiver-status-request.v1"
 STATUS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-status-response.v1"
 READINESS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-readiness.v1"
@@ -441,6 +442,11 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
             "success_status": 200,
         },
     }
+    for name, operation in operations.items():
+        operation["capabilities_precondition_header"] = (
+            None if name == "capabilities"
+            else CAPABILITIES_PRECONDITION_HEADER
+        )
     capabilities = {
         "schema": CAPABILITIES_SCHEMA,
         "api_schema": API_SCHEMA,
@@ -459,6 +465,9 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
         "processing_statuses": list(PROCESSING_STATUSES),
         "terminal_statuses": sorted(TERMINAL_STATUSES),
         "operations": operations,
+        "semantics": {
+            "non_discovery_operations_require_exact_capability_precondition": True,
+        },
     }
     try:
         if set(operations) != {
@@ -1406,8 +1415,10 @@ class CMSTerminalNotificationReceiverApplication:
         phrases = {
             200: "OK", 400: "Bad Request", 401: "Unauthorized",
             403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
-            409: "Conflict", 411: "Length Required", 413: "Content Too Large",
-            415: "Unsupported Media Type", 503: "Service Unavailable",
+            409: "Conflict", 411: "Length Required",
+            412: "Precondition Failed", 413: "Content Too Large",
+            415: "Unsupported Media Type", 428: "Precondition Required",
+            503: "Service Unavailable",
         }
         start_response(f"{status} {phrases[status]}", (
             ("Content-Type", "application/json; charset=utf-8"),
@@ -1468,12 +1479,21 @@ class CMSTerminalNotificationReceiverApplication:
                 "event_id": payload["event_id"],
                 "site_id": payload["site_id"],
                 "body_sha256": body_sha256,
+                "capabilities_sha256": headers.get(
+                    "x-localization-capabilities-sha256"
+                ),
             }
             try:
                 principal = self.authenticate(dict(request), dict(headers))
             except Exception:
                 _blocked("authentication_unavailable", 503)
             _principal(principal, payload["site_id"])
+            expected_capabilities = capabilities_payload(self.path)["sha256"]
+            supplied_capabilities = request["capabilities_sha256"]
+            if supplied_capabilities is None:
+                _blocked("capabilities_precondition_required", 428)
+            if supplied_capabilities != expected_capabilities:
+                _blocked("capabilities_precondition_failed", 412)
             acknowledgement = self.inbox.accept(
                 payload, body, body_sha256, now=self.clock(),
             )

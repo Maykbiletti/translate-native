@@ -300,11 +300,13 @@ polling contract and does not create notification state.
 For a remote backend, pass an
 `HTTPTerminalNotifierAdapter` from
 `integrations/website_localization_cms_terminal_notification_http.py` as the
-`terminal_notifier`. It sends the canonical notification object itself as the
-request body to one configured HTTPS URL. Loopback HTTP is available only by
-explicit test/development opt-in. Redirects are never followed, and the adapter
-performs exactly one transport attempt; the durable notification outbox alone
-decides whether and when to retry.
+`terminal_notifier`. Construct it with the exact deployment-approved receiver
+capability SHA-256 as well as its endpoint and authentication callback. It
+sends the canonical notification object itself as the request body to one
+configured HTTPS URL. Loopback HTTP is available only by explicit
+test/development opt-in. Redirects are never followed, and the adapter performs
+exactly one transport attempt; the durable notification outbox alone decides
+whether and when to retry.
 
 Each request reserves these exact transport headers:
 
@@ -312,7 +314,8 @@ Each request reserves these exact transport headers:
 - `Accept: application/json`;
 - `Idempotency-Key: <notification_id>`;
 - `X-Localization-Terminal-Notification-Id: <notification_id>`;
-- `X-Localization-Terminal-Notification-Sha256: <body_sha256>`.
+- `X-Localization-Terminal-Notification-Sha256: <body_sha256>`;
+- `X-Localization-Capabilities-SHA256: <receiver_capabilities_sha256>`.
 
 The host-supplied authentication callback receives a fresh copy of this
 content-free request before any network access:
@@ -326,7 +329,8 @@ content-free request before any network access:
   "notification_id": "terminal-<sha256>",
   "event_id": "cms-event-184",
   "site_id": "public-site",
-  "body_sha256": "<sha256 of exact canonical request bytes>"
+  "body_sha256": "<sha256 of exact canonical request bytes>",
+  "capabilities_sha256": "<receiver_capabilities_sha256>"
 }
 ```
 
@@ -499,15 +503,17 @@ inspection, and the read does not claim, retry, complete, or otherwise mutate
 processing state.
 
 Discovery is also strictly `GET`, body-free, query-free, and separately scoped.
-Its `blun.cms-terminal-receiver-capabilities-response.v2` envelope contains a
-`blun.cms-terminal-receiver-capabilities.v2` contract and canonical SHA-256.
+Its `blun.cms-terminal-receiver-capabilities-response.v3` envelope contains a
+`blun.cms-terminal-receiver-capabilities.v3` contract and canonical SHA-256.
 The digest covers all active operations, including the runtime's configured
 notification intake path, plus methods, scopes, request and response schemas,
 required fields, success statuses, transport limits, processing states, and
 terminal outcomes. It contains no site, endpoint origin, notification,
 credential, website text, provider response, or private error detail. The
 contract includes the health operation's exact method, path, distinct scope,
-schema, fields, and success status.
+schema, fields, and success status. Every non-discovery operation also names
+the required `X-Localization-Capabilities-SHA256` precondition header; the
+contract semantics require its exact active digest.
 
 The separately scoped OpenAPI route returns
 `blun.cms-terminal-receiver-openapi-response.v1`. Its canonical OpenAPI 3.1
@@ -521,7 +527,11 @@ because the deployment owns the HTTPS origin.
 
 The capability request authenticates the exact empty-body hash before the
 contract is built. It never reads the inbox, checks worker readiness, claims a
-lease, or calls a handler. A custom intake path that collides with any control
+lease, or calls a handler. Every other route includes the supplied capability
+digest in its authentication context and then requires it to equal the active
+complete generation. Absence returns content-free `428`; drift returns `412`
+before notification persistence, inbox inspection, worker-state reporting, or
+OpenAPI construction. A custom intake path that collides with any control
 route is rejected before SQLite is created. Missing or altered notification
 schema fields, reused scopes, a request body, content type, query, wrong method,
 or private authenticator failure returns a content-free fail-closed response.
@@ -543,6 +553,13 @@ configured notification path. `health()`, `readiness()`, `status()`, and
 therefore blocks the operational read until the deployment deliberately
 updates its pin. Every HTTP request is separately authenticated and uses
 exactly one bounded transport attempt with no redirects.
+
+After discovery, the client reserves and sends
+`X-Localization-Capabilities-SHA256` on every operational request and binds the
+same digest into the host authentication context. The receiver checks it after
+authentication but before durable or operational state access. This prevents a
+generation change from accepting a notification under a contract the caller
+did not verify.
 
 `openapi()` then reconstructs the complete origin-free OpenAPI 3.1 document
 from the freshly verified capability object and requires the remote document,
