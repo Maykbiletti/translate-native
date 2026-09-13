@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v2"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v3"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -42,6 +42,33 @@ def _closed_object(
         "required": sorted(set(properties) - set(optional)),
         "properties": dict(properties),
     }
+
+
+def _exact_schema(value: Any) -> dict[str, Any]:
+    """Describe one content-free capability value without allowing drift."""
+    if isinstance(value, Mapping):
+        properties = {
+            str(name): _exact_schema(content)
+            for name, content in value.items()
+        }
+        return _closed_object(properties)
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "boolean", "const": value}
+    if isinstance(value, int):
+        return {"type": "integer", "const": value}
+    if isinstance(value, float):
+        return {"type": "number", "const": value}
+    if isinstance(value, str):
+        return {"type": "string", "const": value}
+    if isinstance(value, (list, tuple)):
+        items = [_exact_schema(item) for item in value]
+        return {
+            "type": "array", "prefixItems": items, "items": False,
+            "minItems": len(items), "maxItems": len(items),
+        }
+    raise TypeError("unsupported exact OpenAPI capability value")
 
 
 def _bounded_text(*, source: bool = False) -> dict[str, Any]:
@@ -331,6 +358,14 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 "status": {"const": "BLOCK"}, "error_code": _schema_ref("ErrorCode"),
             },
         },
+        "Capabilities": {
+            **_exact_schema(capabilities),
+            "description": (
+                "The complete immutable capability generation. Every nested "
+                "field is closed and fixed to this document's active pins."
+            ),
+            "x-capabilities-sha256": capabilities["sha256"],
+        },
         **_source_payload_schemas(capabilities),
         "EnqueueRequest": {
             "type": "object", "additionalProperties": False,
@@ -394,11 +429,7 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
             "required": ["schema", "capabilities"],
             "properties": {
                 "schema": {"const": operations["capabilities"]["response_schema"]},
-                "capabilities": {
-                    "type": "object",
-                    "description": "Must equal the canonical active capability document byte-for-byte.",
-                    "x-capabilities-sha256": capabilities["sha256"],
-                },
+                "capabilities": _schema_ref("Capabilities"),
             },
         },
         "OpenApiResponse": {

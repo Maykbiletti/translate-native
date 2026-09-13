@@ -1183,6 +1183,14 @@ the runtime remains authoritative for checks JSON Schema cannot express
 portably, including NFC bytes, canonical locale casing, and language-family
 exclusion.
 
+The capability response is also fully machine-readable rather than an open
+placeholder. Its OpenAPI component recursively closes every nested object and
+fixes each route, method, scope, principal, request and response schema, limit,
+retry owner, source-event schema, downstream capability pin, and fail-closed
+semantic to the active generation. The v4 capability document additionally
+binds `openapi_document_schema`; therefore an older or replaced description
+cannot keep the same capability SHA-256 even if its routes appear compatible.
+
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
 tenant principal must match the payload's `site_id`; `Idempotency-Key` must

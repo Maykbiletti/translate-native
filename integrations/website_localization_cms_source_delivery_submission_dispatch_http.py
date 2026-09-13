@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v3"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v4"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -40,9 +40,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v3"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v4"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v3"
+    "blun.cms-public-submission-dispatch-capabilities-response.v4"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -490,6 +490,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "cancellation": _DISPATCH._CLIENT._CMS.CANCELLATION_SCHEMA,
                 "tombstone": _DISPATCH._CLIENT._CMS.TOMBSTONE_SCHEMA,
             },
+            "openapi_document_schema": _OPENAPI.DOCUMENT_SCHEMA,
             "semantics": {
                 "authentication_precedes_json_parsing": True,
                 "authentication_binds_exact_body_sha256": True,

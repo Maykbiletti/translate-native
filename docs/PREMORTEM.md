@@ -1,5 +1,23 @@
 # Version 6 premortem
 
+## Self-describing CMS capability schema (13 September 2026)
+
+Assume a CMS generated correct source payload types but still accepted a stale
+or structurally altered capability response.
+
+- The capability response was an open object in the OpenAPI document.
+- A generator could silently ignore missing operations, limits, or semantics.
+- An older OpenAPI document could retain the same external capability pin.
+- Nested unknown fields could disguise a route, scope, retry, or publication
+  policy change.
+
+The OpenAPI profile now describes the complete capability object recursively:
+every object is closed, every field is required, and every scalar is fixed to
+the active generation. The OpenAPI document schema itself is included in the
+v4 capability hash. Tests walk the independent runtime capability fixture and
+prove exact nested parity, closure, the response reference, and the document
+version binding.
+
 ## Closed CMS source payload schemas (13 September 2026)
 
 Assume a CMS generated a client from the authenticated OpenAPI document, but

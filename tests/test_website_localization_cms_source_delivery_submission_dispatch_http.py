@@ -278,6 +278,50 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             1_000_000,
         )
 
+    def test_openapi_capabilities_schema_is_recursively_exact_and_closed(self):
+        self.open()
+        response = self.call(HTTP.OPENAPI_PATH)["json"]
+        document = response["openapi"]
+        capabilities = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )
+        schema = document["components"]["schemas"]["Capabilities"]
+
+        def assert_exact(described, value):
+            if isinstance(value, dict):
+                self.assertEqual(described["type"], "object")
+                self.assertFalse(described["additionalProperties"])
+                self.assertEqual(described["required"], sorted(value))
+                self.assertEqual(set(described["properties"]), set(value))
+                for name, content in value.items():
+                    assert_exact(described["properties"][name], content)
+                return
+            if value is None:
+                self.assertEqual(described, {"type": "null"})
+                return
+            expected_type = (
+                "boolean" if isinstance(value, bool)
+                else "integer" if isinstance(value, int)
+                else "number" if isinstance(value, float)
+                else "string"
+            )
+            self.assertEqual(described, {"type": expected_type, "const": value})
+
+        core = {
+            name: value for name, value in schema.items()
+            if name not in {"description", "x-capabilities-sha256"}
+        }
+        assert_exact(core, capabilities)
+        self.assertEqual(
+            document["components"]["schemas"]["CapabilitiesResponse"]
+            ["properties"]["capabilities"],
+            {"$ref": "#/components/schemas/Capabilities"},
+        )
+        self.assertEqual(
+            capabilities["openapi_document_schema"], document["x-schema"]
+        )
+        self.assertEqual(schema["x-capabilities-sha256"], capabilities["sha256"])
+
     def test_enqueue_commits_before_202_and_status_requires_full_identity(self):
         self.open()
         accepted = self.enqueue()
