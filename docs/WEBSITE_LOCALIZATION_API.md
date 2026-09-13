@@ -449,9 +449,9 @@ If the configured join timeout expires, close fails while durable state remains
 open; the supervisor must resolve or terminate the stuck callback before trying
 again. Construct the hosted runtime after every process fork.
 
-#### Terminal-receiver status, health, readiness, and capabilities
+#### Terminal-receiver status, health, readiness, capabilities, and OpenAPI
 
-The durable runtime also serves four authenticated, content-free control routes
+The durable runtime also serves five authenticated, content-free control routes
 on the same exact HTTPS origin:
 
 | Method | Path | Required scope | Purpose |
@@ -460,6 +460,7 @@ on the same exact HTTPS origin:
 | `GET` | `/v1/localization/terminal-notifications/health` | `terminal-notification-health:read` | Inspect aggregate runtime, worker, and durable inbox health |
 | `GET` | `/v1/localization/terminal-notifications/readiness` | `terminal-notification-readiness:read` | Check the managed worker and verified inbox |
 | `GET` | `/v1/localization/terminal-notifications/capabilities` | `terminal-notification-capabilities:read` | Discover the exact active receiver contract |
+| `GET` | `/v1/localization/terminal-notifications/openapi` | `terminal-notification-openapi:read` | Read the capability-bound OpenAPI 3.1 profile |
 
 Status accepts only canonical UTF-8 JSON and requires
 `X-Localization-Terminal-Status-SHA256` to equal the exact body hash:
@@ -498,8 +499,8 @@ inspection, and the read does not claim, retry, complete, or otherwise mutate
 processing state.
 
 Discovery is also strictly `GET`, body-free, query-free, and separately scoped.
-Its `blun.cms-terminal-receiver-capabilities-response.v1` envelope contains a
-`blun.cms-terminal-receiver-capabilities.v1` contract and canonical SHA-256.
+Its `blun.cms-terminal-receiver-capabilities-response.v2` envelope contains a
+`blun.cms-terminal-receiver-capabilities.v2` contract and canonical SHA-256.
 The digest covers all active operations, including the runtime's configured
 notification intake path, plus methods, scopes, request and response schemas,
 required fields, success statuses, transport limits, processing states, and
@@ -507,6 +508,16 @@ terminal outcomes. It contains no site, endpoint origin, notification,
 credential, website text, provider response, or private error detail. The
 contract includes the health operation's exact method, path, distinct scope,
 schema, fields, and success status.
+
+The separately scoped OpenAPI route returns
+`blun.cms-terminal-receiver-openapi-response.v1`. Its canonical OpenAPI 3.1
+document covers all six receiver operations, including a custom notification
+intake path, and recursively closes the notification, acknowledgement, status,
+health, readiness, capability, and error shapes. It declares the exact required
+idempotency, notification-identity, payload-hash, and status-hash headers. Both
+the envelope and document carry the active capability SHA-256; the envelope
+also carries the canonical document SHA-256. Servers are deliberately omitted
+because the deployment owns the HTTPS origin.
 
 The capability request authenticates the exact empty-body hash before the
 contract is built. It never reads the inbox, checks worker readiness, claims a
@@ -526,7 +537,7 @@ provided canonical request context. Do not learn and trust the digest from the
 same untrusted connection that it is intended to authenticate.
 
 `capabilities()` verifies the response envelope, the canonical digest, every
-schema and limit, all five operation definitions, distinct scopes, and the
+schema and limit, all six operation definitions, distinct scopes, and the
 configured notification path. `health()`, `readiness()`, and `status()` first
 repeat that live contract verification; a contract change therefore blocks the
 operational read until the deployment deliberately updates its pin. Every HTTP

@@ -30,11 +30,13 @@ PROCESSING_ACK_SCHEMA = "blun.cms-terminal-notification-processing-ack.v1"
 AUTH_SCHEMA = "blun.cms-source-terminal-notification-http-auth.v1"
 PRINCIPAL_SCHEMA = "blun.cms-source-terminal-notification-principal.v1"
 ERROR_SCHEMA = "blun.cms-source-terminal-notification-http-error.v1"
-API_SCHEMA = "blun.cms-terminal-receiver-api.v1"
-CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v1"
+API_SCHEMA = "blun.cms-terminal-receiver-api.v2"
+CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v2"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-terminal-receiver-capabilities-response.v1"
+    "blun.cms-terminal-receiver-capabilities-response.v2"
 )
+OPENAPI_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-openapi-response.v1"
+OPENAPI_DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v1"
 HEALTH_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-health.v1"
 HEALTH_RESPONSE_FIELDS = (
     "schema", "status", "runtime_state", "worker_state", "inbox_status",
@@ -45,16 +47,19 @@ WRITE_SCOPE = "terminal-notification:write"
 STATUS_SCOPE = "terminal-notification-status:read"
 READINESS_SCOPE = "terminal-notification-readiness:read"
 CAPABILITIES_SCOPE = "terminal-notification-capabilities:read"
+OPENAPI_SCOPE = "terminal-notification-openapi:read"
 HEALTH_SCOPE = "terminal-notification-health:read"
 DEFAULT_PATH = "/v1/localization/terminal-notifications"
 STATUS_PATH = DEFAULT_PATH + "/status"
 READINESS_PATH = DEFAULT_PATH + "/readiness"
 CAPABILITIES_PATH = DEFAULT_PATH + "/capabilities"
+OPENAPI_PATH = DEFAULT_PATH + "/openapi"
 HEALTH_PATH = DEFAULT_PATH + "/health"
 STATUS_REQUEST_SCHEMA = "blun.cms-terminal-receiver-status-request.v1"
 STATUS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-status-response.v1"
 READINESS_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-readiness.v1"
 MAX_BODY_BYTES = 16_384
+MAX_RESPONSE_BYTES = 1_000_000
 MAX_HEADERS = 64
 MAX_HEADER_VALUE_LENGTH = 4_096
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
@@ -174,7 +179,7 @@ def _blocked(code: str, status: int) -> None:
     raise TerminalNotificationReceiverBlocked("notification_receiver." + code, status)
 
 
-def _canonical(value: Any) -> bytes:
+def _canonical(value: Any, *, max_bytes: int = MAX_BODY_BYTES) -> bytes:
     try:
         result = json.dumps(
             value, ensure_ascii=False, allow_nan=False, sort_keys=True,
@@ -182,7 +187,7 @@ def _canonical(value: Any) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError, RecursionError):
         _blocked("request_invalid", 400)
-    if not result or len(result) > MAX_BODY_BYTES:
+    if not result or len(result) > max_bytes:
         _blocked("request_invalid", 400)
     return result
 
@@ -359,6 +364,19 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
             ],
             "success_status": 200,
         },
+        "openapi": {
+            "method": "GET",
+            "path": OPENAPI_PATH,
+            "scope": OPENAPI_SCOPE,
+            "request_schema": None,
+            "request_fields": [],
+            "response_schema": OPENAPI_RESPONSE_SCHEMA,
+            "response_fields": [
+                "schema", "openapi", "openapi_sha256",
+                "capabilities_sha256",
+            ],
+            "success_status": 200,
+        },
         "readiness": {
             "method": "GET",
             "path": READINESS_PATH,
@@ -393,12 +411,13 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
     if (
         not isinstance(notification_path, str)
         or notification_path in {
-            STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH, HEALTH_PATH,
+            STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH,
+            HEALTH_PATH,
         }
         or len({
             WRITE_SCOPE, STATUS_SCOPE, READINESS_SCOPE, CAPABILITIES_SCOPE,
-            HEALTH_SCOPE,
-        }) != 5
+            OPENAPI_SCOPE, HEALTH_SCOPE,
+        }) != 6
     ):
         _blocked("capabilities_invalid", 503)
     operations = {
@@ -428,8 +447,10 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
         "authentication_request_schema": AUTH_SCHEMA,
         "principal_schema": PRINCIPAL_SCHEMA,
         "error_schema": ERROR_SCHEMA,
+        "openapi_document_schema": OPENAPI_DOCUMENT_SCHEMA,
         "limits": {
             "max_body_bytes": MAX_BODY_BYTES,
+            "max_response_bytes": MAX_RESPONSE_BYTES,
             "max_headers": MAX_HEADERS,
             "max_header_value_bytes": MAX_HEADER_VALUE_LENGTH,
             "processing_max_attempts_min": 1,
@@ -441,7 +462,8 @@ def capabilities_payload(notification_path: str = DEFAULT_PATH) -> dict[str, Any
     }
     try:
         if set(operations) != {
-            "capabilities", "health", "notification", "readiness", "status",
+            "capabilities", "health", "notification", "openapi",
+            "readiness", "status",
         }:
             raise ValueError
         if set(NOTIFICATION_FIELDS) != set(
@@ -1338,7 +1360,8 @@ class CMSTerminalNotificationReceiverApplication:
             or "#" in path
             or len(path) > 256
             or path in {
-                STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH, HEALTH_PATH,
+                STATUS_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH,
+                HEALTH_PATH,
             }
         ):
             raise ValueError("path is invalid")
@@ -1379,7 +1402,7 @@ class CMSTerminalNotificationReceiverApplication:
 
     @staticmethod
     def _send(start_response: Callable[..., Any], status: int, value: Any):
-        body = _canonical(value)
+        body = _canonical(value, max_bytes=MAX_RESPONSE_BYTES)
         phrases = {
             200: "OK", 400: "Bad Request", 401: "Unauthorized",
             403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",

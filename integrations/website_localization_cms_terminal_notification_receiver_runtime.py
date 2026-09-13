@@ -35,6 +35,12 @@ _RECEIVER = _load_module(
     / "integrations"
     / "website_localization_cms_terminal_notification_receiver.py",
 )
+_OPENAPI = _load_module(
+    "blun_website_localization_terminal_receiver_openapi_runtime_dependency",
+    _ROOT
+    / "integrations"
+    / "website_localization_cms_terminal_notification_receiver_openapi.py",
+)
 
 
 class DurableTerminalReceiverRuntimeBlocked(RuntimeError):
@@ -313,7 +319,8 @@ class DurableTerminalNotificationReceiverRuntime:
                 self._require_open()
                 if isinstance(environ, Mapping) and environ.get("PATH_INFO") in {
                     _RECEIVER.STATUS_PATH, _RECEIVER.READINESS_PATH,
-                    _RECEIVER.CAPABILITIES_PATH, _RECEIVER.HEALTH_PATH,
+                    _RECEIVER.CAPABILITIES_PATH, _RECEIVER.OPENAPI_PATH,
+                    _RECEIVER.HEALTH_PATH,
                 }:
                     return self._control_request(environ, start_response)
                 self.require_worker_ready()
@@ -343,6 +350,10 @@ class DurableTerminalNotificationReceiverRuntime:
             headers = self.application._headers(environ)
             if path == _RECEIVER.CAPABILITIES_PATH:
                 return self._capabilities_request(
+                    environ, headers, start_response,
+                )
+            if path == _RECEIVER.OPENAPI_PATH:
+                return self._openapi_request(
                     environ, headers, start_response,
                 )
             if path == _RECEIVER.HEALTH_PATH:
@@ -439,6 +450,43 @@ class DurableTerminalNotificationReceiverRuntime:
         }
         status = 200 if report["status"] == "ready" else 503
         return self.application._send(start_response, status, report)
+
+    def _openapi_request(
+        self,
+        environ: Mapping[str, Any],
+        headers: dict[str, str],
+        start_response: Callable[..., Any],
+    ):
+        if environ.get("REQUEST_METHOD") != "GET":
+            _RECEIVER._blocked("method_not_allowed", 405)
+        if headers.get("content-length") not in {None, "0"}:
+            _RECEIVER._blocked("body_invalid", 400)
+        if "content-type" in headers:
+            _RECEIVER._blocked("content_type", 415)
+        body_sha256 = hashlib.sha256(b"").hexdigest()
+        request = {
+            "schema": _RECEIVER.AUTH_SCHEMA,
+            "method": "GET",
+            "origin": self.application.origin,
+            "path": _RECEIVER.OPENAPI_PATH,
+            "body_sha256": body_sha256,
+        }
+        self._authenticate_control(
+            request, headers, None, _RECEIVER.OPENAPI_SCOPE,
+        )
+        capabilities = _RECEIVER.capabilities_payload(self.application.path)
+        document = _OPENAPI.build_document(capabilities)
+        if (
+            document.get("x-schema") != capabilities["openapi_document_schema"]
+            or document.get("x-capabilities-sha256") != capabilities["sha256"]
+        ):
+            _RECEIVER._blocked("capabilities_invalid", 503)
+        return self.application._send(start_response, 200, {
+            "schema": _RECEIVER.OPENAPI_RESPONSE_SCHEMA,
+            "openapi": document,
+            "openapi_sha256": _OPENAPI.document_sha256(document),
+            "capabilities_sha256": capabilities["sha256"],
+        })
 
     def _health_request(
         self,

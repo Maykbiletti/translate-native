@@ -16,11 +16,13 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 AUTH_SCHEMA = "blun.cms-source-terminal-notification-http-auth.v1"
-API_SCHEMA = "blun.cms-terminal-receiver-api.v1"
-CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v1"
+API_SCHEMA = "blun.cms-terminal-receiver-api.v2"
+CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v2"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-terminal-receiver-capabilities-response.v1"
+    "blun.cms-terminal-receiver-capabilities-response.v2"
 )
+OPENAPI_DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v1"
+OPENAPI_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-openapi-response.v1"
 HEALTH_SCHEMA = "blun.cms-terminal-receiver-health.v1"
 READINESS_SCHEMA = "blun.cms-terminal-receiver-readiness.v1"
 STATUS_REQUEST_SCHEMA = "blun.cms-terminal-receiver-status-request.v1"
@@ -31,6 +33,7 @@ NOTIFICATION_SCHEMA = "blun.cms-source-terminal-notification.v1"
 ACK_SCHEMA = "blun.cms-source-terminal-notification-ack.v1"
 BASE_PATH = "/v1/localization/terminal-notifications"
 CAPABILITIES_PATH = BASE_PATH + "/capabilities"
+OPENAPI_PATH = BASE_PATH + "/openapi"
 HEALTH_PATH = BASE_PATH + "/health"
 READINESS_PATH = BASE_PATH + "/readiness"
 STATUS_PATH = BASE_PATH + "/status"
@@ -381,7 +384,7 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
     if not isinstance(value, dict) or set(value) != {
         "schema", "api_schema", "authentication_request_schema",
         "principal_schema", "error_schema", "limits", "processing_statuses",
-        "terminal_statuses", "operations", "sha256",
+        "terminal_statuses", "operations", "openapi_document_schema", "sha256",
     }:
         return False
     digest = value.get("sha256")
@@ -395,6 +398,7 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         or value.get("authentication_request_schema") != AUTH_SCHEMA
         or value.get("principal_schema") != PRINCIPAL_SCHEMA
         or value.get("error_schema") != ERROR_SCHEMA
+        or value.get("openapi_document_schema") != OPENAPI_DOCUMENT_SCHEMA
         or value.get("processing_statuses") != list(PROCESSING_STATUSES)
         or value.get("terminal_statuses") != sorted(TERMINAL_STATUSES)
     ):
@@ -404,12 +408,14 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         not isinstance(limits, dict)
         or set(limits) != {
             "max_body_bytes", "max_headers", "max_header_value_bytes",
-            "processing_max_attempts_min", "processing_max_attempts_max",
+            "max_response_bytes", "processing_max_attempts_min",
+            "processing_max_attempts_max",
         }
         or limits != {
             "max_body_bytes": 16_384,
             "max_headers": 64,
             "max_header_value_bytes": 4_096,
+            "max_response_bytes": 1_000_000,
             "processing_max_attempts_min": 1,
             "processing_max_attempts_max": 20,
         }
@@ -417,7 +423,8 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         return False
     operations = value.get("operations")
     if not isinstance(operations, dict) or set(operations) != {
-        "capabilities", "health", "notification", "readiness", "status",
+        "capabilities", "health", "notification", "openapi", "readiness",
+        "status",
     }:
         return False
     expected = {
@@ -435,6 +442,11 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
                 "processing_due", "expired_leases", "failed", "error_code",
                 "capabilities_sha256",
             ],
+        ),
+        "openapi": _operation(
+            "openapi", "GET", OPENAPI_PATH, "terminal-notification-openapi:read",
+            None, [], OPENAPI_RESPONSE_SCHEMA,
+            ["schema", "openapi", "openapi_sha256", "capabilities_sha256"],
         ),
         "readiness": _operation(
             "readiness", "GET", READINESS_PATH,
@@ -466,7 +478,10 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         not isinstance(path, str)
         or not path.startswith("/")
         or path.startswith("//")
-        or path in {CAPABILITIES_PATH, HEALTH_PATH, READINESS_PATH, STATUS_PATH}
+        or path in {
+            CAPABILITIES_PATH, HEALTH_PATH, OPENAPI_PATH, READINESS_PATH,
+            STATUS_PATH,
+        }
     ):
         return False
     expected["notification"] = _operation(

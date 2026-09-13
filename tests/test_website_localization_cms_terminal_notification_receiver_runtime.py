@@ -97,6 +97,7 @@ def authenticate(request, headers):
         RUNTIME._RECEIVER.CAPABILITIES_PATH: (
             RUNTIME._RECEIVER.CAPABILITIES_SCOPE
         ),
+        RUNTIME._RECEIVER.OPENAPI_PATH: RUNTIME._RECEIVER.OPENAPI_SCOPE,
         RUNTIME._RECEIVER.HEALTH_PATH: RUNTIME._RECEIVER.HEALTH_SCOPE,
     }
     return principal(request.get("site_id", "public-site"), scopes[request["path"]])
@@ -257,6 +258,7 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
                 {"path": RUNTIME._RECEIVER.STATUS_PATH},
                 {"path": RUNTIME._RECEIVER.READINESS_PATH},
                 {"path": RUNTIME._RECEIVER.CAPABILITIES_PATH},
+                {"path": RUNTIME._RECEIVER.OPENAPI_PATH},
                 {"path": RUNTIME._RECEIVER.HEALTH_PATH},
                 {"authenticate": None},
                 {"processing_max_attempts": 0},
@@ -482,7 +484,8 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
             capabilities["schema"], RUNTIME._RECEIVER.CAPABILITIES_SCHEMA,
         )
         self.assertEqual(set(capabilities["operations"]), {
-            "capabilities", "health", "notification", "readiness", "status",
+            "capabilities", "health", "notification", "openapi",
+            "readiness", "status",
         })
         expected = {
             "capabilities": (
@@ -496,6 +499,10 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
             "health": (
                 "GET", RUNTIME._RECEIVER.HEALTH_PATH,
                 RUNTIME._RECEIVER.HEALTH_SCOPE,
+            ),
+            "openapi": (
+                "GET", RUNTIME._RECEIVER.OPENAPI_PATH,
+                RUNTIME._RECEIVER.OPENAPI_SCOPE,
             ),
             "readiness": (
                 "GET", RUNTIME._RECEIVER.READINESS_PATH,
@@ -528,6 +535,98 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         runtime.worker_readiness.assert_not_called()
         runtime.worker_health.assert_not_called()
         self.assertNotIn("public-site", json.dumps(capabilities))
+        runtime.close()
+
+    def test_openapi_is_authenticated_closed_and_bound_to_capabilities(self):
+        requests = []
+
+        def record_authenticate(request, headers):
+            requests.append((dict(request), dict(headers)))
+            return principal(
+                request.get("site_id", "public-site"),
+                RUNTIME._RECEIVER.OPENAPI_SCOPE,
+            )
+
+        runtime = RUNTIME.open_durable_terminal_notification_receiver(
+            ":memory:", record_authenticate,
+            origin="https://cms.example.test", clock=lambda: 123.5,
+        )
+        changes = runtime._connection.total_changes
+        response = control_request(runtime, RUNTIME._RECEIVER.OPENAPI_PATH)
+
+        self.assertEqual(response.status, 200)
+        value = json.loads(response.body)
+        capabilities = RUNTIME._RECEIVER.capabilities_payload()
+        self.assertEqual(value["schema"], RUNTIME._RECEIVER.OPENAPI_RESPONSE_SCHEMA)
+        self.assertEqual(value["capabilities_sha256"], capabilities["sha256"])
+        document = value["openapi"]
+        self.assertEqual(document["openapi"], "3.1.0")
+        self.assertEqual(
+            document["x-schema"], capabilities["openapi_document_schema"],
+        )
+        self.assertEqual(document["x-capabilities-sha256"], capabilities["sha256"])
+        self.assertEqual(value["openapi_sha256"], hashlib.sha256(
+            RUNTIME._RECEIVER._canonical(
+                document, max_bytes=RUNTIME._RECEIVER.MAX_RESPONSE_BYTES,
+            )
+        ).hexdigest())
+        self.assertEqual(set(document["paths"]), {
+            operation["path"]
+            for operation in capabilities["operations"].values()
+        })
+        schemas = document["components"]["schemas"]
+        self.assertFalse(schemas["TerminalNotification"]["additionalProperties"])
+        self.assertFalse(schemas["StatusResponse"]["additionalProperties"])
+        self.assertEqual(
+            schemas["Capabilities"]["properties"]["sha256"]["const"],
+            capabilities["sha256"],
+        )
+        notification_operation = document["paths"][
+            RUNTIME._RECEIVER.DEFAULT_PATH
+        ]["post"]
+        self.assertEqual(
+            notification_operation["x-authentication-scope"],
+            RUNTIME._RECEIVER.WRITE_SCOPE,
+        )
+        self.assertEqual(
+            {parameter["name"] for parameter in notification_operation["parameters"]},
+            {
+                "Idempotency-Key",
+                "X-Localization-Terminal-Notification-Id",
+                "X-Localization-Terminal-Notification-Sha256",
+            },
+        )
+        self.assertEqual(requests[0][0]["path"], RUNTIME._RECEIVER.OPENAPI_PATH)
+        self.assertEqual(runtime._connection.total_changes, changes)
+        runtime.close()
+
+    def test_openapi_rejects_wrong_scope_body_and_document_drift(self):
+        runtime = open_runtime(":memory:")
+        wrong_scope = mock.patch.object(
+            runtime.application,
+            "authenticate",
+            return_value=principal(scope=RUNTIME._RECEIVER.HEALTH_SCOPE),
+        )
+        with wrong_scope:
+            rejected = control_request(runtime, RUNTIME._RECEIVER.OPENAPI_PATH)
+        self.assertEqual(rejected.status, 403)
+
+        body = control_request(
+            runtime, RUNTIME._RECEIVER.OPENAPI_PATH,
+            headers={"Content-Length": "1"},
+        )
+        self.assertEqual(body.status, 400)
+
+        with mock.patch.object(
+            RUNTIME._OPENAPI, "build_document",
+            return_value={"x-schema": "old", "x-capabilities-sha256": "0" * 64},
+        ):
+            drift = control_request(runtime, RUNTIME._RECEIVER.OPENAPI_PATH)
+        self.assertEqual(drift.status, 503)
+        self.assertEqual(
+            json.loads(drift.body)["error_code"],
+            "notification_receiver.capabilities_invalid",
+        )
         runtime.close()
 
     def test_capabilities_advertise_custom_intake_and_drift_blocks(self):
@@ -772,10 +871,14 @@ class DurableTerminalReceiverRuntimeTests(unittest.TestCase):
         capabilities = control_request(
             runtime, RUNTIME._RECEIVER.CAPABILITIES_PATH,
         )
+        openapi = control_request(runtime, RUNTIME._RECEIVER.OPENAPI_PATH)
         health = control_request(runtime, RUNTIME._RECEIVER.HEALTH_PATH)
         self.assertEqual(
-            (status.status, readiness.status, capabilities.status, health.status),
-            (403, 403, 403, 403),
+            (
+                status.status, readiness.status, capabilities.status,
+                openapi.status, health.status,
+            ),
+            (403, 403, 403, 403, 403),
         )
         runtime.inbox.processing_status.assert_not_called()
         runtime.worker_health.assert_not_called()
