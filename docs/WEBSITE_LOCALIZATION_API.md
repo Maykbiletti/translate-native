@@ -1161,6 +1161,15 @@ readiness use separate body-free operator scopes. Health describes durable
 outbox integrity; readiness additionally requires the supervised worker to be
 alive and the outbox to be healthy.
 
+`GET /v1/localization/cms-submission-dispatch/openapi` uses its own body-free
+operator scope and returns an origin-free OpenAPI 3.1 document generated from
+that exact capability object. It describes all six routes with their methods,
+scopes, principal schemas, request and response schemas, required idempotency
+and payload-hash headers, transport limits, retry ownership, and fail-closed
+publication semantics. The response binds the canonical document hash to the
+active capability hash and contains no server URL, tenant identity, website
+content, model provider, or credential value.
+
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
 tenant principal must match the payload's `site_id`; `Idempotency-Key` must
@@ -1193,10 +1202,16 @@ interchangeable.
 `enqueue()` accepts one complete change, cancellation, or tombstone and keeps
 the source-, delivery-, and client-stage retry ceilings distinct. `status()`
 requires the complete previously known operation, request, event, site, and
-source-payload identity. `health()`, `readiness()`, and `capabilities()` use
-their separate operator scopes. Each operational method first fetches the live
-capability document, accepts only the exact current closed shape, then makes
-one bounded request without following redirects or retrying internally.
+source-payload identity. `health()`, `readiness()`, `capabilities()`, and
+`openapi()` use their separate operator scopes. Each operational method first
+fetches the live capability document, accepts only the exact current closed
+shape, then makes one bounded request without following redirects or retrying
+internally.
+
+`openapi()` also reconstructs the expected document from the separately pinned
+sidecar and downstream capability generations and requires an exact match. A
+peer cannot make a substituted description acceptable merely by recomputing
+the advertised OpenAPI hash.
 
 The credential callback receives a content-free context containing the exact
 method, origin, path, scope, and body SHA-256 plus tenant identity where

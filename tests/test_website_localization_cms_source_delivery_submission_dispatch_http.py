@@ -171,7 +171,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         capabilities = response["json"]["capabilities"]
         self.assertEqual(
             set(capabilities["operations"]),
-            {"capabilities", "enqueue", "health", "readiness", "status"},
+            {"capabilities", "enqueue", "health", "openapi", "readiness", "status"},
         )
         self.assertEqual(
             capabilities["public_submission_capabilities_sha256"],
@@ -189,6 +189,42 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         rendered = response["raw"].decode("utf-8")
         self.assertNotIn("source_text", rendered)
         self.assertNotIn("target_text", rendered)
+
+    def test_openapi_is_capability_bound_origin_free_and_content_free(self):
+        self.open()
+        response = self.call(HTTP.OPENAPI_PATH)
+
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(set(response["json"]), {
+            "schema", "openapi", "openapi_sha256", "capabilities_sha256",
+        })
+        capabilities = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )
+        document = response["json"]["openapi"]
+        self.assertEqual(document, HTTP._OPENAPI.build_document(capabilities))
+        self.assertEqual(
+            response["json"]["openapi_sha256"],
+            HTTP._OPENAPI.document_sha256(document),
+        )
+        self.assertEqual(
+            response["json"]["capabilities_sha256"], capabilities["sha256"]
+        )
+        self.assertEqual(document["openapi"], "3.1.0")
+        self.assertNotIn("servers", document)
+        self.assertEqual(set(document["paths"]), {
+            operation["path"] for operation in capabilities["operations"].values()
+        })
+        for operation in capabilities["operations"].values():
+            described = document["paths"][operation["path"]][
+                operation["method"].lower()
+            ]
+            self.assertEqual(described["x-authentication-scope"], operation["scope"])
+            self.assertEqual(described["x-principal-schema"], operation["principal_schema"])
+            self.assertEqual(described["x-success-status"], operation["success_status"])
+        rendered = response["raw"].decode("utf-8")
+        for private in ("source_text", "target_text", "Bearer test", "site-1"):
+            self.assertNotIn(private, rendered)
 
     def test_enqueue_commits_before_202_and_status_requires_full_identity(self):
         self.open()

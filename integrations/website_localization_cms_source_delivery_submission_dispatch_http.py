@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v1"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v2"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -40,9 +40,12 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v1"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v2"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v1"
+    "blun.cms-public-submission-dispatch-capabilities-response.v2"
+)
+OPENAPI_RESPONSE_SCHEMA = (
+    "blun.cms-public-submission-dispatch-openapi-response.v1"
 )
 
 ENQUEUE_PATH = "/v1/localization/cms-submission-dispatch/requests"
@@ -50,12 +53,14 @@ STATUS_PATH = "/v1/localization/cms-submission-dispatch/status"
 HEALTH_PATH = "/v1/localization/cms-submission-dispatch/health"
 READINESS_PATH = "/v1/localization/cms-submission-dispatch/readiness"
 CAPABILITIES_PATH = "/v1/localization/cms-submission-dispatch/capabilities"
+OPENAPI_PATH = "/v1/localization/cms-submission-dispatch/openapi"
 SCOPES = {
     ENQUEUE_PATH: "cms-submission-dispatch:write",
     STATUS_PATH: "cms-submission-dispatch-status:read",
     HEALTH_PATH: "cms-submission-dispatch-health:read",
     READINESS_PATH: "cms-submission-dispatch-readiness:read",
     CAPABILITIES_PATH: "cms-submission-dispatch-capabilities:read",
+    OPENAPI_PATH: "cms-submission-dispatch-openapi:read",
 }
 METHODS = {
     ENQUEUE_PATH: "POST",
@@ -63,9 +68,10 @@ METHODS = {
     HEALTH_PATH: "GET",
     READINESS_PATH: "GET",
     CAPABILITIES_PATH: "GET",
+    OPENAPI_PATH: "GET",
 }
 TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH}
-BODYLESS_PATHS = {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH}
+BODYLESS_PATHS = {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH}
 MAX_BODY_BYTES = 4_000_000
 MAX_HEADERS = 64
 MAX_HEADER_VALUE = 4096
@@ -96,6 +102,12 @@ _DISPATCH = _load_module(
     _ROOT
     / "integrations"
     / "website_localization_cms_source_delivery_submission_dispatch.py",
+)
+_OPENAPI = _load_module(
+    "blun_website_localization_submission_dispatch_http_openapi",
+    _ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_submission_dispatch_openapi.py",
 )
 
 
@@ -441,6 +453,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
         ("capabilities", CAPABILITIES_PATH, None, CAPABILITIES_RESPONSE_SCHEMA, 200),
         ("enqueue", ENQUEUE_PATH, ENQUEUE_REQUEST_SCHEMA, QUEUE_RESPONSE_SCHEMA, 202),
         ("health", HEALTH_PATH, None, HEALTH_RESPONSE_SCHEMA, 200),
+        ("openapi", OPENAPI_PATH, None, OPENAPI_RESPONSE_SCHEMA, 200),
         ("readiness", READINESS_PATH, None, READINESS_RESPONSE_SCHEMA, 200),
         ("status", STATUS_PATH, STATUS_REQUEST_SCHEMA, STATUS_RESPONSE_SCHEMA, 200),
     )
@@ -582,6 +595,14 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                 return self._send(start_response, 200, {
                     "schema": CAPABILITIES_RESPONSE_SCHEMA,
                     "capabilities": capabilities,
+                })
+            if path == OPENAPI_PATH:
+                document = _OPENAPI.build_document(capabilities)
+                return self._send(start_response, 200, {
+                    "schema": OPENAPI_RESPONSE_SCHEMA,
+                    "openapi": document,
+                    "openapi_sha256": _OPENAPI.document_sha256(document),
+                    "capabilities_sha256": capabilities["sha256"],
                 })
             if path == HEALTH_PATH:
                 health = _health_payload(self.runtime.health())

@@ -144,7 +144,7 @@ class SubmissionDispatchClientTests(unittest.TestCase):
             self.public_digest,
         )
         self.assertEqual(set(response["capabilities"]["operations"]), {
-            "capabilities", "enqueue", "health", "readiness", "status",
+            "capabilities", "enqueue", "health", "openapi", "readiness", "status",
         })
         self.assertEqual(len(self.transport.calls), 1)
         self.assertEqual(self.auth_calls[0], {
@@ -215,6 +215,41 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         self.assertEqual(readiness["readiness"]["capabilities_sha256"], self.public_digest)
         self.assertEqual(readiness["readiness"]["status"], "ready")
         self.assertNotIn("payload", json.dumps((health, readiness)))
+
+    def test_openapi_is_fresh_exact_and_uses_its_own_scope(self):
+        response = self.client.openapi()
+
+        expected = HTTP._OPENAPI.build_document(self.client._expected_capabilities)
+        self.assertEqual(response["openapi"], expected)
+        self.assertEqual(
+            response["openapi_sha256"], HTTP._OPENAPI.document_sha256(expected)
+        )
+        self.assertEqual(len(self.transport.calls), 2)
+        self.assertEqual(self.auth_calls[1]["path"], HTTP.OPENAPI_PATH)
+        self.assertEqual(self.auth_calls[1]["scope"], HTTP.SCOPES[HTTP.OPENAPI_PATH])
+        self.assertEqual(self.auth_calls[1]["body_sha256"], hashlib.sha256(b"").hexdigest())
+
+    def test_self_rehashed_openapi_substitution_is_rejected(self):
+        def mutate(number, result):
+            if number == 2:
+                def replace(value):
+                    value["openapi"]["info"]["description"] = "Altered contract"
+                    value["openapi_sha256"] = HTTP._OPENAPI.document_sha256(
+                        value["openapi"]
+                    )
+                return replace_json(result, replace)
+            return result
+
+        transport = TransformingTransport(self.transport, mutate)
+        client = self.make_client(transport=transport)
+        with self.assertRaises(CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked) as caught:
+            client.openapi()
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_dispatch_client.openapi_binding",
+        )
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(transport.calls), 2)
 
     def test_inconsistent_deployment_pins_are_rejected_without_transport(self):
         with self.assertRaises(ValueError):

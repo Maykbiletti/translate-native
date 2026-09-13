@@ -1,5 +1,25 @@
 # Version 6 premortem
 
+## Capability-bound OpenAPI discovery (13 September 2026)
+
+Assume a CMS generated a client from the public API description, but silently
+used a stale route, wrong scope, or weaker publication and retry semantics.
+
+- A hand-maintained document could drift from the live capability generation.
+- A valid document hash could be paired with a different sidecar or downstream
+  capability digest.
+- A deployment origin, tenant identity, website content, provider, or
+  credential value could leak through discovery.
+- A substituted document could be modified and rehashed by the same untrusted
+  peer.
+
+The sidecar now builds one origin-free OpenAPI 3.1 document from the exact
+freshly validated capability object and returns hashes for both artifacts under
+a separate operator scope. The pinned reference client reconstructs and
+compares the complete document rather than trusting its advertised hash.
+Tests cover every route, method, scope, principal, generation and success
+status, absence of private values, and a self-rehashed substitution.
+
 ## Contract-pinned public submission sidecar client (13 September 2026)
 
 Assume a remote CMS successfully called the durable submission sidecar, but
