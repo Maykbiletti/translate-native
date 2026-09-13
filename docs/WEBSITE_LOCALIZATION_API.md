@@ -1170,6 +1170,19 @@ publication semantics. The response binds the canonical document hash to the
 active capability hash and contains no server URL, tenant identity, website
 content, model provider, or credential value.
 
+The enqueue payload is a closed discriminated union keyed by `schema` for
+`blun.cms-content-change.v2`, `blun.cms-content-cancellation.v1`, and
+`blun.cms-content-tombstone.v1`. Changes carry the complete closed localization
+request, including NFC source text, canonical BCP-47 source locale, content
+type, glossary/policy/model/software versions, and an optional unique target
+array restricted to the 24 exact EU locale profiles. Cancellation and
+tombstone shapes contain only their immutable request and source identities.
+The v3 capability document binds all three payload schema IDs. JSON Schema
+metadata records the UTF-8 source byte ceiling and source-language exclusion;
+the runtime remains authoritative for checks JSON Schema cannot express
+portably, including NFC bytes, canonical locale casing, and language-family
+exclusion.
+
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
 tenant principal must match the payload's `site_id`; `Idempotency-Key` must

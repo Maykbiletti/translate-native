@@ -1,5 +1,23 @@
 # Version 6 premortem
 
+## Closed CMS source payload schemas (13 September 2026)
+
+Assume a CMS generated a client from the authenticated OpenAPI document, but
+the generated enqueue type still accepted a partial or ambiguous payload.
+
+- An opaque payload object could omit localization policy or model bindings.
+- A change could be confused with a cancellation or tombstone.
+- Unknown fields or a non-positive source generation could reach transport.
+- A stale generator could retain old payload schema IDs while discovery looked
+  current.
+
+The OpenAPI profile now publishes a closed discriminated union for all three
+runtime payloads and a complete closed localization request with the 24 exact
+EU target locales. The v3 capability generation binds each payload schema ID.
+Tests compare required and allowed fields with real runtime-valid fixtures,
+pin every discriminator mapping, and verify locale uniqueness and source-
+language exclusion metadata.
+
 ## Capability-bound OpenAPI discovery (13 September 2026)
 
 Assume a CMS generated a client from the public API description, but silently

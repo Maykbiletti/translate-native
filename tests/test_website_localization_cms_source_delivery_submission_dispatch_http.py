@@ -223,8 +223,60 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             self.assertEqual(described["x-principal-schema"], operation["principal_schema"])
             self.assertEqual(described["x-success-status"], operation["success_status"])
         rendered = response["raw"].decode("utf-8")
-        for private in ("source_text", "target_text", "Bearer test", "site-1"):
+        for private in (
+            cms_support.event()["localization"]["source_text"],
+            "target_text", "Bearer test", "site-1",
+        ):
             self.assertNotIn(private, rendered)
+
+    def test_openapi_describes_all_three_exact_source_payloads(self):
+        self.open()
+        document = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]
+        schemas = document["components"]["schemas"]
+        contracts = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )["source_payload_schemas"]
+
+        self.assertEqual(schemas["SourcePayload"]["oneOf"], [
+            {"$ref": "#/components/schemas/ContentChange"},
+            {"$ref": "#/components/schemas/ContentCancellation"},
+            {"$ref": "#/components/schemas/ContentTombstone"},
+        ])
+        self.assertEqual(
+            set(schemas["SourcePayload"]["discriminator"]["mapping"]),
+            set(contracts.values()),
+        )
+        fixtures = {
+            "ContentChange": cms_support.event(),
+            "ContentCancellation": cms_support.cancellation(),
+            "ContentTombstone": cms_support.tombstone(),
+        }
+        for name, fixture in fixtures.items():
+            schema = schemas[name]
+            self.assertFalse(schema["additionalProperties"])
+            self.assertEqual(set(schema["required"]), set(fixture))
+            self.assertEqual(set(schema["properties"]), set(fixture))
+            self.assertEqual(
+                schema["properties"]["schema"]["const"], fixture["schema"]
+            )
+
+        localization = schemas["LocalizationRequest"]
+        self.assertFalse(localization["additionalProperties"])
+        self.assertEqual(
+            set(localization["properties"]),
+            set(cms_support.event()["localization"]),
+        )
+        self.assertNotIn("target_locales", localization["required"])
+        target = localization["properties"]["target_locales"]
+        self.assertTrue(target["uniqueItems"])
+        self.assertTrue(target["x-source-language-excluded"])
+        self.assertEqual(tuple(target["items"]["enum"]), HTTP._OPENAPI.EU_TARGET_LOCALES)
+        self.assertEqual(len(target["items"]["enum"]), 24)
+        self.assertTrue(localization["properties"]["source_locale"]["x-canonical-bcp47"])
+        self.assertEqual(
+            localization["properties"]["source_text"]["x-max-utf8-bytes"],
+            1_000_000,
+        )
 
     def test_enqueue_commits_before_202_and_status_requires_full_identity(self):
         self.open()

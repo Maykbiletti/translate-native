@@ -8,8 +8,18 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v1"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v2"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
+EU_TARGET_LOCALES = (
+    "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
+    "fi-FI", "fr-FR", "de-AT", "el-GR", "hu-HU", "ga-IE", "it-IT",
+    "lv-LV", "lt-LT", "mt-MT", "pl-PL", "pt-PT", "ro-RO", "sk-SK",
+    "sl-SI", "es-ES", "sv-SE",
+)
+CONTENT_TYPES = (
+    "headline", "cta", "marketing", "ui", "documentation", "seo",
+    "legal", "commercial",
+)
 
 
 def _canonical(value: Any) -> bytes:
@@ -21,6 +31,108 @@ def _canonical(value: Any) -> bytes:
 
 def _schema_ref(name: str) -> dict[str, str]:
     return {"$ref": "#/components/schemas/" + name}
+
+
+def _closed_object(
+    properties: Mapping[str, Any], *, optional: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": sorted(set(properties) - set(optional)),
+        "properties": dict(properties),
+    }
+
+
+def _bounded_text(*, source: bool = False) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "string", "minLength": 1, "x-unicode-normalization": "NFC",
+        "x-nul-forbidden": True,
+    }
+    if source:
+        schema.update({"maxLength": 1_000_000, "x-max-utf8-bytes": 1_000_000})
+    else:
+        schema["maxLength"] = 256
+    return schema
+
+
+def _source_payload_schemas(capabilities: Mapping[str, Any]) -> dict[str, Any]:
+    contracts = capabilities["source_payload_schemas"]
+    localization = _closed_object({
+        "source_id": _bounded_text(),
+        "source_revision": _bounded_text(),
+        "source_text": _bounded_text(source=True),
+        "source_locale": {
+            **_bounded_text(),
+            "pattern": "^[A-Za-z]{2,8}(?:-(?:[A-Za-z]{4}|[A-Za-z]{2}|[0-9]{3}|[A-Za-z0-9]{5,8}))*$",
+            "x-canonical-bcp47": True,
+        },
+        "content_type": {"type": "string", "enum": list(CONTENT_TYPES)},
+        "glossary_version": _bounded_text(),
+        "policy_version": _bounded_text(),
+        "provider_id": _bounded_text(),
+        "model_id": _bounded_text(),
+        "model_version": _bounded_text(),
+        "software_version": _bounded_text(),
+        "target_locales": {
+            "type": "array", "minItems": 1, "maxItems": 24,
+            "uniqueItems": True,
+            "items": {"type": "string", "enum": list(EU_TARGET_LOCALES)},
+            "x-source-language-excluded": True,
+        },
+    }, optional=("target_locales",))
+    common = {
+        "event_id": _schema_ref("Token"),
+        "site_id": _schema_ref("Token"),
+        "website_version": _schema_ref("Token"),
+        "source_sequence": {"type": "integer", "minimum": 1},
+    }
+    change = _closed_object({
+        "schema": {"const": contracts["change"]},
+        **common,
+        "localization": _schema_ref("LocalizationRequest"),
+    })
+    cancellation = _closed_object({
+        "schema": {"const": contracts["cancellation"]},
+        "cancellation_id": _schema_ref("Token"),
+        **common,
+        "source_id": _schema_ref("Token"),
+    })
+    tombstone = _closed_object({
+        "schema": {"const": contracts["tombstone"]},
+        "tombstone_id": _schema_ref("Token"),
+        **common,
+        "source_id": _schema_ref("Token"),
+    })
+    return {
+        "LocalizationRequest": localization,
+        "ContentChange": change,
+        "ContentCancellation": cancellation,
+        "ContentTombstone": tombstone,
+        "SourcePayload": {
+            "oneOf": [
+                _schema_ref("ContentChange"),
+                _schema_ref("ContentCancellation"),
+                _schema_ref("ContentTombstone"),
+            ],
+            "discriminator": {
+                "propertyName": "schema",
+                "mapping": {
+                    contracts["change"]: "#/components/schemas/ContentChange",
+                    contracts["cancellation"]: "#/components/schemas/ContentCancellation",
+                    contracts["tombstone"]: "#/components/schemas/ContentTombstone",
+                },
+            },
+            "description": (
+                "One complete canonical change, cancellation, or tombstone; "
+                "runtime validation remains authoritative for NFC, UTF-8 byte "
+                "limits, BCP-47 canonicalization, and source-language exclusion."
+            ),
+            "x-downstream-capabilities-sha256": capabilities[
+                "public_submission_capabilities_sha256"
+            ],
+        },
+    }
 
 
 def _operation(
@@ -219,14 +331,7 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 "status": {"const": "BLOCK"}, "error_code": _schema_ref("ErrorCode"),
             },
         },
-        "SourcePayload": {
-            "type": "object",
-            "description": (
-                "One complete canonical change, cancellation, or tombstone. "
-                "The downstream public capability supplies the exact versioned payload schema."
-            ),
-            "x-downstream-capabilities-sha256": capabilities["public_submission_capabilities_sha256"],
-        },
+        **_source_payload_schemas(capabilities),
         "EnqueueRequest": {
             "type": "object", "additionalProperties": False,
             "required": [

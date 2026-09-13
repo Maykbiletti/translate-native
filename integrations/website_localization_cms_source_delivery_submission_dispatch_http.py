@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v2"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v3"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -40,9 +40,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v2"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v3"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v2"
+    "blun.cms-public-submission-dispatch-capabilities-response.v3"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -484,6 +484,11 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "client_max_attempts": "cms_to_website",
                 "delivery_max_attempts": "website_to_sidecar",
                 "source_max_attempts": "source_processing",
+            },
+            "source_payload_schemas": {
+                "change": _DISPATCH._CLIENT._CMS.CHANGE_SCHEMA,
+                "cancellation": _DISPATCH._CLIENT._CMS.CANCELLATION_SCHEMA,
+                "tombstone": _DISPATCH._CLIENT._CMS.TOMBSTONE_SCHEMA,
             },
             "semantics": {
                 "authentication_precedes_json_parsing": True,
