@@ -1048,8 +1048,39 @@ cross-bound, or unavailable state returns only a content-free blocking error.
 
 Deployments that need read-only discovery may continue to use
 `build_submission_capabilities_http()` directly. Both builders validate the
-same v4 capability snapshot, so the advertised public routes cannot drift from
+same v5 capability snapshot, so the advertised public routes cannot drift from
 the hosted write boundary.
+
+Python and separately deployed website backends may consume the complete
+edge through `CMSSourceDeliverySubmissionHTTPClient` in
+`integrations/website_localization_cms_source_delivery_submission_client.py`.
+Construct it with one exact HTTPS origin, the deployment-approved complete
+submission-capability SHA-256, and a host-owned authentication-header callback.
+The callback receives schema
+`blun.cms-source-delivery-submission-client-auth-context.v1`, exact method,
+origin, freshly discovered path and scope, canonical body SHA-256, and—where
+applicable—the site, event, request, and source-payload identities. Credentials
+remain outside the adapter.
+
+`submit_change()` and `submit_removal()` validate one complete source payload
+before discovery, use only the freshly advertised write contract, and add the
+reserved idempotency and source-payload digest headers after authentication.
+`submission_status()` and `submission_lifecycle()` require the caller's full
+known operation, request, event, site, and payload-hash binding; they do not
+offer identifier-only enumeration. `pipeline_health()` and
+`pipeline_readiness()` are distinct, body-free, site-free operator operations.
+
+Every method first validates the exact complete v5 capability shape, canonical
+digest, durable website binding, and sidecar/source generation hashes against
+the configured deployment pin. It then performs exactly one operational
+transport attempt and independently validates the entire response against the
+request and that same discovered generation. Authentication headers may not
+replace `Host`, framing, media-type, idempotency, or payload-binding headers.
+The default transport follows no redirects and performs no retry; a caller may
+schedule a bounded retry only when the stable content-free failure explicitly
+reports `retryable: true`, and must replay the identical immutable request.
+Representations and failures expose no origin, credential, tenant, source, or
+target text.
 
 A successful response uses schema
 `blun.cms-source-delivery-submission-capabilities-response.v1` and includes the
