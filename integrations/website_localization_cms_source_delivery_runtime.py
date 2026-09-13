@@ -508,6 +508,11 @@ class DurableCMSSourceDeliveryRuntime:
     def health(self) -> Any:
         return self._call("health")
 
+    def capability_binding(self) -> dict[str, Any]:
+        """Return the locally verified durable outbox generation."""
+
+        return self._call("capability_binding")
+
     @property
     def expected_capabilities_sha256(self) -> str:
         """Return the immutable source-service contract pinned by the outbox."""

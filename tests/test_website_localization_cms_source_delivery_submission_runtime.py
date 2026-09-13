@@ -282,6 +282,65 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             ],
         )
 
+    def test_website_capability_binding_reports_the_durable_generation(self):
+        runtime = self.open()
+        before = len(self.transport.calls)
+        schema = "blun.cms-source-delivery-runtime-capability-binding.v1"
+        binding_hash = hashlib.sha256("\x00".join((
+            schema,
+            "source_delivery",
+            runtime.expected_capabilities_sha256,
+            self.remote.expected_runtime_capabilities_sha256,
+            self.remote.expected_commercial_rendering_registry_sha256,
+        )).encode("utf-8")).hexdigest()
+
+        binding = runtime.website_capability_binding()
+
+        self.assertEqual(len(self.transport.calls), before)
+        self.assertEqual(binding, {
+            "schema": schema,
+            "status": "verified",
+            "database_role": "source_delivery",
+            "delivery_capabilities_sha256": (
+                runtime.expected_capabilities_sha256
+            ),
+            "runtime_capabilities_sha256": (
+                self.remote.expected_runtime_capabilities_sha256
+            ),
+            "commercial_rendering_registry_sha256": (
+                self.remote.expected_commercial_rendering_registry_sha256
+            ),
+            "binding_sha256": binding_hash,
+        })
+        binding["status"] = "altered"
+        self.assertEqual(
+            runtime.website_capability_binding()["status"], "verified",
+        )
+
+    def test_generation_tampering_blocks_projections_before_network(self):
+        runtime = self.open()
+        runtime._delivery._connection.execute(
+            "UPDATE cms_source_delivery_runtime_capability_binding "
+            "SET binding_sha256 = ?",
+            ("f" * 64,),
+        )
+        before = len(self.transport.calls)
+
+        for projection in (
+            runtime.submission_health,
+            runtime.submission_readiness,
+        ):
+            with self.assertRaises(
+                SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+            ) as caught:
+                projection()
+            self.assertEqual(
+                caught.exception.code,
+                "source_delivery_submission_runtime."
+                "website_capability_binding_invalid",
+            )
+            self.assertEqual(len(self.transport.calls), before)
+
     def test_preflight_generation_mismatch_blocks_before_database_creation(self):
         with self.assertRaises(
             SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
@@ -452,6 +511,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual((lifecycle.status, lifecycle.stage), (
             "processing", "localization_lifecycle",
         ))
+        self.assertEqual(
+            lifecycle.schema,
+            "blun.cms-source-delivery-submission-lifecycle.v3",
+        )
         self.assertEqual(lifecycle.source_status["required_locales"], [
             "fi-FI", "mt-MT",
         ])
@@ -459,6 +522,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(
             lifecycle.source_capability_binding,
             self.remote.capability_binding(),
+        )
+        self.assertEqual(
+            lifecycle.website_capability_binding,
+            runtime.website_capability_binding(),
         )
         payload = lifecycle.as_payload()
         self.assertEqual(payload["source_status"]["remote_status"], "processing")
@@ -492,6 +559,9 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         health = runtime.submission_health()
 
         self.assertEqual(health.status, "ok")
+        self.assertEqual(
+            health.schema, "blun.cms-source-delivery-submission-health.v2",
+        )
         self.assertEqual(health.website_health["status"], "ok")
         self.assertEqual(health.sidecar_health["status"], "ok")
         self.assertEqual(
@@ -500,10 +570,15 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(
             health.source_capabilities_sha256, self.remote_digest,
         )
+        self.assertEqual(
+            health.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
         payload = health.as_payload()
         self.assertEqual(set(payload), {
             "schema", "status", "website_health", "sidecar_health",
             "sidecar_capabilities_sha256", "source_capabilities_sha256",
+            "website_capability_binding",
         })
         self.assertNotIn("delivery.example", repr(payload))
         self.assertNotIn("website-credential", repr(payload))
@@ -609,6 +684,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         health = runtime.submission_pipeline_health()
 
         self.assertEqual(health.status, "ok")
+        self.assertEqual(
+            health.schema,
+            "blun.cms-source-delivery-submission-pipeline-health.v3",
+        )
         self.assertEqual(health.intake_health["status"], "ok")
         self.assertEqual(health.source_health["status"], "ok")
         self.assertEqual(
@@ -621,11 +700,16 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(
             health.source_capabilities_sha256, self.remote_digest,
         )
+        self.assertEqual(
+            health.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
         payload = health.as_payload()
         self.assertEqual(set(payload), {
             "schema", "status", "intake_health", "source_health",
             "source_capability_binding",
             "sidecar_capabilities_sha256", "source_capabilities_sha256",
+            "website_capability_binding",
         })
         self.assertNotIn("delivery.example", repr(payload))
         self.assertNotIn("website-credential", repr(payload))
@@ -696,6 +780,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         readiness = runtime.submission_readiness()
 
         self.assertEqual(readiness.status, "ready")
+        self.assertEqual(
+            readiness.schema,
+            "blun.cms-source-delivery-submission-readiness.v2",
+        )
         self.assertEqual((
             readiness.website_status,
             readiness.website_worker_state,
@@ -710,6 +798,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(
             readiness.source_capabilities_sha256, self.remote_digest,
         )
+        self.assertEqual(
+            readiness.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
         payload = readiness.as_payload()
         self.assertEqual(set(payload), {
             "schema", "status", "website_status", "website_worker_state",
@@ -717,6 +809,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "sidecar_worker_state", "sidecar_outbox_status",
             "sidecar_error_code", "sidecar_capabilities_sha256",
             "source_capabilities_sha256",
+            "website_capability_binding",
         })
         self.assertNotIn("delivery.example", repr(payload))
         self.assertNotIn("website-credential", repr(payload))
@@ -813,6 +906,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         readiness = runtime.submission_pipeline_readiness()
 
         self.assertEqual(readiness.status, "ready")
+        self.assertEqual(
+            readiness.schema,
+            "blun.cms-source-delivery-submission-pipeline-readiness.v3",
+        )
         self.assertEqual(readiness.intake_readiness["status"], "ready")
         self.assertEqual(readiness.source_readiness, {
             "schema": "blun.cms-source-worker-readiness.v1",
@@ -831,11 +928,16 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(
             readiness.source_capabilities_sha256, self.remote_digest,
         )
+        self.assertEqual(
+            readiness.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
         payload = readiness.as_payload()
         self.assertEqual(set(payload), {
             "schema", "status", "intake_readiness", "source_readiness",
             "source_capability_binding",
             "sidecar_capabilities_sha256", "source_capabilities_sha256",
+            "website_capability_binding",
         })
         self.assertNotIn("delivery.example", repr(payload))
         self.assertNotIn("website-credential", repr(payload))
@@ -889,6 +991,9 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual((status.status, status.stage), (
             "pending", "website_acceptance",
         ))
+        self.assertEqual(
+            status.schema, "blun.cms-source-delivery-submission-status.v2",
+        )
         self.assertEqual((
             status.website_status,
             status.website_delivery_max_attempts,
@@ -904,7 +1009,12 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "sidecar_status", "sidecar_attempts",
             "sidecar_delivery_max_attempts", "source_max_attempts",
             "next_attempt_at", "lease_expired", "error_code",
+            "website_capability_binding",
         })
+        self.assertEqual(
+            status.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
         self.assertNotIn(change["localization"]["source_text"], repr(payload))
 
     def test_submission_status_projects_exact_sidecar_pending_state(self):

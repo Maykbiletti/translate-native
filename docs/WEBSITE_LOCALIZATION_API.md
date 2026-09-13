@@ -969,7 +969,7 @@ must preserve those bindings, both capability pins, the configured middle
 delivery ceiling, and the source-processing ceiling.
 
 The projection schema is
-`blun.cms-source-delivery-submission-status.v1`. Its top-level status is
+`blun.cms-source-delivery-submission-status.v2`. Its top-level status is
 `pending`, `failed`, or `accepted`; its stage is `website_acceptance`,
 `sidecar_delivery`, or `source_acceptance`. It includes the separate website
 and sidecar states, attempt counts and retry ceilings, the next-attempt time,
@@ -977,11 +977,19 @@ lease-expiry flag, and a stable content-free error code. `accepted` means the
 source service has durably accepted the event. It does not mean translation,
 quality review, release approval, or publication succeeded.
 
+The `website_capability_binding` field is independently recomputed from the
+validated, role-specific SQLite generation before the status is projected. It
+contains only the outer adapter capability hash, source-runtime hash,
+commercial rendering-registry hash, database role, and their canonical binding
+hash. A missing, changed, or malformed binding blocks locally before a sidecar
+status request.
+
 `submission_lifecycle()` extends that accepted state with the independently
 validated source lifecycle. Its
-`blun.cms-source-delivery-submission-lifecycle.v2` projection keeps submission,
-source status, and the verified source runtime binding separate. Missing or
-changed binding evidence blocks instead of returning a processing state.
+`blun.cms-source-delivery-submission-lifecycle.v3` projection keeps submission,
+source status, the verified website generation, and the verified source runtime
+binding separate. Missing or changed binding evidence blocks instead of
+returning a processing state.
 
 Use `submission_readiness()` to inspect the complete durable intake path
 without collapsing its two independently operated workers. The method first
@@ -991,10 +999,11 @@ Only a locally ready runtime performs the authenticated, contract-pinned
 sidecar readiness request.
 
 The content-free
-`blun.cms-source-delivery-submission-readiness.v1` projection retains separate
+`blun.cms-source-delivery-submission-readiness.v2` projection retains separate
 website and sidecar readiness, worker state, outbox state, and stable error
 code fields. It also carries the trusted sidecar and source-service capability
-hashes. Overall status is `ready` only when both workers report `running`, both
+hashes plus the locally verified website generation. Overall status is `ready`
+only when both workers report `running`, both
 outboxes report `ok`, both component error codes are absent, and the sidecar
 response matches the currently pinned contract. This is intake readiness; it
 does not assert that a particular localization or publication has completed.
@@ -1007,10 +1016,10 @@ Only fully ready intake performs the separately authenticated, body-free
 `source_readiness()` operation through the sidecar.
 
 The resulting
-`blun.cms-source-delivery-submission-pipeline-readiness.v2` object keeps the
+`blun.cms-source-delivery-submission-pipeline-readiness.v3` object keeps the
 complete intake projection and source-worker projection separate, binds the
-current sidecar and source-service capability hashes plus the source runtime
-binding, and reports overall
+current sidecar and source-service capability hashes plus the website and
+source runtime bindings, and reports overall
 `ready` only when both projections are independently ready. A stopped source
 worker, transport failure, malformed status combination, or capability drift
 blocks fail-closed. This operational probe is content-free and makes no claim
@@ -1023,12 +1032,14 @@ the owned authenticated, contract-pinned client. Invalid local state therefore
 blocks offline; malformed remote counters, contradictory status, and changed
 capability bindings also block fail-closed.
 
-The `blun.cms-source-delivery-submission-health.v1` projection retains the
+The `blun.cms-source-delivery-submission-health.v2` projection retains the
 complete whitelisted website and sidecar health snapshots separately,
 including counts, operation totals, due work, expired leases, terminal
 failures, contract mismatches, and stable error codes. Its overall status is
 `ok` only when both snapshots independently report `ok`. A blocked component
-can never be hidden by the other component's healthy state.
+can never be hidden by the other component's healthy state. The exact website
+generation binding is checked locally and included before the sidecar health
+request is allowed.
 
 Use `submission_pipeline_health()` to extend that health view through every
 durable source-processing queue. The runtime evaluates the website and sidecar
@@ -1036,9 +1047,10 @@ intake projection first. If either intake outbox is blocked, `source_health`
 remains `null` and no source-health request is made. Healthy intake performs a
 separately authenticated, body-free source-health request through the sidecar.
 
-The resulting `blun.cms-source-delivery-submission-pipeline-health.v2` object
+The resulting `blun.cms-source-delivery-submission-pipeline-health.v3` object
 keeps the intake projection and complete source-service projection separate,
-binds both current capability hashes and the source runtime binding, and
+binds both current capability hashes and the website and source runtime
+bindings, and
 preserves `ok`, `degraded`, or
 `blocked` source state. Invalid counters, contradictory HTTP status, transport
 failure, or capability drift block fail-closed without returning content.

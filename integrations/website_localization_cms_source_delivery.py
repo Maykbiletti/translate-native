@@ -583,6 +583,31 @@ class DurableCMSSourceDeliveryOutbox:
             raise CMSSourceDeliveryBlocked("source_delivery.schema_altered")
         self._guard_capability_binding()
 
+    def capability_binding(self) -> dict[str, Any]:
+        """Return the content-free durable generation bound to this outbox."""
+
+        self._validate_schema()
+        if self.runtime_capabilities_sha256 is None:
+            return {
+                "schema": CAPABILITY_BINDING_SCHEMA,
+                "status": "not_configured",
+                "database_role": CAPABILITY_DATABASE_ROLE,
+                "delivery_capabilities_sha256": self.capabilities_sha256,
+                "runtime_capabilities_sha256": None,
+                "commercial_rendering_registry_sha256": None,
+                "binding_sha256": None,
+            }
+        row = self._capability_binding_row()
+        return {
+            "schema": row[1],
+            "status": "verified",
+            "database_role": row[2],
+            "delivery_capabilities_sha256": row[3],
+            "runtime_capabilities_sha256": row[4],
+            "commercial_rendering_registry_sha256": row[5],
+            "binding_sha256": row[6],
+        }
+
     def _verified_source_binding(self, value: Any) -> dict[str, Any]:
         try:
             binding = _CLIENT._HTTP._capability_binding_payload(value)
