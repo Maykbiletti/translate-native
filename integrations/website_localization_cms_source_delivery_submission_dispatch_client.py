@@ -34,11 +34,12 @@ MAX_RESPONSE_BYTES = 4_000_000
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-AUTH_CONTEXT_SCHEMA = "blun.cms-public-submission-dispatch-client-auth-context.v1"
+AUTH_CONTEXT_SCHEMA = "blun.cms-public-submission-dispatch-client-auth-context.v2"
 RESERVED_HEADERS = {
     "accept", "connection", "content-length", "content-type", "host",
     "idempotency-key", "transfer-encoding",
     "x-localization-source-payload-sha256",
+    "x-localization-capabilities-sha256",
 }
 
 
@@ -441,12 +442,20 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             "body_sha256": hashlib.sha256(body or b"").hexdigest(),
             **context,
         }
+        if path != _HTTP.CAPABILITIES_PATH:
+            authentication["capabilities_sha256"] = (
+                self.expected_capabilities_sha256
+            )
         request_headers = _authentication_headers(
             self.authentication_headers, authentication,
         )
         request_headers["Accept"] = "application/json"
         if body is not None:
             request_headers["Content-Type"] = "application/json; charset=utf-8"
+        if path != _HTTP.CAPABILITIES_PATH:
+            request_headers[_HTTP.CAPABILITIES_PRECONDITION_HEADER] = (
+                self.expected_capabilities_sha256
+            )
         if headers:
             request_headers.update(headers)
         try:

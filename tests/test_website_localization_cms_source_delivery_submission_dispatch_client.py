@@ -94,6 +94,21 @@ class StaticTransport:
         return self.result
 
 
+class StaleCapabilityTransport:
+    def __init__(self, transport):
+        self.transport = transport
+        self.calls = []
+
+    def request(self, method, url, headers, body, *, timeout):
+        changed = dict(headers)
+        if urlsplit(url).path != HTTP.CAPABILITIES_PATH:
+            changed[HTTP.CAPABILITIES_PRECONDITION_HEADER] = "0" * 64
+        self.calls.append((method, url, changed, body, timeout))
+        return self.transport.request(
+            method, url, changed, body, timeout=timeout,
+        )
+
+
 def replace_json(result, transform):
     value = json.loads(result.body)
     transform(value)
@@ -200,10 +215,14 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         self.assertEqual(request["client_max_attempts"], 4)
         self.assertEqual(calls[1][2]["Idempotency-Key"], identity["request_id"])
         self.assertEqual(
+            calls[1][2][HTTP.CAPABILITIES_PRECONDITION_HEADER], self.digest,
+        )
+        self.assertEqual(
             calls[1][2]["X-Localization-Source-Payload-Sha256"],
             hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         )
         self.assertEqual(self.auth_calls[1]["body_sha256"], hashlib.sha256(calls[1][3]).hexdigest())
+        self.assertEqual(self.auth_calls[1]["capabilities_sha256"], self.digest)
         self.assertEqual(self.auth_calls[1]["site_id"], "site-1")
         self.assertEqual(response["status"]["client_max_attempts"], 4)
 
@@ -282,6 +301,32 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         self.assertFalse(caught.exception.retryable)
         self.assertEqual(len(transport.calls), 1)
 
+    def test_server_generation_change_blocks_client_write_before_persistence(self):
+        transport = StaleCapabilityTransport(self.transport)
+        client = self.make_client(transport=transport)
+        change = cms_support.event()
+
+        with self.assertRaises(
+            CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked
+        ) as caught:
+            client.enqueue(change)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_dispatch_client.http_status",
+        )
+        self.assertEqual(caught.exception.http_status, 412)
+        self.assertEqual(
+            caught.exception.remote_error_code,
+            "submission_dispatch_http.capabilities_precondition_failed",
+        )
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(transport.calls), 2)
+        with self.assertRaises(
+            http_support.RUNTIME.CMSSourceDeliverySubmissionDispatchRuntimeBlocked
+        ):
+            self.runtime.status("change", change["event_id"])
+
     def test_cross_tenant_status_and_response_substitution_fail_closed(self):
         accepted = self.client.enqueue(cms_support.event())["status"]
         identity = tuple(accepted[name] for name in (
@@ -318,6 +363,18 @@ class SubmissionDispatchClientTests(unittest.TestCase):
             self.client.enqueue({"schema": "not-a-source-event"})
         self.assertEqual(payload.exception.code, "source_delivery_submission_dispatch_client.request_invalid")
         self.assertEqual(len(self.transport.calls), calls)
+
+        client = self.make_client(headers={
+            HTTP.CAPABILITIES_PRECONDITION_HEADER: "0" * 64,
+        })
+        with self.assertRaises(
+            CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked
+        ) as precondition:
+            client.capabilities()
+        self.assertEqual(
+            precondition.exception.code,
+            "source_delivery_submission_dispatch_client.authentication",
+        )
 
     def test_redirects_are_terminal_and_network_failures_are_retryable_once(self):
         redirect = StaticTransport(CLIENT.HTTPResult(

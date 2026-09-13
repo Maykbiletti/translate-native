@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v7"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v8"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -40,9 +40,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v7"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v8"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v7"
+    "blun.cms-public-submission-dispatch-capabilities-response.v8"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -72,6 +72,8 @@ METHODS = {
 }
 TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH}
 BODYLESS_PATHS = {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH}
+CAPABILITIES_PRECONDITION_HEADER = "X-Localization-Capabilities-SHA256"
+CAPABILITIES_PRECONDITION_PATHS = set(SCOPES) - {CAPABILITIES_PATH}
 _AUTHENTICATION_ERRORS = {
     401: ("submission_dispatch_http.authentication_failed",),
     403: ("submission_dispatch_http.scope_rejected",),
@@ -100,6 +102,10 @@ _BODY_400_ERRORS = (
     "submission_dispatch_http.request_invalid",
     "submission_dispatch_http.transfer_encoding_rejected",
 )
+_CAPABILITIES_PRECONDITION_ERRORS = {
+    412: ("submission_dispatch_http.capabilities_precondition_failed",),
+    428: ("submission_dispatch_http.capabilities_precondition_required",),
+}
 ERROR_CODES = {
     CAPABILITIES_PATH: {
         400: _BODYLESS_400_ERRORS,
@@ -113,6 +119,7 @@ ERROR_CODES = {
             *_BODY_400_ERRORS, "submission_dispatch_http.binding_invalid",
         ))),
         **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
         409: ("submission_dispatch_http.idempotency_collision",),
         411: ("submission_dispatch_http.content_length_required",),
         413: ("submission_dispatch_http.body_too_large",),
@@ -126,6 +133,7 @@ ERROR_CODES = {
     HEALTH_PATH: {
         400: _BODYLESS_400_ERRORS,
         **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
         411: ("submission_dispatch_http.content_length_required",),
         413: ("submission_dispatch_http.body_too_large",),
         503: tuple(sorted((
@@ -136,6 +144,7 @@ ERROR_CODES = {
     OPENAPI_PATH: {
         400: _BODYLESS_400_ERRORS,
         **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
         411: ("submission_dispatch_http.content_length_required",),
         413: ("submission_dispatch_http.body_too_large",),
         503: _COMMON_503_ERRORS,
@@ -143,6 +152,7 @@ ERROR_CODES = {
     READINESS_PATH: {
         400: _BODYLESS_400_ERRORS,
         **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
         411: ("submission_dispatch_http.content_length_required",),
         413: ("submission_dispatch_http.body_too_large",),
         503: tuple(sorted((
@@ -153,6 +163,7 @@ ERROR_CODES = {
     STATUS_PATH: {
         400: _BODY_400_ERRORS,
         **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
         404: ("submission_dispatch_http.submission_not_found",),
         411: ("submission_dispatch_http.content_length_required",),
         413: ("submission_dispatch_http.body_too_large",),
@@ -239,7 +250,7 @@ class CMSSourceDeliverySubmissionDispatchHTTPBlocked(RuntimeError):
 
     def __init__(self, code: str, status: int):
         if ERROR_CODE.fullmatch(code) is None or status not in {
-            400, 401, 403, 404, 405, 409, 411, 413, 415, 503,
+            400, 401, 403, 404, 405, 409, 411, 412, 413, 415, 428, 503,
         }:
             raise ValueError("invalid submission dispatch HTTP failure")
         super().__init__(code)
@@ -591,6 +602,10 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 ),
                 "request_schema": request_schema,
                 "response_schema": response_schema,
+                "capabilities_precondition_header": (
+                    CAPABILITIES_PRECONDITION_HEADER
+                    if path in CAPABILITIES_PRECONDITION_PATHS else None
+                ),
                 "success_status": status,
                 "error_statuses": list(ERROR_STATUSES[path]),
                 "error_codes": {
@@ -623,6 +638,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
             "semantics": {
                 "authentication_precedes_json_parsing": True,
                 "authentication_binds_exact_body_sha256": True,
+                "non_discovery_operations_require_exact_capability_precondition": True,
                 "tenant_operations_are_site_bound": True,
                 "write_requires_ready_managed_worker": True,
                 "accepted_means_website_intake_only": True,
@@ -675,7 +691,8 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
             200: "OK", 202: "Accepted", 400: "Bad Request",
             401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
             405: "Method Not Allowed", 409: "Conflict",
-            411: "Length Required", 413: "Content Too Large",
+            411: "Length Required", 412: "Precondition Failed",
+            413: "Content Too Large", 428: "Precondition Required",
             415: "Unsupported Media Type", 503: "Service Unavailable",
         }
         start_response(f"{status} {phrases[status]}", [
@@ -737,6 +754,13 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                     "schema": CAPABILITIES_RESPONSE_SCHEMA,
                     "capabilities": capabilities,
                 })
+            supplied_capabilities = environ.get(
+                "HTTP_X_LOCALIZATION_CAPABILITIES_SHA256"
+            )
+            if supplied_capabilities is None:
+                raise _blocked("capabilities_precondition_required", 428)
+            if supplied_capabilities != capabilities["sha256"]:
+                raise _blocked("capabilities_precondition_failed", 412)
             if path == OPENAPI_PATH:
                 document = _OPENAPI.build_document(capabilities)
                 return self._send(start_response, 200, {

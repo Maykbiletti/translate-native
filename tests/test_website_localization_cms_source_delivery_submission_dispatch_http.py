@@ -60,6 +60,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.support.setUp()
         self.authenticator = Authenticator()
         self.runtime = None
+        self.capabilities_digest = None
 
     def tearDown(self):
         if self.runtime is not None:
@@ -98,6 +99,9 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             http_authenticator=self.authenticator,
             **kwargs,
         )
+        self.capabilities_digest = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )["sha256"]
         return self.runtime
 
     @staticmethod
@@ -109,7 +113,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
 
     def call(
         self, path, *, method=None, body=None, headers=None, scheme="https",
-        query="", content_length=None,
+        query="", content_length=None, bind_capabilities=True,
     ):
         raw = b"" if body is None else (
             body if isinstance(body, bytes) else self.canonical(body)
@@ -127,7 +131,13 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         }
         if body is not None:
             environ["CONTENT_TYPE"] = "application/json; charset=utf-8"
-        for name, value in (headers or {}).items():
+        request_headers = dict(headers or {})
+        if bind_capabilities and path in HTTP.CAPABILITIES_PRECONDITION_PATHS:
+            request_headers.setdefault(
+                HTTP.CAPABILITIES_PRECONDITION_HEADER,
+                self.capabilities_digest,
+            )
+        for name, value in request_headers.items():
             environ["HTTP_" + name.upper().replace("-", "_")] = value
         response = {}
 
@@ -186,13 +196,27 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertTrue(
             capabilities["semantics"]["write_requires_ready_managed_worker"]
         )
+        self.assertTrue(
+            capabilities["semantics"]
+            ["non_discovery_operations_require_exact_capability_precondition"]
+        )
+        self.assertIsNone(
+            capabilities["operations"]["capabilities"]
+            ["capabilities_precondition_header"]
+        )
+        for name in {"enqueue", "health", "openapi", "readiness", "status"}:
+            self.assertEqual(
+                capabilities["operations"][name]
+                ["capabilities_precondition_header"],
+                HTTP.CAPABILITIES_PRECONDITION_HEADER,
+            )
         self.assertEqual(
             capabilities["operations"]["enqueue"]["error_statuses"],
-            [400, 401, 403, 405, 409, 411, 413, 415, 503],
+            [400, 401, 403, 405, 409, 411, 412, 413, 415, 428, 503],
         )
         self.assertEqual(
             capabilities["operations"]["status"]["error_statuses"],
-            [400, 401, 403, 404, 405, 411, 413, 415, 503],
+            [400, 401, 403, 404, 405, 411, 412, 413, 415, 428, 503],
         )
         self.assertEqual(
             capabilities["operations"]["capabilities"]["error_statuses"],
@@ -405,6 +429,73 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             ["error_code"]["enum"],
             all_codes,
         )
+
+    def test_openapi_requires_the_capability_precondition_except_for_discovery(self):
+        self.open()
+        document = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]
+        capabilities = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )
+
+        for name, contract in capabilities["operations"].items():
+            operation = document["paths"][contract["path"]][
+                contract["method"].lower()
+            ]
+            parameters = operation.get("parameters", [])
+            matches = [
+                item for item in parameters
+                if item["name"] == HTTP.CAPABILITIES_PRECONDITION_HEADER
+            ]
+            self.assertEqual(len(matches), 0 if name == "capabilities" else 1)
+            if matches:
+                self.assertTrue(matches[0]["required"])
+                self.assertEqual(
+                    matches[0]["schema"],
+                    {"$ref": "#/components/schemas/Sha256"},
+                )
+
+    def test_missing_or_stale_capability_precondition_blocks_before_runtime(self):
+        self.open()
+        payload = cms_support.event()
+        request = self.enqueue_request(payload)
+        _copy, identity, canonical = HTTP._DISPATCH._payload(payload)
+        base_headers = {
+            "Idempotency-Key": identity["request_id"],
+            "X-Localization-Source-Payload-SHA256": hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest(),
+        }
+
+        with mock.patch.object(
+            self.runtime, "enqueue", wraps=self.runtime.enqueue,
+        ) as enqueue:
+            missing = self.call(
+                HTTP.ENQUEUE_PATH, body=request, headers=base_headers,
+                bind_capabilities=False,
+            )
+            stale = self.call(
+                HTTP.ENQUEUE_PATH, body=request,
+                headers={
+                    **base_headers,
+                    HTTP.CAPABILITIES_PRECONDITION_HEADER: "0" * 64,
+                },
+                bind_capabilities=False,
+            )
+
+        self.assertEqual(
+            (missing["status"], missing["json"]["error_code"]),
+            (428, "submission_dispatch_http.capabilities_precondition_required"),
+        )
+        self.assertEqual(
+            (stale["status"], stale["json"]["error_code"]),
+            (412, "submission_dispatch_http.capabilities_precondition_failed"),
+        )
+        enqueue.assert_not_called()
+        self.assertEqual(len(self.authenticator.calls), 2)
+        with self.assertRaises(
+            RUNTIME.CMSSourceDeliverySubmissionDispatchRuntimeBlocked
+        ):
+            self.runtime.status("change", payload["event_id"])
 
     def test_openapi_encodes_runtime_state_invariants(self):
         self.open()

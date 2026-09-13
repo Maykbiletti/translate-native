@@ -1230,6 +1230,17 @@ trusted reasons. Verified `503` errors remain retryable and a verified `409`
 idempotency collision remains terminal; the exception message itself contains
 only the stable local failure code.
 
+The v8 capability generation and v7 OpenAPI document additionally require
+`X-Localization-Capabilities-SHA256` on every route except authenticated
+capability discovery. The header must equal the complete active sidecar
+capability SHA-256 and participates in the host authentication context. A
+missing header returns the advertised content-free `428`; a stale or replaced
+generation returns `412`. Both failures occur before enqueue, status lookup,
+health/readiness access, or OpenAPI generation, so a capability change between
+discovery and operation cannot persist or expose work under an unexpected
+contract. Discovery itself remains the bootstrap and therefore requires no
+self-referential precondition.
+
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
 tenant principal must match the payload's `site_id`; `Idempotency-Key` must

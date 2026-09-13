@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v6"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v7"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -226,8 +226,19 @@ def _operation(
                 },
             },
         }
+    parameters = []
+    precondition_header = contract["capabilities_precondition_header"]
+    if precondition_header is not None:
+        parameters.append({
+            "name": precondition_header, "in": "header", "required": True,
+            "schema": _schema_ref("Sha256"),
+            "description": (
+                "Must equal the complete capability SHA-256 obtained from the "
+                "immediately preceding authenticated discovery response."
+            ),
+        })
     if headers:
-        operation["parameters"] = [
+        parameters.extend([
             {
                 "name": "Idempotency-Key", "in": "header", "required": True,
                 "schema": _schema_ref("Token"),
@@ -239,7 +250,9 @@ def _operation(
                 "schema": _schema_ref("Sha256"),
                 "description": "SHA-256 of the complete canonical source payload.",
             },
-        ]
+        ])
+    if parameters:
+        operation["parameters"] = parameters
     return operation
 
 
