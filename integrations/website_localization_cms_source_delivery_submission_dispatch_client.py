@@ -512,6 +512,28 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
     def readiness(self) -> Mapping[str, Any]:
         return self._monitor("readiness")
 
+    def openapi(self) -> Mapping[str, Any]:
+        """Return the exact origin-free API document for this pinned deployment."""
+        contract = self._contract("openapi")
+        response = self._request(
+            contract["method"], contract["path"], contract["scope"], None,
+            {contract["success_status"]}, {},
+        )
+        expected = _HTTP._OPENAPI.build_document(self._expected_capabilities)
+        if (
+            set(response) != {
+                "schema", "openapi", "openapi_sha256", "capabilities_sha256",
+            }
+            or response.get("schema") != contract["response_schema"]
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("openapi") != expected
+            or response.get("openapi_sha256")
+            != _HTTP._OPENAPI.document_sha256(expected)
+        ):
+            _fail("openapi_binding")
+        return response
+
     def _monitor(self, name: str) -> Mapping[str, Any]:
         contract = self._contract(name)
         response = self._request(
