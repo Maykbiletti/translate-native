@@ -76,6 +76,67 @@ class Runtime:
     def submission_capabilities(self):
         raise AssertionError("capabilities were not requested")
 
+    def submission_pipeline_health(self):
+        self.calls.append(("pipeline_health",))
+        blocked_health = {
+            "schema": "blun.cms-source-delivery-health.v1",
+            "status": "blocked",
+            "counts": {},
+            "operations": {},
+            "due": 0,
+            "expired_leases": 0,
+            "failed": 0,
+            "contract_mismatches": 0,
+            "error_code": "source_delivery.integrity",
+        }
+        intake = {
+            "schema": HTTP._SUBMISSION.HEALTH_SCHEMA,
+            "status": "blocked",
+            "website_health": copy.deepcopy(blocked_health),
+            "sidecar_health": copy.deepcopy(blocked_health),
+            "sidecar_capabilities_sha256": self.digest,
+            "source_capabilities_sha256": "9" * 64,
+            "website_capability_binding": copy.deepcopy(self.binding),
+        }
+        return HTTP._SUBMISSION.HMACCMSSourceDeliverySubmissionPipelineHealth(
+            schema=HTTP._SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+            status="blocked",
+            intake_health=intake,
+            source_health=None,
+            source_capability_binding=None,
+            website_capability_binding=copy.deepcopy(self.binding),
+            sidecar_capabilities_sha256=self.digest,
+            source_capabilities_sha256="9" * 64,
+        )
+
+    def submission_pipeline_readiness(self):
+        self.calls.append(("pipeline_readiness",))
+        intake = {
+            "schema": HTTP._SUBMISSION.READINESS_SCHEMA,
+            "status": "not_ready",
+            "website_status": "not_ready",
+            "website_worker_state": "unmanaged",
+            "website_outbox_status": "ok",
+            "website_error_code": "source_delivery_runtime.worker_not_ready",
+            "sidecar_status": None,
+            "sidecar_worker_state": None,
+            "sidecar_outbox_status": None,
+            "sidecar_error_code": None,
+            "sidecar_capabilities_sha256": self.digest,
+            "source_capabilities_sha256": "9" * 64,
+            "website_capability_binding": copy.deepcopy(self.binding),
+        }
+        return HTTP._SUBMISSION.HMACCMSSourceDeliverySubmissionPipelineReadiness(
+            schema=HTTP._SUBMISSION.PIPELINE_READINESS_SCHEMA,
+            status="not_ready",
+            intake_readiness=intake,
+            source_readiness=None,
+            source_capability_binding=None,
+            website_capability_binding=copy.deepcopy(self.binding),
+            sidecar_capabilities_sha256=self.digest,
+            source_capabilities_sha256="9" * 64,
+        )
+
     def worker_readiness(self):
         self.calls.append(("readiness",))
         return {
@@ -227,15 +288,25 @@ class SubmissionHTTPTests(unittest.TestCase):
                 raise self.auth_failure
             return {
                 "schema": (
-                    HTTP.READ_PRINCIPAL_SCHEMA
-                    if request["path"] in HTTP.READ_PATHS
-                    else HTTP.PRINCIPAL_SCHEMA
+                    HTTP.OPERATOR_PRINCIPAL_SCHEMA
+                    if request["path"] in HTTP.MONITOR_PATHS
+                    else (
+                        HTTP.READ_PRINCIPAL_SCHEMA
+                        if request["path"] in HTTP.READ_PATHS
+                        else HTTP.PRINCIPAL_SCHEMA
+                    )
                 ),
                 "principal_id": "website-backend",
                 "credential_id": "public-ingress",
                 "credential_version": "1",
-                "scope": self.principal_scope or HTTP.SCOPES[request["path"]],
-                "site_id": self.principal_site,
+                "scope": self.principal_scope or (
+                    HTTP.MONITOR_SCOPES[request["path"]]
+                    if request["path"] in HTTP.MONITOR_PATHS
+                    else HTTP.SCOPES[request["path"]]
+                ),
+                **({} if request["path"] in HTTP.MONITOR_PATHS else {
+                    "site_id": self.principal_site,
+                }),
             }
 
         self.application = HTTP.build_submission_http(
@@ -338,6 +409,25 @@ class SubmissionHTTPTests(unittest.TestCase):
             "CONTENT_TYPE": "application/json",
             "CONTENT_LENGTH": str(len(body)),
             "wsgi.input": io.BytesIO(body),
+        }
+        environ.update(overrides)
+        captured = {}
+        response_body = b"".join(self.application(
+            environ,
+            lambda status, headers: captured.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        return int(captured["status"].split(" ", 1)[0]), captured, json.loads(response_body)
+
+    def monitor_request(self, path=HTTP.PIPELINE_HEALTH_PATH, **overrides):
+        environ = {
+            "PATH_INFO": path,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "GET",
+            "wsgi.url_scheme": "https",
+            "CONTENT_LENGTH": "0",
+            "wsgi.input": io.BytesIO(b""),
         }
         environ.update(overrides)
         captured = {}
@@ -589,6 +679,91 @@ class SubmissionHTTPTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(
             response["error_code"], "submission_http.submission_not_found",
+        )
+
+    def test_operator_routes_keep_pipeline_health_and_readiness_separate(self):
+        health_status, health_metadata, health = self.monitor_request()
+        readiness_status, _readiness_metadata, readiness = self.monitor_request(
+            HTTP.PIPELINE_READINESS_PATH,
+        )
+
+        self.assertEqual((health_status, readiness_status), (200, 200))
+        self.assertEqual(health_metadata["headers"]["Cache-Control"], "no-store")
+        self.assertEqual(
+            health["schema"],
+            HTTP.MONITOR_RESPONSE_SCHEMAS[HTTP.PIPELINE_HEALTH_PATH],
+        )
+        self.assertEqual(health["result"]["status"], "blocked")
+        self.assertEqual(readiness["result"]["status"], "not_ready")
+        self.assertTrue(health["content_free"])
+        self.assertFalse(readiness["publication_authority"])
+        self.assertEqual(self.runtime.calls, [
+            ("pipeline_health",), ("pipeline_readiness",),
+        ])
+        self.assertEqual(
+            self.auth_requests[0]["schema"], HTTP.OPERATOR_AUTH_REQUEST_SCHEMA,
+        )
+        self.assertEqual(
+            self.auth_requests[0]["body_sha256"], HTTP.EMPTY_SHA256,
+        )
+        self.assertNotIn("site_id", self.auth_requests[0])
+        self.assertNotIn("A price of", repr(health))
+
+    def test_operator_scopes_and_transport_fail_before_runtime(self):
+        self.principal_scope = HTTP.PIPELINE_READINESS_SCOPE
+        status, _metadata, response = self.monitor_request()
+        self.assertEqual(status, 403)
+        self.assertEqual(response["error_code"], "submission_http.scope_rejected")
+        self.assertEqual(self.runtime.calls, [])
+
+        self.principal_scope = None
+        for overrides in (
+            {"REQUEST_METHOD": "POST"},
+            {"wsgi.url_scheme": "http"},
+            {"QUERY_STRING": "details=1"},
+            {"CONTENT_TYPE": "application/json"},
+            {"CONTENT_LENGTH": "1", "wsgi.input": io.BytesIO(b"x")},
+            {"HTTP_TRANSFER_ENCODING": "chunked"},
+        ):
+            with self.subTest(overrides=overrides):
+                self.runtime.calls.clear()
+                status, _metadata, _response = self.monitor_request(**overrides)
+                self.assertIn(status, {400, 405})
+                self.assertEqual(self.runtime.calls, [])
+
+    def test_operator_route_rejects_rebound_or_malformed_pipeline_state(self):
+        original = self.runtime.submission_pipeline_health
+
+        def tampered():
+            value = original()
+            intake = copy.deepcopy(value.intake_health)
+            intake["source_capabilities_sha256"] = "8" * 64
+            return dataclasses.replace(value, intake_health=intake)
+
+        self.runtime.submission_pipeline_health = tampered
+        status, _metadata, response = self.monitor_request()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            response["error_code"], "submission_http.runtime_response_invalid",
+        )
+        self.assertNotIn("8" * 64, repr(response))
+
+        original_readiness = self.runtime.submission_pipeline_readiness
+
+        def malformed():
+            value = original_readiness()
+            intake = copy.deepcopy(value.intake_readiness)
+            intake["website_error_code"] = None
+            return dataclasses.replace(value, intake_readiness=intake)
+
+        self.runtime.submission_pipeline_readiness = malformed
+        status, _metadata, response = self.monitor_request(
+            HTTP.PIPELINE_READINESS_PATH,
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            response["error_code"], "submission_http.runtime_response_invalid",
         )
 
 

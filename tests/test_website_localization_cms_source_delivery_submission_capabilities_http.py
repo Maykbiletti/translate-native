@@ -130,7 +130,13 @@ def capability_payload():
             },
             "submission_pipeline_health": {
                 "kind": "read",
-                "response_schema": SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+                "method": "GET",
+                "path": SUBMISSION.PIPELINE_HEALTH_HTTP_PATH,
+                "scope": SUBMISSION.PIPELINE_HEALTH_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+                "response_schema": SUBMISSION.PIPELINE_HEALTH_HTTP_RESPONSE_SCHEMA,
             },
             "submission_readiness": {
                 "kind": "read",
@@ -138,7 +144,13 @@ def capability_payload():
             },
             "submission_pipeline_readiness": {
                 "kind": "read",
-                "response_schema": SUBMISSION.PIPELINE_READINESS_SCHEMA,
+                "method": "GET",
+                "path": SUBMISSION.PIPELINE_READINESS_HTTP_PATH,
+                "scope": SUBMISSION.PIPELINE_READINESS_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": SUBMISSION.PIPELINE_READINESS_SCHEMA,
+                "response_schema": SUBMISSION.PIPELINE_READINESS_HTTP_RESPONSE_SCHEMA,
             },
         },
         "retry_budgets": {

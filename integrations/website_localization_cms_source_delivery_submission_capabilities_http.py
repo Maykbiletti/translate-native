@@ -250,7 +250,15 @@ def _capabilities(value: Any) -> dict[str, Any]:
             },
             "submission_pipeline_health": {
                 "kind": "read",
-                "response_schema": _SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+                "method": "GET",
+                "path": _SUBMISSION.PIPELINE_HEALTH_HTTP_PATH,
+                "scope": _SUBMISSION.PIPELINE_HEALTH_HTTP_SCOPE,
+                "principal_schema": _SUBMISSION.OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": _SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+                "response_schema": (
+                    _SUBMISSION.PIPELINE_HEALTH_HTTP_RESPONSE_SCHEMA
+                ),
             },
             "submission_readiness": {
                 "kind": "read",
@@ -258,7 +266,15 @@ def _capabilities(value: Any) -> dict[str, Any]:
             },
             "submission_pipeline_readiness": {
                 "kind": "read",
-                "response_schema": _SUBMISSION.PIPELINE_READINESS_SCHEMA,
+                "method": "GET",
+                "path": _SUBMISSION.PIPELINE_READINESS_HTTP_PATH,
+                "scope": _SUBMISSION.PIPELINE_READINESS_HTTP_SCOPE,
+                "principal_schema": _SUBMISSION.OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": _SUBMISSION.PIPELINE_READINESS_SCHEMA,
+                "response_schema": (
+                    _SUBMISSION.PIPELINE_READINESS_HTTP_RESPONSE_SCHEMA
+                ),
             },
         }
         if not isinstance(operations, Mapping) or operations != expected_operations:

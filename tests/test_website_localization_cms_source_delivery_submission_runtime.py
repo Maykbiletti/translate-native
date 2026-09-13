@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import importlib.util
 import io
@@ -402,7 +403,13 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             },
             "submission_pipeline_health": {
                 "kind": "read",
-                "response_schema": SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+                "method": "GET",
+                "path": SUBMISSION.PIPELINE_HEALTH_HTTP_PATH,
+                "scope": SUBMISSION.PIPELINE_HEALTH_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+                "response_schema": SUBMISSION.PIPELINE_HEALTH_HTTP_RESPONSE_SCHEMA,
             },
             "submission_readiness": {
                 "kind": "read",
@@ -410,7 +417,13 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             },
             "submission_pipeline_readiness": {
                 "kind": "read",
-                "response_schema": SUBMISSION.PIPELINE_READINESS_SCHEMA,
+                "method": "GET",
+                "path": SUBMISSION.PIPELINE_READINESS_HTTP_PATH,
+                "scope": SUBMISSION.PIPELINE_READINESS_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": SUBMISSION.PIPELINE_READINESS_SCHEMA,
+                "response_schema": SUBMISSION.PIPELINE_READINESS_HTTP_RESPONSE_SCHEMA,
             },
         })
         self.assertEqual(
@@ -646,6 +659,94 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(status_response["result"]["event_id"], change["event_id"])
         self.assertEqual(status_response["result"]["payload_sha256"], payload_sha256)
         self.assertFalse(status_response["accepted_implies_publication"])
+
+    def test_public_operator_routes_validate_live_pipeline_end_to_end(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        authentication_requests = []
+
+        def authenticate(request):
+            authentication_requests.append(copy.deepcopy(request))
+            return {
+                "schema": SUBMISSION_HTTP.OPERATOR_PRINCIPAL_SCHEMA,
+                "principal_id": "deployment-operator",
+                "credential_id": "pipeline-reader",
+                "credential_version": "1",
+                "scope": SUBMISSION_HTTP.MONITOR_SCOPES[request["path"]],
+            }
+
+        application = SUBMISSION_HTTP.build_submission_http(
+            runtime, authenticate,
+        )
+        responses = {}
+        for path in (
+            SUBMISSION_HTTP.PIPELINE_HEALTH_PATH,
+            SUBMISSION_HTTP.PIPELINE_READINESS_PATH,
+        ):
+            environ = {
+                "PATH_INFO": path,
+                "QUERY_STRING": "",
+                "REQUEST_METHOD": "GET",
+                "wsgi.url_scheme": "https",
+                "CONTENT_LENGTH": "0",
+                "wsgi.input": io.BytesIO(b""),
+            }
+            metadata = {}
+            responses[path] = json.loads(b"".join(application(
+                environ,
+                lambda status, headers: metadata.update(
+                    status=status, headers=dict(headers),
+                ),
+            )))
+            self.assertEqual(
+                metadata["status"], "200 OK", msg=responses[path],
+            )
+
+        health = responses[SUBMISSION_HTTP.PIPELINE_HEALTH_PATH]
+        readiness = responses[SUBMISSION_HTTP.PIPELINE_READINESS_PATH]
+        self.assertEqual(health["result"]["status"], "ok")
+        self.assertEqual(health["result"]["source_health"]["status"], "ok")
+        self.assertEqual(readiness["result"]["status"], "ready")
+        self.assertEqual(
+            readiness["result"]["source_readiness"]["status"], "ready",
+        )
+        self.assertEqual(len(authentication_requests), 2)
+        self.assertTrue(all(
+            item["schema"] == SUBMISSION_HTTP.OPERATOR_AUTH_REQUEST_SCHEMA
+            and item["body_sha256"] == SUBMISSION_HTTP.EMPTY_SHA256
+            for item in authentication_requests
+        ))
+        self.assertNotIn("delivery.example", repr(responses))
+        self.assertNotIn("website-credential", repr(responses))
+
+        original_health = runtime.submission_pipeline_health
+
+        def tampered_health():
+            value = original_health()
+            source_health = copy.deepcopy(value.source_health)
+            source_health["changes"]["counts"]["failed"] = 1
+            return dataclasses.replace(value, source_health=source_health)
+
+        runtime.submission_pipeline_health = tampered_health
+        metadata = {}
+        error = json.loads(b"".join(application({
+            "PATH_INFO": SUBMISSION_HTTP.PIPELINE_HEALTH_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "GET",
+            "wsgi.url_scheme": "https",
+            "CONTENT_LENGTH": "0",
+            "wsgi.input": io.BytesIO(b""),
+        }, lambda status, headers: metadata.update(
+            status=status, headers=dict(headers),
+        ))))
+        self.assertEqual(metadata["status"], "503 Service Unavailable")
+        self.assertEqual(
+            error["error_code"], "submission_http.runtime_response_invalid",
+        )
 
     def test_generation_tampering_blocks_projections_before_network(self):
         runtime = self.open()

@@ -952,7 +952,7 @@ the existing owner-only, process-bound, inode-guarded lifecycle.
 
 Call `submission_capabilities()` to discover the exact live contract of this
 complete website edge. The content-free
-`blun.cms-source-delivery-submission-capabilities.v4` snapshot advertises the
+`blun.cms-source-delivery-submission-capabilities.v5` snapshot advertises the
 public change, removal, acceptance-status, and lifecycle HTTPS contracts, all
 six composed operational
 projection schemas, the separately owned website, sidecar and source retry
@@ -982,6 +982,17 @@ It exposes the capability route plus two durable write routes:
 | `POST` | `/v1/localization/source-delivery/submissions/removals` | `source-delivery-submission-removal:write` |
 | `POST` | `/v1/localization/source-delivery/submissions/status` | `source-delivery-submission-status:read` |
 | `POST` | `/v1/localization/source-delivery/submissions/lifecycle` | `source-delivery-submission-lifecycle:read` |
+| `GET` | `/v1/localization/source-delivery/submissions/pipeline-health` | `source-delivery-submission-pipeline-health:read` |
+| `GET` | `/v1/localization/source-delivery/submissions/pipeline-readiness` | `source-delivery-submission-pipeline-readiness:read` |
+
+The two operator routes require an exact body-free HTTPS GET and a site-free
+operator principal. Their scopes are intentionally distinct. They expose only
+the already content-free composed runtime projections, after independently
+revalidating every nested component, capability hash, and runtime binding.
+Health preserves `ok`, `degraded`, and `blocked`; readiness preserves only
+whether every required worker can accept and process work. Neither route
+accepts a query, identifies a tenant, returns source or target text, or grants
+quality approval or publication authority.
 
 The capability-discovery route still requires HTTPS, no query, no request body, no content
 type, and no transfer encoding. Before any local database read or sidecar

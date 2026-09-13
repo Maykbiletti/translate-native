@@ -47,7 +47,7 @@ _RUNTIME = _load_module(
 HMACCredential = _AUTH.HMACCredential
 
 CAPABILITIES_SCHEMA = (
-    "blun.cms-source-delivery-submission-capabilities.v4"
+    "blun.cms-source-delivery-submission-capabilities.v5"
 )
 CAPABILITIES_HTTP_PATH = (
     "/v1/localization/source-delivery/submission-capabilities"
@@ -80,6 +80,30 @@ LIFECYCLE_HTTP_PATH = (
 )
 STATUS_HTTP_SCOPE = "source-delivery-submission-status:read"
 LIFECYCLE_HTTP_SCOPE = "source-delivery-submission-lifecycle:read"
+PIPELINE_HEALTH_HTTP_PATH = (
+    "/v1/localization/source-delivery/submissions/pipeline-health"
+)
+PIPELINE_READINESS_HTTP_PATH = (
+    "/v1/localization/source-delivery/submissions/pipeline-readiness"
+)
+PIPELINE_HEALTH_HTTP_SCOPE = (
+    "source-delivery-submission-pipeline-health:read"
+)
+PIPELINE_READINESS_HTTP_SCOPE = (
+    "source-delivery-submission-pipeline-readiness:read"
+)
+OPERATOR_HTTP_AUTH_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-submission-operator-auth-request.v1"
+)
+OPERATOR_HTTP_PRINCIPAL_SCHEMA = (
+    "blun.cms-source-delivery-submission-operator-principal.v1"
+)
+PIPELINE_HEALTH_HTTP_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-submission-pipeline-health-response.v1"
+)
+PIPELINE_READINESS_HTTP_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-submission-pipeline-readiness-response.v1"
+)
 WRITE_HTTP_AUTH_REQUEST_SCHEMA = (
     "blun.cms-source-delivery-submission-http-auth-request.v1"
 )
@@ -574,7 +598,13 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             },
             "submission_pipeline_health": {
                 "kind": "read",
-                "response_schema": PIPELINE_HEALTH_SCHEMA,
+                "method": "GET",
+                "path": PIPELINE_HEALTH_HTTP_PATH,
+                "scope": PIPELINE_HEALTH_HTTP_SCOPE,
+                "principal_schema": OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": PIPELINE_HEALTH_SCHEMA,
+                "response_schema": PIPELINE_HEALTH_HTTP_RESPONSE_SCHEMA,
             },
             "submission_readiness": {
                 "kind": "read",
@@ -582,7 +612,13 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             },
             "submission_pipeline_readiness": {
                 "kind": "read",
-                "response_schema": PIPELINE_READINESS_SCHEMA,
+                "method": "GET",
+                "path": PIPELINE_READINESS_HTTP_PATH,
+                "scope": PIPELINE_READINESS_HTTP_SCOPE,
+                "principal_schema": OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": PIPELINE_READINESS_SCHEMA,
+                "response_schema": PIPELINE_READINESS_HTTP_RESPONSE_SCHEMA,
             },
         }
         retry_budgets = {

@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Public end-to-end pipeline monitoring (13 September 2026)
+
+Assume the composed runtime was safe, but its public operational view leaked
+tenant data or let a plausible partial state appear production-ready.
+
+- A shared monitoring credential could be mistaken for a site principal and
+  expose request identities or website content.
+- A healthy intake queue could conceal a blocked source queue, or a health
+  response could be accepted as readiness.
+- Changed counters, nested bindings, or capability generations could survive
+  superficial envelope validation.
+- Authentication, transport, or source-service failure could still return a
+  stale success response.
+
+The outer WSGI boundary now provides separate body-free health and readiness
+routes with distinct operator scopes and no tenant identity. It authenticates
+before runtime access, validates every intake and source component with its
+canonical contract, preserves component state instead of averaging it, and
+requires all repeated generation bindings to agree. Tests cover live
+end-to-end success, wrong scopes and request shapes, rebound capability hashes,
+contradictory readiness, content-free failures, and strict separation from
+publication authority.
+
 ## Public website capability discovery (13 September 2026)
 
 Assume the in-process website runtime had the correct end-to-end capability,
