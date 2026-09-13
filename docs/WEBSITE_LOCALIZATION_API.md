@@ -950,6 +950,24 @@ resumes pending website work only under the exact same sidecar adapter,
 source-runtime, and commercial rendering generation. The SQLite file retains
 the existing owner-only, process-bound, inode-guarded lifecycle.
 
+Call `submission_capabilities()` to discover the exact live contract of this
+complete website edge. The content-free
+`blun.cms-source-delivery-submission-capabilities.v1` snapshot advertises the
+accepted change and removal schemas, all six composed operational projection
+schemas, the separately owned website, sidecar and source retry budgets, and
+the explicit rule that durable source acceptance is not publication. It also
+states that this edge neither generates translations nor grants publication
+authority. Its
+canonical SHA-256 binds the locally verified website generation to the current
+sidecar and source-service capability pins.
+
+The method validates the guarded SQLite generation before it performs one
+fresh authenticated sidecar capability request. A missing or changed local
+binding therefore causes no network traffic. A stale, substituted or malformed
+sidecar contract blocks the whole snapshot; the runtime never returns partial
+capabilities. Returned nested maps are defensive copies and contain no
+endpoint, credential, tenant, source text, target text or project price.
+
 `enqueue_change()` and `enqueue_removal()` persist work before transport.
 Their `delivery_max_attempts` controls only website-to-sidecar acceptance;
 their `source_max_attempts` remains the final processing ceiling; the factory's

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
+import json
 import os
 import secrets
 import sys
@@ -44,6 +46,30 @@ _RUNTIME = _load_module(
 
 HMACCredential = _AUTH.HMACCredential
 
+CAPABILITIES_SCHEMA = (
+    "blun.cms-source-delivery-submission-capabilities.v1"
+)
+STATUS_SCHEMA = "blun.cms-source-delivery-submission-status.v2"
+LIFECYCLE_SCHEMA = "blun.cms-source-delivery-submission-lifecycle.v3"
+HEALTH_SCHEMA = "blun.cms-source-delivery-submission-health.v2"
+PIPELINE_HEALTH_SCHEMA = (
+    "blun.cms-source-delivery-submission-pipeline-health.v3"
+)
+READINESS_SCHEMA = "blun.cms-source-delivery-submission-readiness.v2"
+PIPELINE_READINESS_SCHEMA = (
+    "blun.cms-source-delivery-submission-pipeline-readiness.v3"
+)
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
 
 class HMACCMSSourceDeliverySubmissionRuntimeBlocked(RuntimeError):
     """Stable composition failure without credentials or website content."""
@@ -57,6 +83,38 @@ def _blocked(code: str) -> HMACCMSSourceDeliverySubmissionRuntimeBlocked:
     return HMACCMSSourceDeliverySubmissionRuntimeBlocked(
         "source_delivery_submission_runtime." + code
     )
+
+
+@dataclass(frozen=True)
+class HMACCMSSourceDeliverySubmissionCapabilities:
+    """Canonical content-free contract for the complete website edge."""
+
+    schema: str
+    operations: Mapping[str, Any]
+    retry_budgets: Mapping[str, Any]
+    semantics: Mapping[str, Any]
+    sidecar_capabilities_sha256: str
+    source_capabilities_sha256: str
+    website_capability_binding: Mapping[str, Any]
+    sha256: str
+
+    def as_payload(self) -> dict[str, Any]:
+        return copy.deepcopy({
+            "schema": self.schema,
+            "operations": dict(self.operations),
+            "retry_budgets": dict(self.retry_budgets),
+            "semantics": dict(self.semantics),
+            "sidecar_capabilities_sha256": (
+                self.sidecar_capabilities_sha256
+            ),
+            "source_capabilities_sha256": (
+                self.source_capabilities_sha256
+            ),
+            "website_capability_binding": dict(
+                self.website_capability_binding
+            ),
+            "sha256": self.sha256,
+        })
 
 
 @dataclass(frozen=True)
@@ -363,6 +421,117 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             raise _blocked("website_capability_binding_invalid") from None
         return copy.deepcopy(expected)
 
+    def submission_capabilities(
+        self,
+    ) -> HMACCMSSourceDeliverySubmissionCapabilities:
+        """Discover and hash the exact live end-to-end submission contract."""
+
+        self._assert_open()
+        website_capability_binding = self.website_capability_binding()
+        try:
+            response = self._client.capabilities()
+            expected_sidecar = _AUTH._HTTP._capabilities_payload()
+            if (
+                not isinstance(response, Mapping)
+                or set(response) != {"schema", "capabilities"}
+                or response.get("schema")
+                != _AUTH._HTTP.CAPABILITIES_RESPONSE_SCHEMA
+                or response.get("capabilities") != expected_sidecar
+                or expected_sidecar.get("sha256")
+                != self._client.expected_capabilities_sha256
+                or self._client.expected_capabilities_sha256
+                != self._adapter.sidecar_capabilities_sha256
+                or self._client.expected_remote_capabilities_sha256
+                != self._adapter.remote_capabilities_sha256
+            ):
+                raise ValueError
+        except Exception:
+            raise _blocked("capabilities_invalid") from None
+
+        operations = {
+            "enqueue_change": {
+                "kind": "write",
+                "request_schemas": [_ADAPTER.CHANGE_SCHEMA],
+            },
+            "enqueue_removal": {
+                "kind": "write",
+                "request_schemas": [
+                    _ADAPTER.CANCELLATION_SCHEMA,
+                    _ADAPTER.TOMBSTONE_SCHEMA,
+                ],
+            },
+            "submission_status": {
+                "kind": "read",
+                "response_schema": STATUS_SCHEMA,
+            },
+            "submission_lifecycle": {
+                "kind": "read",
+                "response_schema": LIFECYCLE_SCHEMA,
+            },
+            "submission_health": {
+                "kind": "read",
+                "response_schema": HEALTH_SCHEMA,
+            },
+            "submission_pipeline_health": {
+                "kind": "read",
+                "response_schema": PIPELINE_HEALTH_SCHEMA,
+            },
+            "submission_readiness": {
+                "kind": "read",
+                "response_schema": READINESS_SCHEMA,
+            },
+            "submission_pipeline_readiness": {
+                "kind": "read",
+                "response_schema": PIPELINE_READINESS_SCHEMA,
+            },
+        }
+        retry_budgets = {
+            "website_to_sidecar": {
+                "configured_per_request": True,
+                "minimum": 1,
+                "maximum": 20,
+            },
+            "sidecar_to_source": {
+                "configured_per_runtime": True,
+                "maximum_attempts": (
+                    self._adapter.sidecar_delivery_max_attempts
+                ),
+            },
+            "source_processing": {
+                "configured_per_request": True,
+                "minimum": 1,
+                "maximum": 20,
+            },
+        }
+        semantics = {
+            "content_free": True,
+            "accepted_means": "durable_source_acceptance",
+            "accepted_implies_publication": False,
+            "translation_generation": False,
+            "publication_authority": False,
+        }
+        body = {
+            "schema": CAPABILITIES_SCHEMA,
+            "operations": operations,
+            "retry_budgets": retry_budgets,
+            "semantics": semantics,
+            "sidecar_capabilities_sha256": (
+                self._client.expected_capabilities_sha256
+            ),
+            "source_capabilities_sha256": (
+                self._client.expected_remote_capabilities_sha256
+            ),
+            "website_capability_binding": website_capability_binding,
+        }
+        try:
+            digest = hashlib.sha256(_canonical(body)).hexdigest()
+        except Exception:
+            raise _blocked("capabilities_invalid") from None
+        return HMACCMSSourceDeliverySubmissionCapabilities(
+            **copy.deepcopy(body),
+            sha256=digest,
+        )
+
     def replace_credential(self, credential: HMACCredential) -> None:
         """Atomically replace the signer used by every sidecar operation."""
 
@@ -416,7 +585,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         if local.status != "succeeded":
             failed = local.status == "failed"
             return HMACCMSSourceDeliverySubmissionStatus(
-                schema="blun.cms-source-delivery-submission-status.v2",
+                schema=STATUS_SCHEMA,
                 operation=local.operation,
                 request_id=local.request_id,
                 event_id=local.event_id,
@@ -481,7 +650,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         accepted = sidecar["status"] == "succeeded"
         failed = sidecar["status"] == "failed"
         return HMACCMSSourceDeliverySubmissionStatus(
-            schema="blun.cms-source-delivery-submission-status.v2",
+            schema=STATUS_SCHEMA,
             operation=local.operation,
             request_id=local.request_id,
             event_id=local.event_id,
@@ -513,7 +682,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         website_capability_binding = submission.website_capability_binding
         if submission.status != "accepted":
             return HMACCMSSourceDeliverySubmissionLifecycle(
-                schema="blun.cms-source-delivery-submission-lifecycle.v3",
+                schema=LIFECYCLE_SCHEMA,
                 status=submission.status,
                 stage=submission.stage,
                 submission=submission_payload,
@@ -591,7 +760,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             status = "accepted"
             stage = "source_processing"
         return HMACCMSSourceDeliverySubmissionLifecycle(
-            schema="blun.cms-source-delivery-submission-lifecycle.v3",
+            schema=LIFECYCLE_SCHEMA,
             status=status,
             stage=stage,
             submission=submission_payload,
@@ -640,7 +809,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             raise _blocked("health_invalid") from None
 
         return HMACCMSSourceDeliverySubmissionHealth(
-            schema="blun.cms-source-delivery-submission-health.v2",
+            schema=HEALTH_SCHEMA,
             status=(
                 "ok"
                 if website["status"] == sidecar["status"] == "ok"
@@ -668,7 +837,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         website_capability_binding = intake.website_capability_binding
         if intake.status != "ok":
             return HMACCMSSourceDeliverySubmissionPipelineHealth(
-                schema="blun.cms-source-delivery-submission-pipeline-health.v3",
+                schema=PIPELINE_HEALTH_SCHEMA,
                 status="blocked",
                 intake_health=intake_payload,
                 source_health=None,
@@ -727,7 +896,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             raise _blocked("pipeline_health_invalid") from None
 
         return HMACCMSSourceDeliverySubmissionPipelineHealth(
-            schema="blun.cms-source-delivery-submission-pipeline-health.v3",
+            schema=PIPELINE_HEALTH_SCHEMA,
             status=source_health["health"]["status"],
             intake_health=intake_payload,
             source_health=source_health["health"],
@@ -758,7 +927,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
 
         if website["status"] != "ready":
             return HMACCMSSourceDeliverySubmissionReadiness(
-                schema="blun.cms-source-delivery-submission-readiness.v2",
+                schema=READINESS_SCHEMA,
                 status="not_ready",
                 website_status=website["status"],
                 website_worker_state=website["worker_state"],
@@ -797,7 +966,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
 
         ready = sidecar["status"] == "ready"
         return HMACCMSSourceDeliverySubmissionReadiness(
-            schema="blun.cms-source-delivery-submission-readiness.v2",
+            schema=READINESS_SCHEMA,
             status="ready" if ready else "not_ready",
             website_status=website["status"],
             website_worker_state=website["worker_state"],
@@ -827,9 +996,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
         website_capability_binding = intake.website_capability_binding
         if intake.status != "ready":
             return HMACCMSSourceDeliverySubmissionPipelineReadiness(
-                schema=(
-                    "blun.cms-source-delivery-submission-pipeline-readiness.v3"
-                ),
+                schema=PIPELINE_READINESS_SCHEMA,
                 status="not_ready",
                 intake_readiness=intake_payload,
                 source_readiness=None,
@@ -891,7 +1058,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             raise _blocked("pipeline_readiness_invalid") from None
 
         return HMACCMSSourceDeliverySubmissionPipelineReadiness(
-            schema="blun.cms-source-delivery-submission-pipeline-readiness.v3",
+            schema=PIPELINE_READINESS_SCHEMA,
             status=(
                 "ready"
                 if source_readiness["readiness"]["status"] == "ready"

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -317,6 +318,116 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             runtime.website_capability_binding()["status"], "verified",
         )
 
+    def test_submission_capabilities_bind_the_complete_live_website_edge(self):
+        runtime = self.open()
+        before = len(self.transport.calls)
+
+        capabilities = runtime.submission_capabilities()
+        payload = capabilities.as_payload()
+
+        self.assertEqual(len(self.transport.calls), before + 1)
+        self.assertEqual(payload["schema"], SUBMISSION.CAPABILITIES_SCHEMA)
+        self.assertEqual(payload["operations"], {
+            "enqueue_change": {
+                "kind": "write",
+                "request_schemas": [SUBMISSION._ADAPTER.CHANGE_SCHEMA],
+            },
+            "enqueue_removal": {
+                "kind": "write",
+                "request_schemas": [
+                    SUBMISSION._ADAPTER.CANCELLATION_SCHEMA,
+                    SUBMISSION._ADAPTER.TOMBSTONE_SCHEMA,
+                ],
+            },
+            "submission_status": {
+                "kind": "read", "response_schema": SUBMISSION.STATUS_SCHEMA,
+            },
+            "submission_lifecycle": {
+                "kind": "read",
+                "response_schema": SUBMISSION.LIFECYCLE_SCHEMA,
+            },
+            "submission_health": {
+                "kind": "read", "response_schema": SUBMISSION.HEALTH_SCHEMA,
+            },
+            "submission_pipeline_health": {
+                "kind": "read",
+                "response_schema": SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+            },
+            "submission_readiness": {
+                "kind": "read",
+                "response_schema": SUBMISSION.READINESS_SCHEMA,
+            },
+            "submission_pipeline_readiness": {
+                "kind": "read",
+                "response_schema": SUBMISSION.PIPELINE_READINESS_SCHEMA,
+            },
+        })
+        self.assertEqual(
+            payload["retry_budgets"]["sidecar_to_source"]
+            ["maximum_attempts"],
+            4,
+        )
+        self.assertEqual(payload["semantics"], {
+            "content_free": True,
+            "accepted_means": "durable_source_acceptance",
+            "accepted_implies_publication": False,
+            "translation_generation": False,
+            "publication_authority": False,
+        })
+        self.assertEqual(
+            payload["website_capability_binding"],
+            runtime.website_capability_binding(),
+        )
+        self.assertEqual(
+            payload["sidecar_capabilities_sha256"], self.sidecar_digest,
+        )
+        self.assertEqual(
+            payload["source_capabilities_sha256"], self.remote_digest,
+        )
+        unsigned = copy.deepcopy(payload)
+        digest = unsigned.pop("sha256")
+        self.assertEqual(
+            digest,
+            hashlib.sha256(SUBMISSION._canonical(unsigned)).hexdigest(),
+        )
+        rendered = repr(payload)
+        for private in (
+            "delivery.example", "website-credential", "site-1",
+            "source_text", "target_text",
+        ):
+            self.assertNotIn(private, rendered)
+
+        payload["operations"]["submission_status"]["kind"] = "altered"
+        payload["website_capability_binding"]["status"] = "altered"
+        fresh = runtime.submission_capabilities().as_payload()
+        self.assertEqual(
+            fresh["operations"]["submission_status"]["kind"], "read",
+        )
+        self.assertEqual(
+            fresh["website_capability_binding"]["status"], "verified",
+        )
+        self.assertEqual(fresh["sha256"], digest)
+
+    def test_submission_capabilities_reject_remote_contract_substitution(self):
+        runtime = self.open()
+        altered = SUBMISSION._AUTH._HTTP._capabilities_payload()
+        altered["operations"]["health"]["scope"] = "weaker-scope"
+        response = {
+            "schema": SUBMISSION._AUTH._HTTP.CAPABILITIES_RESPONSE_SCHEMA,
+            "capabilities": altered,
+        }
+
+        with patch.object(runtime._client, "capabilities", return_value=response):
+            with self.assertRaises(
+                SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+            ) as caught:
+                runtime.submission_capabilities()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.capabilities_invalid",
+        )
+
     def test_generation_tampering_blocks_projections_before_network(self):
         runtime = self.open()
         runtime._delivery._connection.execute(
@@ -327,6 +438,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         before = len(self.transport.calls)
 
         for projection in (
+            runtime.submission_capabilities,
             runtime.submission_health,
             runtime.submission_readiness,
         ):
