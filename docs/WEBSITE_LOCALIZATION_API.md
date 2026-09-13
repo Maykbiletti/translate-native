@@ -1201,6 +1201,19 @@ content-free monitor envelope and the standard fail-closed error envelope;
 this matches the runtime distinction between a valid degraded state and an
 inability to produce trustworthy monitoring evidence.
 
+The v6 capability generation and v5 OpenAPI document also bind semantic
+response invariants. `SubmissionStatus` uses JSON Schema 2020-12 conditionals
+to require a lease expiry exactly for `leased`, and complete remote status,
+attempt and digest evidence exactly for `accepted`. Health permits `ok` only
+with zero failures and expired leases, while `blocked` requires at least one
+of those signals. Readiness is a closed union between a running, healthy,
+error-free `ready` state and a `not_ready` state with a stable error code.
+Each operation carries the same ordered `x-response-invariants` list as its
+capability record. Stable identifiers retain rules that portable JSON Schema
+cannot encode, including attempt-count comparisons, request-identity equality
+and queue-count sums; runtime and the pinned reference client remain
+authoritative for those relationships.
+
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
 tenant principal must match the payload's `site_id`; `Idempotency-Key` must

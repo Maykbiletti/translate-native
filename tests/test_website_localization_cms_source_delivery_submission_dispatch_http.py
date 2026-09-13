@@ -232,6 +232,10 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             self.assertEqual(described["x-success-status"], operation["success_status"])
             self.assertEqual(described["x-error-statuses"], operation["error_statuses"])
             self.assertEqual(
+                described["x-response-invariants"],
+                operation["response_invariants"],
+            )
+            self.assertEqual(
                 set(described["responses"]),
                 {str(operation["success_status"]), *map(str, operation["error_statuses"])},
             )
@@ -370,6 +374,42 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
                     self.assertEqual(
                         schema, {"$ref": "#/components/schemas/Error"}
                     )
+
+    def test_openapi_encodes_runtime_state_invariants(self):
+        self.open()
+        schemas = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"][
+            "components"
+        ]["schemas"]
+
+        status = schemas["SubmissionStatus"]
+        self.assertEqual(status["x-invariants"], [
+            "attempts_lte_client_max_attempts",
+            "leased_iff_lease_expires_at",
+            "accepted_iff_remote_binding_complete",
+        ])
+        self.assertEqual(
+            status["allOf"][0]["then"]["properties"]["lease_expires_at"]["type"],
+            "number",
+        )
+        self.assertEqual(
+            status["allOf"][0]["else"]["properties"]["lease_expires_at"],
+            {"type": "null"},
+        )
+        self.assertEqual(
+            status["allOf"][1]["then"]["properties"]["remote_status"]["type"],
+            "string",
+        )
+        self.assertEqual(
+            schemas["Health"]["allOf"][0]["then"]["properties"]["failed"],
+            {"const": 0},
+        )
+        ready = schemas["Readiness"]["oneOf"]
+        self.assertEqual(ready[0]["properties"]["worker_state"], {"const": "running"})
+        self.assertEqual(ready[0]["properties"]["error_code"], {"type": "null"})
+        self.assertEqual(
+            ready[1]["properties"]["error_code"],
+            {"$ref": "#/components/schemas/ErrorCode"},
+        )
 
     def test_enqueue_commits_before_202_and_status_requires_full_identity(self):
         self.open()

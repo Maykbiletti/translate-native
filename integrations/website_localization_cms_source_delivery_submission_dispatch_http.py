@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v5"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v6"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -40,9 +40,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v5"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v6"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v5"
+    "blun.cms-public-submission-dispatch-capabilities-response.v6"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -79,6 +79,38 @@ ERROR_STATUSES = {
     OPENAPI_PATH: (400, 401, 403, 405, 503),
     READINESS_PATH: (400, 401, 403, 405, 503),
     STATUS_PATH: (400, 401, 403, 404, 405, 411, 413, 415, 503),
+}
+RESPONSE_INVARIANTS = {
+    CAPABILITIES_PATH: (
+        "exact_capability_generation",
+    ),
+    ENQUEUE_PATH: (
+        "status_identity_matches_request",
+        "attempts_lte_client_max_attempts",
+        "leased_iff_lease_expires_at",
+        "accepted_iff_remote_binding_complete",
+    ),
+    HEALTH_PATH: (
+        "queue_count_sum_matches_operation_count_sum",
+        "due_lte_pending_plus_retry_wait",
+        "expired_leases_lte_leased",
+        "failed_equals_failed_count",
+        "ok_iff_no_expired_leases_or_failures",
+    ),
+    OPENAPI_PATH: (
+        "exact_openapi_generation",
+        "capabilities_sha256_matches",
+    ),
+    READINESS_PATH: (
+        "ready_iff_worker_running_and_outbox_ok_and_no_error",
+        "not_ready_requires_error",
+    ),
+    STATUS_PATH: (
+        "status_identity_matches_request",
+        "attempts_lte_client_max_attempts",
+        "leased_iff_lease_expires_at",
+        "accepted_iff_remote_binding_complete",
+    ),
 }
 MAX_BODY_BYTES = 4_000_000
 MAX_HEADERS = 64
@@ -478,6 +510,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "response_schema": response_schema,
                 "success_status": status,
                 "error_statuses": list(ERROR_STATUSES[path]),
+                "response_invariants": list(RESPONSE_INVARIANTS[path]),
             }
         contract = {
             "schema": CAPABILITIES_SCHEMA,

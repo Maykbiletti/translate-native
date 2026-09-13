@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v4"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v5"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -205,6 +205,7 @@ def _operation(
         "x-principal-schema": contract["principal_schema"],
         "x-success-status": contract["success_status"],
         "x-error-statuses": list(contract["error_statuses"]),
+        "x-response-invariants": list(contract["response_invariants"]),
         "responses": dict(sorted(responses.items(), key=lambda item: int(item[0]))),
     }
     if request_schema is not None:
@@ -267,9 +268,40 @@ def _status_schema() -> dict[str, Any]:
         "remote_binding_sha256": nullable_sha,
         "response_sha256": nullable_sha,
     }
+    remote_complete = {
+        "properties": {
+            "remote_status": {
+                "type": "string",
+                "enum": ["failed", "leased", "pending", "retry_wait", "succeeded"],
+            },
+            "remote_attempts": {
+                "type": "integer", "minimum": 0, "maximum": 20,
+            },
+            "remote_capabilities_sha256": _schema_ref("Sha256"),
+            "remote_binding_sha256": _schema_ref("Sha256"),
+            "response_sha256": _schema_ref("Sha256"),
+        },
+    }
     return {
         "type": "object", "additionalProperties": False,
         "required": sorted(properties), "properties": properties,
+        "allOf": [
+            {
+                "if": {"properties": {"status": {"const": "leased"}}},
+                "then": {"properties": {"lease_expires_at": {"type": "number", "minimum": 0}}},
+                "else": {"properties": {"lease_expires_at": {"type": "null"}}},
+            },
+            {
+                "if": {"properties": {"status": {"const": "accepted"}}},
+                "then": remote_complete,
+                "else": {"not": remote_complete},
+            },
+        ],
+        "x-invariants": [
+            "attempts_lte_client_max_attempts",
+            "leased_iff_lease_expires_at",
+            "accepted_iff_remote_binding_complete",
+        ],
         "description": "Content-free durable submission state; accepted is not publication.",
     }
 
@@ -422,6 +454,17 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 "failed": {"type": "integer", "minimum": 0, "maximum": 1_000_000},
                 "expected_capabilities_sha256": {"const": capabilities["public_submission_capabilities_sha256"]},
             },
+            "allOf": [{
+                "if": {"properties": {"status": {"const": "ok"}}},
+                "then": {"properties": {
+                    "expired_leases": {"const": 0}, "failed": {"const": 0},
+                }},
+                "else": {"anyOf": [
+                    {"properties": {"expired_leases": {"minimum": 1}}},
+                    {"properties": {"failed": {"minimum": 1}}},
+                ]},
+            }],
+            "x-invariants": list(operations["health"]["response_invariants"]),
         },
         "HealthResponse": envelope(
             operations["health"]["response_schema"], "health", _schema_ref("Health")
@@ -437,6 +480,19 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 "error_code": {"oneOf": [_schema_ref("ErrorCode"), {"type": "null"}]},
                 "capabilities_sha256": {"const": capabilities["public_submission_capabilities_sha256"]},
             },
+            "oneOf": [
+                {"properties": {
+                    "status": {"const": "ready"},
+                    "worker_state": {"const": "running"},
+                    "outbox_status": {"const": "ok"},
+                    "error_code": {"type": "null"},
+                }},
+                {"properties": {
+                    "status": {"const": "not_ready"},
+                    "error_code": _schema_ref("ErrorCode"),
+                }},
+            ],
+            "x-invariants": list(operations["readiness"]["response_invariants"]),
         },
         "ReadinessResponse": envelope(
             operations["readiness"]["response_schema"], "readiness", _schema_ref("Readiness")

@@ -1,5 +1,23 @@
 # Version 6 premortem
 
+## Executable CMS state invariants (13 September 2026)
+
+Assume a generated CMS client rejected malformed fields but accepted a
+cross-field contradiction as a real queue or monitor state.
+
+- `leased` could be paired with no lease expiry, or another state with one.
+- `accepted` could omit one of the remote binding digests or attempt fields.
+- Health could claim `ok` while reporting failures or expired leases.
+- Readiness could claim `ready` with a stopped worker, blocked outbox, or error.
+- Portable-schema limits could leave important remaining relationships hidden.
+
+The v6 capability generation now binds an exact response-invariant list per
+operation. The v5 OpenAPI document enforces leased, accepted, health and
+readiness relationships with JSON Schema 2020-12 conditionals and publishes
+stable identifiers for non-portable attempt, identity and aggregate rules.
+Tests prove exact capability-to-OpenAPI parity and inspect every executable
+branch rather than accepting descriptive text as enforcement.
+
 ## Exact CMS failure contracts (13 September 2026)
 
 Assume a generated CMS client handled successful requests correctly but made
