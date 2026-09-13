@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Authenticated public write ingress for the owned website submission edge.
+"""Authenticated public ingress and progress API for the website edge.
 
 The WSGI boundary accepts one exact website change or removal per request.
 Authentication sees request metadata and the body digest, while the principal
 is bound to the payload site before any runtime or durable outbox access.
 HTTP 202 means only that the website outbox durably accepted the request; it
 never implies source acceptance, localization quality, approval, or publication.
+Separate site-bound reads expose acceptance and source lifecycle without
+collapsing either state into publication authority.
 """
 
 from __future__ import annotations
@@ -46,19 +48,25 @@ _CAPABILITIES = _load_module(
     / "website_localization_cms_source_delivery_submission_capabilities_http.py",
 )
 
-API_SCHEMA = "blun.cms-source-delivery-submission-http.v1"
+API_SCHEMA = "blun.cms-source-delivery-submission-http.v2"
 ERROR_SCHEMA = "blun.cms-source-delivery-submission-http-error.v1"
 AUTH_REQUEST_SCHEMA = _SUBMISSION.WRITE_HTTP_AUTH_REQUEST_SCHEMA
 PRINCIPAL_SCHEMA = _SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA
+READ_AUTH_REQUEST_SCHEMA = _SUBMISSION.READ_HTTP_AUTH_REQUEST_SCHEMA
+READ_PRINCIPAL_SCHEMA = _SUBMISSION.READ_HTTP_PRINCIPAL_SCHEMA
 CHANGE_REQUEST_SCHEMA = _SUBMISSION.CHANGE_HTTP_REQUEST_SCHEMA
 REMOVAL_REQUEST_SCHEMA = _SUBMISSION.REMOVAL_HTTP_REQUEST_SCHEMA
 CHANGE_RESPONSE_SCHEMA = _SUBMISSION.CHANGE_HTTP_RESPONSE_SCHEMA
 REMOVAL_RESPONSE_SCHEMA = _SUBMISSION.REMOVAL_HTTP_RESPONSE_SCHEMA
 CHANGE_PATH = _SUBMISSION.CHANGE_HTTP_PATH
 REMOVAL_PATH = _SUBMISSION.REMOVAL_HTTP_PATH
+STATUS_PATH = _SUBMISSION.STATUS_HTTP_PATH
+LIFECYCLE_PATH = _SUBMISSION.LIFECYCLE_HTTP_PATH
 CAPABILITIES_PATH = _SUBMISSION.CAPABILITIES_HTTP_PATH
 CHANGE_SCOPE = _SUBMISSION.CHANGE_HTTP_SCOPE
 REMOVAL_SCOPE = _SUBMISSION.REMOVAL_HTTP_SCOPE
+STATUS_SCOPE = _SUBMISSION.STATUS_HTTP_SCOPE
+LIFECYCLE_SCOPE = _SUBMISSION.LIFECYCLE_HTTP_SCOPE
 
 MAX_BODY_BYTES = 4_000_000
 MAX_HEADERS = 64
@@ -68,15 +76,25 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 STATUSES = {"pending", "leased", "retry_wait", "succeeded", "failed"}
-SCOPES = {CHANGE_PATH: CHANGE_SCOPE, REMOVAL_PATH: REMOVAL_SCOPE}
+SCOPES = {
+    CHANGE_PATH: CHANGE_SCOPE,
+    REMOVAL_PATH: REMOVAL_SCOPE,
+    STATUS_PATH: STATUS_SCOPE,
+    LIFECYCLE_PATH: LIFECYCLE_SCOPE,
+}
 REQUEST_SCHEMAS = {
     CHANGE_PATH: CHANGE_REQUEST_SCHEMA,
     REMOVAL_PATH: REMOVAL_REQUEST_SCHEMA,
+    STATUS_PATH: _SUBMISSION.STATUS_HTTP_REQUEST_SCHEMA,
+    LIFECYCLE_PATH: _SUBMISSION.LIFECYCLE_HTTP_REQUEST_SCHEMA,
 }
 RESPONSE_SCHEMAS = {
     CHANGE_PATH: CHANGE_RESPONSE_SCHEMA,
     REMOVAL_PATH: REMOVAL_RESPONSE_SCHEMA,
+    STATUS_PATH: _SUBMISSION.STATUS_HTTP_RESPONSE_SCHEMA,
+    LIFECYCLE_PATH: _SUBMISSION.LIFECYCLE_HTTP_RESPONSE_SCHEMA,
 }
+READ_PATHS = {STATUS_PATH, LIFECYCLE_PATH}
 
 
 class SubmissionHTTPBlocked(RuntimeError):
@@ -224,7 +242,9 @@ def _request(body: bytes) -> Mapping[str, Any]:
     return value
 
 
-def _principal(value: Any, scope: str) -> dict[str, str]:
+def _principal(
+    value: Any, scope: str, *, schema: str = PRINCIPAL_SCHEMA,
+) -> dict[str, str]:
     fields = {
         "schema", "principal_id", "credential_id", "credential_version",
         "scope", "site_id",
@@ -232,7 +252,7 @@ def _principal(value: Any, scope: str) -> dict[str, str]:
     if not isinstance(value, Mapping) or set(value) != fields:
         raise _blocked("authentication_failed", 401)
     try:
-        if value["schema"] != PRINCIPAL_SCHEMA:
+        if value["schema"] != schema:
             raise ValueError
         for name in fields - {"schema"}:
             _token(value[name])
@@ -373,6 +393,207 @@ def _status(
         raise _blocked("runtime_response_invalid", 503) from None
 
 
+class _PayloadView:
+    def __init__(self, value: Mapping[str, Any]):
+        self.value = value
+
+    def as_payload(self) -> Mapping[str, Any]:
+        return self.value
+
+
+def _read_identity(value: Any, *, schema: str) -> dict[str, str]:
+    fields = {
+        "schema", "operation", "request_id", "event_id", "site_id",
+        "payload_sha256",
+    }
+    try:
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ValueError
+        if value["schema"] != schema:
+            raise ValueError
+        result = {name: _token(value[name]) for name in (
+            "operation", "request_id", "event_id", "site_id",
+        )}
+        if result["operation"] not in {"change", "cancellation", "tombstone"}:
+            raise ValueError
+        if result["operation"] == "change" and result["request_id"] != result["event_id"]:
+            raise ValueError
+        result["payload_sha256"] = _sha256(value["payload_sha256"])
+        return result
+    except Exception:
+        raise _blocked("request_invalid", 400) from None
+
+
+def _submission_status_payload(
+    value: Any, identity: Mapping[str, str],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "operation", "request_id", "event_id", "site_id",
+        "payload_sha256", "status", "stage", "website_status",
+        "website_attempts", "website_delivery_max_attempts",
+        "sidecar_status", "sidecar_attempts",
+        "sidecar_delivery_max_attempts", "source_max_attempts",
+        "next_attempt_at", "lease_expired", "error_code",
+        "website_capability_binding",
+    }
+    try:
+        payload = value.as_payload()
+        if not isinstance(payload, Mapping) or set(payload) != fields:
+            raise ValueError
+        if payload["schema"] != _SUBMISSION.STATUS_SCHEMA:
+            raise ValueError
+        if payload.get("site_id") != identity["site_id"]:
+            raise _blocked("site_not_found", 404)
+        for name in ("operation", "request_id", "event_id", "payload_sha256"):
+            if payload.get(name) != identity[name]:
+                raise ValueError
+        if payload["status"] not in {"pending", "accepted", "failed"}:
+            raise ValueError
+        if payload["stage"] not in {
+            "website_acceptance", "sidecar_delivery", "source_acceptance",
+        }:
+            raise ValueError
+        website_max = payload["website_delivery_max_attempts"]
+        sidecar_max = payload["sidecar_delivery_max_attempts"]
+        source_max = payload["source_max_attempts"]
+        for maximum in (website_max, sidecar_max, source_max):
+            if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= 20:
+                raise ValueError
+        website_attempts = payload["website_attempts"]
+        if (
+            isinstance(website_attempts, bool)
+            or not isinstance(website_attempts, int)
+            or not 0 <= website_attempts <= website_max
+            or payload["website_status"] not in STATUSES
+        ):
+            raise ValueError
+        sidecar_attempts = payload["sidecar_attempts"]
+        sidecar_status = payload["sidecar_status"]
+        if (sidecar_status is None) != (sidecar_attempts is None):
+            raise ValueError
+        if sidecar_status is not None and (
+            sidecar_status not in STATUSES
+            or isinstance(sidecar_attempts, bool)
+            or not isinstance(sidecar_attempts, int)
+            or not 0 <= sidecar_attempts <= sidecar_max
+        ):
+            raise ValueError
+        next_attempt = payload["next_attempt_at"]
+        if (
+            isinstance(next_attempt, bool)
+            or not isinstance(next_attempt, (int, float))
+            or not math.isfinite(float(next_attempt))
+            or float(next_attempt) < 0
+            or not isinstance(payload["lease_expired"], bool)
+        ):
+            raise ValueError
+        error = payload["error_code"]
+        if error is not None and (
+            not isinstance(error, str) or ERROR_CODE.fullmatch(error) is None
+        ):
+            raise ValueError
+        if payload["stage"] == "website_acceptance":
+            if (
+                sidecar_status is not None
+                or payload["website_status"] == "succeeded"
+                or payload["status"]
+                != ("failed" if payload["website_status"] == "failed" else "pending")
+            ):
+                raise ValueError
+        elif payload["stage"] == "sidecar_delivery":
+            if (
+                payload["website_status"] != "succeeded"
+                or sidecar_status in {None, "succeeded"}
+                or payload["status"]
+                != ("failed" if sidecar_status == "failed" else "pending")
+            ):
+                raise ValueError
+        elif (
+            payload["status"] != "accepted"
+            or payload["website_status"] != "succeeded"
+            or sidecar_status != "succeeded"
+        ):
+            raise ValueError
+        result = dict(payload)
+        result["website_capability_binding"] = _binding(
+            payload["website_capability_binding"]
+        )
+        _canonical(result, response=True)
+        return result
+    except SubmissionHTTPBlocked:
+        raise
+    except Exception:
+        raise _blocked("runtime_response_invalid", 503) from None
+
+
+def _submission_lifecycle_payload(
+    value: Any, identity: Mapping[str, str],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "status", "stage", "submission", "source_status",
+        "source_capability_binding", "website_capability_binding",
+        "sidecar_capabilities_sha256", "source_capabilities_sha256",
+    }
+    try:
+        payload = value.as_payload()
+        if not isinstance(payload, Mapping) or set(payload) != fields:
+            raise ValueError
+        if payload["schema"] != _SUBMISSION.LIFECYCLE_SCHEMA:
+            raise ValueError
+        submission = _submission_status_payload(
+            _PayloadView(payload["submission"]), identity,
+        )
+        website_binding = _binding(payload["website_capability_binding"])
+        if website_binding != submission["website_capability_binding"]:
+            raise ValueError
+        sidecar_hash = _sha256(payload["sidecar_capabilities_sha256"])
+        source_hash = _sha256(payload["source_capabilities_sha256"])
+        source_status = payload["source_status"]
+        source_binding = payload["source_capability_binding"]
+        if source_status is None or source_binding is None:
+            if source_status is not None or source_binding is not None:
+                raise ValueError
+            if (
+                payload["status"] != submission["status"]
+                or payload["stage"] != submission["stage"]
+            ):
+                raise ValueError
+        else:
+            if submission["status"] != "accepted":
+                raise ValueError
+            normalized = _SUBMISSION._AUTH._HTTP._SOURCE_HTTP._source_status_payload(
+                _PayloadView(source_status),
+                expected_event_id=identity["event_id"],
+                expected_site_id=identity["site_id"],
+            )
+            if normalized != source_status:
+                raise ValueError
+            normalized_binding = (
+                _SUBMISSION._AUTH._HTTP._SOURCE_HTTP._capability_binding_payload(
+                    source_binding
+                )
+            )
+            if normalized_binding != source_binding:
+                raise ValueError
+            if payload["stage"] not in {
+                "source_processing", "localization_lifecycle",
+            }:
+                raise ValueError
+        result = dict(payload)
+        result.update({
+            "submission": submission,
+            "website_capability_binding": website_binding,
+            "sidecar_capabilities_sha256": sidecar_hash,
+            "source_capabilities_sha256": source_hash,
+        })
+        _canonical(result, response=True)
+        return result
+    except SubmissionHTTPBlocked:
+        raise
+    except Exception:
+        raise _blocked("runtime_response_invalid", 503) from None
+
+
 class SubmissionHTTPApplication:
     """Strict public WSGI adapter over one hosted website submission runtime."""
 
@@ -380,6 +601,7 @@ class SubmissionHTTPApplication:
         if not all(callable(getattr(runtime, name, None)) for name in (
             "submission_capabilities", "website_capability_binding",
             "worker_readiness", "enqueue_change", "enqueue_removal",
+            "submission_status", "submission_lifecycle",
         )):
             raise TypeError("runtime must provide website submission operations")
         if not callable(authenticator):
@@ -394,7 +616,7 @@ class SubmissionHTTPApplication:
     def _send(start_response, status: int, payload: Mapping[str, Any]):
         body = _canonical(dict(payload), response=True)
         phrases = {
-            202: "Accepted", 400: "Bad Request", 401: "Unauthorized",
+            200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized",
             403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
             409: "Conflict", 411: "Length Required", 413: "Content Too Large",
             415: "Unsupported Media Type", 503: "Service Unavailable",
@@ -436,20 +658,67 @@ class SubmissionHTTPApplication:
             body = _body(environ)
             headers = _headers(environ)
             auth_request = {
-                "schema": AUTH_REQUEST_SCHEMA,
+                "schema": (
+                    READ_AUTH_REQUEST_SCHEMA
+                    if path in READ_PATHS
+                    else AUTH_REQUEST_SCHEMA
+                ),
                 "method": "POST",
                 "path": path,
                 "headers": [list(item) for item in headers],
                 "body_sha256": hashlib.sha256(body).hexdigest(),
             }
             try:
-                principal = _principal(self.authenticator(auth_request), SCOPES[path])
+                principal = _principal(
+                    self.authenticator(auth_request),
+                    SCOPES[path],
+                    schema=(
+                        READ_PRINCIPAL_SCHEMA
+                        if path in READ_PATHS
+                        else PRINCIPAL_SCHEMA
+                    ),
+                )
             except SubmissionHTTPBlocked:
                 raise
             except Exception:
                 raise _blocked("authentication_unavailable", 503) from None
 
             request = _request(body)
+            if path in READ_PATHS:
+                identity = _read_identity(
+                    request, schema=REQUEST_SCHEMAS[path],
+                )
+                if identity["site_id"] != principal["site_id"]:
+                    raise _blocked("site_not_found", 404)
+                try:
+                    if path == STATUS_PATH:
+                        result = _submission_status_payload(
+                            self.runtime.submission_status(
+                                identity["operation"], identity["request_id"],
+                            ),
+                            identity,
+                        )
+                    else:
+                        result = _submission_lifecycle_payload(
+                            self.runtime.submission_lifecycle(
+                                identity["operation"], identity["request_id"],
+                            ),
+                            identity,
+                        )
+                except SubmissionHTTPBlocked:
+                    raise
+                except Exception as error:
+                    code = getattr(error, "code", "")
+                    if isinstance(code, str) and code.endswith(".status_not_found"):
+                        raise _blocked("submission_not_found", 404) from None
+                    raise _blocked("runtime_blocked", 503) from None
+                return self._send(start_response, 200, {
+                    "schema": RESPONSE_SCHEMAS[path],
+                    "api_schema": API_SCHEMA,
+                    "result": result,
+                    "accepted_implies_publication": False,
+                })
+
             payload_key = "change" if path == CHANGE_PATH else "removal"
             if set(request) != {
                 "schema", payload_key, "source_max_attempts",
@@ -532,6 +801,6 @@ def build_submission_http(
     runtime: Any,
     authenticator: Callable[[dict[str, Any]], Any],
 ) -> SubmissionHTTPApplication:
-    """Build the public capability and durable-write website boundary."""
+    """Build the public capability, durable-write, and progress boundary."""
 
     return SubmissionHTTPApplication(runtime, authenticator)

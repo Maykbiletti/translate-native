@@ -47,7 +47,7 @@ _RUNTIME = _load_module(
 HMACCredential = _AUTH.HMACCredential
 
 CAPABILITIES_SCHEMA = (
-    "blun.cms-source-delivery-submission-capabilities.v3"
+    "blun.cms-source-delivery-submission-capabilities.v4"
 )
 CAPABILITIES_HTTP_PATH = (
     "/v1/localization/source-delivery/submission-capabilities"
@@ -72,11 +72,25 @@ REMOVAL_HTTP_PATH = (
 )
 CHANGE_HTTP_SCOPE = "source-delivery-submission-change:write"
 REMOVAL_HTTP_SCOPE = "source-delivery-submission-removal:write"
+STATUS_HTTP_PATH = (
+    "/v1/localization/source-delivery/submissions/status"
+)
+LIFECYCLE_HTTP_PATH = (
+    "/v1/localization/source-delivery/submissions/lifecycle"
+)
+STATUS_HTTP_SCOPE = "source-delivery-submission-status:read"
+LIFECYCLE_HTTP_SCOPE = "source-delivery-submission-lifecycle:read"
 WRITE_HTTP_AUTH_REQUEST_SCHEMA = (
     "blun.cms-source-delivery-submission-http-auth-request.v1"
 )
 WRITE_HTTP_PRINCIPAL_SCHEMA = (
     "blun.cms-source-delivery-submission-write-principal.v1"
+)
+READ_HTTP_AUTH_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-submission-read-auth-request.v1"
+)
+READ_HTTP_PRINCIPAL_SCHEMA = (
+    "blun.cms-source-delivery-submission-read-principal.v1"
 )
 CHANGE_HTTP_REQUEST_SCHEMA = (
     "blun.cms-source-delivery-submission-change-request.v1"
@@ -89,6 +103,18 @@ CHANGE_HTTP_RESPONSE_SCHEMA = (
 )
 REMOVAL_HTTP_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-submission-removal-response.v1"
+)
+STATUS_HTTP_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-submission-status-request.v1"
+)
+LIFECYCLE_HTTP_REQUEST_SCHEMA = (
+    "blun.cms-source-delivery-submission-lifecycle-request.v1"
+)
+STATUS_HTTP_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-submission-status-response.v1"
+)
+LIFECYCLE_HTTP_RESPONSE_SCHEMA = (
+    "blun.cms-source-delivery-submission-lifecycle-response.v1"
 )
 STATUS_SCHEMA = "blun.cms-source-delivery-submission-status.v2"
 LIFECYCLE_SCHEMA = "blun.cms-source-delivery-submission-lifecycle.v3"
@@ -524,11 +550,23 @@ class HMACCMSSourceDeliverySubmissionRuntime:
             },
             "submission_status": {
                 "kind": "read",
-                "response_schema": STATUS_SCHEMA,
+                "method": "POST",
+                "path": STATUS_HTTP_PATH,
+                "scope": STATUS_HTTP_SCOPE,
+                "principal_schema": READ_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": STATUS_HTTP_REQUEST_SCHEMA,
+                "result_schema": STATUS_SCHEMA,
+                "response_schema": STATUS_HTTP_RESPONSE_SCHEMA,
             },
             "submission_lifecycle": {
                 "kind": "read",
-                "response_schema": LIFECYCLE_SCHEMA,
+                "method": "POST",
+                "path": LIFECYCLE_HTTP_PATH,
+                "scope": LIFECYCLE_HTTP_SCOPE,
+                "principal_schema": READ_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": LIFECYCLE_HTTP_REQUEST_SCHEMA,
+                "result_schema": LIFECYCLE_SCHEMA,
+                "response_schema": LIFECYCLE_HTTP_RESPONSE_SCHEMA,
             },
             "submission_health": {
                 "kind": "read",

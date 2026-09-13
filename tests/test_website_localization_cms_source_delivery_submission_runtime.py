@@ -378,11 +378,24 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
                 "response_schema": SUBMISSION.REMOVAL_HTTP_RESPONSE_SCHEMA,
             },
             "submission_status": {
-                "kind": "read", "response_schema": SUBMISSION.STATUS_SCHEMA,
+                "kind": "read",
+                "method": "POST",
+                "path": SUBMISSION.STATUS_HTTP_PATH,
+                "scope": SUBMISSION.STATUS_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.READ_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.STATUS_HTTP_REQUEST_SCHEMA,
+                "result_schema": SUBMISSION.STATUS_SCHEMA,
+                "response_schema": SUBMISSION.STATUS_HTTP_RESPONSE_SCHEMA,
             },
             "submission_lifecycle": {
                 "kind": "read",
-                "response_schema": SUBMISSION.LIFECYCLE_SCHEMA,
+                "method": "POST",
+                "path": SUBMISSION.LIFECYCLE_HTTP_PATH,
+                "scope": SUBMISSION.LIFECYCLE_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.READ_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.LIFECYCLE_HTTP_REQUEST_SCHEMA,
+                "result_schema": SUBMISSION.LIFECYCLE_SCHEMA,
+                "response_schema": SUBMISSION.LIFECYCLE_HTTP_RESPONSE_SCHEMA,
             },
             "submission_health": {
                 "kind": "read", "response_schema": SUBMISSION.HEALTH_SCHEMA,
@@ -527,12 +540,19 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
 
         def authenticate(request):
             authentication_requests.append(copy.deepcopy(request))
+            read = request["path"] == SUBMISSION_HTTP.STATUS_PATH
             return {
-                "schema": SUBMISSION_HTTP.PRINCIPAL_SCHEMA,
+                "schema": (
+                    SUBMISSION_HTTP.READ_PRINCIPAL_SCHEMA
+                    if read else SUBMISSION_HTTP.PRINCIPAL_SCHEMA
+                ),
                 "principal_id": "website-backend",
                 "credential_id": "public-ingress",
                 "credential_version": "1",
-                "scope": SUBMISSION_HTTP.CHANGE_SCOPE,
+                "scope": (
+                    SUBMISSION_HTTP.STATUS_SCOPE
+                    if read else SUBMISSION_HTTP.CHANGE_SCOPE
+                ),
                 "site_id": "site-1",
             }
 
@@ -596,6 +616,36 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(tuple(rows[0]), (
             "change", change["event_id"], payload_sha256, 4, 3,
         ))
+
+        status_request = {
+            "schema": SUBMISSION.STATUS_HTTP_REQUEST_SCHEMA,
+            "operation": "change",
+            "request_id": change["event_id"],
+            "event_id": change["event_id"],
+            "site_id": change["site_id"],
+            "payload_sha256": payload_sha256,
+        }
+        status_body = SUBMISSION._canonical(status_request)
+        status_environ = {
+            "PATH_INFO": SUBMISSION_HTTP.STATUS_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json",
+            "CONTENT_LENGTH": str(len(status_body)),
+            "wsgi.input": io.BytesIO(status_body),
+        }
+        status_metadata = {}
+        status_response = json.loads(b"".join(application(
+            status_environ,
+            lambda status, headers: status_metadata.update(
+                status=status, headers=dict(headers),
+            ),
+        )))
+        self.assertEqual(status_metadata["status"], "200 OK")
+        self.assertEqual(status_response["result"]["event_id"], change["event_id"])
+        self.assertEqual(status_response["result"]["payload_sha256"], payload_sha256)
+        self.assertFalse(status_response["accepted_implies_publication"])
 
     def test_generation_tampering_blocks_projections_before_network(self):
         runtime = self.open()

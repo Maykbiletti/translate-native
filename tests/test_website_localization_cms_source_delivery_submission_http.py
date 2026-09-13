@@ -61,6 +61,7 @@ class Runtime:
         self.calls = []
         self.ready = True
         self.failure = None
+        self.source_ready = False
         self.digest = "a" * 64
         self.binding = {
             "schema": "blun.cms-source-delivery-runtime-capability-binding.v1",
@@ -131,6 +132,86 @@ class Runtime:
     def enqueue_removal(self, payload, *, source_max_attempts, delivery_max_attempts):
         return self._enqueue(payload, source_max_attempts, delivery_max_attempts)
 
+    def submission_status(self, operation, request_id):
+        self.calls.append(("status", operation, request_id))
+        if self.failure is not None:
+            raise self.failure
+        accepted = self.source_ready
+        return HTTP._SUBMISSION.HMACCMSSourceDeliverySubmissionStatus(
+            schema=HTTP._SUBMISSION.STATUS_SCHEMA,
+            operation=operation,
+            request_id=request_id,
+            event_id="event-1",
+            site_id="site-1",
+            payload_sha256="e" * 64,
+            status="accepted" if accepted else "pending",
+            stage="source_acceptance" if accepted else "website_acceptance",
+            website_status="succeeded" if accepted else "pending",
+            website_attempts=1 if accepted else 0,
+            website_delivery_max_attempts=4,
+            sidecar_status="succeeded" if accepted else None,
+            sidecar_attempts=1 if accepted else None,
+            sidecar_delivery_max_attempts=5,
+            source_max_attempts=3,
+            next_attempt_at=100.0,
+            lease_expired=False,
+            error_code=None,
+            website_capability_binding=copy.deepcopy(self.binding),
+        )
+
+    def submission_lifecycle(self, operation, request_id):
+        self.calls.append(("lifecycle", operation, request_id))
+        status = self.submission_status(operation, request_id)
+        self.calls.pop()
+        source_status = None
+        source_binding = None
+        if self.source_ready:
+            source_status = {
+                "schema": "blun.cms-source-service-status.v3",
+                "event_id": "event-1", "site_id": "site-1",
+                "website_version": "v1", "source_sequence": 1,
+                "change_sha256": "8" * 64,
+                "dispatch_status": "pending", "dispatch_attempts": 0,
+                "dispatch_max_attempts": 3, "dispatch_error_code": None,
+                "plan_id": None, "job_count": None,
+                "lifecycle_state": None, "lifecycle_poll_attempts": 0,
+                "lifecycle_error_code": None, "remote_status": None,
+                "lifecycle_sha256": None, "required_locales": [],
+                "approved_locales": [], "blocked_locales": [],
+                "queue_counts": {}, "notification_state": "disabled",
+                "notification_id": None, "notification_sha256": None,
+                "notification_attempts": 0, "notification_max_attempts": None,
+                "notification_error_code": None,
+                "terminal_processing_state": "disabled",
+                "terminal_processing_poll_attempts": 0,
+                "terminal_processing_failures": 0,
+                "terminal_processing_error_code": None,
+                "receiver_processing_state": None,
+                "receiver_processing_attempts": None,
+                "receiver_processing_max_attempts": None,
+                "receiver_processing_error_code": None,
+                "receiver_processed_at": None,
+            }
+            source_binding = {
+                "schema": HTTP._SUBMISSION._AUTH._HTTP._SOURCE_HTTP.CAPABILITY_BINDING_SCHEMA,
+                "status": "verified", "capabilities_sha256": "9" * 64,
+                "commercial_rendering_registry_sha256": "7" * 64,
+                "database_roles": list(
+                    HTTP._SUBMISSION._AUTH._HTTP._SOURCE_HTTP.CAPABILITY_DATABASE_ROLES
+                ),
+            }
+        return HTTP._SUBMISSION.HMACCMSSourceDeliverySubmissionLifecycle(
+            schema=HTTP._SUBMISSION.LIFECYCLE_SCHEMA,
+            status="accepted" if self.source_ready else status.status,
+            stage="source_processing" if self.source_ready else status.stage,
+            submission=status.as_payload(),
+            source_status=source_status,
+            source_capability_binding=source_binding,
+            website_capability_binding=copy.deepcopy(self.binding),
+            sidecar_capabilities_sha256="f" * 64,
+            source_capabilities_sha256="9" * 64,
+        )
+
 
 class SubmissionHTTPTests(unittest.TestCase):
     def setUp(self):
@@ -145,7 +226,11 @@ class SubmissionHTTPTests(unittest.TestCase):
             if self.auth_failure is not None:
                 raise self.auth_failure
             return {
-                "schema": HTTP.PRINCIPAL_SCHEMA,
+                "schema": (
+                    HTTP.READ_PRINCIPAL_SCHEMA
+                    if request["path"] in HTTP.READ_PATHS
+                    else HTTP.PRINCIPAL_SCHEMA
+                ),
                 "principal_id": "website-backend",
                 "credential_id": "public-ingress",
                 "credential_version": "1",
@@ -221,6 +306,37 @@ class SubmissionHTTPTests(unittest.TestCase):
             "HTTP_X_LOCALIZATION_SOURCE_PAYLOAD_SHA256": hashlib.sha256(
                 payload_raw
             ).hexdigest(),
+            "wsgi.input": io.BytesIO(body),
+        }
+        environ.update(overrides)
+        captured = {}
+        response_body = b"".join(self.application(
+            environ,
+            lambda status, headers: captured.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        return int(captured["status"].split(" ", 1)[0]), captured, json.loads(response_body)
+
+    def read_request(self, path=HTTP.STATUS_PATH, **overrides):
+        request = {
+            "schema": HTTP.REQUEST_SCHEMAS[path],
+            "operation": "change",
+            "request_id": "event-1",
+            "event_id": "event-1",
+            "site_id": "site-1",
+            "payload_sha256": "e" * 64,
+        }
+        body = json.dumps(
+            request, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        environ = {
+            "PATH_INFO": path,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json",
+            "CONTENT_LENGTH": str(len(body)),
             "wsgi.input": io.BytesIO(body),
         }
         environ.update(overrides)
@@ -382,6 +498,98 @@ class SubmissionHTTPTests(unittest.TestCase):
             HTTP.build_submission_http(object(), lambda _request: {})
         with self.assertRaises(TypeError):
             HTTP.build_submission_http(self.runtime, object())
+
+    def test_status_is_authenticated_and_keeps_acceptance_distinct(self):
+        status, metadata, response = self.read_request()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(metadata["headers"]["Cache-Control"], "no-store")
+        self.assertEqual(response["schema"], HTTP.RESPONSE_SCHEMAS[HTTP.STATUS_PATH])
+        self.assertEqual(response["api_schema"], HTTP.API_SCHEMA)
+        self.assertEqual(response["result"]["status"], "pending")
+        self.assertEqual(response["result"]["stage"], "website_acceptance")
+        self.assertFalse(response["accepted_implies_publication"])
+        self.assertEqual(self.runtime.calls, [("status", "change", "event-1")])
+        self.assertEqual(
+            self.auth_requests[-1]["schema"], HTTP.READ_AUTH_REQUEST_SCHEMA,
+        )
+
+    def test_lifecycle_route_does_not_collapse_pending_submission(self):
+        status, _metadata, response = self.read_request(HTTP.LIFECYCLE_PATH)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response["result"]["stage"], "website_acceptance")
+        self.assertIsNone(response["result"]["source_status"])
+        self.assertEqual(self.runtime.calls, [("lifecycle", "change", "event-1")])
+
+    def test_lifecycle_exposes_validated_source_state_without_content(self):
+        self.runtime.source_ready = True
+
+        status, _metadata, response = self.read_request(HTTP.LIFECYCLE_PATH)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response["result"]["stage"], "source_processing")
+        self.assertEqual(
+            response["result"]["source_status"]["dispatch_status"],
+            "pending",
+        )
+        self.assertNotIn("content", repr(response["result"]))
+
+    def test_lifecycle_rejects_cross_site_source_projection(self):
+        self.runtime.source_ready = True
+        original = self.runtime.submission_lifecycle
+
+        def tampered(operation, request_id):
+            value = original(operation, request_id)
+            source = copy.deepcopy(value.source_status)
+            source["site_id"] = "site-2"
+            return dataclasses.replace(value, source_status=source)
+
+        self.runtime.submission_lifecycle = tampered
+
+        status, _metadata, response = self.read_request(HTTP.LIFECYCLE_PATH)
+
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            response["error_code"], "submission_http.runtime_response_invalid",
+        )
+
+    def test_read_scope_site_and_identity_fail_before_runtime(self):
+        self.principal_scope = "wrong:scope"
+        status, _metadata, _response = self.read_request()
+        self.assertEqual(status, 403)
+        self.assertEqual(self.runtime.calls, [])
+
+        self.principal_scope = None
+        self.principal_site = "site-2"
+        status, _metadata, _response = self.read_request()
+        self.assertEqual(status, 404)
+        self.assertEqual(self.runtime.calls, [])
+
+    def test_cross_bound_runtime_status_and_missing_submission_fail_closed(self):
+        original = self.runtime.submission_status
+
+        def tampered(operation, request_id):
+            value = original(operation, request_id)
+            return dataclasses.replace(value, payload_sha256="0" * 64)
+
+        self.runtime.submission_status = tampered
+        status, _metadata, response = self.read_request()
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            response["error_code"], "submission_http.runtime_response_invalid",
+        )
+
+        self.runtime.calls.clear()
+        self.runtime.submission_status = original
+        self.runtime.failure = RuntimeFailure(
+            "source_delivery_runtime.status_not_found"
+        )
+        status, _metadata, response = self.read_request()
+        self.assertEqual(status, 404)
+        self.assertEqual(
+            response["error_code"], "submission_http.submission_not_found",
+        )
 
 
 if __name__ == "__main__":
