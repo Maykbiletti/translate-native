@@ -1031,12 +1031,13 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v2` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v3` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
-confidence, locale quality profile, optional commercial profile, its exact
-content-free targeted-review summary, and the human/independent-review
+confidence, locale quality profile, and, for commercial content, the exact
+nested locale-specific commercial profile plus its content-free targeted-review
+summary and the human/independent-review
 requirements. The verifier must cryptographically
 bind every field. It must reject a receipt issued for another result, policy,
 model, profile, software version, locale, or review purpose. In particular, a
@@ -1304,10 +1305,15 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v1` object. That content-free
+a `blun.website-localization-release-evidence.v3` object. That content-free
 object binds the signed approval and worker-result hashes, quality-receipt
-hash, and either a null commercial scope or the exact commercial-profile ID
-and validated review summary. It contains no source text, target text, amount,
+hash, and either a null commercial scope or the exact commercial-profile ID,
+locale-specific commercial quality-profile version and digest, and validated
+review summary. If that summary requires targeted review, the object also binds
+the exact ordered dimensions, resolution method, receipt hash, and independent
+provider identity when a second model was used. The receiver rejects a missing,
+unexpected, cross-scope, or method-inconsistent resolution before the host
+commit. It contains no source text, target text, amount,
 currency, tax wording, brand, or reviewer explanation. A CMS can therefore
 pin the advertised profile and reject missing, malformed, or drifted evidence
 before replacing its current content, without treating a cross-language regex
@@ -1399,8 +1405,11 @@ signed payload with a host-supplied
 `PublicationExpectation`. That expectation binds the exact current event,
 site, website version, plan, source identity, source generation and hash,
 complete sorted required-locale set, content type, and commercial profile.
-A correctly signed but partial, stale, or differently scoped publication is
-therefore rejected before any CMS write.
+For commercial content, the receiver also recomputes each locale's canonical
+commercial quality-profile version and digest and requires the signed v2
+release evidence to match it exactly. A correctly signed but partial, stale,
+cross-locale, or differently scoped publication is therefore rejected before
+any CMS write.
 
 The host supplies one commit callback. It must atomically and idempotently bind
 the stable `(delivery_id, payload_sha256)` pair to the expected source revision,
@@ -1648,11 +1657,39 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v2` profile to the job payload, job ID
-and plan ID; the existing seven types retain their previous payloads and IDs.
-It is available for every planner locale, including `mt-MT` and `fi-FI`.
+versioned `translate-native.commercial.v5` profile plus one exact
+`translate-native.commercial-locale-quality-profile.v2` object to the job
+payload, job ID and plan ID; the existing seven types retain their previous
+payloads and IDs. It is available for every planner locale, including `mt-MT`
+and `fi-FI`.
 The public skill's [commercial guide](../translate-native/references/commercial-localization.md)
 applies to all languages, with no hardcoded project prices, brands or products.
+
+The 24 locale objects are not aliases for one universal prompt. Each has a
+distinct version and canonical SHA-256, binds the corresponding general locale
+quality generation, preserves that profile's native, fidelity, adversarial and
+institutional-reference focus, and adds the ten commercial checks. The worker
+reconstructs the object before provider access and supplies it to
+transcreation, source-hidden native review and source-aware fidelity review.
+Its version and digest are retained in the result's signed quality-profile
+binding. Changing either locale policy or the generic commercial generation
+therefore invalidates jobs, cache entries, review receipts and publication
+authority.
+
+Each object also embeds `translate-native.commercial-rendering-reference.v1`
+from the tagged Unicode CLDR 48 JSON release. It records the resolved CLDR
+locale, default and native numbering systems, grouping threshold, decimal and
+grouping symbols, and the standard decimal, percent, currency, ISO-currency,
+approximation, limit, and range patterns. The explicit `de-AT`, `en-IE`, and
+`pt-PT` regional files are used where they exist; other profiles use the
+applicable language parent. Non-breaking and narrow non-breaking spaces remain
+exact Unicode data in the canonical profile and its digest.
+
+These patterns guide native rendering; they do not prove semantic fidelity.
+Equivalent number words, written percentages, and digit forms are permitted,
+while exact values and currency identities must survive without rounding or
+conversion. Any ambiguity is routed to an independent model or qualified
+native-domain review and remains blocked until resolved.
 
 The three provider calls stay ordered: transcreation, source-hidden native
 editing, source-aware fidelity. Commercial fidelity additionally returns
@@ -1685,12 +1722,14 @@ Do not classify legal text as commercial to bypass the legal human-review gate.
 The full commercial response hash stays in the normal quality-pass receipt;
 job IDs bind the profile version through queue, signed memory and publication.
 The content-free result summary uses
-`translate-native.commercial-review-summary.v1`; the authenticated capability
+`translate-native.commercial-review-summary.v2`; the authenticated capability
 response publishes its exact separately hashed machine contract, including the
 ordered allowed dimensions and the invariant between status and unresolved
-dimensions. Quality-evidence request v5 and receipt-binding v2 carry that exact
-summary, so adapters can reject unknown, reordered or contradictory review
-scope without reconstructing it from prose.
+dimensions. Its evidence digest covers a versioned canonical binding of the
+commercial profile, exact UTF-8 source and target hashes, and complete review
+evidence. Quality-evidence request v5 and receipt-binding v2 carry that exact
+summary, so adapters can reject unknown, reordered, contradictory, or
+transplanted review scope without reconstructing it from prose.
 As before, the host must verify an independent quality receipt before signing.
 Schema validation does not prove that a model's semantic findings are true or
 complete. The receipt verifier must validate evidence held by the trusted host;
@@ -1703,9 +1742,10 @@ allows equivalent locale forms, and converts unresolved evidence into a bound
 low-confidence review route. Keeping source evidence out of the native pass
 prevents source-shaped copy from receiving an
 artificial advantage. Version-bound job IDs prevent old policy/cache reuse.
-Tests exercise the contract across all 24 locale routes, ten defect dimensions,
-native digit/number-word representations, multiple offers, source blindness,
-queue terminal failures and the actual worker-to-signed-publication path.
+Tests exercise distinct canonical profiles across all 24 locale routes, ten
+defect dimensions, native digit/number-word representations, multiple offers,
+source blindness, locale-profile tampering, queue terminal failures and the
+actual worker-to-signed-publication path.
 Scripted adapters test enforcement, not real native quality or DeepL superiority.
 
 ## One-transition service loop

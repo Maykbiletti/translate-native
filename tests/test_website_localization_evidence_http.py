@@ -268,7 +268,14 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
 
     def test_commercial_review_scope_is_exact_and_content_free(self):
         base = evidence_request().as_payload()
-        base["commercial_profile"] = "translate-native.commercial.v2"
+        base["content_type"] = "commercial"
+        base["commercial_profile"] = "translate-native.commercial.v3"
+        commercial_quality = PLANNER.commercial_quality_profile_for("fi-FI")
+        base["quality_profile"]["commercial"] = {
+            "profile": base["commercial_profile"],
+            "version": commercial_quality["version"],
+            "sha256": commercial_quality["sha256"],
+        }
         base["commercial_review"] = {
             "schema": HTTP.COMMERCIAL_REVIEW_SUMMARY_SCHEMA,
             "profile": base["commercial_profile"],
@@ -289,9 +296,16 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
 
         transport = FakeTransport(response_for)
         adapter(transport).obtain(CommercialRequest(base))
-        sent = json.loads(transport.calls[0][2])["request"]["commercial_review"]
-        self.assertEqual(sent["review_required_dimensions"], ["tax_status"])
-        self.assertNotIn("VAT", json.dumps(sent))
+        sent = json.loads(transport.calls[0][2])["request"]
+        self.assertEqual(
+            sent["commercial_review"]["review_required_dimensions"],
+            ["tax_status"],
+        )
+        self.assertEqual(
+            sent["quality_profile"]["commercial"],
+            base["quality_profile"]["commercial"],
+        )
+        self.assertNotIn("VAT", json.dumps(sent["commercial_review"]))
 
         for mutation in (
             {"review_required_dimensions": ["private VAT 480"]},
@@ -308,6 +322,38 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
                 adapter(invalid_transport).obtain(CommercialRequest(payload))
             self.assertEqual(caught.exception.code, "request_invalid")
             self.assertEqual(invalid_transport.calls, [])
+
+        profile_mutations = (
+            lambda payload: payload["quality_profile"].pop("commercial"),
+            lambda payload: payload["quality_profile"]["commercial"].update(
+                profile="another-commercial-profile"
+            ),
+            lambda payload: payload["quality_profile"]["commercial"].update(
+                version="invalid version"
+            ),
+            lambda payload: payload["quality_profile"]["commercial"].update(
+                sha256="not-a-digest"
+            ),
+        )
+        for mutate in profile_mutations:
+            payload = json.loads(json.dumps(base))
+            mutate(payload)
+            invalid_transport = FakeTransport(response_for)
+            with self.subTest(mutate=mutate), self.assertRaises(
+                HTTP.HTTPEvidenceProviderFailed,
+            ) as caught:
+                adapter(invalid_transport).obtain(CommercialRequest(payload))
+            self.assertEqual(caught.exception.code, "request_invalid")
+            self.assertEqual(invalid_transport.calls, [])
+
+        noncommercial = evidence_request().as_payload()
+        noncommercial["quality_profile"]["commercial"] = base[
+            "quality_profile"
+        ]["commercial"]
+        invalid_transport = FakeTransport(response_for)
+        with self.assertRaises(HTTP.HTTPEvidenceProviderFailed):
+            adapter(invalid_transport).obtain(CommercialRequest(noncommercial))
+        self.assertEqual(invalid_transport.calls, [])
 
     def test_response_must_bind_outer_and_inner_evidence(self):
         cases = (
@@ -424,6 +470,70 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             self.assertEqual(receipt_request["binding"]["review_kind"], "quality")
             state = evidence_state.statuses(event["event_id"])[0]
             self.assertEqual((state.status, state.attempts, state.last_error_code), ("succeeded", 2, None))
+        finally:
+            for connection in reversed(connections):
+                connection.close()
+
+    def test_commercial_job_crosses_evidence_and_receipt_https_bindings(self):
+        connections = [sqlite3.connect(":memory:") for _ in range(4)]
+        try:
+            queue = QUEUE.LocalizationQueue(connections[0])
+            store = RELEASE.LocalizationReleaseStore(connections[1], queue)
+            bridge = CMS.WebsiteLocalizationCMSBridge(connections[2], queue, store)
+            evidence_state = COORDINATOR.QualityEvidenceStateStore(connections[3])
+            event_authority = CMSAuthority(b"event-key")
+            approval_authority = ApprovalAuthority()
+            publication_authority = CMSAuthority(b"publication-key")
+            event = change_event(targets=("fi-FI",), content_type="commercial")
+            event["localization"]["source_text"] = (
+                "Save up to EUR 480 per year. Prices exclude VAT."
+            )
+            plan = PLANNER.plan_from_mapping(event["localization"])
+            signature = event_authority.sign(CMS._canonical_json(event).encode("utf-8"))
+            bridge.ingest_change(event, signature, event_authority, now=100)
+            claim = queue.claim("worker", now=110, lease_seconds=30)
+            self.assertIsNotNone(claim)
+            queue.complete(
+                claim,
+                completed_result(
+                    plan.jobs[0],
+                    "Säästä jopa 480 euroa vuodessa. Hinnat eivät sisällä arvonlisäveroa.",
+                ),
+                now=111,
+            )
+            evidence_transport = FakeTransport(response_for)
+            receipt_transport = FakeTransport(receipt_response_for)
+            outcome = COORDINATOR.run_next_release(
+                bridge,
+                event["event_id"],
+                event_authority,
+                adapter(evidence_transport),
+                evidence_revision="commercial-evidence-http-1",
+                now=200,
+                approval_ttl_seconds=1000,
+                evidence_state=evidence_state,
+                quality_verifier=RECEIPT_HTTP.HTTPReceiptVerifierAdapter(
+                    "https://quality.example.test/v1/receipts/verify",
+                    lambda: {"Authorization": "Bearer verifier-token"},
+                    transport=receipt_transport,
+                ),
+                approval_authority=approval_authority,
+                publication_authority=publication_authority,
+                evidence_worker_id="commercial-quality-http-worker",
+            )
+            self.assertEqual(
+                (outcome.status, outcome.target_locale),
+                ("delivery_ready", "fi-FI"),
+            )
+            evidence_payload = json.loads(evidence_transport.calls[0][2])[
+                "request"
+            ]
+            receipt_payload = json.loads(receipt_transport.calls[0][2])[
+                "binding"
+            ]
+            expected = evidence_payload["quality_profile"]["commercial"]
+            self.assertEqual(receipt_payload["quality_profile"]["commercial"], expected)
+            self.assertEqual(expected["profile"], PLANNER.COMMERCIAL_PROFILE)
         finally:
             for connection in reversed(connections):
                 connection.close()

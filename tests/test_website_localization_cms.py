@@ -210,6 +210,19 @@ def completed_result(job, candidate):
             "locale": payload["target"]["locale"],
             "version": payload["target"]["quality_profile_version"],
             "sha256": payload["target"]["quality_profile_sha256"],
+            **(
+                {
+                    "commercial": {
+                        "profile": payload["commercial_profile"],
+                        "version": payload["commercial_quality_profile"]
+                        ["version"],
+                        "sha256": payload["commercial_quality_profile"]
+                        ["sha256"],
+                    }
+                }
+                if payload["content_type"] == "commercial"
+                else {}
+            ),
         },
         "commercial_review": commercial_review,
         "human_review_required": False,
@@ -455,6 +468,7 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 hashlib.sha256(b"quality-receipt").hexdigest(),
             )
             self.assertIsNone(evidence["commercial_profile"])
+            self.assertIsNone(evidence["commercial_quality_profile"])
             self.assertIsNone(evidence["commercial_review"])
         self.assertTrue(self.publication_authority.verify(
             CMS._canonical_json(first.payload).encode("utf-8"),
@@ -477,9 +491,27 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
 
         for item in request.payload["localizations"]:
             evidence = item["release_evidence"]
+            self.assertEqual(set(evidence), {
+                "schema", "job_id", "target_locale", "content_type",
+                "target_sha256", "result_sha256", "quality_receipt_sha256",
+                "approval_id", "approval_sha256", "commercial_profile",
+                "commercial_quality_profile", "commercial_review",
+                "commercial_review_resolution",
+            })
             self.assertEqual(
                 evidence["commercial_profile"], PLANNER.COMMERCIAL_PROFILE,
             )
+            canonical = PLANNER.commercial_quality_profile_for(item["locale"])
+            self.assertEqual(evidence["commercial_quality_profile"], {
+                "profile": canonical["commercial_profile"],
+                "version": canonical["version"],
+                "sha256": canonical["sha256"],
+            })
+            self.assertEqual(set(evidence["commercial_review"]), {
+                "schema", "profile", "status", "review_required_dimensions",
+                "evidence_sha256",
+            })
+            self.assertIsNone(evidence["commercial_review_resolution"])
             self.assertEqual(evidence["commercial_review"]["status"], "verified")
             self.assertEqual(
                 evidence["commercial_review"]["review_required_dimensions"], [],
@@ -487,7 +519,7 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         serialized = json.dumps(
             [item["release_evidence"] for item in request.payload["localizations"]]
         )
-        self.assertNotIn("480", serialized)
+        self.assertNotIn(event["localization"]["source_text"], serialized)
         self.assertNotIn("VAT", serialized)
 
     def test_success_requires_exact_ack_and_sends_one_complete_request(self):

@@ -93,7 +93,9 @@ def publication_request(authority=None):
                 "approval_sha256": "2" * 64,
                 "quality_receipt_sha256": "3" * 64,
                 "commercial_profile": None,
+                "commercial_quality_profile": None,
                 "commercial_review": None,
+                "commercial_review_resolution": None,
             },
         }],
     }

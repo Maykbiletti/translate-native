@@ -42,7 +42,7 @@ CONTENT_TYPES = frozenset({
     "commercial",
 })
 QUALITY_PASSES = ("target_native", "source_fidelity")
-COMMERCIAL_PROFILE = "translate-native.commercial.v2"
+COMMERCIAL_PROFILE = "translate-native.commercial.v5"
 
 
 class LocalizationPlanBlocked(ValueError):
@@ -78,6 +78,9 @@ def _load_quality_profiles():
 
 
 _QUALITY_PROFILES = _load_quality_profiles()
+COMMERCIAL_RENDERING_REGISTRY_SCHEMA = (
+    _QUALITY_PROFILES.COMMERCIAL_RENDERING_REGISTRY_SCHEMA
+)
 
 
 def _locale(locale: str, eu_code: str, language: str, native_name: str, script: str) -> LocaleProfile:
@@ -123,6 +126,17 @@ def quality_profile_for(locale: str) -> dict[str, Any]:
     return _QUALITY_PROFILES.quality_profile_for(locale)
 
 
+def commercial_quality_profile_for(locale: str) -> dict[str, Any]:
+    return _QUALITY_PROFILES.commercial_quality_profile_for(
+        locale,
+        COMMERCIAL_PROFILE,
+    )
+
+
+def commercial_rendering_registry() -> dict[str, Any]:
+    return _QUALITY_PROFILES.commercial_rendering_registry(COMMERCIAL_PROFILE)
+
+
 @dataclass(frozen=True)
 class LocalizationJob:
     job_id: str
@@ -142,6 +156,11 @@ class LocalizationJob:
 
     def as_payload(self) -> dict[str, Any]:
         """Return the provider-neutral queue payload for one target locale."""
+        commercial = (
+            commercial_quality_profile_for(self.target.locale)
+            if self.content_type == "commercial"
+            else None
+        )
         return {
             "schema": JOB_SCHEMA,
             "job_id": self.job_id,
@@ -165,7 +184,14 @@ class LocalizationJob:
             "software_version": self.software_version,
             "quality_passes": list(QUALITY_PASSES),
             "release_required": True,
-            **({"commercial_profile": COMMERCIAL_PROFILE} if self.content_type == "commercial" else {}),
+            **(
+                {
+                    "commercial_profile": COMMERCIAL_PROFILE,
+                    "commercial_quality_profile": commercial,
+                }
+                if commercial is not None
+                else {}
+            ),
         }
 
 
@@ -321,9 +347,15 @@ def plan_website_localization(
     }
     if content_type == "commercial":
         common["commercial_profile"] = COMMERCIAL_PROFILE
-    jobs = tuple(
-        LocalizationJob(
-            job_id="blun-l10n-" + _digest({**common, "target": asdict(profile)}),
+    jobs_list = []
+    for profile in profiles:
+        job_binding = {**common, "target": asdict(profile)}
+        if content_type == "commercial":
+            job_binding["commercial_quality_profile"] = (
+                commercial_quality_profile_for(profile.locale)
+            )
+        jobs_list.append(LocalizationJob(
+            job_id="blun-l10n-" + _digest(job_binding),
             source_id=source_id,
             source_revision=source_revision,
             source_text=source_text,
@@ -337,9 +369,8 @@ def plan_website_localization(
             model_id=model_id,
             model_version=model_version,
             software_version=software_version,
-        )
-        for profile in profiles
-    )
+        ))
+    jobs = tuple(jobs_list)
     plan_binding = {
         **common,
         "target_locales": [job.target.locale for job in jobs],

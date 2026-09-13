@@ -31,7 +31,7 @@ PUBLICATION_SCHEMA = "blun.cms-localization-publication.v3"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
-CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v3"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v5"
 PUBLICATION_HTTP_CONTRACT_SCHEMA = (
     "blun.cms-localization-publication-http-capabilities.v2"
 )
@@ -507,6 +507,7 @@ class WebsiteLocalizationCMSBridge:
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
 
             commercial = _COMMERCIAL.public_profile(_PLANNER.COMMERCIAL_PROFILE)
+            rendering_registry = _PLANNER.commercial_rendering_registry()
             review_summary_contract = _COMMERCIAL.public_review_summary_contract(
                 _PLANNER.COMMERCIAL_PROFILE,
             )
@@ -515,7 +516,8 @@ class WebsiteLocalizationCMSBridge:
                 or set(commercial) != {
                     "schema", "profile", "applies_to", "dimensions",
                     "preservation", "rendering", "verification",
-                    "protected_terms", "review_summary_schema",
+                    "locale_quality_profile", "protected_terms",
+                    "review_summary_schema",
                     "review_summary_contract", "sha256",
                 }
                 or commercial["schema"] != _COMMERCIAL.PUBLIC_PROFILE_SCHEMA
@@ -528,6 +530,35 @@ class WebsiteLocalizationCMSBridge:
                     "locales": "all-supported-target-locales",
                 }
                 or commercial["protected_terms"] != "project-configuration-only"
+                or commercial["locale_quality_profile"] != {
+                    "schema": _COMMERCIAL.COMMERCIAL_LOCALE_PROFILE_SCHEMA,
+                    "required": True,
+                    "binding_fields": [
+                        "locale", "version", "commercial_profile",
+                        "quality_profile_version", "quality_profile_sha256",
+                        "rendering_reference",
+                        "sha256",
+                    ],
+                    "rendering_reference": {
+                        "schema": (
+                            _COMMERCIAL.COMMERCIAL_RENDERING_REFERENCE_SCHEMA
+                        ),
+                        "authority": "Unicode CLDR",
+                        "version": "48",
+                        "purpose": "target-locale-rendering-guidance",
+                        "semantic_proof": False,
+                        "unresolved_route": (
+                            "independent-model-or-qualified-native-domain-review"
+                        ),
+                    },
+                    "required_commercial_checks": list(
+                        _EXPECTED_COMMERCIAL_DIMENSIONS
+                    ),
+                    "provider_phases": [
+                        "transcreation", "target_native", "source_fidelity",
+                    ],
+                    "tamper_policy": "block-before-provider",
+                }
                 or [item.get("name") for item in commercial["dimensions"]]
                 != list(_EXPECTED_COMMERCIAL_DIMENSIONS)
                 or tuple(_COMMERCIAL.DIMENSIONS) != _EXPECTED_COMMERCIAL_DIMENSIONS
@@ -570,7 +601,18 @@ class WebsiteLocalizationCMSBridge:
                     "canonicalization": (
                         "utf-8-json-sort-keys-no-insignificant-whitespace"
                     ),
-                    "covers": "complete-commercial-review-evidence",
+                    "binding_schema": _COMMERCIAL.EVIDENCE_BINDING_SCHEMA,
+                    "binding_fields": [
+                        "schema", "profile", "source_sha256", "target_sha256",
+                        "evidence",
+                    ],
+                    "text_hashing": "exact-utf-8",
+                    "covers": [
+                        "commercial-profile",
+                        "exact-source-sha256",
+                        "exact-target-sha256",
+                        "complete-commercial-review-evidence",
+                    ],
                 }
                 or review_summary_contract["content_policy"] != {
                     "source_text": False,
@@ -597,6 +639,7 @@ class WebsiteLocalizationCMSBridge:
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
 
             locales = []
+            expected_rendering_locales = []
             seen_locales: set[str] = set()
             seen_languages: set[str] = set()
             seen_eu_codes: set[str] = set()
@@ -638,11 +681,28 @@ class WebsiteLocalizationCMSBridge:
                 ):
                     raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
                 quality = _PLANNER.quality_profile_for(locale)
+                commercial_quality = _PLANNER.commercial_quality_profile_for(
+                    locale,
+                )
                 if (
                     not isinstance(quality, dict)
                     or quality.get("locale") != locale
                     or quality.get("version") != version
                     or quality.get("sha256") != digest
+                    or not isinstance(commercial_quality, dict)
+                    or commercial_quality.get("locale") != locale
+                    or commercial_quality.get("commercial_profile")
+                    != _PLANNER.COMMERCIAL_PROFILE
+                    or commercial_quality.get("quality_profile_version")
+                    != version
+                    or commercial_quality.get("quality_profile_sha256")
+                    != digest
+                    or commercial_quality.get("schema")
+                    != _COMMERCIAL.COMMERCIAL_LOCALE_PROFILE_SCHEMA
+                    or not isinstance(commercial_quality.get("version"), str)
+                    or TOKEN.fullmatch(commercial_quality["version"]) is None
+                    or not isinstance(commercial_quality.get("sha256"), str)
+                    or SHA256.fullmatch(commercial_quality["sha256"]) is None
                 ):
                     raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
                 seen_locales.add(locale)
@@ -657,7 +717,46 @@ class WebsiteLocalizationCMSBridge:
                     "direction": direction,
                     "quality_profile_version": version,
                     "quality_profile_sha256": digest,
+                    "commercial_quality_profile_version": (
+                        commercial_quality["version"]
+                    ),
+                    "commercial_quality_profile_sha256": (
+                        commercial_quality["sha256"]
+                    ),
                 })
+                expected_rendering_locales.append({
+                    "locale": locale,
+                    "commercial_quality_profile": {
+                        "version": commercial_quality["version"],
+                        "sha256": commercial_quality["sha256"],
+                    },
+                    "rendering_reference": commercial_quality[
+                        "rendering_reference"
+                    ],
+                })
+
+            expected_rendering_registry = {
+                "schema": _PLANNER.COMMERCIAL_RENDERING_REGISTRY_SCHEMA,
+                "commercial_profile": _PLANNER.COMMERCIAL_PROFILE,
+                "source": {
+                    "authority": "Unicode CLDR",
+                    "version": "48",
+                },
+                "content_policy": {
+                    "source_text": False,
+                    "target_text": False,
+                    "project_prices": False,
+                    "project_brands": False,
+                    "credentials": False,
+                },
+                "locales": expected_rendering_locales,
+            }
+            expected_rendering_registry = {
+                **expected_rendering_registry,
+                "sha256": _hash(_canonical_json(expected_rendering_registry)),
+            }
+            if rendering_registry != expected_rendering_registry:
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
 
             body = {
                 "schema": CAPABILITIES_SCHEMA,
@@ -677,6 +776,7 @@ class WebsiteLocalizationCMSBridge:
                 "content_types": sorted(content_types),
                 "quality_passes": list(quality_passes),
                 "commercial_profile": commercial,
+                "commercial_rendering_registry": rendering_registry,
                 "publication_http": self._publication_http_capabilities(),
                 "locales": locales,
             }

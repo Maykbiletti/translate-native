@@ -107,6 +107,871 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.99.0: authenticated public pipeline monitoring
+
+Version 6.99.0 exposes separate provider-neutral HTTPS operator reads for the
+complete website-to-source health and readiness projections. Both routes are
+body-free and content-free, use distinct scopes, and authenticate before any
+runtime, queue, or downstream access.
+
+The boundary independently validates the website and sidecar intake state,
+the source-service state, every capability generation and both runtime
+bindings. Health never substitutes for readiness, neither response identifies
+a tenant or includes website content, and neither grants publication
+authority. Malformed counters, contradictory component states, altered
+bindings, or unavailable downstream evidence block fail-closed.
+
+### Version 6.98.0: authenticated public submission progress
+
+Version 6.98.0 completes the public submit-and-observe path with separate,
+provider-neutral HTTPS reads for durable acceptance status and the full source
+localization lifecycle. Every lookup is bound to its authenticated site,
+operation, request and event identities, and exact source-payload SHA-256
+before runtime access.
+
+The boundary independently validates the complete content-free runtime
+projection, including retry counters and pinned capability generations. A
+foreign tenant is indistinguishable from a missing submission; malformed,
+substituted, or cross-bound downstream state fails closed. Acceptance and
+source processing remain separate, and neither response grants quality
+approval or publication. The v4 capability snapshot advertises both live
+read routes, scopes, request/result schemas, and response envelopes.
+
+### Version 6.97.0: authenticated public website submission
+
+Version 6.97.0 exposes the website-owned outer outbox through two provider-
+neutral HTTPS write routes for one change or one cancellation/tombstone. Each
+request binds its authenticated principal to the exact site, canonical body
+hash, source-payload hash, idempotency identity, and separate website-delivery
+and source-processing retry ceilings before touching runtime state.
+
+The hosted website worker and the pinned commercial capability generation must
+both be ready. HTTP 202 is returned only after the immutable outer-outbox row
+has been committed; exact retries reuse that row and changed content or retry
+policy conflicts fail closed. The content-free acknowledgement keeps website
+acceptance distinct from sidecar/source acceptance, quality approval, and
+publication. The v3 public capability snapshot now advertises these live paths,
+scopes, schemas, and precise acceptance semantics.
+
+### Version 6.96.0: authenticated website capability discovery
+
+Version 6.96.0 exposes the complete website submission capability as a strict,
+read-only WSGI route. The route at
+`GET /v1/localization/source-delivery/submission-capabilities` requires HTTPS,
+an exact host-authenticated read scope, an empty body, and no query. The
+provider-neutral authenticator receives only canonical request metadata and
+the empty-body hash before the runtime or downstream sidecar is contacted.
+
+The response admits only the exact V6.96 operation, retry, semantics, and
+durable-generation fields and rechecks their canonical SHA-256. Changed
+schemas, added private fields, altered publication semantics, stale hashes,
+runtime failures, and authentication failures therefore return only stable,
+content-free blocking envelopes.
+
+### Version 6.95.0: discoverable end-to-end website capabilities
+
+Version 6.95.0 adds one canonical, content-free capability snapshot at the
+outer website submission runtime. It advertises the exact change and removal
+schemas, every composed status, lifecycle, health and readiness projection,
+the three independently owned retry budgets, and the fail-closed publication
+boundary under one deterministic SHA-256. It explicitly states that this edge
+neither generates translations nor grants publication authority.
+
+The runtime validates its guarded website database generation before making a
+fresh authenticated sidecar capability request. The returned snapshot binds
+the exact live sidecar and source-service capability pins to that durable
+website generation. Local tampering therefore blocks without network access;
+remote contract substitution blocks without returning a weaker capability.
+
+### Version 6.94.0: observable website generation evidence
+
+Version 6.94.0 exposes the outer website outbox's exact, content-free durable
+generation as a canonical capability binding. The binding identifies the
+website database role, sidecar-adapter contract, source-runtime contract,
+commercial rendering registry, and their derived binding hash without
+including an endpoint, credential, tenant, source text, or target text.
+
+Every composed submission status, lifecycle, health, pipeline-health,
+readiness, and pipeline-readiness projection now carries that independently
+validated website binding alongside the existing sidecar and source evidence.
+The runtime derives it from the canonical SQLite row on every read. A changed
+adapter, malformed or substituted binding, or altered database generation
+blocks locally before any operational request reaches the sidecar.
+
+### Version 6.93.0: local-first website restart preflight
+
+Version 6.93.0 validates an existing outer website outbox locally and read-only
+before the authenticated sidecar preflight can make a network request. File
+ownership, mode and identity, the base outbox schema, the canonical generation
+table, its role-specific row, and its derived digest must all match the exact
+adapter, source-runtime, and commercial rendering-registry generation.
+
+A changed generation, altered schema, malformed binding, unsafe file, or
+non-empty unbound legacy outbox now blocks with a stable content-free reason and
+zero transport calls. A missing database is still created only after remote
+generation verification, while a provably empty unbound legacy database remains
+migratable and is bound only after that same verification succeeds.
+
+### Version 6.92.0: authenticated website generation preflight
+
+Version 6.92.0 closes the remaining durable generation gap at the public
+website edge. The owned HMAC submission composition now requires the expected
+source-runtime and commercial rendering-registry hashes, verifies both through
+the authenticated sidecar source-readiness route, and opens no website database
+until that exact content-free binding is proven.
+
+The verified values become part of the sidecar-adapter contract and the outer
+website outbox's role-specific SQLite binding. Missing, partial, malformed,
+stale, or substituted generations block fail-closed before database creation;
+pending website work can resume only with the same adapter, runtime, and price
+format generation. Direct low-level adapter use remains compatible and
+deliberately unbound unless both generation pins are supplied together.
+
+### Version 6.91.0: durable sidecar generation binding
+
+Version 6.91.0 durably binds the source-delivery sidecar database to the exact
+sidecar contract, verified source-runtime capability generation, and commercial
+rendering-registry generation. Every restart validates canonical role-specific
+metadata and its derived digest before queue or network access. Pending work can
+therefore resume only under the generation that accepted it.
+
+An empty unbound legacy outbox may be adopted atomically. A non-empty unbound
+outbox, changed capability generation, altered binding record, malformed table,
+or attempt to reopen a bound production database without generation pins blocks
+fail-closed. Version 6.92 extends the same generation guarantee to the outer
+website database.
+
+### Version 6.90.0: authenticated source runtime binding
+
+Version 6.90.0 carries the verified, content-free commercial capability
+generation across the authenticated source-service boundary. Production HTTP
+startup now requires the existing signed capability preflight before any
+database is created. Capabilities, writes, status, health, and readiness all
+return the exact durable runtime and commercial rendering-registry binding;
+the pinned source client verifies it on every response.
+
+The source-delivery sidecar and owned website runtime preserve that binding as
+separate evidence through lifecycle, pipeline health, and pipeline readiness.
+Missing, malformed, replaced, or drifting bindings block before acceptance is
+reported. This closes the gap between a statically pinned HTTP schema and the
+actual commercial policy generation operating the durable queues.
+
+### Version 6.89.0: durable commercial capability binding
+
+Version 6.89.0 preserves the verified commercial capability generation across
+CMS worker restarts. The change, removal, and lifecycle databases each retain a
+canonical, role-specific binding to the complete capability and commercial
+rendering-registry digests. A restart with the same binding resumes pending
+work, including recovery from a partially completed same-binding startup.
+
+Another generation, swapped database roles, altered metadata, and non-empty
+unbound legacy queues block before service schema changes, queue access, or
+provider traffic. Empty legacy stores may be adopted deliberately. This keeps
+old price and offer work from silently crossing a policy deployment while
+preserving a safe migration path and content-free operational evidence.
+
+### Version 6.88.0: pinned durable CMS startup
+
+Version 6.88.0 carries both commercial capability pins into the durable
+source-CMS composition root. An explicit production preflight performs one
+signed capability read before any queue database is created, requires the
+complete capability and commercial rendering-registry pins, and retains only
+their public digests.
+
+Missing pins, transport failure, contract substitution, and either mismatch
+leave persistent state untouched and return stable content-free errors. The
+runtime exposes the verified binding separately and rechecks it before every
+later state transition, so an altered client cannot enqueue or deliver website
+content under another commercial contract.
+
+### Version 6.87.0: pinned commercial capability client
+
+Version 6.87.0 completes the public commercial rendering registry at the
+source-side reference client. The client now compares the complete v5
+capability shape, commercial profile, all 24 locale bindings, and the exact
+canonical rendering registry with its installed contract. A substituted
+registry remains blocked even if an intermediary recomputes every public
+digest.
+
+Deployments may additionally pin the complete capability digest and the
+commercial rendering-registry digest in the client constructor. Malformed pins
+stop before transport; mismatches stop after one response with distinct,
+non-retryable error codes. This makes contract upgrades deliberate without
+embedding project prices, brands, credentials, or content in the public
+capability path.
+
+### Version 6.86.0: public commercial rendering registry
+
+Version 6.86.0 exposes the complete set of 24 locale-exact commercial
+rendering references through the signed CMS capability contract. Every entry
+is bound to its exact commercial locale-profile version and digest, and the
+whole content-free registry has its own canonical SHA-256 digest. CMS and
+website clients can therefore discover and deliberately pin the rules they
+need instead of guessing separators, grouping thresholds, currency placement,
+or range notation.
+
+The capability contract advances to v5. It reconstructs every advertised
+registry entry from the canonical locale profile before returning any data;
+missing, reordered, altered, or rehashed entries block the whole response.
+The registry contains no project prices, brands, source or target text, or
+credentials, and its CLDR guidance still does not claim semantic equivalence.
+
+### Version 6.85.0: locale-exact commercial rendering references
+
+Version 6.85.0 binds an exact Unicode CLDR 48 number-format reference into
+every one of the 24 commercial EU-locale profiles. Providers now receive the
+resolved CLDR locale, numbering system, grouping threshold, decimal and grouping
+symbols, and decimal, percentage, currency, ISO-currency, approximation, limit,
+and range patterns in all three ordered phases. Explicit regional data is used
+for `de-AT`, `en-IE`, and `pt-PT`; the other configured locales use their CLDR
+parent data.
+
+The reference is rendering guidance, never a language-independent semantic
+proof. Meaning-preserving number words, written percentages, and equivalent
+digit forms remain valid; rounding and currency conversion remain forbidden;
+ambiguous values still require an independent model or qualified native-domain
+review. The profile generation advances to v5/v2, invalidating stale jobs,
+caches, receipts, and publication authority.
+
+### Version 6.84.0: visible commercial escalation resolution
+
+Version 6.84.0 carries the outcome of every targeted commercial escalation to
+the CMS receiver. When the primary commercial review remains unresolved, the
+signed publication evidence now identifies the exact ordered review dimensions,
+whether a qualified human or independent model resolved them, the receipt hash,
+and the independent provider binding where applicable.
+
+The release-evidence contract advances to v3. Verified commercial results and
+non-commercial content keep a null resolution, while missing, unexpected,
+cross-scope, malformed, or method-inconsistent resolution evidence blocks before
+the receiver's commit callback. Raw receipts, prices, source or target text,
+qualified-human identity, and reviewer prose remain excluded.
+
+### Version 6.83.0: commercial evidence HTTP profile binding
+
+Version 6.83.0 carries the exact locale-specific commercial quality profile
+through the provider-neutral quality-evidence and receipt-verification HTTPS
+boundaries. Commercial requests now require the nested profile identifier,
+version and digest to match their content type, commercial policy and review
+summary before authentication or network access.
+
+The evidence request and receipt-binding contracts advance to v6 and v3, so
+durable retries and opaque receipts created before this binding cannot be
+silently reused. Non-commercial traffic retains the compact base locale
+profile and rejects injected commercial scope. A complete coordinator test
+drives a Finnish offer through both adapters to signed delivery readiness.
+
+### Version 6.82.0: locale-bound commercial publication evidence
+
+Version 6.82.0 carries each approved commercial locale's exact quality-profile
+version and digest through the signed, content-free release evidence to the CMS
+receiver. The receiver recomputes the current canonical binding independently
+for every locale and blocks stale versions, substituted digests, wrong profile
+IDs, missing evidence, and cross-locale reuse before any host commit.
+
+The release-evidence contract is now v2 and remains null-scoped for all
+non-commercial content. The durable receiver store also rechecks the compact
+binding inside its atomic write transaction, so a malformed commercial bundle
+cannot replace the last known good publication even when a callback is invoked
+directly.
+
+### Version 6.81.0: locale-bound commercial quality profiles
+
+Version 6.81.0 replaces the one-size-fits-all commercial prompt binding with
+24 distinct, canonical EU-locale evaluation profiles. Each profile inherits
+the exact locale's native, fidelity, adversarial and source-reference rules,
+then adds brand-neutral checks for prices, discounts, qualifiers, tax status,
+billing, commitment, renewal, cancellation, conditions and offer assignment.
+
+The complete profile is versioned and hashed into each commercial job. The
+worker recomputes it before any provider call and supplies it independently to
+transcreation, target-only native review and source-aware fidelity review. Its
+version and digest also enter the signed quality-profile result, so profile
+changes invalidate job IDs, cached results, review evidence and publication
+authority without introducing fixed brands, products or prices.
+
+### Version 6.80.0: end-to-end processing health
+
+Version 6.80.0 adds one authenticated `submission_pipeline_health()` probe
+from the website acceptance outbox through the sidecar to every durable source
+processing queue. Website intake, sidecar delivery, and source-service health
+remain separate content-free projections, including their own counters and
+stable error codes.
+
+The probe contacts the source layer only after website and sidecar intake are
+healthy. It binds both capability generations and revalidates the complete
+source health schema rather than trusting an aggregate flag. Degraded source
+registration remains visible, while blocked queues, malformed counters,
+transport failure, HTTP/status contradictions, and contract substitution fail
+closed without exposing website content, translations, or credentials.
+
+### Version 6.79.0: end-to-end processing readiness
+
+Version 6.79.0 adds one authenticated
+`submission_pipeline_readiness()` probe from the website worker through the
+sidecar to the source localization service. It reports intake readiness and
+source-processing readiness as separate content-free objects and returns
+overall `ready` only when all three operated layers are ready.
+
+If the website worker or sidecar is not ready, the probe does not contact the
+next layer. Every successful downstream read is bound to the current sidecar
+and source-service capability hashes and revalidated against the source
+readiness schema. Stopped workers, malformed state, network failures, and
+contract substitution therefore remain fail-closed without exposing website
+content, credentials, provider responses, or translated text.
+
+### Version 6.78.0: end-to-end localization lifecycle status
+
+Version 6.78.0 adds one authenticated `submission_lifecycle()` read from the
+website-owned outbox through the sidecar to the source localization service.
+The sidecar exposes the source status only after the exact site, event, and
+payload row has reached durable source acceptance; earlier stages remain local
+and perform no premature downstream lifecycle request.
+
+The result preserves the acceptance projection and the complete content-free
+source-service status as separate nested objects. Event and tenant identity,
+payload hash, retry state, required and blocked locales, publication state,
+terminal processing, and both capability generations are validated at every
+hop. Processing or review can therefore never be collapsed into publication,
+and missing, malformed, or stale lifecycle evidence blocks fail-closed.
+
+### Version 6.77.0: end-to-end submission health
+
+Version 6.77.0 adds one content-free `submission_health()` projection across
+the website and sidecar acceptance outboxes. It validates local storage before
+network access and then uses the owned authenticated, capability-pinned client
+to retrieve the downstream snapshot.
+
+Both health objects remain distinct with their counters, due work, expired
+leases, failures, contract mismatches, and stable error codes. Overall health
+is `ok` only when both outboxes independently report `ok`; malformed state or
+contract substitution blocks fail-closed.
+
+### Version 6.76.0: end-to-end submission readiness
+
+Version 6.76.0 adds one content-free `submission_readiness()` projection for
+the complete durable website-to-sidecar intake path. It validates the owned
+website worker and outbox first; only a locally ready runtime performs the
+authenticated sidecar readiness request.
+
+The result keeps website and sidecar worker state, outbox state, stable error
+codes, and both capability pins distinct. Overall readiness is positive only
+when both durable workers are running and both outboxes are healthy. A stopped
+or malformed local runtime causes no remote request, while a blocked sidecar
+can never be hidden behind a healthy website worker.
+
+### Version 6.75.0: bound submission progress
+
+Version 6.75.0 adds one content-free `submission_status()` projection across
+the website acceptance outbox and the sidecar delivery outbox. Before local
+acceptance it reads no remote state; afterwards it authenticates the status
+request and binds the returned operation, identities, tenant, payload hash,
+capability pins, and independent retry ceilings to the persisted submission.
+
+The result distinguishes `website_acceptance`, `sidecar_delivery`, and
+`source_acceptance`. An `accepted` result means only that the source service
+durably accepted the event; it never claims that localization, review, or
+publication completed. Stale local contracts, malformed remote status, and
+changed retry policy fail closed without exposing website content.
+
+### Version 6.74.0: owned authenticated submission runtime
+
+Version 6.74.0 composes the rotating HMAC client, sidecar adapter, private
+SQLite outbox, and optional supervised worker into one website-owned runtime.
+Invalid transport, retry, worker, or contract configuration fails before the
+outbox file is created or any request is sent.
+
+The runtime preserves separate website-acceptance, sidecar-delivery, and
+source-processing retry ceilings. It exposes local acceptance and downstream
+sidecar status as deliberately different operations, routes live credential
+replacement to the exact signer used by the worker, and blocks inherited or
+closed instances before storage or network access.
+
+### Version 6.73.0: durable authenticated sidecar submission
+
+Version 6.73.0 connects the contract-pinned, rotatable HMAC sidecar client to
+the existing website-owned SQLite outbox through an explicit adapter. A source
+event is durable before the first sidecar request, survives a client or process
+crash, and is replayed with the same immutable identity until the sidecar has
+durably accepted it.
+
+The adapter keeps three retry ceilings distinct: local sidecar-acceptance
+attempts, sidecar-to-source-service delivery attempts, and source-service
+processing attempts. Its synthetic capability digest binds both remote
+contract pins and the inner delivery policy, so a configuration change blocks
+old active rows instead of silently changing their semantics.
+
+### Version 6.72.0: source-bound commercial review evidence
+
+Version 6.72.0 binds every content-free commercial review digest to the exact
+UTF-8 source and target hashes, the commercial profile generation, and the
+complete canonical review evidence. Commercial profile v3 and review-summary
+contract v2 invalidate older plans, cache entries, approvals, and capability
+pins instead of letting a structurally valid digest move between texts or
+policies. The authenticated capability registry publishes the exact versioned
+binding recipe without exposing prices, copy, spans, brands, or reviewer prose.
+
+### Version 6.71.0: composed authenticated source-delivery client
+
+Version 6.71.0 provides one provider-neutral client surface for a website
+backend to call all six source-delivery sidecar operations. Origin, sidecar
+capability pin, and downstream capability pin are supplied once and shared by
+the private rotating HMAC signer and contract-pinned HTTPS client, eliminating
+duplicate security configuration.
+
+The composed client is bound to its creating process, performs no network call
+when construction fails, and routes credential replacement to the exact signer
+used by capabilities, changes, removals, status, health, and readiness. Invalid
+replacement state keeps the last valid credential, while representations and
+errors remain content-free and secret-free.
+
+### Version 6.70.0: uninterrupted source-delivery client rotation
+
+Version 6.70.0 lets a long-lived source-delivery client replace its HMAC
+credential without restarting its worker or rebuilding its HTTP adapter. The
+provider-neutral rotating signer validates a complete replacement, serializes
+the swap with proof creation, retains the last valid signer on failure, and
+rejects inherited use from a forked process.
+
+The origin and both capability-contract pins stay immutable throughout the
+client lifetime. A safe fleet rollout overlaps old and new generations on the
+server, rotates every client, drains proofs and requests already emitted under
+the old generation, and only then retires it server-side. The client lock does
+not claim to synchronize other processes or requests already in transport.
+
+### Version 6.69.0: uninterrupted source-delivery credential rotation
+
+Version 6.69.0 lets a running authenticated source-delivery sidecar replace
+its accepted HMAC credential generations without restarting the outbox worker
+or resetting replay protection. Operators may first overlap old and new
+generations, move clients, and then retire the old generation.
+
+The runtime materializes and validates the complete replacement before taking
+effect, serializes the swap with in-flight authentication, and retains the
+last valid verifier on every rejected update. The existing replay ledger stays
+authoritative across removal and later re-addition of a generation. Storage,
+process, and lifecycle guards are checked before a replacement; errors and
+representations expose neither credentials nor secret-manager detail.
+
+### Version 6.68.0: protected authenticated sidecar runtime
+
+Version 6.68.0 turns the source-delivery HMAC reference into one deployable
+host composition. It preflights the complete authentication, worker, retry,
+contract-pin, and path configuration in memory before opening either durable
+database, then owns the hosted delivery runtime and its separate replay ledger
+as one lifecycle.
+
+The replay database is created owner-only and bound to its process, inode, safe
+parent chain, and serialized connection. Permission drift, links, replacement,
+corrupt retained nonces, inherited pre-fork state, closed runtimes, or storage
+failure make authentication unavailable before the protected outbox is read or
+written. A content-free authentication health snapshot remains separate from
+website content and credentials. Shutdown closes the delivery worker and
+outbox before the replay ledger; if a worker exceeds its bound, authentication
+stays open for an explicit supervisor decision.
+
+### Version 6.67.0: rotatable source-delivery authentication
+
+Version 6.67.0 completes a deployable authentication path for the
+source-delivery sidecar without fixing one identity provider. The reference
+client signer and server verifier bind the exact origin, method, verified path,
+route scope, body hash, tenant identities, idempotency headers, and both active
+capability-contract digests into one canonical HMAC-SHA-256 proof.
+
+Credentials carry an explicit generation and allowlist of scopes, so several
+versions can overlap during controlled rotation without granting another site.
+A caller-owned durable SQLite replay store atomically consumes every random
+nonce before protected content is parsed or persisted. Expired, future,
+replayed, altered, retired, cross-tenant, or wrongly scoped proofs fail closed;
+store and clock outages remain distinguishable, content-free retryable server
+failures. No key, credential, website text, or provider response is represented
+or stored in the replay ledger.
+
+### Version 6.66.0: contract-pinned source-delivery sidecar client
+
+Version 6.66.0 gives CMS and website backends one provider-neutral HTTPS
+reference client for the source-delivery sidecar. Every write and operational
+read first verifies the complete live capability contract against a trusted
+sidecar pin, then uses only its freshly verified method and path.
+
+The client separately pins the downstream source-service contract, binds
+changes and removals to canonical inner-payload hashes and immutable
+idempotency identities, and requires complete known bindings for status reads.
+Authentication code cannot replace reserved transport headers. Redirects,
+hidden retries, tenant substitutions, changed retry ceilings, stale capability
+digests, malformed blocked states, and private transport failures remain
+content-free and fail closed.
+
+### Version 6.65.0: website-source delivery HTTP sidecar
+
+Version 6.65.0 lets non-Python websites and CMS backends use the protected
+source-delivery runtime through one provider-neutral HTTPS/WSGI boundary. Six
+separately scoped routes accept changes and removals or expose status, health,
+readiness, and a canonically hashed machine-readable contract.
+
+Authentication is bound to the exact method, path, headers, and request-body
+SHA-256 before JSON is parsed. Writes additionally require the immutable
+request ID, canonical source-payload hash, exact website tenant, both retry
+ceilings, and a live managed worker before new work is persisted. Responses are
+independently validated and contain only durable identities, hashes, counters,
+states, and stable errors; a missing or foreign website item is
+indistinguishable. The hosted factory can construct the runtime, worker, and
+sidecar as one preflighted unit without creating storage for an invalid
+authenticator.
+
+### Version 6.64.0: hosted website-source delivery runtime
+
+Version 6.64.0 turns the durable website outbox into an owned production
+runtime. Configuration and lease safety are proven in memory before one
+private SQLite file is created. Every later operation rechecks the database
+path and inode, rejects links or weakened permissions, serializes threads, and
+blocks an inherited pre-fork runtime before it can enter a lock or call the
+source client.
+
+The hosted factory starts one supervised non-daemon worker and gates new
+managed intake on its live state. Readiness combines worker liveness with the
+outbox's fail-closed health without exposing website content. Shutdown signals
+the worker before joining it; if a provider call exceeds the bound, the
+database remains open until the worker has safely returned.
+
+### Version 6.63.0: durable website-source delivery
+
+Version 6.63.0 gives website and CMS backends a durable handoff to the
+contract-pinned source client. The new SQLite outbox persists each immutable
+change, cancellation, or tombstone before network access, leases exactly one
+attempt to one worker, and safely replays the same idempotency identity after
+an ambiguous response or process crash.
+
+Delivery retries and source-service retries have separate bounded ceilings.
+Removal work takes priority over ordinary changes; exponential backoff remains
+durable across restarts. Exact payload hashes, request identities, source retry
+policy, and the trusted capability digest are fixed at enqueue time. Altered
+rows, stale leases, exhausted work, invalid acknowledgements, and contract
+changes remain content-free and fail closed through explicit status and health
+snapshots.
+
+### Version 6.62.0: contract-pinned source-CMS client
+
+Version 6.62.0 completes the public source-ingress path for website and CMS
+backends. The new provider-neutral HTTPS client discovers the live contract
+before every operation, verifies it against a trusted deployment pin, and uses
+only the freshly verified method and path for source changes, cancellations,
+tombstones, site-bound status, health, and readiness.
+
+Every write uses one canonical body, one transport attempt, an immutable
+idempotency identity, and exact request and payload hashes. All operational
+responses now carry the capability digest that authorized their schema; the
+client rejects endpoint changes, stale responses, cross-site status, altered
+payload hashes, malformed state, redirects, and private transport failures
+fail-closed. Stable retryability lets the website host schedule bounded replay
+without introducing a hidden retry loop in the adapter.
+
+### Version 6.61.0: durable terminal-processing reconciliation
+
+Version 6.61.0 closes the gap between receiver acceptance and actual CMS-side
+processing. When the configured terminal notifier also exposes the pinned
+`status(event_id, site_id)` operation, the source service creates an independent
+durable processing-observation record after the exact notification
+acknowledgement commits. Later ticks poll only that bound event and site.
+
+The observation ledger has its own leases, crash recovery, bounded transport
+failures, and polling cadence. It accepts a receiver state only when the
+notification ID, event, site, terminal outcome, and payload SHA-256 all match
+the delivered record. Pending and leased receiver work stays visible without
+being called complete; a remote terminal failure, malformed response, exhausted
+status access, expired local lease, or altered ledger blocks health fail-closed.
+The authenticated source status and health APIs now expose this content-free
+state through their V3 schemas, including stable local and receiver error codes.
+
+### Version 6.60.0: contract-pinned terminal delivery
+
+Version 6.60.0 makes the terminal-receiver client directly usable as the
+source service's durable terminal notifier. Before each delivery it validates
+the complete immutable notification locally, fetches and verifies the live
+receiver contract against the trusted deployment pin, and takes the active
+notification path from that verified contract. This supports custom receiver
+paths without maintaining a second unpinned delivery configuration.
+
+The write authenticates the exact method, origin, verified path, body SHA-256,
+notification, event, and site. Reserved idempotency and binding headers cannot
+be supplied by credential code. Only an exact acknowledgement for the same
+payload is accepted, and the client exposes stable retryability metadata to the
+durable outbox so it alone controls replay. Invalid payloads and contract drift
+block before the notification write; redirects, cross-site acknowledgements,
+and private transport failures remain fail-closed and content-free.
+
+### Version 6.59.0: response-bound terminal-receiver contract
+
+Version 6.59.0 binds every health, readiness, and site-specific status response
+to the exact current terminal-receiver capability SHA-256. The server derives
+that binding from its live configured intake path and complete semantic
+contract when it creates each response; the operator client requires it to
+equal the trusted deployment pin.
+
+This closes the interval between the client's discovery request and its
+operational request. A switched endpoint, stale replay, changed custom intake
+path, missing binding, or response from another compatible-looking deployment
+cannot pass merely because discovery succeeded immediately beforehand. The new
+field is part of the canonical advertised response schemas, so old clients and
+servers fail closed until upgraded together.
+
+### Version 6.58.0: contract-pinned terminal-receiver operator client
+
+Version 6.58.0 adds a provider-neutral HTTPS client for the terminal receiver's
+capability, health, readiness, and site-bound status routes. Deployment code
+supplies an expected capability SHA-256 through trusted configuration. Before
+every operational read, the client fetches the live contract, verifies its
+canonical digest and complete semantics, and requires it to equal that pin.
+
+Each request uses fresh method-, origin-, path-, body-hash-, event-, and
+site-bound authentication. The client follows no redirect, makes one bounded
+transport attempt per request, accepts only exact UTF-8 JSON schemas and field
+sets, and checks cross-field state invariants. A changed route, reused scope,
+rehashed semantic downgrade, tenant mismatch, partial health evidence, private
+transport exception, or unexpected status blocks with a stable content-free
+error before operational data can be trusted. Valid `503` health and readiness
+snapshots remain observable as blocked state rather than being mislabeled as a
+network failure.
+
+### Version 6.57.0: terminal-receiver operational health API
+
+Version 6.57.0 adds a separately authenticated, body-free health route for
+the hosted terminal receiver. It combines runtime ownership, managed-worker
+state, verified SQLite inbox integrity, processing counts, due work, expired
+leases, and terminal failures in one content-free operational snapshot. HTTP
+`200` requires an open runtime, a running or deliberately unmanaged worker,
+and an `ok` inbox; every worker or storage failure returns `503` with a stable
+error code.
+
+The route authenticates before reading health, never claims work or invokes the
+CMS handler, and uses a fifth distinct scope. Aggregate counts contain no site,
+event, notification, website text, credential, provider response, or private
+exception detail. The discoverable receiver contract now hashes this fifth
+operation, its exact schema, fields, path, method, scope, and success status;
+path collisions or scope reuse block before SQLite is opened.
+
+### Version 6.56.0: discoverable terminal-receiver contract
+
+Version 6.56.0 adds a separately authenticated, body-free capability route for
+the hosted terminal receiver. It publishes the exact active notification,
+status, health, readiness, and discovery operations with their methods, paths, scopes,
+schemas, required fields, success statuses, transport limits, processing
+states, and terminal outcomes. One canonical SHA-256 covers the complete
+content-free contract, including a configured custom notification intake path.
+
+The contract is generated from the same constants used by the receiver and
+never reads SQLite, claims work, calls the CMS handler, or exposes a site,
+notification, website text, credential, or deployment endpoint. A reused
+write/read scope, colliding custom intake path, altered notification schema,
+non-empty discovery request, malformed transport, or private authentication
+failure blocks the complete response instead of advertising a partial or stale
+interface.
+
+### Version 6.55.0: terminal-receiver status and readiness API
+
+Version 6.55.0 exposes the hosted terminal receiver's durable processing state
+without requiring deployment code to query SQLite. A canonical, authenticated
+status request is bound to one event and site and returns only notification
+identity, hashes, terminal state, attempts, lease timing, stable error code,
+and completion time. A foreign site's event is indistinguishable from a
+missing event.
+
+A separate body-free readiness route reports the managed worker and verified
+inbox state. Status and readiness use distinct read scopes from notification
+delivery, never advance processing, and remain available for diagnosis after
+the worker stops or blocks. Plain HTTP, queries, ambiguous framing, invalid
+methods, noncanonical bodies, wrong body hashes, scope reuse, storage damage,
+and private authenticator failures all produce content-free fail-closed
+responses.
+
+### Version 6.54.0: supervised terminal-receiver host
+
+Version 6.54.0 closes the deployment gap between durable terminal receipt and
+CMS-side processing. `open_hosted_durable_terminal_notification_receiver`
+starts one process-owned, non-daemon background worker that claims and handles
+one due notification at a time. State-specific waits are interruptible, so an
+idle worker stops promptly without waiting through its configured poll delay.
+
+Once the runtime enters managed mode, HTTP intake succeeds only while the
+worker is running and inbox health is `ok`. Startup, stop, callback-loop
+failure, terminal processing failure, damaged storage, and inherited pre-fork
+instances therefore fail closed before another notification is acknowledged.
+`worker_readiness()` exposes only worker state, inbox state, and stable error
+codes. `close()` signals and joins the worker before closing SQLite; a bounded
+join timeout leaves the database open for an explicit supervisor decision
+instead of racing a still-running host callback.
+
+### Version 6.53.0: durable terminal-notification processing
+
+Version 6.53.0 closes the CMS-side callback loop after durable receipt. The
+receiver now creates one processing record in the same transaction that stores
+and acknowledges a terminal notification. A host worker claims one due record
+at a time and receives the exact content-free notification only after the
+claim's owner, random token, attempt, deadline, and immutable payload binding
+have been committed.
+
+The host returns a bound `processed` acknowledgement. Retryable failures use a
+persisted bounded exponential delay; permanent failures and exhausted attempts
+remain visible and block health. Expired leases recover after restart, while a
+stale worker cannot complete a replacement claim. Unknown callback exceptions
+become one stable content-free failure code instead of stored private prose.
+
+Existing V6.51/V6.52 databases migrate transactionally from schema V1 to V2.
+Every old receipt is validated before one pending processing record is
+backfilled; any altered table or stored binding rolls the whole migration back.
+CMS handlers must apply their own side effect idempotently by
+`notification_id`, because a crash after that side effect but before the local
+completion commit intentionally causes a safe replay.
+
+### Version 6.52.0: protected terminal-receiver runtime
+
+Version 6.52.0 gives the reference terminal receiver a production-oriented
+composition root. It validates authentication, origin, route, and HTTPS policy
+before opening SQLite, creates a missing database exclusively with mode `0600`,
+and rejects symlinks, hard links, special files, shared writable parents,
+permission drift, and path replacement. The exact file identity is rechecked
+under the runtime lock before every request, status read, and health inspection.
+
+One runtime belongs to one WSGI worker process and owns its connection until an
+idempotent close. Inherited pre-fork instances, requests racing shutdown, closed
+runtimes, damaged schemas, failed integrity checks, and semantically altered
+rows remain fail closed. Restarted workers recover the durable inbox, while a
+content-free health result reports only runtime state and received-record count.
+
+### Version 6.51.0: durable terminal-notification receiver
+
+Version 6.51.0 completes the remote terminal callback with a provider-neutral
+reference receiver. Its HTTPS-only WSGI boundary validates canonical UTF-8 JSON,
+the three reserved identity headers, exact site authorization, and the same
+content-free authentication context used by the sending adapter. Authentication
+remains host supplied, so bearer tokens, HMAC, mTLS gateways, and other policies
+can be integrated without coupling the service to one vendor.
+
+The receiver commits each exact notification to a serialized, process-bound
+SQLite inbox before returning the acknowledgement. Replays after a lost response
+return the same acknowledgement without changing the original receipt time;
+changed data under an existing event, notification, or payload identity conflicts.
+Restart recovery, parallel requests, altered storage, malformed framing, wrong-site
+credentials, and private verifier failures are covered fail closed without exposing
+website content or secret-bearing error detail.
+
+### Version 6.50.0: secure terminal-notification HTTPS adapter
+
+Version 6.50.0 makes the durable terminal outbox deployable across a real CMS
+boundary. The provider-neutral callback adapter posts one canonical,
+content-free terminal notification to one fixed HTTPS endpoint, never follows
+redirects, and never retries inside the transport. A host-supplied
+authentication function receives the exact body hash and routing identity, so
+deployments may apply their own token, signature, or gateway policy without a
+hard-coded provider.
+
+The notification ID and body hash are repeated in reserved idempotency and
+binding headers. Only an exact JSON acknowledgement for the same notification,
+event, site, and body hash succeeds. Redirects, altered requests, header
+injection, duplicate JSON keys, incorrect content types, malformed or oversized
+bodies, cross-bound acknowledgements, and private transport exceptions fail
+closed. Retryable status and network failures return only stable public codes
+to the durable outbox, which remains the sole owner of bounded retries.
+
+### Version 6.49.0: durable terminal notifications
+
+Version 6.49.0 closes the callback gap after lifecycle monitoring reaches a
+verified terminal result. Deployments may supply a provider-neutral terminal
+notifier; the source service then registers one content-free notification in
+the lifecycle database before invoking host code. Event, site, plan, website
+version, source sequence, job count, change hash, lifecycle binding, terminal
+status, and available lifecycle evidence are bound to one deterministic
+notification ID.
+
+The notifier is optional so polling-only integrations remain compatible. When
+enabled, each callback attempt uses a durable lease, bounded exponential
+backoff, and an explicit attempt ceiling. Only an exact acknowledgement bound
+to the notification, event, site, and payload hash completes delivery. Lost
+responses replay the same identity; altered evidence, invalid acknowledgements,
+expired leases, exhausted attempts, and damaged state block health without
+exposing website content or private callback errors.
+
+### Version 6.48.0: supervised source-CMS host lifecycle
+
+Version 6.48.0 closes the operational gap between the durable source-CMS
+runtime and a production WSGI host. `open_hosted_cms_source` starts one owned,
+non-daemon worker before returning the HTTP application. Its interruptible
+sleep allows bounded shutdown without waiting through the idle interval, while
+`close` joins the worker before any SQLite connection is closed.
+
+The separately authenticated readiness route reports only worker and service
+state. It stays unavailable before startup, after shutdown, on worker failure,
+or when durable service health blocks. Once a runtime has entered managed mode,
+HTTP change and removal writes fail closed whenever that worker is not running;
+no accepted work can silently remain without an active dispatcher. Private
+exceptions are reduced to stable codes, and a failed worker cannot be restarted
+against potentially inconsistent in-memory state.
+
+### Version 6.47.0: discoverable source-CMS contract
+
+Version 6.47.0 exposes the complete source-CMS HTTP surface through one
+authenticated, content-free capabilities route. Integrators receive the exact
+active paths, methods, route-specific scopes, principal schemas, request and
+response schemas, required top-level fields, success statuses, retry bounds,
+and transport limits. A canonical SHA-256 binds the complete advertised
+contract for deployment checks and generated clients.
+
+The capability object is derived from the same constants used by WSGI routing
+and authentication. It is available only through the separate
+`source-capabilities:read` scope, accepts no body or query, touches no runtime
+state, and performs no network call. Missing, duplicate, or inconsistent route
+metadata blocks the complete response instead of advertising a partial or
+stale interface.
+
+### Version 6.46.0: source-CMS lifecycle status
+
+Version 6.46.0 closes the source-CMS request loop with an authenticated,
+strictly read-only status route. A CMS can follow one accepted event from its
+durable dispatch through lifecycle registration, per-locale processing,
+approval, publication, cancellation, or failure without receiving source or
+target prose. The response exposes only exact generation identifiers, hashes,
+states, bounded counters, locale tags, and stable error codes.
+
+Status credentials are bound to one `site_id` and a separate
+`source-status:read` scope. A missing event and an event owned by another site
+produce the same content-free response. The runtime revalidates the complete
+stored change and lifecycle binding on every read; a corrupt database,
+mismatched response identity, malformed principal, or private exception blocks
+without repairing state, taking a lease, or performing a network call.
+
+### Version 6.45.0: authenticated source-CMS HTTP ingress
+
+Version 6.45.0 gives the durable source-CMS runtime a strict, optional WSGI
+boundary for real CMS deployments. Separate HTTPS routes accept complete
+change and removal envelopes or return aggregate health; each route requires
+its own authenticated scope. The authenticator receives method, path, bounded
+headers, and the exact body hash, but never the website body as a parsed
+object. Valid work is persisted before the response and later processed by the
+same crash-safe runtime.
+
+The boundary rejects ambiguous framing, transfer encoding, queries, oversized
+bodies, duplicate JSON keys, wrong schemas, wrong scopes, and idempotency
+collisions. Responses contain only IDs, hashes, counters, states, and stable
+error codes. Runtime, database, authentication, and response-shape failures
+return fail-closed without exposing source or target text.
+
+### Version 6.44.0: owned source-CMS runtime
+
+Version 6.44.0 makes the coordinated source-CMS service directly deployable as
+one owned runtime. Its composition root validates the complete client, worker,
+lease, delay, timeout, and database configuration before creating persistent
+state; opens three independent owner-only SQLite files; serializes threads;
+and rejects use inherited across a process fork before lock or store access.
+Restarts and separately constructed workers reuse the existing durable leases,
+so accepted changes, removals, and lifecycle polls converge without duplicate
+change dispatch. Every public failure remains content-free, and a linked,
+hard-linked, aliased, replaced, missing, or permission-weakened database blocks
+before the next network operation.
+
+### Version 6.43.0: automatic source-CMS lifecycle service
+
+Version 6.43.0 closes the source-side gap between durable webhook delivery and durable lifecycle observation. One provider-neutral service now prioritizes cancellations and tombstones, dispatches immutable website changes, registers every accepted change for monitoring, and polls verified lifecycle state. A restart after remote acceptance but before local registration reconciles the exact stored acknowledgement without sending the accepted change again. Each tick performs at most one network operation, keeps the existing token-bound outbox leases authoritative, and exposes only content-free status and health data.
+
 ### What “mandatory” really means
 
 An MCP server cannot physically stop an agent that is still allowed to print directly to its terminal, Telegram bridge, API response, or file. Non-bypassable enforcement requires the host to capture the complete candidate output, assign `task_kind` and the expected locale outside the agent's control, call the gateway, verify the purpose-bound receipt, and withhold delivery on every failure. If the agent controls the wrapper, signing key, task classification, source, or delivery channel, the installation is advisory.
@@ -708,7 +1573,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.42.18 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.99.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

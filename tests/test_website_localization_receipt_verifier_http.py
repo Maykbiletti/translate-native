@@ -271,7 +271,13 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
 
     def test_commercial_review_scope_is_bound_before_transport(self):
         value = binding()
-        value["commercial_profile"] = "translate-native.commercial.v2"
+        value["content_type"] = "commercial"
+        value["commercial_profile"] = "translate-native.commercial.v3"
+        value["quality_profile"]["commercial"] = {
+            "profile": value["commercial_profile"],
+            "version": "commercial-eu-fi-FI-2026-09-1",
+            "sha256": "3" * 64,
+        }
         value["commercial_review"] = {
             "schema": HTTP.COMMERCIAL_REVIEW_SUMMARY_SCHEMA,
             "profile": value["commercial_profile"],
@@ -282,8 +288,15 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         value["independent_review_required"] = True
         transport = Transport(response_for)
         self.adapter(transport).verify(binding=value, receipt="signed-receipt")
-        sent = json.loads(transport.calls[0][2])["binding"]["commercial_review"]
-        self.assertEqual(sent["review_required_dimensions"], ["cancellation"])
+        sent = json.loads(transport.calls[0][2])["binding"]
+        self.assertEqual(
+            sent["commercial_review"]["review_required_dimensions"],
+            ["cancellation"],
+        )
+        self.assertEqual(
+            sent["quality_profile"]["commercial"],
+            value["quality_profile"]["commercial"],
+        )
 
         value["commercial_review"]["review_required_dimensions"] = [
             "private cancellation text",
@@ -294,6 +307,39 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
                 binding=value, receipt="signed-receipt",
             )
         self.assertEqual(caught.exception.code, "binding_invalid")
+        self.assertEqual(invalid_transport.calls, [])
+
+        for mutate in (
+            lambda payload: payload["quality_profile"].pop("commercial"),
+            lambda payload: payload["quality_profile"]["commercial"].update(
+                profile="another-commercial-profile"
+            ),
+            lambda payload: payload.update(content_type="marketing"),
+        ):
+            changed = json.loads(json.dumps(value))
+            changed["commercial_review"]["review_required_dimensions"] = [
+                "cancellation"
+            ]
+            mutate(changed)
+            invalid_transport = Transport(response_for)
+            with self.subTest(mutate=mutate), self.assertRaises(
+                HTTP.HTTPReceiptVerifierFailed,
+            ) as caught:
+                self.adapter(invalid_transport).verify(
+                    binding=changed, receipt="signed-receipt",
+                )
+            self.assertEqual(caught.exception.code, "binding_invalid")
+            self.assertEqual(invalid_transport.calls, [])
+
+        noncommercial = binding()
+        noncommercial["quality_profile"]["commercial"] = value[
+            "quality_profile"
+        ]["commercial"]
+        invalid_transport = Transport(response_for)
+        with self.assertRaises(HTTP.HTTPReceiptVerifierFailed):
+            self.adapter(invalid_transport).verify(
+                binding=noncommercial, receipt="signed-receipt",
+            )
         self.assertEqual(invalid_transport.calls, [])
 
 

@@ -412,6 +412,25 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
                 contract_sha256=self.contract_sha256,
             ))
 
+    def test_direct_commit_rejects_inconsistent_commercial_quality_binding(self):
+        publication = HELPERS.publication_payload()
+        self.store.register_source(HELPERS.expectation(publication))
+        publication["localizations"][0]["release_evidence"][
+            "commercial_quality_profile"
+        ]["profile"] = "commercial-offer-v2"
+        rebind_publication(publication)
+
+        with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+            self.store.commit(HELPERS.request(
+                publication, self.publication_authority,
+            ))
+
+        self.assertIsNone(
+            self.store.read_active_bundle(HELPERS.expectation(
+                HELPERS.publication_payload()
+            ))
+        )
+
     def test_health_detects_tampered_source_and_tombstone_expectations(self):
         publication = HELPERS.publication_payload()
         self.store.register_source(HELPERS.expectation(publication))

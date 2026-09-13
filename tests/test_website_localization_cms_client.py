@@ -180,6 +180,15 @@ def replace_json(result, transform):
     return CLIENT.HTTPResult(result.status, headers, body)
 
 
+def rehash(value):
+    unsigned = dict(value)
+    unsigned.pop("sha256", None)
+    value["sha256"] = hashlib.sha256(json.dumps(
+        unsigned, ensure_ascii=False, allow_nan=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
 class CMSLocalizationHTTPClientTests(unittest.TestCase):
     def setUp(self):
         self.queue_connection = sqlite3.connect(":memory:")
@@ -405,6 +414,90 @@ class CMSLocalizationHTTPClientTests(unittest.TestCase):
         )
         with self.assertRaises(CLIENT.CMSClientFailed):
             second.capabilities(request_id="capability-contract-drift")
+
+    def test_capability_pins_are_constructor_fixed_and_fail_closed(self):
+        current = self.bridge.localization_capabilities()
+        accepted_transport = WSGITransport(self.api)
+        accepted = CLIENT.CMSLocalizationHTTPClient(
+            "https://localization.example.test", lambda: {}, self.authority,
+            transport=accepted_transport, clock=lambda: 100,
+            capabilities_sha256=current["sha256"],
+            commercial_rendering_registry_sha256=(
+                current["commercial_rendering_registry"]["sha256"]
+            ),
+        )
+
+        response = accepted.capabilities(request_id="pinned-capabilities-1")
+
+        self.assertEqual(response["capabilities"]["sha256"], current["sha256"])
+        self.assertEqual(len(accepted_transport.calls), 1)
+        with self.assertRaises(AttributeError):
+            accepted.capabilities_sha256 = "0" * 64
+        with self.assertRaises(AttributeError):
+            accepted.commercial_rendering_registry_sha256 = "0" * 64
+
+        for name, options, code in (
+            (
+                "capabilities", {"capabilities_sha256": "0" * 64},
+                "capabilities_pin_mismatch",
+            ),
+            (
+                "commercial registry",
+                {"commercial_rendering_registry_sha256": "0" * 64},
+                "commercial_rendering_registry_pin_mismatch",
+            ),
+        ):
+            with self.subTest(name=name):
+                transport = WSGITransport(self.api)
+                client = CLIENT.CMSLocalizationHTTPClient(
+                    "https://localization.example.test", lambda: {},
+                    self.authority, transport=transport, clock=lambda: 100,
+                    **options,
+                )
+                with self.assertRaises(CLIENT.CMSClientFailed) as caught:
+                    client.capabilities(request_id="wrong-pin-1")
+                self.assertEqual(caught.exception.code, code)
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(len(transport.calls), 1)
+
+        for name, value in (
+            ("short", "0" * 63),
+            ("uppercase", "A" * 64),
+            ("boolean", True),
+        ):
+            with self.subTest(invalid_pin=name):
+                transport = WSGITransport(self.api)
+                with self.assertRaises(ValueError):
+                    CLIENT.CMSLocalizationHTTPClient(
+                        "https://localization.example.test", lambda: {},
+                        self.authority, transport=transport, clock=lambda: 100,
+                        commercial_rendering_registry_sha256=value,
+                    )
+                self.assertEqual(transport.calls, [])
+
+    def test_self_rehashed_commercial_capability_substitution_blocks(self):
+        def substitute_registry(result):
+            def transform(value):
+                capabilities = value["capabilities"]
+                registry = capabilities["commercial_rendering_registry"]
+                registry["locales"][0]["rendering_reference"]["symbols"][
+                    "decimal"
+                ] = "."
+                rehash(registry)
+                rehash(capabilities)
+            return replace_json(result, transform)
+
+        transport = TransformingTransport(self.transport, substitute_registry)
+        client = CLIENT.CMSLocalizationHTTPClient(
+            "https://localization.example.test", lambda: {}, self.authority,
+            transport=transport, clock=lambda: 100,
+        )
+
+        with self.assertRaises(CLIENT.CMSClientFailed) as caught:
+            client.capabilities(request_id="self-rehashed-registry-1")
+
+        self.assertEqual(caught.exception.code, "response_binding")
+        self.assertEqual(len(transport.calls), 1)
 
     def test_network_failure_is_one_retryable_attempt(self):
         class FailedTransport:

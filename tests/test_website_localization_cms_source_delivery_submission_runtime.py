@@ -1,0 +1,1713 @@
+from __future__ import annotations
+
+import copy
+import dataclasses
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import sqlite3
+import stat
+import sys
+import tempfile
+import threading
+import unittest
+from unittest.mock import patch
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from tests import test_website_localization_cms_client as cms_support
+from tests import test_website_localization_cms_source_delivery as delivery_support
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+SUBMISSION = load(
+    "blun_test_website_localization_cms_source_delivery_submission_runtime",
+    ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_submission_runtime.py",
+)
+SERVER = load(
+    "blun_test_website_localization_cms_source_delivery_submission_server",
+    ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_auth_runtime.py",
+)
+CAPABILITIES_HTTP = load(
+    "blun_test_website_localization_submission_capabilities_http",
+    ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_submission_capabilities_http.py",
+)
+SUBMISSION_HTTP = load(
+    "blun_test_website_localization_submission_http",
+    ROOT
+    / "integrations"
+    / "website_localization_cms_source_delivery_submission_http.py",
+)
+
+
+class Nonces:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._value = 0
+
+    def __call__(self):
+        with self._lock:
+            self._value += 1
+            return f"{self._value:032d}"
+
+
+class WSGITransport:
+    def __init__(self, application):
+        self.application = application
+        self.calls = []
+        self.blocked = False
+
+    def request(self, method, url, headers, body, *, timeout):
+        call = (method, url, dict(headers), body, timeout)
+        self.calls.append(call)
+        if self.blocked:
+            raise OSError("transport blocked")
+        parsed = urlsplit(url)
+        raw = b"" if body is None else body
+        environ = {
+            "PATH_INFO": parsed.path,
+            "QUERY_STRING": parsed.query,
+            "REQUEST_METHOD": method,
+            "wsgi.url_scheme": parsed.scheme,
+            "CONTENT_LENGTH": str(len(raw)),
+            "wsgi.input": io.BytesIO(raw),
+        }
+        for name, value in headers.items():
+            normalized = name.upper().replace("-", "_")
+            if normalized == "CONTENT_TYPE":
+                environ[normalized] = value
+            elif normalized != "CONTENT_LENGTH":
+                environ["HTTP_" + normalized] = value
+        captured = {}
+        response_body = b"".join(self.application(
+            environ,
+            lambda status, response_headers: captured.update(
+                status=status, headers=tuple(response_headers),
+            ),
+        ))
+        return SUBMISSION._AUTH._CLIENT.HTTPResult(
+            int(captured["status"].split(" ", 1)[0]),
+            captured["headers"],
+            response_body,
+        )
+
+
+class NoNetworkTransport:
+    def __init__(self):
+        self.calls = []
+
+    def request(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        raise AssertionError("network access was not expected")
+
+
+class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 100.0
+        self.directory = tempfile.TemporaryDirectory()
+        root = Path(self.directory.name)
+        self.website_database = root / "website.sqlite3"
+        self.sidecar_database = root / "sidecar.sqlite3"
+        self.replay_database = root / "replay.sqlite3"
+        self.remote = delivery_support.ScriptedClient()
+        self.sidecar_digest = (
+            SUBMISSION._AUTH._HTTP._capabilities_payload()["sha256"]
+        )
+        self.remote_digest = self.remote.expected_capabilities_sha256
+        self.nonces = Nonces()
+        self.old_client_credential = self.client_credential("1")
+        self.new_client_credential = self.client_credential("2")
+        self.old_server_credential = self.server_credential("1")
+        self.new_server_credential = self.server_credential("2")
+        self.sidecar = SERVER.open_hosted_hmac_authenticated_cms_source_delivery(
+            self.sidecar_database,
+            self.replay_database,
+            self.remote,
+            (self.old_server_credential, self.new_server_credential),
+            worker_id="sidecar-worker",
+            origin="https://delivery.example",
+            sidecar_capabilities_sha256=self.sidecar_digest,
+            remote_capabilities_sha256=self.remote_digest,
+            clock=lambda: self.now,
+            lease_seconds=60,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        self.transport = WSGITransport(self.sidecar.http)
+        self.runtimes = []
+
+    def tearDown(self):
+        for runtime in reversed(self.runtimes):
+            runtime._owner_pid = os.getpid()
+            runtime._delivery._owner_pid = os.getpid()
+            if self.website_database.exists() and not self.website_database.is_symlink():
+                os.chmod(self.website_database, 0o600)
+            try:
+                runtime.close(worker_timeout_seconds=1)
+            except Exception:
+                pass
+        self.sidecar.delivery._owner_pid = os.getpid()
+        self.sidecar.authentication._owner_pid = os.getpid()
+        for path in (self.sidecar_database, self.replay_database):
+            if path.exists() and not path.is_symlink():
+                os.chmod(path, 0o600)
+        try:
+            self.sidecar.close(worker_timeout_seconds=1)
+        except Exception:
+            pass
+        self.directory.cleanup()
+
+    @staticmethod
+    def _scopes(auth_module):
+        return tuple(sorted(auth_module._HTTP.SCOPES.values()))
+
+    def client_credential(self, version, *, secret=None):
+        return SUBMISSION.HMACCredential(
+            principal_id="website-backend",
+            credential_id="website-credential",
+            credential_version=version,
+            secret=(bytes([int(version)]) * 32 if secret is None else secret),
+            scopes=self._scopes(SUBMISSION._AUTH),
+            site_id="site-1",
+        )
+
+    def server_credential(self, version, *, secret=None):
+        return SERVER.HMACCredential(
+            principal_id="website-backend",
+            credential_id="website-credential",
+            credential_version=version,
+            secret=(bytes([int(version)]) * 32 if secret is None else secret),
+            scopes=self._scopes(SERVER._AUTH),
+            site_id="site-1",
+        )
+
+    def open(self, credential=None, *, hosted=False, **overrides):
+        options = {
+            "worker_id": "website-worker",
+            "origin": "https://delivery.example",
+            "sidecar_capabilities_sha256": self.sidecar_digest,
+            "remote_capabilities_sha256": self.remote_digest,
+            "runtime_capabilities_sha256": (
+                self.remote.expected_runtime_capabilities_sha256
+            ),
+            "commercial_rendering_registry_sha256": (
+                self.remote.expected_commercial_rendering_registry_sha256
+            ),
+            "sidecar_delivery_max_attempts": 4,
+            "clock": lambda: self.now,
+            "nonce_factory": self.nonces,
+            "transport": self.transport,
+            "lease_seconds": 60,
+            "base_delay_seconds": 5,
+            "max_delay_seconds": 20,
+        }
+        options.update(overrides)
+        factory = (
+            SUBMISSION.open_hosted_hmac_cms_source_delivery_submission
+            if hosted
+            else SUBMISSION.open_durable_hmac_cms_source_delivery_submission
+        )
+        runtime = factory(
+            self.website_database,
+            self.old_client_credential if credential is None else credential,
+            **options,
+        )
+        self.runtimes.append(runtime)
+        return runtime
+
+    @staticmethod
+    def payload_hash(value):
+        return hashlib.sha256(
+            SUBMISSION._AUTH._CLIENT._canonical(value)
+        ).hexdigest()
+
+    def test_durable_composition_preserves_three_budgets_and_two_states(self):
+        runtime = self.open()
+        change = cms_support.event()
+        queued = runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+
+        outcome = runtime.run_once()
+        local = runtime.status("change", change["event_id"])
+        sidecar = runtime.sidecar_status(
+            "change",
+            change["event_id"],
+            change["event_id"],
+            change["site_id"],
+            self.payload_hash(change),
+        )["status"]
+
+        self.assertEqual((queued.delivery_max_attempts, queued.source_max_attempts), (2, 3))
+        self.assertEqual((outcome.status, local.status), ("succeeded", "succeeded"))
+        self.assertEqual(sidecar["delivery_max_attempts"], 4)
+        self.assertEqual(sidecar["source_max_attempts"], 3)
+        self.assertIn(sidecar["status"], {"pending", "leased", "succeeded"})
+        self.assertEqual(stat.S_IMODE(self.website_database.stat().st_mode), 0o600)
+        self.assertEqual(runtime.health().status, "ok")
+
+    def test_authenticated_preflight_binds_the_outer_database_generation(self):
+        runtime = self.open()
+        stored = runtime._delivery._connection.execute(
+            "SELECT database_role, delivery_capabilities_sha256, "
+            "runtime_capabilities_sha256, "
+            "commercial_rendering_registry_sha256 "
+            "FROM cms_source_delivery_runtime_capability_binding"
+        ).fetchone()
+
+        self.assertEqual(tuple(stored), (
+            "source_delivery",
+            runtime.expected_capabilities_sha256,
+            self.remote.expected_runtime_capabilities_sha256,
+            self.remote.expected_commercial_rendering_registry_sha256,
+        ))
+        self.assertEqual(
+            runtime._adapter.expected_runtime_capabilities_sha256,
+            self.remote.expected_runtime_capabilities_sha256,
+        )
+        self.assertEqual(
+            runtime._adapter.expected_commercial_rendering_registry_sha256,
+            self.remote.expected_commercial_rendering_registry_sha256,
+        )
+        self.assertEqual(
+            [urlsplit(call[1]).path for call in self.transport.calls],
+            [
+                "/v1/localization/source-delivery/capabilities",
+                "/v1/localization/source-delivery/source-readiness",
+            ],
+        )
+
+    def test_website_capability_binding_reports_the_durable_generation(self):
+        runtime = self.open()
+        before = len(self.transport.calls)
+        schema = "blun.cms-source-delivery-runtime-capability-binding.v1"
+        binding_hash = hashlib.sha256("\x00".join((
+            schema,
+            "source_delivery",
+            runtime.expected_capabilities_sha256,
+            self.remote.expected_runtime_capabilities_sha256,
+            self.remote.expected_commercial_rendering_registry_sha256,
+        )).encode("utf-8")).hexdigest()
+
+        binding = runtime.website_capability_binding()
+
+        self.assertEqual(len(self.transport.calls), before)
+        self.assertEqual(binding, {
+            "schema": schema,
+            "status": "verified",
+            "database_role": "source_delivery",
+            "delivery_capabilities_sha256": (
+                runtime.expected_capabilities_sha256
+            ),
+            "runtime_capabilities_sha256": (
+                self.remote.expected_runtime_capabilities_sha256
+            ),
+            "commercial_rendering_registry_sha256": (
+                self.remote.expected_commercial_rendering_registry_sha256
+            ),
+            "binding_sha256": binding_hash,
+        })
+        binding["status"] = "altered"
+        self.assertEqual(
+            runtime.website_capability_binding()["status"], "verified",
+        )
+
+    def test_submission_capabilities_bind_the_complete_live_website_edge(self):
+        runtime = self.open()
+        before = len(self.transport.calls)
+
+        capabilities = runtime.submission_capabilities()
+        payload = capabilities.as_payload()
+
+        self.assertEqual(len(self.transport.calls), before + 1)
+        self.assertEqual(payload["schema"], SUBMISSION.CAPABILITIES_SCHEMA)
+        self.assertEqual(payload["operations"], {
+            "capabilities_http": {
+                "kind": "read",
+                "method": "GET",
+                "path": SUBMISSION.CAPABILITIES_HTTP_PATH,
+                "scope": SUBMISSION.CAPABILITIES_HTTP_SCOPE,
+                "principal_schema": (
+                    SUBMISSION.CAPABILITIES_HTTP_PRINCIPAL_SCHEMA
+                ),
+                "request_schema": None,
+                "response_schema": (
+                    SUBMISSION.CAPABILITIES_HTTP_RESPONSE_SCHEMA
+                ),
+            },
+            "enqueue_change": {
+                "kind": "write",
+                "method": "POST",
+                "path": SUBMISSION.CHANGE_HTTP_PATH,
+                "scope": SUBMISSION.CHANGE_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.CHANGE_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [SUBMISSION._ADAPTER.CHANGE_SCHEMA],
+                "response_schema": SUBMISSION.CHANGE_HTTP_RESPONSE_SCHEMA,
+            },
+            "enqueue_removal": {
+                "kind": "write",
+                "method": "POST",
+                "path": SUBMISSION.REMOVAL_HTTP_PATH,
+                "scope": SUBMISSION.REMOVAL_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.WRITE_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.REMOVAL_HTTP_REQUEST_SCHEMA,
+                "payload_schemas": [
+                    SUBMISSION._ADAPTER.CANCELLATION_SCHEMA,
+                    SUBMISSION._ADAPTER.TOMBSTONE_SCHEMA,
+                ],
+                "response_schema": SUBMISSION.REMOVAL_HTTP_RESPONSE_SCHEMA,
+            },
+            "submission_status": {
+                "kind": "read",
+                "method": "POST",
+                "path": SUBMISSION.STATUS_HTTP_PATH,
+                "scope": SUBMISSION.STATUS_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.READ_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.STATUS_HTTP_REQUEST_SCHEMA,
+                "result_schema": SUBMISSION.STATUS_SCHEMA,
+                "response_schema": SUBMISSION.STATUS_HTTP_RESPONSE_SCHEMA,
+            },
+            "submission_lifecycle": {
+                "kind": "read",
+                "method": "POST",
+                "path": SUBMISSION.LIFECYCLE_HTTP_PATH,
+                "scope": SUBMISSION.LIFECYCLE_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.READ_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": SUBMISSION.LIFECYCLE_HTTP_REQUEST_SCHEMA,
+                "result_schema": SUBMISSION.LIFECYCLE_SCHEMA,
+                "response_schema": SUBMISSION.LIFECYCLE_HTTP_RESPONSE_SCHEMA,
+            },
+            "submission_health": {
+                "kind": "read", "response_schema": SUBMISSION.HEALTH_SCHEMA,
+            },
+            "submission_pipeline_health": {
+                "kind": "read",
+                "method": "GET",
+                "path": SUBMISSION.PIPELINE_HEALTH_HTTP_PATH,
+                "scope": SUBMISSION.PIPELINE_HEALTH_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": SUBMISSION.PIPELINE_HEALTH_SCHEMA,
+                "response_schema": SUBMISSION.PIPELINE_HEALTH_HTTP_RESPONSE_SCHEMA,
+            },
+            "submission_readiness": {
+                "kind": "read",
+                "response_schema": SUBMISSION.READINESS_SCHEMA,
+            },
+            "submission_pipeline_readiness": {
+                "kind": "read",
+                "method": "GET",
+                "path": SUBMISSION.PIPELINE_READINESS_HTTP_PATH,
+                "scope": SUBMISSION.PIPELINE_READINESS_HTTP_SCOPE,
+                "principal_schema": SUBMISSION.OPERATOR_HTTP_PRINCIPAL_SCHEMA,
+                "request_schema": None,
+                "result_schema": SUBMISSION.PIPELINE_READINESS_SCHEMA,
+                "response_schema": SUBMISSION.PIPELINE_READINESS_HTTP_RESPONSE_SCHEMA,
+            },
+        })
+        self.assertEqual(
+            payload["retry_budgets"]["sidecar_to_source"]
+            ["maximum_attempts"],
+            4,
+        )
+        self.assertEqual(payload["semantics"], {
+            "content_free": True,
+            "accepted_means": "durable_website_outbox_acceptance",
+            "accepted_implies_publication": False,
+            "translation_generation": False,
+            "publication_authority": False,
+        })
+        self.assertEqual(
+            payload["website_capability_binding"],
+            runtime.website_capability_binding(),
+        )
+        self.assertEqual(
+            payload["sidecar_capabilities_sha256"], self.sidecar_digest,
+        )
+        self.assertEqual(
+            payload["source_capabilities_sha256"], self.remote_digest,
+        )
+        unsigned = copy.deepcopy(payload)
+        digest = unsigned.pop("sha256")
+        self.assertEqual(
+            digest,
+            hashlib.sha256(SUBMISSION._canonical(unsigned)).hexdigest(),
+        )
+        rendered = repr(payload)
+        for private in (
+            "delivery.example", "website-credential", "site-1",
+            "source_text", "target_text",
+        ):
+            self.assertNotIn(private, rendered)
+
+        payload["operations"]["submission_status"]["kind"] = "altered"
+        payload["website_capability_binding"]["status"] = "altered"
+        fresh = runtime.submission_capabilities().as_payload()
+        self.assertEqual(
+            fresh["operations"]["submission_status"]["kind"], "read",
+        )
+        self.assertEqual(
+            fresh["website_capability_binding"]["status"], "verified",
+        )
+        self.assertEqual(fresh["sha256"], digest)
+
+    def test_submission_capabilities_reject_remote_contract_substitution(self):
+        runtime = self.open()
+        altered = SUBMISSION._AUTH._HTTP._capabilities_payload()
+        altered["operations"]["health"]["scope"] = "weaker-scope"
+        response = {
+            "schema": SUBMISSION._AUTH._HTTP.CAPABILITIES_RESPONSE_SCHEMA,
+            "capabilities": altered,
+        }
+
+        with patch.object(runtime._client, "capabilities", return_value=response):
+            with self.assertRaises(
+                SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+            ) as caught:
+                runtime.submission_capabilities()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.capabilities_invalid",
+        )
+
+    def test_public_capability_route_uses_the_live_owned_runtime(self):
+        runtime = self.open()
+        authentication_requests = []
+
+        def authenticate(request):
+            authentication_requests.append(copy.deepcopy(request))
+            return {
+                "schema": CAPABILITIES_HTTP.PRINCIPAL_SCHEMA,
+                "principal_id": "deployment-operator",
+                "credential_id": "capability-reader",
+                "credential_version": "1",
+                "scope": CAPABILITIES_HTTP.CAPABILITIES_SCOPE,
+            }
+
+        application = CAPABILITIES_HTTP.build_submission_capabilities_http(
+            runtime, authenticate,
+        )
+        environ = {
+            "PATH_INFO": CAPABILITIES_HTTP.CAPABILITIES_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "GET",
+            "wsgi.url_scheme": "https",
+            "CONTENT_LENGTH": "0",
+            "wsgi.input": io.BytesIO(b""),
+        }
+        response_metadata = {}
+        before = len(self.transport.calls)
+        body = b"".join(application(
+            environ,
+            lambda status, headers: response_metadata.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        response = json.loads(body)
+
+        self.assertEqual(response_metadata["status"], "200 OK")
+        self.assertEqual(len(authentication_requests), 1)
+        self.assertEqual(len(self.transport.calls), before + 1)
+        self.assertEqual(
+            response["schema"], CAPABILITIES_HTTP.CAPABILITIES_RESPONSE_SCHEMA,
+        )
+        self.assertEqual(
+            response["capabilities"]["website_capability_binding"],
+            runtime.website_capability_binding(),
+        )
+        self.assertEqual(
+            response["capabilities"]["sidecar_capabilities_sha256"],
+            self.sidecar_digest,
+        )
+
+    def test_public_change_route_persists_once_before_accepting(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        authentication_requests = []
+
+        def authenticate(request):
+            authentication_requests.append(copy.deepcopy(request))
+            read = request["path"] == SUBMISSION_HTTP.STATUS_PATH
+            return {
+                "schema": (
+                    SUBMISSION_HTTP.READ_PRINCIPAL_SCHEMA
+                    if read else SUBMISSION_HTTP.PRINCIPAL_SCHEMA
+                ),
+                "principal_id": "website-backend",
+                "credential_id": "public-ingress",
+                "credential_version": "1",
+                "scope": (
+                    SUBMISSION_HTTP.STATUS_SCOPE
+                    if read else SUBMISSION_HTTP.CHANGE_SCOPE
+                ),
+                "site_id": "site-1",
+            }
+
+        application = SUBMISSION_HTTP.build_submission_http(
+            runtime, authenticate,
+        )
+        change = cms_support.event()
+        request = {
+            "schema": SUBMISSION_HTTP.CHANGE_REQUEST_SCHEMA,
+            "change": change,
+            "source_max_attempts": 3,
+            "delivery_max_attempts": 4,
+        }
+        body = SUBMISSION._canonical(request)
+        payload_sha256 = self.payload_hash(change)
+        environ = {
+            "PATH_INFO": SUBMISSION_HTTP.CHANGE_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json; charset=utf-8",
+            "CONTENT_LENGTH": str(len(body)),
+            "HTTP_IDEMPOTENCY_KEY": change["event_id"],
+            "HTTP_X_LOCALIZATION_SOURCE_PAYLOAD_SHA256": payload_sha256,
+            "wsgi.input": io.BytesIO(body),
+        }
+
+        responses = []
+        for _attempt in range(2):
+            metadata = {}
+            environ["wsgi.input"] = io.BytesIO(body)
+            response_body = b"".join(application(
+                environ,
+                lambda status, headers: metadata.update(
+                    status=status, headers=dict(headers),
+                ),
+            ))
+            responses.append((metadata, json.loads(response_body)))
+
+        self.assertEqual(
+            [item[0]["status"] for item in responses],
+            ["202 Accepted", "202 Accepted"],
+        )
+        self.assertEqual(len(authentication_requests), 2)
+        self.assertTrue(all(
+            item["body_sha256"] == hashlib.sha256(body).hexdigest()
+            for item in authentication_requests
+        ))
+        self.assertTrue(all(
+            item[1]["request_id"] == change["event_id"]
+            and item[1]["payload_sha256"] == payload_sha256
+            and item[1]["accepted_implies_publication"] is False
+            for item in responses
+        ))
+        rows = runtime._delivery._connection.execute(
+            "SELECT operation, request_id, payload_sha256, "
+            "delivery_max_attempts, source_max_attempts "
+            "FROM cms_source_delivery_outbox"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(tuple(rows[0]), (
+            "change", change["event_id"], payload_sha256, 4, 3,
+        ))
+
+        status_request = {
+            "schema": SUBMISSION.STATUS_HTTP_REQUEST_SCHEMA,
+            "operation": "change",
+            "request_id": change["event_id"],
+            "event_id": change["event_id"],
+            "site_id": change["site_id"],
+            "payload_sha256": payload_sha256,
+        }
+        status_body = SUBMISSION._canonical(status_request)
+        status_environ = {
+            "PATH_INFO": SUBMISSION_HTTP.STATUS_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json",
+            "CONTENT_LENGTH": str(len(status_body)),
+            "wsgi.input": io.BytesIO(status_body),
+        }
+        status_metadata = {}
+        status_response = json.loads(b"".join(application(
+            status_environ,
+            lambda status, headers: status_metadata.update(
+                status=status, headers=dict(headers),
+            ),
+        )))
+        self.assertEqual(status_metadata["status"], "200 OK")
+        self.assertEqual(status_response["result"]["event_id"], change["event_id"])
+        self.assertEqual(status_response["result"]["payload_sha256"], payload_sha256)
+        self.assertFalse(status_response["accepted_implies_publication"])
+
+    def test_public_operator_routes_validate_live_pipeline_end_to_end(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        authentication_requests = []
+
+        def authenticate(request):
+            authentication_requests.append(copy.deepcopy(request))
+            return {
+                "schema": SUBMISSION_HTTP.OPERATOR_PRINCIPAL_SCHEMA,
+                "principal_id": "deployment-operator",
+                "credential_id": "pipeline-reader",
+                "credential_version": "1",
+                "scope": SUBMISSION_HTTP.MONITOR_SCOPES[request["path"]],
+            }
+
+        application = SUBMISSION_HTTP.build_submission_http(
+            runtime, authenticate,
+        )
+        responses = {}
+        for path in (
+            SUBMISSION_HTTP.PIPELINE_HEALTH_PATH,
+            SUBMISSION_HTTP.PIPELINE_READINESS_PATH,
+        ):
+            environ = {
+                "PATH_INFO": path,
+                "QUERY_STRING": "",
+                "REQUEST_METHOD": "GET",
+                "wsgi.url_scheme": "https",
+                "CONTENT_LENGTH": "0",
+                "wsgi.input": io.BytesIO(b""),
+            }
+            metadata = {}
+            responses[path] = json.loads(b"".join(application(
+                environ,
+                lambda status, headers: metadata.update(
+                    status=status, headers=dict(headers),
+                ),
+            )))
+            self.assertEqual(
+                metadata["status"], "200 OK", msg=responses[path],
+            )
+
+        health = responses[SUBMISSION_HTTP.PIPELINE_HEALTH_PATH]
+        readiness = responses[SUBMISSION_HTTP.PIPELINE_READINESS_PATH]
+        self.assertEqual(health["result"]["status"], "ok")
+        self.assertEqual(health["result"]["source_health"]["status"], "ok")
+        self.assertEqual(readiness["result"]["status"], "ready")
+        self.assertEqual(
+            readiness["result"]["source_readiness"]["status"], "ready",
+        )
+        self.assertEqual(len(authentication_requests), 2)
+        self.assertTrue(all(
+            item["schema"] == SUBMISSION_HTTP.OPERATOR_AUTH_REQUEST_SCHEMA
+            and item["body_sha256"] == SUBMISSION_HTTP.EMPTY_SHA256
+            for item in authentication_requests
+        ))
+        self.assertNotIn("delivery.example", repr(responses))
+        self.assertNotIn("website-credential", repr(responses))
+
+        original_health = runtime.submission_pipeline_health
+
+        def tampered_health():
+            value = original_health()
+            source_health = copy.deepcopy(value.source_health)
+            source_health["changes"]["counts"]["failed"] = 1
+            return dataclasses.replace(value, source_health=source_health)
+
+        runtime.submission_pipeline_health = tampered_health
+        metadata = {}
+        error = json.loads(b"".join(application({
+            "PATH_INFO": SUBMISSION_HTTP.PIPELINE_HEALTH_PATH,
+            "QUERY_STRING": "",
+            "REQUEST_METHOD": "GET",
+            "wsgi.url_scheme": "https",
+            "CONTENT_LENGTH": "0",
+            "wsgi.input": io.BytesIO(b""),
+        }, lambda status, headers: metadata.update(
+            status=status, headers=dict(headers),
+        ))))
+        self.assertEqual(metadata["status"], "503 Service Unavailable")
+        self.assertEqual(
+            error["error_code"], "submission_http.runtime_response_invalid",
+        )
+
+    def test_generation_tampering_blocks_projections_before_network(self):
+        runtime = self.open()
+        runtime._delivery._connection.execute(
+            "UPDATE cms_source_delivery_runtime_capability_binding "
+            "SET binding_sha256 = ?",
+            ("f" * 64,),
+        )
+        before = len(self.transport.calls)
+
+        for projection in (
+            runtime.submission_capabilities,
+            runtime.submission_health,
+            runtime.submission_readiness,
+        ):
+            with self.assertRaises(
+                SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+            ) as caught:
+                projection()
+            self.assertEqual(
+                caught.exception.code,
+                "source_delivery_submission_runtime."
+                "website_capability_binding_invalid",
+            )
+            self.assertEqual(len(self.transport.calls), before)
+
+    def test_preflight_generation_mismatch_blocks_before_database_creation(self):
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(runtime_capabilities_sha256="e" * 64)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.capability_preflight_mismatch",
+        )
+        self.assertFalse(self.website_database.exists())
+        self.assertEqual(len(self.transport.calls), 2)
+
+    def test_unavailable_preflight_blocks_before_database_creation(self):
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.capability_preflight_unavailable",
+        )
+        self.assertFalse(self.website_database.exists())
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_restart_rejects_generation_mismatch_before_network(self):
+        runtime = self.open()
+        runtime.close()
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute(
+                "UPDATE cms_source_delivery_runtime_capability_binding "
+                "SET runtime_capabilities_sha256 = ?",
+                ("e" * 64,),
+            )
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime."
+            "local_database_generation_mismatch",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_rejects_tampered_schema_before_network(self):
+        runtime = self.open()
+        runtime.close()
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute("DROP TABLE cms_source_delivery_meta")
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.local_database_schema_altered",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_rejects_unsafe_database_before_network(self):
+        runtime = self.open()
+        runtime.close()
+        os.chmod(self.website_database, 0o640)
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.local_database_unsafe",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_rejects_nonempty_unbound_database_before_network(self):
+        runtime = self.open()
+        runtime.enqueue_change(cms_support.event())
+        runtime.close()
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute(
+                "DROP TABLE cms_source_delivery_runtime_capability_binding"
+            )
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime."
+            "local_database_generation_unbound",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_adopts_empty_unbound_database_after_remote_preflight(self):
+        runtime = self.open()
+        runtime.close()
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute(
+                "DROP TABLE cms_source_delivery_runtime_capability_binding"
+            )
+        before = len(self.transport.calls)
+
+        reopened = self.open()
+        stored = reopened._delivery._connection.execute(
+            "SELECT runtime_capabilities_sha256, "
+            "commercial_rendering_registry_sha256 "
+            "FROM cms_source_delivery_runtime_capability_binding"
+        ).fetchone()
+
+        self.assertEqual(tuple(stored), (
+            self.remote.expected_runtime_capabilities_sha256,
+            self.remote.expected_commercial_rendering_registry_sha256,
+        ))
+        self.assertEqual(len(self.transport.calls), before + 2)
+
+    def test_sidecar_lifecycle_uses_the_owned_authenticated_client(self):
+        runtime = self.open()
+
+        capabilities = runtime.sidecar_capabilities()["capabilities"]
+        health = runtime.sidecar_health()["health"]
+        readiness = runtime.sidecar_readiness()["readiness"]
+
+        self.assertEqual(capabilities["sha256"], self.sidecar_digest)
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(readiness["status"], "ready")
+        self.assertEqual(len(self.transport.calls), 7)
+
+    def test_submission_lifecycle_reaches_source_without_collapsing_stages(self):
+        runtime = self.open()
+        preflight_calls = len(self.transport.calls)
+        change = cms_support.event()
+        runtime.enqueue_change(change, source_max_attempts=3)
+
+        local = runtime.submission_lifecycle("change", change["event_id"])
+        self.assertEqual((local.status, local.stage), (
+            "pending", "website_acceptance",
+        ))
+        self.assertIsNone(local.source_status)
+        self.assertEqual(len(self.transport.calls), preflight_calls)
+
+        runtime.run_once()
+        sidecar = runtime.submission_lifecycle("change", change["event_id"])
+        self.assertEqual((sidecar.status, sidecar.stage), (
+            "pending", "sidecar_delivery",
+        ))
+        self.assertIsNone(sidecar.source_status)
+
+        self.sidecar.delivery.run_once()
+        lifecycle = runtime.submission_lifecycle(
+            "change", change["event_id"],
+        )
+
+        self.assertEqual((lifecycle.status, lifecycle.stage), (
+            "processing", "localization_lifecycle",
+        ))
+        self.assertEqual(
+            lifecycle.schema,
+            "blun.cms-source-delivery-submission-lifecycle.v3",
+        )
+        self.assertEqual(lifecycle.source_status["required_locales"], [
+            "fi-FI", "mt-MT",
+        ])
+        self.assertEqual(lifecycle.submission["status"], "accepted")
+        self.assertEqual(
+            lifecycle.source_capability_binding,
+            self.remote.capability_binding(),
+        )
+        self.assertEqual(
+            lifecycle.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
+        payload = lifecycle.as_payload()
+        self.assertEqual(payload["source_status"]["remote_status"], "processing")
+        self.assertNotIn(
+            change["localization"]["source_text"], repr(payload),
+        )
+
+    def test_submission_lifecycle_rejects_tampered_source_state(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change)
+        runtime.run_once()
+        self.sidecar.delivery.run_once()
+        original = self.remote.status
+
+        def tampered(event_id, site_id):
+            response = copy.deepcopy(original(event_id, site_id))
+            response["status"]["site_id"] = "other-site"
+            return response
+
+        self.remote.status = tampered
+        with self.assertRaisesRegex(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+            "source_delivery_submission_runtime.lifecycle_unavailable",
+        ):
+            runtime.submission_lifecycle("change", change["event_id"])
+
+    def test_submission_health_requires_both_outboxes_to_be_healthy(self):
+        runtime = self.open()
+
+        health = runtime.submission_health()
+
+        self.assertEqual(health.status, "ok")
+        self.assertEqual(
+            health.schema, "blun.cms-source-delivery-submission-health.v2",
+        )
+        self.assertEqual(health.website_health["status"], "ok")
+        self.assertEqual(health.sidecar_health["status"], "ok")
+        self.assertEqual(
+            health.sidecar_capabilities_sha256, self.sidecar_digest,
+        )
+        self.assertEqual(
+            health.source_capabilities_sha256, self.remote_digest,
+        )
+        self.assertEqual(
+            health.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
+        payload = health.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "status", "website_health", "sidecar_health",
+            "sidecar_capabilities_sha256", "source_capabilities_sha256",
+            "website_capability_binding",
+        })
+        self.assertNotIn("delivery.example", repr(payload))
+        self.assertNotIn("website-credential", repr(payload))
+
+    def test_submission_health_keeps_local_failure_separate(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change, delivery_max_attempts=1)
+        original = self.transport.request
+
+        def fail_once(*_args, **_kwargs):
+            self.transport.request = original
+            raise SUBMISSION._AUTH._CLIENT.CMSSourceDeliveryClientBlocked(
+                "source_delivery_client.network", retryable=True,
+            )
+
+        self.transport.request = fail_once
+        failed = runtime.run_once()
+
+        health = runtime.submission_health()
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(health.status, "blocked")
+        self.assertEqual(health.website_health["status"], "blocked")
+        self.assertEqual(
+            health.website_health["error_code"], "source_delivery.failed",
+        )
+        self.assertEqual(health.sidecar_health["status"], "ok")
+
+    def test_submission_health_keeps_sidecar_failure_separate(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change)
+        runtime.run_once()
+        self.remote.failures.append(delivery_support.ClientFailure(
+            "source_client.denied", retryable=False,
+        ))
+        failed = self.sidecar.delivery.run_once()
+
+        health = runtime.submission_health()
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(health.status, "blocked")
+        self.assertEqual(health.website_health["status"], "ok")
+        self.assertEqual(health.sidecar_health["status"], "blocked")
+        self.assertEqual(
+            health.sidecar_health["error_code"], "source_delivery.failed",
+        )
+
+    def test_submission_health_rejects_malformed_local_state_offline(self):
+        runtime = self.open()
+        runtime._delivery.health = lambda: {"status": "ok"}
+        before = len(self.transport.calls)
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_health()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.health_invalid",
+        )
+        self.assertEqual(len(self.transport.calls), before)
+
+    def test_submission_health_rejects_malformed_remote_state(self):
+        runtime = self.open()
+        response = runtime.sidecar_health()
+        altered = copy.deepcopy(response)
+        altered["health"]["failed"] = 1
+        runtime._client.health = lambda: altered
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_health()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.health_invalid",
+        )
+
+    def test_submission_health_rejects_sidecar_capability_substitution(self):
+        runtime = self.open()
+        response = runtime.sidecar_health()
+        altered = copy.deepcopy(response)
+        altered["capabilities_sha256"] = "f" * 64
+        runtime._client.health = lambda: altered
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_health()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.health_invalid",
+        )
+
+    def test_pipeline_health_covers_intake_and_source_queues(self):
+        runtime = self.open()
+
+        health = runtime.submission_pipeline_health()
+
+        self.assertEqual(health.status, "ok")
+        self.assertEqual(
+            health.schema,
+            "blun.cms-source-delivery-submission-pipeline-health.v3",
+        )
+        self.assertEqual(health.intake_health["status"], "ok")
+        self.assertEqual(health.source_health["status"], "ok")
+        self.assertEqual(
+            health.source_capability_binding,
+            self.remote.capability_binding(),
+        )
+        self.assertEqual(
+            health.sidecar_capabilities_sha256, self.sidecar_digest,
+        )
+        self.assertEqual(
+            health.source_capabilities_sha256, self.remote_digest,
+        )
+        self.assertEqual(
+            health.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
+        payload = health.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "status", "intake_health", "source_health",
+            "source_capability_binding",
+            "sidecar_capabilities_sha256", "source_capabilities_sha256",
+            "website_capability_binding",
+        })
+        self.assertNotIn("delivery.example", repr(payload))
+        self.assertNotIn("website-credential", repr(payload))
+
+        original = self.remote.health
+
+        def degraded():
+            response = original()
+            response["health"].update({
+                "status": "degraded",
+                "pending_lifecycle_registrations": 1,
+                "error_code": "source_service.lifecycle_registration_pending",
+            })
+            return response
+
+        self.remote.health = degraded
+        degraded_health = runtime.submission_pipeline_health()
+        self.assertEqual(degraded_health.status, "degraded")
+        self.assertEqual(degraded_health.intake_health["status"], "ok")
+        self.assertEqual(degraded_health.source_health["status"], "degraded")
+
+        def blocked():
+            response = original()
+            response["health"].update({
+                "status": "blocked",
+                "error_code": "source_service.component_blocked",
+            })
+            response["health"]["changes"]["status"] = "blocked"
+            return response
+
+        self.remote.health = blocked
+        blocked_health = runtime.submission_pipeline_health()
+        self.assertEqual(blocked_health.status, "blocked")
+        self.assertEqual(blocked_health.intake_health["status"], "ok")
+        self.assertEqual(blocked_health.source_health["status"], "blocked")
+
+    def test_pipeline_health_stops_before_source_when_intake_is_blocked(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change, delivery_max_attempts=1)
+        original = self.transport.request
+
+        def fail_once(*_args, **_kwargs):
+            self.transport.request = original
+            raise SUBMISSION._AUTH._CLIENT.CMSSourceDeliveryClientBlocked(
+                "source_delivery_client.network", retryable=True,
+            )
+
+        self.transport.request = fail_once
+        self.assertEqual(runtime.run_once().status, "failed")
+        self.remote.calls.clear()
+
+        health = runtime.submission_pipeline_health()
+
+        self.assertEqual(health.status, "blocked")
+        self.assertEqual(health.intake_health["status"], "blocked")
+        self.assertIsNone(health.source_health)
+        self.assertNotIn(("health",), self.remote.calls)
+
+    def test_submission_readiness_requires_both_owned_workers(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+
+        readiness = runtime.submission_readiness()
+
+        self.assertEqual(readiness.status, "ready")
+        self.assertEqual(
+            readiness.schema,
+            "blun.cms-source-delivery-submission-readiness.v2",
+        )
+        self.assertEqual((
+            readiness.website_status,
+            readiness.website_worker_state,
+            readiness.website_outbox_status,
+            readiness.sidecar_status,
+            readiness.sidecar_worker_state,
+            readiness.sidecar_outbox_status,
+        ), ("ready", "running", "ok", "ready", "running", "ok"))
+        self.assertEqual(
+            readiness.sidecar_capabilities_sha256, self.sidecar_digest,
+        )
+        self.assertEqual(
+            readiness.source_capabilities_sha256, self.remote_digest,
+        )
+        self.assertEqual(
+            readiness.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
+        payload = readiness.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "status", "website_status", "website_worker_state",
+            "website_outbox_status", "website_error_code", "sidecar_status",
+            "sidecar_worker_state", "sidecar_outbox_status",
+            "sidecar_error_code", "sidecar_capabilities_sha256",
+            "source_capabilities_sha256",
+            "website_capability_binding",
+        })
+        self.assertNotIn("delivery.example", repr(payload))
+        self.assertNotIn("website-credential", repr(payload))
+
+    def test_submission_readiness_stays_local_when_website_is_not_ready(self):
+        runtime = self.open()
+        before = len(self.transport.calls)
+
+        readiness = runtime.submission_readiness()
+
+        self.assertEqual(len(self.transport.calls), before)
+        self.assertEqual((
+            readiness.status,
+            readiness.website_status,
+            readiness.website_worker_state,
+            readiness.sidecar_status,
+        ), ("not_ready", "not_ready", "unmanaged", None))
+        self.assertEqual(
+            readiness.website_error_code,
+            "source_delivery_runtime.worker_not_ready",
+        )
+
+    def test_submission_readiness_surfaces_sidecar_worker_failure(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        self.sidecar.delivery.stop_worker(timeout_seconds=1)
+
+        readiness = runtime.submission_readiness()
+
+        self.assertEqual((
+            readiness.status,
+            readiness.website_status,
+            readiness.sidecar_status,
+            readiness.sidecar_worker_state,
+        ), ("not_ready", "ready", "not_ready", "stopped"))
+        self.assertEqual(
+            readiness.sidecar_error_code,
+            "source_delivery_runtime.worker_not_ready",
+        )
+
+    def test_submission_readiness_rejects_malformed_local_state_offline(self):
+        runtime = self.open()
+        runtime._delivery.worker_readiness = lambda: {
+            "schema": "blun.cms-source-delivery-worker-readiness.v1",
+            "status": "ready",
+        }
+        before = len(self.transport.calls)
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_readiness()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.readiness_invalid",
+        )
+        self.assertEqual(len(self.transport.calls), before)
+
+    def test_submission_readiness_rejects_malformed_remote_state(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+        response = runtime.sidecar_readiness()
+        altered = copy.deepcopy(response)
+        altered["readiness"]["outbox_status"] = "blocked"
+        runtime._client.readiness = lambda: altered
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_readiness()
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.readiness_invalid",
+        )
+
+    def test_pipeline_readiness_covers_intake_and_source_processing(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+
+        readiness = runtime.submission_pipeline_readiness()
+
+        self.assertEqual(readiness.status, "ready")
+        self.assertEqual(
+            readiness.schema,
+            "blun.cms-source-delivery-submission-pipeline-readiness.v3",
+        )
+        self.assertEqual(readiness.intake_readiness["status"], "ready")
+        self.assertEqual(readiness.source_readiness, {
+            "schema": "blun.cms-source-worker-readiness.v1",
+            "status": "ready",
+            "worker_state": "running",
+            "service_status": "ok",
+            "error_code": None,
+        })
+        self.assertEqual(
+            readiness.source_capability_binding,
+            self.remote.capability_binding(),
+        )
+        self.assertEqual(
+            readiness.sidecar_capabilities_sha256, self.sidecar_digest,
+        )
+        self.assertEqual(
+            readiness.source_capabilities_sha256, self.remote_digest,
+        )
+        self.assertEqual(
+            readiness.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
+        payload = readiness.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "status", "intake_readiness", "source_readiness",
+            "source_capability_binding",
+            "sidecar_capabilities_sha256", "source_capabilities_sha256",
+            "website_capability_binding",
+        })
+        self.assertNotIn("delivery.example", repr(payload))
+        self.assertNotIn("website-credential", repr(payload))
+
+        def not_ready():
+            return {
+                "schema": delivery_support.DELIVERY._CLIENT._HTTP.READINESS_RESPONSE_SCHEMA,
+                "readiness": {
+                    "schema": "blun.cms-source-worker-readiness.v1",
+                    "status": "not_ready",
+                    "worker_state": "stopped",
+                    "service_status": "blocked",
+                    "error_code": "source_runtime.worker_not_ready",
+                },
+                "capabilities_sha256": self.remote_digest,
+                "capability_binding": self.remote.capability_binding(),
+            }
+
+        self.remote.readiness = not_ready
+        blocked = runtime.submission_pipeline_readiness()
+        self.assertEqual(blocked.status, "not_ready")
+        self.assertEqual(blocked.intake_readiness["status"], "ready")
+        self.assertEqual(blocked.source_readiness["status"], "not_ready")
+        self.assertEqual(
+            blocked.source_readiness["error_code"],
+            "source_runtime.worker_not_ready",
+        )
+
+    def test_pipeline_readiness_stays_local_when_intake_is_not_ready(self):
+        runtime = self.open()
+        before = len(self.transport.calls)
+
+        readiness = runtime.submission_pipeline_readiness()
+
+        self.assertEqual(readiness.status, "not_ready")
+        self.assertEqual(readiness.intake_readiness["status"], "not_ready")
+        self.assertIsNone(readiness.source_readiness)
+        self.assertEqual(len(self.transport.calls), before)
+
+    def test_submission_status_stays_local_until_sidecar_acceptance(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        before = len(self.transport.calls)
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(len(self.transport.calls), before)
+        self.assertEqual((status.status, status.stage), (
+            "pending", "website_acceptance",
+        ))
+        self.assertEqual(
+            status.schema, "blun.cms-source-delivery-submission-status.v2",
+        )
+        self.assertEqual((
+            status.website_status,
+            status.website_delivery_max_attempts,
+            status.sidecar_status,
+            status.sidecar_delivery_max_attempts,
+            status.source_max_attempts,
+        ), ("pending", 2, None, 4, 3))
+        payload = status.as_payload()
+        self.assertEqual(set(payload), {
+            "schema", "operation", "request_id", "event_id", "site_id",
+            "payload_sha256", "status", "stage", "website_status",
+            "website_attempts", "website_delivery_max_attempts",
+            "sidecar_status", "sidecar_attempts",
+            "sidecar_delivery_max_attempts", "source_max_attempts",
+            "next_attempt_at", "lease_expired", "error_code",
+            "website_capability_binding",
+        })
+        self.assertEqual(
+            status.website_capability_binding,
+            runtime.website_capability_binding(),
+        )
+        self.assertNotIn(change["localization"]["source_text"], repr(payload))
+
+    def test_submission_status_projects_exact_sidecar_pending_state(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        runtime.run_once()
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual((status.status, status.stage), (
+            "pending", "sidecar_delivery",
+        ))
+        self.assertEqual((
+            status.website_status,
+            status.website_delivery_max_attempts,
+            status.sidecar_status,
+            status.sidecar_delivery_max_attempts,
+            status.source_max_attempts,
+        ), ("succeeded", 2, "pending", 4, 3))
+        self.assertIsNone(status.error_code)
+
+    def test_submission_status_calls_source_acceptance_only_after_delivery(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        runtime.run_once()
+        delivered = self.sidecar.delivery.run_once()
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(delivered.status, "succeeded")
+        self.assertEqual((status.status, status.stage), (
+            "accepted", "source_acceptance",
+        ))
+        self.assertEqual(status.sidecar_status, "succeeded")
+        self.assertIsNone(status.error_code)
+
+    def test_submission_status_preserves_distinct_removal_identities(self):
+        runtime = self.open()
+        removal = cms_support.cancellation()
+        runtime.enqueue_removal(
+            removal, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        runtime.run_once()
+        self.sidecar.delivery.run_once()
+
+        status = runtime.submission_status(
+            "cancellation", removal["cancellation_id"],
+        )
+
+        self.assertEqual((status.status, status.stage), (
+            "accepted", "source_acceptance",
+        ))
+        self.assertEqual((status.operation, status.request_id, status.event_id), (
+            "cancellation", removal["cancellation_id"], removal["event_id"],
+        ))
+        self.assertEqual(status.site_id, removal["site_id"])
+        self.assertEqual(status.payload_sha256, self.payload_hash(removal))
+
+    def test_submission_status_surfaces_terminal_sidecar_failure(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change)
+        runtime.run_once()
+        self.remote.failures.append(delivery_support.ClientFailure(
+            "source_client.denied", retryable=False,
+        ))
+        failed = self.sidecar.delivery.run_once()
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual((status.status, status.stage), (
+            "failed", "sidecar_delivery",
+        ))
+        self.assertEqual(status.sidecar_status, "failed")
+        self.assertEqual(status.error_code, "source_client.denied")
+
+    def test_submission_status_rejects_changed_retry_bindings(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(
+            change, source_max_attempts=3, delivery_max_attempts=2,
+        )
+        runtime.run_once()
+        response = runtime.sidecar_status(
+            "change",
+            change["event_id"],
+            change["event_id"],
+            change["site_id"],
+            self.payload_hash(change),
+        )
+        altered = copy.deepcopy(response)
+        altered["status"]["delivery_max_attempts"] = 5
+        runtime._client.status = lambda *_args: altered
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.status_invalid",
+        )
+
+    def test_stale_local_contract_blocks_before_sidecar_status_access(self):
+        runtime = self.open()
+        change = cms_support.event()
+        runtime.enqueue_change(change)
+        runtime.run_once()
+        runtime._delivery._connection.execute(
+            """
+            UPDATE cms_source_delivery_outbox
+            SET capabilities_sha256 = ?
+            WHERE operation = 'change' AND request_id = ?
+            """,
+            ("f" * 64, change["event_id"]),
+        )
+        before = len(self.transport.calls)
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime.status_invalid",
+        )
+        self.assertEqual(len(self.transport.calls), before)
+
+    def test_terminal_website_failure_never_reads_sidecar_status(self):
+        transport = WSGITransport(self.sidecar.http)
+        runtime = self.open(transport=transport)
+        transport.blocked = True
+        change = cms_support.event()
+        runtime.enqueue_change(change, delivery_max_attempts=1)
+        failed = runtime.run_once()
+        before = len(transport.calls)
+
+        status = runtime.submission_status("change", change["event_id"])
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(len(transport.calls), before)
+        self.assertEqual((status.status, status.stage, status.sidecar_status), (
+            "failed", "website_acceptance", None,
+        ))
+        self.assertEqual(status.error_code, "source_delivery_client.network")
+
+    def test_rotation_reaches_the_exact_signer_without_reopening_outbox(self):
+        runtime = self.open()
+        inode = self.website_database.stat().st_ino
+        first = cms_support.event()
+        runtime.enqueue_change(first)
+        runtime.run_once()
+        split = len(self.transport.calls)
+
+        runtime.replace_credential(self.new_client_credential)
+        second = cms_support.event(
+            event_id="event-2",
+            website_version="web-2",
+            source_sequence=2,
+            source_revision="cms-2",
+        )
+        runtime.enqueue_change(second)
+        runtime.run_once()
+
+        version_header = SUBMISSION._AUTH.HEADER_CREDENTIAL_VERSION
+        self.assertEqual(self.website_database.stat().st_ino, inode)
+        self.assertTrue(all(
+            call[2][version_header] == "1" for call in self.transport.calls[:split]
+        ))
+        self.assertTrue(all(
+            call[2][version_header] == "2" for call in self.transport.calls[split:]
+        ))
+        self.assertEqual(runtime.status("change", "event-2").status, "succeeded")
+
+    def test_invalid_middle_policy_creates_no_database_and_makes_no_request(self):
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION._ADAPTER.CMSSourceDeliverySidecarAdapterBlocked,
+        ) as caught:
+            self.open(
+                sidecar_delivery_max_attempts=0,
+                transport=transport,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_sidecar_adapter.attempts_invalid",
+        )
+        self.assertFalse(self.website_database.exists())
+        self.assertEqual(transport.calls, [])
+
+    def test_invalid_hosted_delay_creates_no_database_and_makes_no_request(self):
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION._RUNTIME.DurableCMSSourceDeliveryRuntimeBlocked,
+        ) as caught:
+            self.open(
+                hosted=True,
+                idle_delay_seconds=0,
+                transport=transport,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_runtime.loop_invalid",
+        )
+        self.assertFalse(self.website_database.exists())
+        self.assertEqual(transport.calls, [])
+
+    def test_hosted_worker_is_owned_and_ready(self):
+        runtime = self.open(
+            hosted=True,
+            active_delay_seconds=10,
+            idle_delay_seconds=10,
+            blocked_delay_seconds=10,
+        )
+
+        self.assertEqual(runtime.worker_state, "running")
+        self.assertEqual(runtime.worker_readiness()["status"], "ready")
+        runtime.stop_worker(timeout_seconds=1)
+        self.assertEqual(runtime.worker_state, "stopped")
+
+    def test_process_close_and_representation_fail_closed_without_secrets(self):
+        runtime = self.open()
+        rendered = repr(runtime)
+        self.assertNotIn("delivery.example", rendered)
+        self.assertNotIn("website-credential", rendered)
+        self.assertNotIn(self.old_client_credential.secret.hex(), rendered)
+
+        runtime._owner_pid += 1
+        self.assertEqual(runtime.state, "foreign-process")
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as foreign:
+            runtime.sidecar_health()
+        self.assertEqual(
+            foreign.exception.code,
+            "source_delivery_submission_runtime.foreign_process",
+        )
+        runtime._owner_pid = os.getpid()
+        runtime.close()
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as closed:
+            runtime.replace_credential(self.new_client_credential)
+        self.assertEqual(
+            closed.exception.code,
+            "source_delivery_submission_runtime.closed",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

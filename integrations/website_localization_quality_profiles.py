@@ -10,8 +10,17 @@ from typing import Any
 
 
 SCHEMA = "blun.website-localization-quality-profile.v1"
+COMMERCIAL_SCHEMA = "translate-native.commercial-locale-quality-profile.v2"
+COMMERCIAL_RENDERING_SCHEMA = "translate-native.commercial-rendering-reference.v1"
+COMMERCIAL_RENDERING_REGISTRY_SCHEMA = (
+    "translate-native.commercial-rendering-registry.v1"
+)
 CLDR_VERSION = "48"
 CLDR_SUMMARY = "https://www.unicode.org/cldr/charts/48/summary/{language}.html"
+CLDR_NUMBERS = (
+    "https://github.com/unicode-org/cldr-json/blob/48.0.0/"
+    "cldr-json/cldr-numbers-full/main/{locale}/numbers.json"
+)
 MALTESE_ORTHOGRAPHY_SOURCE = (
     "https://kunsilltalmalti.gov.mt/mistoqssija-u-twegiba-51-76/"
 )
@@ -25,6 +34,18 @@ REQUIRED_RED_TEAM_CHECKS = (
     "meaning_omission",
     "unnatural_cta",
     "marketing_calque",
+)
+COMMERCIAL_REVIEW_CHECKS = (
+    "amount_currency",
+    "discount_basis",
+    "qualifiers",
+    "tax_status",
+    "billing_interval",
+    "commitment",
+    "renewal",
+    "cancellation",
+    "conditions",
+    "offer_assignment",
 )
 
 
@@ -42,6 +63,70 @@ class LocaleQualityProfile:
         body = json.loads(_canonical_json({"schema": SCHEMA, **asdict(self)}))
         body["sha256"] = hashlib.sha256(_canonical_json(body)).hexdigest()
         return body
+
+
+@dataclass(frozen=True)
+class CommercialRenderingReference:
+    locale: str
+    cldr_locale: str
+    numbering_system: str
+    native_numbering_system: str
+    minimum_grouping_digits: int
+    decimal_symbol: str
+    grouping_symbol: str
+    decimal_pattern: str
+    percent_pattern: str
+    currency_pattern: str
+    currency_alpha_pattern: str
+    currency_append_iso_pattern: str
+    approximately_pattern: str
+    at_least_pattern: str
+    at_most_pattern: str
+    range_pattern: str
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": COMMERCIAL_RENDERING_SCHEMA,
+            "locale": self.locale,
+            "source": {
+                "authority": "Unicode CLDR",
+                "version": CLDR_VERSION,
+                "locale": self.cldr_locale,
+                "url": CLDR_NUMBERS.format(locale=self.cldr_locale),
+            },
+            "numbering_system": self.numbering_system,
+            "native_numbering_system": self.native_numbering_system,
+            "minimum_grouping_digits": self.minimum_grouping_digits,
+            "symbols": {
+                "decimal": self.decimal_symbol,
+                "group": self.grouping_symbol,
+            },
+            "patterns": {
+                "decimal": self.decimal_pattern,
+                "percent": self.percent_pattern,
+                "currency": self.currency_pattern,
+                "currency_alpha_next_to_number": self.currency_alpha_pattern,
+                "currency_append_iso": self.currency_append_iso_pattern,
+                "approximately": self.approximately_pattern,
+                "at_least": self.at_least_pattern,
+                "at_most": self.at_most_pattern,
+                "range": self.range_pattern,
+            },
+            "application": {
+                "purpose": "target-locale-rendering-guidance",
+                "semantic_proof": False,
+                "allow_equivalent_number_words": True,
+                "allow_equivalent_written_percentages": True,
+                "allow_equivalent_digit_forms": True,
+                "preserve_exact_value_and_currency_identity": True,
+                "rounding_allowed": False,
+                "currency_conversion_allowed": False,
+                "ambiguous_values": "targeted-review",
+                "unresolved_route": (
+                    "independent-model-or-qualified-native-domain-review"
+                ),
+            },
+        }
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -222,9 +307,155 @@ PROFILES: tuple[LocaleQualityProfile, ...] = (
     ),
 )
 
+_NBSP = "\N{NO-BREAK SPACE}"
+_NNBSP = "\N{NARROW NO-BREAK SPACE}"
+
+
+def _rendering(
+    locale: str,
+    cldr_locale: str,
+    *,
+    minimum_grouping_digits: int = 1,
+    decimal_symbol: str = ",",
+    grouping_symbol: str = _NBSP,
+    percent_pattern: str = f"#,##0{_NBSP}%",
+    currency_pattern: str = f"#,##0.00{_NBSP}¤",
+    currency_alpha_pattern: str | None = None,
+    currency_append_iso_pattern: str = f"{{0}}{_NBSP}¤¤",
+    approximately_pattern: str = "~{0}",
+    at_least_pattern: str = "≥{0}",
+    at_most_pattern: str = "≤{0}",
+    range_pattern: str = "{0}–{1}",
+) -> CommercialRenderingReference:
+    return CommercialRenderingReference(
+        locale=locale,
+        cldr_locale=cldr_locale,
+        numbering_system="latn",
+        native_numbering_system="latn",
+        minimum_grouping_digits=minimum_grouping_digits,
+        decimal_symbol=decimal_symbol,
+        grouping_symbol=grouping_symbol,
+        decimal_pattern="#,##0.###",
+        percent_pattern=percent_pattern,
+        currency_pattern=currency_pattern,
+        currency_alpha_pattern=currency_alpha_pattern or currency_pattern,
+        currency_append_iso_pattern=currency_append_iso_pattern,
+        approximately_pattern=approximately_pattern,
+        at_least_pattern=at_least_pattern,
+        at_most_pattern=at_most_pattern,
+        range_pattern=range_pattern,
+    )
+
+
+# CLDR 48 parent data is used unless the chosen BCP-47 profile has an explicit
+# regional override. These are rendering references, never semantic validators.
+COMMERCIAL_RENDERING_REFERENCES: tuple[CommercialRenderingReference, ...] = (
+    _rendering(
+        "bg-BG", "bg", minimum_grouping_digits=2,
+        percent_pattern="#,##0%", at_least_pattern="≥ {0}",
+        at_most_pattern="≤ {0}", range_pattern="{0} – {1}",
+    ),
+    _rendering(
+        "hr-HR", "hr", grouping_symbol=".", at_least_pattern="{0}+",
+        range_pattern="{0} – {1}",
+    ),
+    _rendering(
+        "cs-CZ", "cs", currency_append_iso_pattern="{0} ¤¤",
+    ),
+    _rendering(
+        "da-DK", "da", grouping_symbol=".", at_least_pattern="{0}+",
+        range_pattern="{0}-{1}",
+    ),
+    _rendering(
+        "nl-NL", "nl", grouping_symbol=".", percent_pattern="#,##0%",
+        currency_pattern=f"¤{_NBSP}#,##0.00;¤{_NBSP}-#,##0.00",
+        at_least_pattern="{0}+", range_pattern="{0}-{1}",
+    ),
+    _rendering(
+        "en-IE", "en-IE", decimal_symbol=".", grouping_symbol=",",
+        percent_pattern="#,##0%", currency_pattern="¤#,##0.00",
+        currency_alpha_pattern=f"¤{_NBSP}#,##0.00",
+        at_least_pattern="{0}+",
+    ),
+    _rendering(
+        "et-EE", "et", minimum_grouping_digits=2,
+        percent_pattern="#,##0%", approximately_pattern="~ {0}",
+        at_most_pattern="≤ {0}", range_pattern="{0}‒{1}",
+    ),
+    _rendering("fi-FI", "fi", at_least_pattern="vähintään {0}"),
+    _rendering(
+        "fr-FR", "fr", grouping_symbol=_NNBSP,
+        approximately_pattern="≈{0}",
+    ),
+    _rendering(
+        "de-AT", "de-AT", currency_pattern=f"¤{_NBSP}#,##0.00",
+        approximately_pattern="≈{0}", at_least_pattern="{0}+",
+    ),
+    _rendering(
+        "el-GR", "el", grouping_symbol=".", percent_pattern="#,##0%",
+        at_least_pattern="{0}+",
+    ),
+    _rendering(
+        "hu-HU", "hu", minimum_grouping_digits=2,
+        percent_pattern="#,##0%", at_least_pattern="{0}+",
+    ),
+    _rendering(
+        "ga-IE", "ga", decimal_symbol=".", grouping_symbol=",",
+        percent_pattern="#,##0%", currency_pattern="¤#,##0.00",
+        currency_alpha_pattern=f"¤{_NBSP}#,##0.00",
+        at_least_pattern="{0}+",
+    ),
+    _rendering(
+        "it-IT", "it", minimum_grouping_digits=2, grouping_symbol=".",
+        percent_pattern="#,##0%", range_pattern="{0}-{1}",
+    ),
+    _rendering(
+        "lv-LV", "lv", minimum_grouping_digits=2,
+        percent_pattern="#,##0%",
+    ),
+    _rendering("lt-LT", "lt"),
+    _rendering(
+        "mt-MT", "mt", decimal_symbol=".", grouping_symbol=",",
+        percent_pattern="#,##0%", currency_pattern="¤#,##0.00",
+        currency_alpha_pattern=f"¤{_NBSP}#,##0.00",
+    ),
+    _rendering(
+        "pl-PL", "pl", minimum_grouping_digits=2,
+        percent_pattern="#,##0%",
+    ),
+    _rendering(
+        "pt-PT", "pt-PT", minimum_grouping_digits=2,
+        percent_pattern="#,##0%", at_least_pattern="+{0}",
+        range_pattern="{0} - {1}",
+    ),
+    _rendering(
+        "ro-RO", "ro", grouping_symbol=".",
+        range_pattern="{0} - {1}",
+    ),
+    _rendering(
+        "sk-SK", "sk", at_least_pattern="{0}+",
+        range_pattern="{0} – {1}",
+    ),
+    _rendering(
+        "sl-SI", "sl", minimum_grouping_digits=2, grouping_symbol=".",
+        approximately_pattern="~ {0}", at_least_pattern="≥ {0}",
+        at_most_pattern="≤ {0}",
+    ),
+    _rendering(
+        "es-ES", "es", minimum_grouping_digits=2, grouping_symbol=".",
+        at_least_pattern="Más de {0}", range_pattern="{0}-{1}",
+    ),
+    _rendering("sv-SE", "sv", at_least_pattern="⩾{0}"),
+)
+
 _BY_LOCALE = {profile.locale: profile for profile in PROFILES}
 if len(_BY_LOCALE) != len(PROFILES):
     raise RuntimeError("duplicate website-localization quality profile")
+_COMMERCIAL_RENDERING_BY_LOCALE = {
+    reference.locale: reference for reference in COMMERCIAL_RENDERING_REFERENCES
+}
+if set(_COMMERCIAL_RENDERING_BY_LOCALE) != set(_BY_LOCALE):
+    raise RuntimeError("commercial rendering and quality-profile registries differ")
 
 
 def quality_profile_for(locale: str) -> dict[str, Any]:
@@ -233,3 +464,122 @@ def quality_profile_for(locale: str) -> dict[str, Any]:
     except (KeyError, TypeError):
         raise ValueError("unsupported quality-profile locale") from None
     return profile.as_payload()
+
+
+def commercial_quality_profile_for(
+    locale: str,
+    commercial_profile: str,
+) -> dict[str, Any]:
+    """Bind commercial evaluation to one exact locale quality generation."""
+
+    try:
+        profile = _BY_LOCALE[locale]
+    except (KeyError, TypeError):
+        raise ValueError("unsupported commercial quality-profile locale") from None
+    if (
+        not isinstance(commercial_profile, str)
+        or not commercial_profile
+        or commercial_profile != commercial_profile.strip()
+        or len(commercial_profile) > 256
+    ):
+        raise ValueError("commercial profile is invalid")
+    quality = profile.as_payload()
+    rendering = _COMMERCIAL_RENDERING_BY_LOCALE[locale].as_payload()
+    body = {
+        "schema": COMMERCIAL_SCHEMA,
+        "locale": locale,
+        "version": f"commercial-eu-{locale}-2026-09-2",
+        "commercial_profile": commercial_profile,
+        "quality_profile_version": quality["version"],
+        "quality_profile_sha256": quality["sha256"],
+        "rendering_reference": rendering,
+        "creation_focus": [
+            *quality["native_review_focus"],
+            (
+                "Write prices, offers, billing intervals, commitments, renewal, "
+                "cancellation and conditions as natural native commercial copy "
+                "without changing any proposition or its offer assignment."
+            ),
+            (
+                "Apply rendering_reference for target-locale number, percent, "
+                "currency, spacing, approximation, limit and range conventions; "
+                "do not round values or convert currencies."
+            ),
+        ],
+        "native_review_focus": [
+            *quality["native_review_focus"],
+            (
+                "Reject source-shaped price labels, interval phrases, CTAs and "
+                "terms; allow locale-appropriate number, currency, spacing and "
+                "punctuation conventions when the commercial meaning is exact."
+            ),
+            (
+                "Judge numeric and currency typography against rendering_reference "
+                "while accepting natural equivalent number words, written "
+                "percentages and digit forms."
+            ),
+        ],
+        "fidelity_review_focus": [
+            *quality["fidelity_review_focus"],
+            (
+                "Check every commercial proposition and footnote against its own "
+                "offer, including values, limits, timing, tax status and conditions."
+            ),
+            (
+                "Use rendering_reference only to interpret locale formatting, "
+                "never as deterministic proof of value equality; route ambiguous "
+                "values to targeted review."
+            ),
+        ],
+        "adversarial_focus": [
+            *quality["adversarial_focus"],
+            (
+                "Reject swapped offer terms, hidden qualifiers, changed billing "
+                "or commitment periods, strengthened discounts, and invented tax, "
+                "renewal or cancellation claims."
+            ),
+        ],
+        "required_commercial_checks": list(COMMERCIAL_REVIEW_CHECKS),
+        "source_refs": quality["source_refs"],
+    }
+    detached = json.loads(_canonical_json(body))
+    detached["sha256"] = hashlib.sha256(_canonical_json(detached)).hexdigest()
+    return detached
+
+
+def commercial_rendering_registry(commercial_profile: str) -> dict[str, Any]:
+    """Return the complete content-free commercial rendering registry."""
+
+    entries = []
+    for profile in PROFILES:
+        commercial = commercial_quality_profile_for(
+            profile.locale,
+            commercial_profile,
+        )
+        entries.append({
+            "locale": profile.locale,
+            "commercial_quality_profile": {
+                "version": commercial["version"],
+                "sha256": commercial["sha256"],
+            },
+            "rendering_reference": commercial["rendering_reference"],
+        })
+    body = {
+        "schema": COMMERCIAL_RENDERING_REGISTRY_SCHEMA,
+        "commercial_profile": commercial_profile,
+        "source": {
+            "authority": "Unicode CLDR",
+            "version": CLDR_VERSION,
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "project_prices": False,
+            "project_brands": False,
+            "credentials": False,
+        },
+        "locales": entries,
+    }
+    detached = json.loads(_canonical_json(body))
+    detached["sha256"] = hashlib.sha256(_canonical_json(detached)).hexdigest()
+    return detached

@@ -1,5 +1,590 @@
 # Version 6 premortem
 
+## Public end-to-end pipeline monitoring (13 September 2026)
+
+Assume the composed runtime was safe, but its public operational view leaked
+tenant data or let a plausible partial state appear production-ready.
+
+- A shared monitoring credential could be mistaken for a site principal and
+  expose request identities or website content.
+- A healthy intake queue could conceal a blocked source queue, or a health
+  response could be accepted as readiness.
+- Changed counters, nested bindings, or capability generations could survive
+  superficial envelope validation.
+- Authentication, transport, or source-service failure could still return a
+  stale success response.
+
+The outer WSGI boundary now provides separate body-free health and readiness
+routes with distinct operator scopes and no tenant identity. It authenticates
+before runtime access, validates every intake and source component with its
+canonical contract, preserves component state instead of averaging it, and
+requires all repeated generation bindings to agree. Tests cover live
+end-to-end success, wrong scopes and request shapes, rebound capability hashes,
+contradictory readiness, content-free failures, and strict separation from
+publication authority.
+
+## Public website capability discovery (13 September 2026)
+
+Assume the in-process website runtime had the correct end-to-end capability,
+but a public discovery boundary exposed a weaker or private variant.
+
+- A body, query, insecure transport, or wrong scope could reach the runtime.
+- Authentication could occur after the runtime had already read its database
+  or contacted the downstream sidecar.
+- A replaced runtime could add an endpoint, tenant, credential, or website
+  content under a nested field and recompute the outer hash.
+- A plausible but stale schema or changed publication semantic could be served
+  as if it were the active contract.
+
+The read-only WSGI adapter now requires exact HTTPS GET semantics and validates
+the host-supplied principal before any runtime access. It accepts only the
+closed V6.96 capability shape, exact nested operations and semantics, bounded
+retry policy, verified durable binding, and matching canonical digest. Tests
+prove authentication-before-runtime ordering, reject every alternate request
+shape and substituted contract, and require stable content-free failures.
+
+## Authenticated source runtime binding (12 September 2026)
+
+Assume a sidecar reached a healthy source API whose static HTTP contract was
+correct, but whose durable worker used another price and offer capability
+generation.
+
+- A static API digest could remain unchanged while the internal commercial
+  profile or locale-rendering registry changed.
+- A capability check followed by a write could lose the verified runtime
+  binding at the response boundary, leaving the caller unable to prove which
+  generation accepted the work.
+- Health and readiness could report a plausible service state without exposing
+  whether all three durable databases still carried the same verified binding.
+- A sidecar could accidentally discard or reshape the binding while forwarding
+  operational evidence, hiding a partial deployment mismatch from the website
+  host.
+
+The source HTTP application now requires a verified durable binding before it
+can be hosted, returns the exact content-free binding with capabilities and
+every operation, and revalidates it after runtime work. The contract-pinned
+source client requires both internal deployment pins and rejects missing,
+stale, malformed, or substituted bindings. Source delivery independently
+revalidates and forwards the same binding through health and readiness, so a
+single mismatch blocks fail-closed rather than being reduced to a healthy
+aggregate state.
+
+## Locale-exact commercial rendering references (12 September 2026)
+
+Assume every commercial provider phase received the correct language profile,
+but rendered amounts, percentages, ranges, and currency labels with conventions
+from a different EU locale.
+
+- A language name alone cannot distinguish Austrian grouping or Portuguese
+  spacing from a generic parent-language default.
+- Treating one punctuation spelling as semantic proof would reject equivalent
+  number words, native digits, or safely reformatted values.
+- An unversioned external reference could change without invalidating queued
+  jobs, cached targets, review evidence, or publication approvals.
+- Copying a formatting table by hand could silently transpose two locales or
+  normalize non-breaking spaces into ordinary spaces.
+
+Embed a canonical CLDR 48 number-format reference in each of the 24 commercial
+locale profiles, including the resolved CLDR locale, numbering system, decimal
+and grouping symbols, minimum grouping threshold, decimal, percent, currency,
+ISO-currency, approximation, limit, and range patterns. Bind the complete
+reference and its official tagged source URL into the profile digest and every
+provider phase. Treat these values as rendering guidance only: semantic review
+must accept meaning-preserving surface variants and route ambiguous values to
+independent model or qualified native-domain review. Tests cover all locales,
+exact Maltese and Finnish conventions, Austrian and Portuguese region overrides,
+Unicode spacing, profile tampering, and the ban on deterministic regex proof.
+
+## Commercial escalation evidence at publication (12 September 2026)
+
+Assume a locale reached the CMS with a commercial review summary that still
+said `review_required`, while the publication evidence did not say whether the
+targeted dimensions were resolved by an independent model or a qualified human.
+
+- A valid approval could conceal which escalation path actually satisfied the
+  unresolved amount, tax, renewal, cancellation, or condition checks.
+- A receiver that accepts `review_required` without a matching resolution could
+  mistake an unresolved primary review for publishable evidence.
+- A generic receipt hash could be copied to a different ordered dimension scope
+  unless the scope and review method remain inside the signed publication.
+- Exposing raw receipts or reviewer prose would leak sensitive review material.
+
+Advance the publication-evidence contract, add one content-free resolution only
+when the commercial summary is unresolved, and bind its exact ordered dimensions,
+review method, receipt hash, and independent provider identity when applicable.
+Require the receiver to reject missing, unexpected, cross-scope, malformed, or
+method-inconsistent resolution evidence before its commit callback. Prove both
+allowed escalation paths and keep verified commercial and non-commercial traffic
+compact with a `null` resolution.
+
+## Commercial evidence HTTP profile binding (12 September 2026)
+
+Assume a valid commercial worker result could not reach the remote quality
+service, or a remote receipt was accepted without the exact locale-specific
+commercial profile that produced it.
+
+- The worker's nested commercial profile could be rejected by an older HTTP
+  validator that only permits the three base locale-profile fields.
+- Accepting an optional nested object would let commercial requests omit it or
+  let non-commercial requests smuggle unrelated commercial scope.
+- Checking only token and digest shapes would allow a different commercial
+  profile identifier to travel beside an otherwise valid review summary.
+- Keeping the old evidence and receipt schema generations would let durable
+  retries silently reuse pre-binding requests or receipts.
+
+Version both contracts, require the exact compact commercial profile binding
+inside `quality_profile` only when `content_type` is `commercial`, and require
+its profile identifier to match the top-level commercial policy and review
+summary before any authentication or network access. End-to-end tests carry a
+real commercial coordinator request through both HTTPS adapters and prove that
+missing, extra, stale-shaped, or cross-profile bindings fail closed locally.
+
+## Locale-bound commercial publication evidence (12 September 2026)
+
+Assume a CMS replaced its current localized offer with a signed bundle whose
+generic commercial profile was correct but whose locale-specific profile was
+stale or belonged to another EU language.
+
+- A generic profile ID cannot prove that Finnish, Maltese, or another locale
+  used the intended native-language commercial quality generation.
+- Adding an optional digest would let old senders silently bypass the binding.
+- Comparing only well-formed tokens and hashes would accept a valid-looking but
+  obsolete or cross-locale profile.
+- Applying commercial requirements to ordinary content would create false
+  publication blocks.
+
+Version the release-evidence schema, require a compact commercial quality
+binding only for commercial content, and derive it from the already approved
+worker result. The CMS receiver recomputes the canonical binding for each exact
+locale before its commit callback; the durable store independently rejects
+missing or structurally inconsistent bindings during its atomic recheck. Tests
+cover all 24 EU locales, non-commercial compatibility, malformed evidence, and
+stale version, digest, and profile substitution before commit.
+
+## Locale-bound commercial quality profiles (12 September 2026)
+
+Assume a commercial job advertised one of 24 EU locales while every provider
+phase still received the same universal pricing prompt.
+
+- A locale label without locale-specific evaluation guidance could accept
+  source-shaped price labels, interval wording, CTAs or contract terms.
+- A profile omitted from the job digest could change without invalidating cache
+  entries, review evidence or publication authority.
+- A caller-controlled profile could weaken one difficult language while still
+  presenting a valid generic commercial profile identifier.
+- Passing the source into the target-only phase through profile data would
+  destroy the required independence of the native-language review.
+
+Derive one canonical commercial profile from each existing locale quality
+generation, bind the generic commercial policy plus locale profile version and
+digest, and hash the complete object into the job identity. Recompute it before
+provider access, pass the content-free profile to all three ordered phases, and
+retain its version and digest in signed release evidence. Tests cover all 24
+locales, Maltese and Finnish risk markers, phase separation, profile drift,
+mutation before provider access, cache invalidation and release tampering.
+
+## End-to-end processing health (12 September 2026)
+
+Assume every intake worker appeared healthy while the source processing queues
+were blocked or damaged.
+
+- A healthy website outbox and sidecar could hide exhausted source retries,
+  corrupt queue counters, or incomplete terminal processing.
+- One aggregate health flag could erase which operated boundary is degraded or
+  blocked.
+- Continuing to the source layer after an earlier intake failure could create
+  misleading secondary network errors.
+- A structurally valid health response from another capability generation could
+  be accepted after configuration drift.
+
+The sidecar exposes a distinct authenticated, body-free source-health operation
+and validates the complete source response against its pinned contract. The
+website runtime first validates website and sidecar intake health, stops before
+the source call when intake is blocked, preserves both projections and their
+error details separately, binds both capability hashes, and fails closed on
+every transport, schema, status, or contract inconsistency.
+
+## End-to-end processing readiness (12 September 2026)
+
+Assume a website accepted localization work while the source service could not
+actually process it.
+
+- A healthy website worker and sidecar could hide a stopped or blocked source
+  worker.
+- Combining all readiness data into one object could erase which operated
+  boundary is unavailable.
+- A local failure could still trigger an unnecessary downstream request and
+  create misleading network noise.
+- A valid source readiness response from another capability generation could
+  be accepted after configuration drift.
+
+The sidecar exposes a distinct authenticated, body-free source-readiness
+operation and validates the complete source response against its pinned
+contract. The website runtime first verifies local and sidecar intake; it
+contacts the source layer only when both are ready, preserves both readiness
+objects separately, binds both capability hashes, and fails closed on every
+transport, schema, status, or contract inconsistency.
+
+## End-to-end localization lifecycle status (12 September 2026)
+
+Assume a website followed a durably accepted submission into localization but
+read the wrong tenant, an event that had not reached the source service, or an
+obsolete status contract.
+
+- A source-status request before sidecar acceptance could probe or invent
+  downstream state for work still owned by an upstream outbox.
+- A valid response for another site, event, payload, or capability generation
+  could be attached to the local submission.
+- Collapsing source acceptance and the localization lifecycle into one success
+  could make processing, review, or publication appear complete too early.
+- Reformatting the rich source status at each hop could silently omit a failed
+  locale, retry counter, terminal notification, or receiver state.
+
+The sidecar exposes a distinct authenticated source-status operation only for
+an exact locally succeeded outbox row. Every hop binds the site, event, stored
+payload hash, sidecar capability hash, and source-service capability hash. The
+website runtime keeps acceptance and localization as separate nested status
+objects, validates the complete source payload without lossy normalization,
+and fails closed on missing, premature, malformed, or stale state.
+
+## End-to-end submission health (12 September 2026)
+
+Assume one durable submission outbox appeared healthy while the other was
+blocked, corrupt, or bound to a changed sidecar contract.
+
+- A website-only health check could stay green while sidecar delivery is
+  permanently failed or holding an expired lease.
+- A healthy sidecar could hide failed or stale work in the website outbox if a
+  deployment reduced both states to one averaged signal.
+- Malformed counters or a substituted capability hash could be normalized into
+  a plausible healthy response.
+- Probing the sidecar before validating local storage could send an
+  authenticated request from a runtime whose own state cannot be trusted.
+
+The combined projection validates the local health snapshot before network
+access, then uses the owned authenticated client and requires the exact
+sidecar schema and capability binding. It preserves both complete content-free
+snapshots and reports `ok` only when both independently report `ok`.
+
+## End-to-end submission readiness (12 September 2026)
+
+Assume the website worker appeared healthy while the authenticated sidecar
+worker was stopped, blocked, or reporting an incompatible state.
+
+- A local-only readiness check could allow an operator to declare the complete
+  submission path available while accepted work cannot advance downstream.
+- Querying the sidecar when the website worker is already unavailable could
+  waste credentials and present an irrelevant remote success as overall health.
+- Averaging two states could let one healthy outbox conceal the other boundary's
+  blocking error.
+- A malformed readiness response or changed capability contract could be
+  normalized into a positive result.
+
+The combined projection validates local readiness first and remains offline
+unless that boundary is ready. It then uses the owned authenticated client,
+requires the exact response schema and capability binding, preserves both
+worker and outbox states independently, and reports ready only when both
+durable intake workers are running with healthy outboxes.
+
+## Bound submission progress (12 September 2026)
+
+Assume an operator polled a successfully queued website event and mistook one
+durable boundary for completion at the next boundary.
+
+- Reading the sidecar before local acceptance could disclose or manufacture a
+  remote state for work that the website still owns.
+- A status response for another event, tenant, payload, or contract generation
+  could be attached to the local row.
+- Collapsing the three retry ceilings could hide which queue exhausted its
+  attempts and make an unsafe retry appear available.
+- Sidecar-to-source acceptance could be reported as finished localization or
+  publication even though those later stages have not run.
+
+The combined status projection stays local until website acceptance, then uses
+the owned authenticated client and revalidates all immutable identities,
+payload and capability hashes, and both downstream retry ceilings. It exposes
+three explicit acceptance stages, carries only content-free error codes, and
+defines final `accepted` as durable source-service acceptance rather than
+localization completion.
+
+## Owned authenticated submission runtime (12 September 2026)
+
+Assume a website operator assembled the valid HMAC client, sidecar adapter,
+SQLite outbox, and worker separately but still lost a source event or confused
+durable acceptance with downstream completion.
+
+- The rotating client could omit the public immutable contract needed by the
+  outbox adapter and fail only when production wiring starts.
+- A credential replacement could update a signer other than the one used by
+  the durable worker.
+- Invalid worker or middle-retry configuration could create persistent state
+  before failing, or trigger an early network request.
+- A local succeeded row could be presented as completed source processing even
+  though the sidecar still reports pending or failed work.
+
+The owned submission runtime constructs one rotating signer, pinned client,
+adapter, guarded outbox, and optional worker from one configuration. It exposes
+the client's immutable contract to the adapter, validates hosted delays before
+opening SQLite, routes rotation through the owned client, and gives local
+acceptance and authenticated sidecar lifecycle reads separate method names.
+Process and close guards run before either storage or transport access.
+
+## Durable authenticated sidecar submission (12 September 2026)
+
+Assume a website persisted an event but mixed the retry policy for reaching the
+sidecar with the sidecar's delivery policy or the source service's processing
+policy.
+
+- A transient sidecar outage could exhaust the downstream source retry budget.
+- A changed sidecar pin or inner retry ceiling could alter an already queued
+  event after restart.
+- Treating sidecar acceptance as a direct source-service response could let a
+  malformed acknowledgement satisfy the existing outbox validator.
+- Translating a client exception could accidentally turn an unknown failure
+  into a retryable one.
+
+The sidecar outbox adapter gives each boundary its own explicit retry ceiling
+and hashes both capability pins plus the inner delivery policy into the
+outbox's immutable contract binding. It accepts only the exact validated
+sidecar envelope before producing a private completion projection, preserves
+declared retryability, and makes every unknown or malformed failure permanent
+and content-free.
+
+## Source-bound commercial review evidence (12 September 2026)
+
+Assume a structurally valid, content-free commercial review summary was copied
+to a different source, target, or policy generation.
+
+- A digest covering only the evidence object could remain unchanged when the
+  reviewed source or candidate changed outside an evidence span.
+- Updating the digest recipe without the commercial profile could leave old
+  plan, cache, and approval identities apparently current.
+- A worker and authenticated capability registry could enforce different hash
+  recipes while sharing the same summary schema.
+- Mutation tests could cover changed reviewer evidence but miss exact Unicode
+  text or profile changes.
+
+Commercial profile v3 and summary-contract v2 now hash a versioned binding of
+the exact UTF-8 source hash, exact UTF-8 target hash, profile, and complete
+canonical evidence. The profile bump invalidates earlier derived identities;
+the capability registry validates and publishes the same recipe. Independent
+tests mutate source, target, profile, and evidence and require distinct digest
+changes for every input.
+
+## Single-source authenticated client composition (12 September 2026)
+
+Assume a website backend wired a valid rotating signer to a valid HTTPS client,
+but duplicated their security configuration incorrectly.
+
+- The signer and client could receive different origins or capability pins and
+  fail only after the service entered production.
+- An adapter could rotate one signer while a different signer still protected
+  outgoing operations.
+- A convenience wrapper could omit status, health, readiness, or removal and
+  encourage an unprotected alternate path.
+- A forked worker could reach the network through an inherited client before
+  the signer rejected its first proof.
+
+The composed client now accepts origin and both capability pins exactly once,
+constructs its private rotating signer and HTTP client together, and exposes
+all six contract operations through one process-bound surface. Configuration
+failure performs no network call. Credential replacement reaches the exact
+signer used by every operation and retains its previous credential on failure.
+
+## Uninterrupted source-delivery client rotation (12 September 2026)
+
+Assume the server accepted an overlap generation, but a long-lived source
+worker could not move its HMAC signer safely without a restart.
+
+- Concurrent requests could observe a partially replaced credential or change
+  generation halfway through proof creation.
+- Invalid secret-manager output could destroy the last working client signer.
+- A forked process could inherit signer state and silently reuse parent-owned
+  secret material and synchronization.
+- Retiring the old server generation immediately after one client swap could
+  reject proofs already emitted or leave other client instances behind.
+
+The client now owns one process-bound rotating signer. It validates a complete
+replacement under the same lock used for proof creation and swaps only after
+success, preserving the previous signer on failure. Rotation never changes the
+fixed origin or capability pins. Deployments overlap generations server-side,
+rotate every client instance, drain already emitted requests and the proof
+validity window, and only then retire the old generation.
+
+## Uninterrupted source-delivery credential rotation (12 September 2026)
+
+Assume a running source-delivery sidecar rotated credentials but briefly
+accepted an incomplete set, lost its last working verifier, or weakened replay
+protection.
+
+- An in-flight request could race the replacement and observe a partially
+  updated credential map.
+- Invalid secret-manager output could remove every valid generation before the
+  configuration error became visible.
+- Removing and later re-adding a generation could make an already consumed
+  proof usable again if rotation also reset replay state.
+- A failed update could bypass storage, process, or lifecycle guards, while its
+  private exception or secret value escaped through a stable error.
+
+The runtime now materializes and validates one complete replacement verifier,
+then swaps it atomically under the same lock used by authentication. The prior
+verifier remains active until the replacement and replay-path guard both pass.
+All generations share the unchanged durable nonce ledger, so retirement and
+re-enrollment do not restore consumed proofs. Closed, inherited, replaced, or
+permission-weakened runtimes reject the update; failures are reduced to stable
+content-free codes.
+
+## Durable terminal-processing reconciliation (11 September 2026)
+
+Assume the source CMS received a valid intake acknowledgement but later lost
+the actual CMS processing result.
+
+- An accepted notification could be reported as complete while its receiver
+  processing row was still pending or had failed terminally.
+- A status response for another event, site, terminal outcome, or payload could
+  be attached to the local delivery.
+- Two source workers could poll the same observation concurrently, or a crash
+  could strand a local status lease indefinitely.
+- Repeated network failures could keep the source apparently healthy forever,
+  while private transport detail leaked into durable state.
+
+The source now registers an independent processing observation only after the
+exact notification acknowledgement commits. Its SQLite ledger binds the
+notification, event, site, terminal status, and payload SHA-256; uses expiring
+leases and bounded content-free retry codes; and accepts only the receiver's
+fully bound status shape. Pending work remains visible, while remote failure,
+exhausted observation, lease expiry, response drift, or storage corruption
+blocks source health fail-closed.
+
+## Response-bound terminal-receiver contract (11 September 2026)
+
+Assume capability discovery passed but the subsequent operational response came
+from a stale, switched, or differently configured receiver.
+
+- A load balancer could route discovery and health to deployments with different
+  notification paths or contract versions.
+- A cached health response could predate a contract change while still matching
+  the expected health schema.
+- A status response could omit the contract identity, leaving the client unable
+  to prove that its event and site were read under the pinned interface.
+
+Every operational response now carries the live canonical capability SHA-256,
+and the advertised response field sets include that binding. The client checks
+it against its trusted pin after the fresh discovery preflight; missing, stale,
+or mismatched bindings block rather than accepting ambiguous evidence.
+
+## Contract-pinned terminal-receiver operator client (11 September 2026)
+
+Assume an operator accepted a terminal-receiver control response from the wrong,
+changed, or semantically weakened endpoint.
+
+- A redirect could carry credentials to another origin, or a transport wrapper
+  could silently repeat a supposedly read-only request.
+- A validly rehashed contract could reuse write authority for health, change a
+  route or schema, or advertise a partial interface under the expected product.
+- Status could be returned for another event or site, while inconsistent health
+  counts or a truncated response could still be labeled healthy.
+- A deployment could pin the contract once but omit checking whether it changed
+  before a later operational read.
+
+The new operator client requires an out-of-band capability digest and verifies
+the live canonical contract, exact operation semantics, distinct scopes, and
+schemas before every health, readiness, or status request. Requests bind fresh
+authentication to method, exact origin, path, body hash, event, and site; the
+transport performs one bounded attempt without redirects. Exact response fields
+and cross-field invariants distinguish valid blocked state from malformed
+evidence, while every local failure exposes only a stable content-free code.
+
+## Terminal-receiver operational health API (11 September 2026)
+
+Assume the hosted terminal receiver accepted work while its operational health
+report was stale, misleading, state-changing, or exposed tenant information.
+
+- Readiness alone could hide due work, expired leases, or permanently failed
+  processing records from an operator.
+- A stopped or failed managed worker could be reported healthy because SQLite
+  integrity still passed independently.
+- A health request could reuse a write credential, mutate retry state, or expose
+  event, site, notification, target text, or private callback details.
+- The runtime route and machine-readable capability contract could drift or a
+  custom intake path could collide with the health path.
+
+The new body-free health route uses its own scope and authenticates before a
+read-only aggregate inspection. It combines runtime, worker, SQLite integrity,
+processing counts, due work, expired leases, and terminal failures; incomplete
+evidence, worker failure, and storage failure return content-free `503` with a
+stable code. The canonical capability digest covers the exact route and fields,
+while preflight rejects path collisions and scope reuse before SQLite opens.
+
+## Durable terminal-notification processing (11 September 2026)
+
+Assume the CMS accepted and stored a verified terminal notification but never
+applied it safely to its own local state.
+
+- A crash between the HTTP acknowledgement and processing registration could
+  leave a durable receipt that no worker can discover.
+- Two CMS workers could process the same notification concurrently, or an old
+  worker could finish after its lease expired and a replacement took over.
+- A callback could fail forever, persist private exception prose, or return an
+  acknowledgement for a different event or payload.
+- Migrating a V6.51/V6.52 inbox could backfill altered evidence or partially
+  upgrade the schema before failure.
+
+The receive transaction now inserts both the immutable inbox row and its
+processing record before acknowledging. Claims bind worker, random token,
+attempt, deadline, notification identity, and exact payload hash; completion
+rechecks every field, and expired ownership cannot finish. Retry state and a
+bounded attempt ceiling are durable, while only validated stable error codes
+are stored. The V1-to-V2 migration validates the old schema and every receipt
+inside one transaction before backfill, so any discrepancy rolls back without
+partial state. Host side effects remain idempotent by notification ID because
+an acknowledgement lost after the side effect must be replayed safely.
+
+## Protected terminal-receiver runtime (11 September 2026)
+
+Assume the durable callback receiver validated every request correctly but wrote
+its evidence through an unsafe or stale SQLite connection.
+
+- A symlink, hard link, permissive file, shared writable directory, or exchanged
+  path could redirect or expose the terminal-notification ledger.
+- A runtime constructed before a worker fork could reuse a connection and lock
+  whose process ownership is no longer valid.
+- Shutdown could close SQLite during a request, while a damaged database could
+  continue returning superficially healthy counts.
+- Invalid origin, route, authenticator, or HTTPS policy could be discovered only
+  after an unwanted database file had already been created.
+
+The composition root preflights the complete HTTP configuration before touching
+the database, reserves a missing regular file exclusively with mode `0600`, and
+pins its device/inode identity. Parent ownership, permissions, link count, file
+mode, and identity are rechecked under one process-owned runtime lock before
+every request, status read, and health check. Close shares that lock and is
+idempotent. Health verifies SQLite integrity plus every stored semantic binding;
+configuration, path, process, lifecycle, and storage failures remain fail closed.
+
+## Durable terminal-notification receiver (11 September 2026)
+
+Assume the source localization service reported a verified terminal result but
+the website CMS recorded it twice, acknowledged it too early, or accepted it for
+the wrong tenant.
+
+- The CMS could commit a notification and lose its response, then repeat a host
+  side effect when the durable sender replays the same bytes.
+- A reused event or notification ID could carry a changed terminal state, source
+  generation, lifecycle binding, or payload hash.
+- Generic authentication could validate a credential without binding the exact
+  method, origin, path, site, event, notification, and request bytes.
+- The receiver could acknowledge before its local transaction commits, or expose
+  verifier, database, or credential detail when a dependency fails.
+
+The reference receiver requires canonical request bytes and exact reserved
+headers, gives a host verifier the sender's complete content-free authentication
+context, and requires a principal scoped to the same site. A serialized,
+process-bound SQLite transaction stores one immutable notification before the
+acknowledgement is constructed. Exact replays preserve the first receipt;
+identity collisions, altered rows or schemas, invalid framing, and unavailable
+authentication or storage fail closed through stable content-free responses.
+
 ## Durable source-side removal outbox (10 September 2026)
 
 Assume a website backend removed content but an unpublished localization kept
@@ -318,5 +903,35 @@ Assume the Version 6 response-and-translation gateway and automatic updater ship
 | A pre-fork server inherits a CMS runtime into another process | The child reuses a duplicated SQLite connection or waits forever on a lock held by a vanished parent thread, while retries appear to be ordinary receiver failures | Bind the runtime to its creator process and check ownership before every lock acquisition; block inherited trusted operations and callbacks without exposing content, while allowing each post-fork worker to open its own connection | Simulated process drift blocks reads, writes, close, and signed WSGI publication before store access; two independent worker runtimes on one database handle concurrent retries and converge on one receipt and bundle |
 | Replaced CMS bundles retain superseded target prose indefinitely | Old localized pages and release evidence remain readable in SQLite after a newer complete bundle is active, increasing breach impact and storage without serving rollback | Enable SQLite secure deletion and scrub the predecessor payload and locale rows only after the replacement is complete and the active pointer has moved, all inside the same transaction; retain only content-free replay bindings | A successful replacement leaves prose only for the active generation; a cleanup trigger failure rolls the entire switch back to the last-known-good bundle; restored superseded content makes health fail closed |
 | A source dispatch succeeds but its website never learns the terminal localization outcome | A poller replays an expired signed read, accepts another plan or source generation, overlaps after a crash, or retries an outage without limit while its status leaks website prose | Register only an exact successful durable change dispatch; bind event, site, plan, version, sequence, job count, and canonical change hash; create a fresh signed lifecycle request per leased poll; separate normal polling from capped consecutive-failure backoff; retain only content-free state | Real client integration proves distinct request IDs across polls; cross-connection leases recover crashes; altered generations, responses, schemas, and state block; retry ceilings and terminal remote failures remain visible without retaining source or target text |
+| A source CMS successfully submits a website change but never begins lifecycle monitoring | The process exits after the remote acknowledgement or after the separate monitor commit; a manual host handoff is forgotten, normal changes starve removals, or recovery sends duplicate logical work | Compose removal dispatch, acknowledgement-to-monitor reconciliation, change dispatch, and lifecycle polling into one removal-first source service; reuse exact persisted IDs, acknowledgements, hashes, leases, and idempotent registration while permitting only one network operation per tick | Tests cover both crash boundaries, restart recovery without change resend, removal priority, conflicting bindings before network access, stable error redaction, content-free health, bounded loop delays, and invalid configuration before schema creation |
+
+| The source-CMS service has durable logic but no owned production runtime | A bad worker, timeout, lease, or path creates partial state; threads enter one connection concurrently; a pre-fork child inherits a locked runtime; or linked, shared, replaced, or permission-weakened databases allow the next request to use untrusted state | Add one composition root that validates the complete service in memory, requires three distinct canonical private database files, owns their connections, serializes threads, binds itself to its creator process, and rechecks every file identity around each operation | Invalid configuration and unsafe paths create no schemas; restart, close, fork, permission drift, 24 concurrent ticks, and two separately opened workers prove fail-closed operation and one durable change dispatch |
+| The source-CMS runtime has no authenticated deployment ingress | A local bridge writes unverified bodies, accepts ambiguous HTTP framing, leaks source text through errors or health, shares one credential across write and read paths, or treats an identity collision as a successful replay | Add an HTTPS-only WSGI boundary with bounded exact bodies, content-free hash-bound authentication, separate route scopes, strict schemas, durable enqueue-before-response, and whitelisted output fields | End-to-end change and removal flows, health, identical replay, conflicting replay, malformed framing, wrong scopes, private exceptions, database tampering, and concurrent requests all remain content-free and fail closed |
+| A source CMS can submit work but cannot safely read its later outcome | Deployment glue queries SQLite directly, exposes another site's event, leaks stored website prose, accepts a corrupt dispatch-to-lifecycle binding, or mutates worker state while serving status | Project one exact stored event through a strictly read-only service and runtime method; bind a dedicated status principal to the requested site; whitelist generation IDs, hashes, states, counters, locales, and stable reasons only | Tests follow queued work through remote lifecycle observation without extra network calls, make missing and cross-site events indistinguishable, reject an unbound runtime response, and redact private failures |
+| Source-CMS integrators must reconstruct the active HTTP contract from prose | Generated clients use a stale path, shared scope, wrong principal or schema, overlook a transport bound, or trust a partial capability response while the runtime routes something else | Publish one separately authenticated, content-free capability object derived from the active routing constants; bind every operation, limit, required top-level field, and success status under a canonical digest; block the complete response on drift | Tests compare every advertised operation with live WSGI method and scope maps, verify the digest and body-free authentication, prove no runtime call occurs, and make altered route metadata fail closed |
+| A source-CMS HTTP host accepts work while no dispatcher is alive | Accepted changes remain indefinitely queued after forgotten worker startup, a sleeping worker delays shutdown, a provider call makes shutdown unbounded, or a crashed thread leaves the process apparently healthy | Add an owned non-daemon worker lifecycle with interruptible waits, signal-before-join shutdown, explicit fail-closed readiness, managed-write gating, and stable worker failure codes | Tests prove automatic dispatch, readiness transitions, write rejection after stop, bounded shutdown during a blocked provider call, private-error redaction, invalid startup rejection, and close-before-database teardown |
+| A source CMS observes a terminal result but its website backend never receives the outcome | A crash loses the handoff after the terminal monitor commit, a lost response causes duplicate effects, altered generation evidence reaches another site, retries never stop, or callback errors leak customer prose | Derive one content-free notification from the verified terminal lifecycle, persist its deterministic identity before host code, lease bounded attempts, and require an exact acknowledgement bound to event, site, and payload hash | Restart repairs the registration gap; a lost response reuses one identity; terminal success and failure remain distinguishable; collisions, altered evidence, invalid acknowledgements, exhausted retries, lease expiry, and state tampering block health before another callback |
+| A durable terminal notification crosses an unsafe or ambiguous HTTP boundary | A redirect forwards credentials, an HTTP client silently retries, authentication signs different bytes, a valid acknowledgement belongs to another site or generation, or a private gateway response enters durable status | Pin one HTTPS endpoint, disable redirects and transport retries, authenticate the exact canonical body hash plus notification identity, reserve idempotency/binding headers, and require a byte-bound exact acknowledgement | Transport tests prove one attempt, fixed origin, exact body/auth/header hashes, stable retry classification, outbox-owned replay, and rejection of insecure endpoints, injected headers, malformed JSON, duplicate keys, wrong content type, altered notification identity, and cross-bound acknowledgements |
+| A durable terminal receiver acknowledges work while its CMS processor is absent or dying | A forgotten worker leaves accepted notifications stranded, a callback races database shutdown, an idle loop delays termination, a private loop exception is leaked, or a pre-fork child controls the parent's thread and connection | Add one process-owned non-daemon worker, gate managed HTTP intake on running state and verified inbox health, use interruptible state-specific waits, redact failures to stable codes, and join before closing SQLite | Tests prove automatic receipt-to-processing, readiness transitions, rejection without a live worker, prompt idle shutdown, database preservation on join timeout, private-error redaction, invalid configuration before file creation, and foreign-process blocking |
+| A CMS operator cannot safely observe terminal-receiver processing over the public boundary | Deployment glue reads SQLite directly, a status lookup exposes another site's event, a reused write credential gains operational access, readiness stays green after worker or storage failure, or a read mutates a lease | Add canonical site-bound status and body-free readiness routes with distinct read scopes, exact body-hash authentication, whitelisted content-free responses, and no processing operations | Tests cover pending-to-succeeded status, foreign-site equivalence with missing events, read-only storage counters, managed readiness transitions, scope separation, transport and hash rejection, and private-error redaction |
+| Terminal-receiver integrators must reconstruct the active HTTP contract from prose | A generated client uses a stale path or schema, reuses a write credential for discovery, omits a binding field, or advertises a custom intake path that collides with an operational route | Publish one separately authenticated, body-free capability object derived from the active receiver constants and configured intake path; hash every canonical field and reject the complete contract on drift | Tests compare all four operations with runtime routes and scopes, verify the digest and empty-body authentication, prove no inbox or worker call occurs, preserve custom paths, and make schema drift or path collisions fail closed |
+| Source delivery uses a fixed callback adapter beside the pinned receiver client | A custom path changes without the writer, credential code replaces an idempotency header, malformed terminal evidence reaches the network, an acknowledgement belongs to another tenant, or nested retries duplicate side effects | Make the contract-pinned client callable as the durable notifier; validate the immutable notification before discovery, take the write path only from the freshly verified contract, bind authentication and reserved headers to the exact payload, require an exact acknowledgement, and expose retryability without retrying internally | End-to-end WSGI tests prove custom-path discovery then one write, exact authentication and hashes, durable receipt, pre-network payload rejection, pre-write contract-drift blocking, cross-site acknowledgement rejection, stable retry metadata, and no hidden transport replay |
+| Website backends must hand-build requests for the source-CMS ingress | A stale route accepts a different schema, a deployment swaps after discovery, an idempotency identity is reused with altered content, a response belongs to another site, or client retries multiply a write | Provide one provider-neutral, contract-pinned HTTPS client; validate immutable payloads before discovery, derive each operation from the freshly verified contract, bind every operational response to its capability digest and request identity, and leave bounded retries to the host | End-to-end WSGI tests cover all write and read operations, exact auth and body hashes, idempotent replay, pre-write contract drift, payload and tenant tampering, redirects, stable retryability, and content-free status data |
+| A website process calls the one-attempt source client without a durable handoff | A crash before the request loses a source change; a crash after remote acceptance causes uncertainty; an old lease overwrites a newer result; or nested retry policies multiply writes and hide exhausted work | Persist one immutable change, cancellation, or tombstone before network access; bind its capability digest and two separate retry ceilings; claim one token-bound attempt; replay the same idempotency identity after lease expiry; prioritize removals; and block health on tampering, drift, expiry, or terminal failure | Tests prove persist-before-call, exact replay, removal priority, durable backoff, bounded permanent failure, crash recovery after remote acceptance, stale-lease rejection, capability drift, short-lease rejection, and no client call after database tampering |
+| The website-source outbox is durable but deployment glue owns its connection and worker lifetime | Invalid configuration creates a database before failing; concurrent threads overlap transactions; a prefork child inherits a locked connection; linked or replaced storage receives trusted work; a dead worker still accepts events; or shutdown closes SQLite beneath a slow provider call | Add one preflighted composition root with an owner-only identity-guarded file, process binding before every lock, serialized connection access, a supervised non-daemon worker, managed-intake gating, content-free readiness, and signal-before-join shutdown that preserves the open database on timeout | Tests cover no-file invalid preflight, mode `0600`, restart recovery, automatic delivery, stopped-worker intake rejection, permission drift, links, inode replacement, process drift, 24 concurrent enqueues, redacted worker failure, bounded blocked-provider shutdown, and shared durable claims |
+| Non-Python website backends cannot use the protected source-delivery runtime without custom deployment glue | A local endpoint parses hostile content before authentication, accepts another site's event, leaks source text through status, queues work behind a dead worker, rehashes a weakened contract, or serializes a forged runtime result | Add one authenticated HTTPS/WSGI sidecar with route-specific scopes, exact body and payload hashes, tenant-bound writes and reads, managed-worker readiness, independently validated content-free responses, and a canonical contract digest | End-to-end tests cover change, cancellation and tombstone intake through remote delivery, exact authentication and idempotency bindings, cross-site indistinguishability, stopped workers, damaged storage, malformed framing, contract drift, response substitution, private failures, and concurrent replay |
+| Website and CMS backends must hand-build requests for the source-delivery sidecar | A stale route is used after discovery, credential code overwrites binding headers, sidecar and downstream contracts are confused, a response substitutes another tenant or payload, or hidden redirects and retries duplicate work | Provide one provider-neutral HTTPS reference client with fresh exact capability validation, separate sidecar and downstream pins, reserved headers, complete known status bindings, one transport attempt, and stable retryability | End-to-end WSGI tests cover all six routes, changes, cancellations, tombstones, exact inner-payload hashes, stale and downstream contract pins, response tampering, cross-site status, reserved-header injection, redirects, timeouts, malformed input, and parallel idempotent replay |
+| Every source-delivery deployment must invent authentication around the public callback contract | A signature authenticates only the body but not its route or tenant, a captured proof is replayed, an old credential survives rotation, another site's scope is accepted, altered replay state is trusted, or a failure leaks a key or customer content | Supply a provider-neutral HMAC signer and verifier that bind origin, route, scope, body, tenant, idempotency, payload, and both capability pins; atomically consume random nonces in a durable content-free SQLite ledger; allow only explicit credential generations and scopes | End-to-end tests cover all six routes, exact proof fields, replay, expiry and future skew, wrong keys and pins, retired generations, tenant and scope separation, altered bindings, replay-ledger tampering, clock failure, redaction, and concurrent idempotent writes |
+| The HMAC contract is correct but its caller-owned replay connection is deployed unsafely | The replay database is shared or replaced, permissions weaken, a forked worker inherits its connection, shutdown closes authentication beneath a live request, invalid configuration leaves operational state, or auth failure is invisible beside outbox health | Add one preflighted composition root with separate owner-only databases, safe-parent and inode guards, process binding before locks, serialized replay access, content-free auth health, and delivery-before-auth shutdown ordering | Tests cover no-file invalid preflight, mode `0600`, end-to-end hosted requests, durable replay after restart, permission drift, links, inode replacement, process drift, closed state, corrupt replay rows, parallel idempotent writes, redacted health, and blocked-worker shutdown |
+| CMS clients know that locale-specific commercial rendering exists but cannot retrieve the exact rules they must pin | A client guesses separators or currency placement, accepts a partial locale set, or silently follows tampered CLDR metadata while the server still advertises healthy capabilities | Publish one canonical content-free registry for all 24 locale rendering references, bind every entry to its commercial quality-profile version and digest, hash the complete registry, and validate exact canonical equality before returning signed capabilities | Capability tests require the exact 24-locale registry, CLDR 48 Maltese/Finnish/Austrian/Portuguese references, detached payloads, no project content, and fail-closed rejection of missing, reordered, or altered entries |
+| The server publishes a complete commercial rendering registry but the source-side reference client accepts a self-rehashed substitute or silently crosses a deployment upgrade | A proxy or incompatible service replaces the registry and recomputes its public hashes, or a legitimate profile change reaches production before the CMS host deliberately accepts new rules | Make the reference client validate the exact v5 capability shape and canonical 24-locale registry against its installed contract, then support immutable overall-capability and rendering-registry deployment pins with distinct non-retryable failures | End-to-end client tests accept exact current pins and reject malformed pins before transport, wrong deployment pins after one response, plus missing, reordered, altered, or obsolete registries even when every public hash is recomputed |
+| Deployment configures both commercial capability pins but the durable CMS source runtime never exercises them before accepting work | A host assumes constructor pins are active, opens persistent queues without a successful capability read, or the client binding changes after startup while queued website content continues toward the wrong contract | Add an explicit startup preflight that requires and verifies both immutable pins before creating any database, retains only their content-free hashes, and rechecks the client binding before every runtime transition | Runtime tests prove successful pinned startup, zero database creation for missing pins or remote mismatch, one bounded capability request, content-free status, and blocking before persistence or delivery when the client binding changes |
+| A pinned CMS runtime restarts over durable queues that were created for another commercial capability generation or database role | Pending work silently crosses a price/offer policy deployment, swapped change/removal files acquire new tables, an unbound legacy queue with work is adopted, or a partially written/tampered binding is trusted after a crash | Persist the exact two-pin binding and database role independently in all three SQLite files, precheck existing metadata before service schema writes, adopt only provably empty unbound stores, and revalidate canonical rows on every operation | Restart tests preserve same-binding work, reject a coherent different binding and swapped roles before schema mutation, reject non-empty unbound stores, safely adopt empty legacy stores, recover same-binding partial writes, and block altered rows before queue access |
+| The outer website outbox remains unbound while the sidecar and source queues pin a commercial generation | Website retries can resume under a different runtime or price-format policy, a stale sidecar can be trusted, or the website database is created before any authenticated proof of the downstream generation | Require both host-owned generation pins together, verify them through authenticated sidecar source readiness before opening SQLite, include them in the adapter contract, and persist the exact role-specific binding in the outer outbox | Tests prove exact signed preflight and persisted hashes, reject mismatch or outage before database creation, bind adapter-digest changes, preserve direct unpinned compatibility, and keep local status reads offline |
+| A website runtime contacts the sidecar before discovering that its existing outer outbox is locally unsafe or belongs to another generation | A restart leaks operational traffic, consumes authentication nonces, or depends on an unavailable network even though a changed pin, tampered schema, unsafe file, or non-empty unbound queue already makes safe recovery impossible | Validate the existing file identity, base schema, canonical generation row, and derived digest through a read-only local preflight before the authenticated sidecar request; preserve remote-first creation and migration for missing or provably empty stores | Restart tests require zero transport calls for generation mismatch, schema tampering, unsafe permissions, and non-empty unbound work; same-generation state resumes, and an empty legacy store binds only after the unchanged authenticated preflight |
+| The outer website generation is durable but invisible in composed operational projections | Operators see healthy website, sidecar, and source states without proof that the website outbox is still bound to the generation that accepted its work; a cached or reconstructed hash can hide database tampering | Project one canonical, content-free website capability binding directly from the guarded SQLite row and carry it independently through status, lifecycle, health, and readiness contracts before any downstream read | Exact binding and defensive-copy tests cover every projection; altered generation metadata blocks health and readiness locally with zero additional transport calls; payloads contain no endpoint, credential, tenant, source, or target text |
+| The owned website runtime has many safe methods but no single discoverable end-to-end contract | An integrator pins only the sidecar, assumes stale projection schemas, collapses the three retry budgets, or treats durable source acceptance as publication; local generation drift is found only after an operational call | Publish one canonical content-free capability snapshot that binds every outer operation and projection schema, retry ownership and publication semantics to the guarded website generation plus freshly verified sidecar and source pins | Exact snapshot and defensive-copy tests prove deterministic hashing; local generation tampering blocks before network, and remote contract substitution blocks without returning partial capabilities or private data |
+| A public website write endpoint authenticates the transport but not the durable request identity | Another site's payload reaches readiness or storage, a replay changes content or retry policy under one ID, a dead worker acknowledges stranded work, or HTTP 202 is mistaken for source acceptance or publication | Bind the authenticated principal to the exact site, body hash, canonical payload hash, route-specific scope and idempotency key before runtime access; require the hosted worker and pinned generation; return only after the outer SQLite commit with explicit non-publication semantics | Change, cancellation and tombstone tests cover exact auth/body/header bindings, cross-site and wrong-scope rejection with zero runtime calls, worker failure, one-row replay, collision conflict, malformed transport, tampered runtime status, and a real hosted-runtime durable write |
+| A public progress endpoint leaks another tenant or collapses durable acceptance into publication | A guessed request ID returns another site's status, a substituted payload hash or nested source projection is serialized, or `accepted` is presented as linguistically approved and publishable | Require distinct site-bound read scopes; bind operation, request, event, site and source-payload hash before lookup; independently validate status and lifecycle envelopes with separate capability generations; preserve every stage and explicit non-publication semantics | Tests prove wrong-scope and foreign-site rejection before runtime access, not-found equivalence, status/lifecycle separation, valid source-state projection, and fail-closed rejection of changed payload hashes and cross-site nested source state |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
