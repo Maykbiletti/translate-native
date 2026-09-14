@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -588,6 +589,37 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertIsNone(duplicate)
         status = self.evidence_state.statuses(self.event["event_id"])[0]
         self.assertEqual((status.status, status.attempts), ("leased", 1))
+
+    def test_request_identity_is_verified_before_state_persistence(self):
+        self.complete_all()
+        valid = self.evidence_request()
+        cases = (
+            replace(valid, evidence_revision="different-evidence-1"),
+            replace(valid, target_locale="fi-FI"),
+            replace(
+                valid,
+                request_id="blun-l10n-evidence-" + "0" * 64,
+            ),
+        )
+
+        for request in cases:
+            with self.subTest(request=request), self.assertRaises(
+                COORDINATOR.LocalizationReleaseCoordinatorBlocked,
+            ) as caught:
+                self.evidence_state.claim(
+                    request,
+                    worker_id="quality-worker",
+                    now=200,
+                    lease_seconds=10,
+                    max_attempts=3,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "evidence.request_id.binding_mismatch",
+            )
+        self.assertEqual(self.evidence_connection.execute(
+            "SELECT COUNT(*) FROM localization_quality_evidence_state"
+        ).fetchone()[0], 0)
 
     def test_retryable_evidence_failure_backs_off_and_stops_at_attempt_limit(self):
         self.complete_all()

@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from test_website_localization_release_coordinator import (
@@ -59,7 +60,7 @@ class FakeTransport:
 def evidence_request():
     source_text = "Build your business with BLUN."
     target_text = "Kasvata yritystäsi BLUN-palvelun avulla."
-    return COORDINATOR.QualityEvidenceRequest(
+    request = COORDINATOR.QualityEvidenceRequest(
         schema=COORDINATOR.EVIDENCE_REQUEST_SCHEMA,
         request_id="blun-l10n-evidence-" + "a" * 64,
         evidence_revision="native-evidence-1",
@@ -89,6 +90,10 @@ def evidence_request():
         commercial_review_resolution_contract_sha256=None,
         human_review_required=False,
         independent_review_required=False,
+    )
+    return replace(
+        request,
+        request_id=COORDINATOR._request_id_for_payload(request.as_payload()),
     )
 
 
@@ -170,6 +175,39 @@ class AcceptingVerifier:
 
 
 class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
+    def test_request_identity_contract_matches_the_coordinator(self):
+        request = evidence_request()
+        payload = request.as_payload()
+
+        self.assertEqual(
+            HTTP.EVIDENCE_REQUEST_IDENTITY_FIELDS,
+            COORDINATOR.EVIDENCE_REQUEST_IDENTITY_FIELDS,
+        )
+        self.assertEqual(
+            HTTP._request_id_for_payload(payload),
+            request.request_id,
+        )
+        self.assertEqual(
+            set(HTTP.EVIDENCE_REQUEST_IDENTITY_FIELDS),
+            set(payload) - {"request_id", "source_text", "target_text"},
+        )
+        for field in HTTP.EVIDENCE_REQUEST_IDENTITY_FIELDS:
+            changed = json.loads(json.dumps(payload))
+            value = changed[field]
+            if value is None:
+                changed[field] = "changed"
+            elif type(value) is bool:
+                changed[field] = not value
+            elif isinstance(value, dict):
+                changed[field]["changed"] = True
+            else:
+                changed[field] = str(value) + "-changed"
+            with self.subTest(field=field):
+                self.assertNotEqual(
+                    HTTP._request_id_for_payload(changed),
+                    request.request_id,
+                )
+
     def test_sends_one_exact_native_unicode_request_with_stable_idempotency(self):
         transport = FakeTransport(response_for)
         provider = adapter(transport)
@@ -251,6 +289,7 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             ("target_sha256", "0" * 64),
             ("schema", "wrong.schema"),
             ("human_review_required", 1),
+            ("evidence_revision", "different-evidence-1"),
         ):
             class BadRequest:
                 request_id = evidence_request().request_id
@@ -290,6 +329,7 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             )["sha256"]
         )
         base["independent_review_required"] = True
+        base["request_id"] = HTTP._request_id_for_payload(base)
 
         class CommercialRequest:
             request_id = base["request_id"]

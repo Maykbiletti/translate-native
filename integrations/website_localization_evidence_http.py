@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-quality-evidence-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-quality-evidence-http-response.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v7"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v8"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
@@ -48,6 +48,15 @@ REQUEST_FIELDS = {
     "commercial_review_resolution_contract_sha256",
     "independent_review_required",
 }
+EVIDENCE_REQUEST_IDENTITY_FIELDS = (
+    "schema", "evidence_revision", "event_id", "plan_id", "job_id",
+    "result_sha256", "source_sha256", "target_sha256", "source_locale",
+    "target_locale", "content_type", "glossary_version", "policy_version",
+    "provider", "software_version", "review_confidence", "quality_profile",
+    "commercial_profile", "commercial_review",
+    "commercial_review_resolution_contract_sha256", "human_review_required",
+    "independent_review_required",
+)
 EVIDENCE_FIELDS = {
     "schema", "request_id", "result_sha256", "quality_receipt",
     "human_review_receipt", "independent_model_review",
@@ -164,6 +173,19 @@ def _canonical_json(value: Any, *, code: str, maximum: int) -> bytes:
     if not encoded or len(encoded) > maximum:
         raise HTTPEvidenceProviderFailed(code, retryable=False)
     return encoded
+
+
+def _request_id_for_payload(payload: Mapping[str, Any]) -> str:
+    identity = {
+        field: payload[field]
+        for field in EVIDENCE_REQUEST_IDENTITY_FIELDS
+    }
+    digest = hashlib.sha256(_canonical_json(
+        identity,
+        code="request_invalid",
+        maximum=MAX_REQUEST_BYTES,
+    )).hexdigest()
+    return "blun-l10n-evidence-" + digest
 
 
 def _pairs(items):
@@ -429,6 +451,8 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
         payload["commercial_review_resolution_contract_sha256"]
         != expected_resolution_contract_sha256
     ):
+        raise HTTPEvidenceProviderFailed("request_invalid", retryable=False)
+    if request_id != _request_id_for_payload(payload):
         raise HTTPEvidenceProviderFailed("request_invalid", retryable=False)
     return payload, _canonical_json(
         payload, code="request_invalid", maximum=MAX_REQUEST_BYTES,

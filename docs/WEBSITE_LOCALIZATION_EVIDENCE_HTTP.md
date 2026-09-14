@@ -29,8 +29,9 @@ Neither credentials nor remote response prose appears in adapter errors.
 ## Request
 
 The adapter accepts only the coordinator's exact immutable
-`blun.localization-quality-evidence-request.v7` object. It validates the
-complete field set, request ID, SHA-256 values, locale profile, model identity,
+`blun.localization-quality-evidence-request.v8` object. It validates the
+complete field set, derives the request ID, and checks SHA-256 values, locale
+profile, model identity,
 confidence decisions, and, for commercial content, the exact locale-specific
 commercial quality-profile binding plus its content-free targeted-review
 summary, UTF-8 size, Unicode NFC, and the source and target text hashes before
@@ -44,7 +45,7 @@ It sends one canonical UTF-8 JSON document:
   "request_id": "blun-l10n-evidence-<64 lowercase hexadecimal characters>",
   "request_sha256": "<SHA-256 of the canonical inner request>",
   "request": {
-    "schema": "blun.localization-quality-evidence-request.v7",
+    "schema": "blun.localization-quality-evidence-request.v8",
     "request_id": "<same request ID>",
     "source_locale": "en-IE",
     "target_locale": "fi-FI",
@@ -65,7 +66,7 @@ It sends one canonical UTF-8 JSON document:
 ```
 
 The abbreviated example omits other required inner fields for readability.
-Production requests always contain exactly the full v6 field set. Commercial
+Production requests always contain exactly the full v8 field set. Commercial
 requests include `commercial_profile`, the matching `commercial_review`
 summary, and `quality_profile.commercial` with the same profile identifier plus
 its exact locale-specific version and SHA-256 digest. An unresolved commercial
@@ -78,6 +79,16 @@ Source and
 target text are intentionally present because this external step verifies the
 existing source-blind native review and the separate source-aware fidelity
 review. The service must preserve their confidentiality.
+
+The suffix of `request_id` is the SHA-256 of canonical UTF-8 JSON containing
+exactly `schema`, `evidence_revision`, `event_id`, `plan_id`, `job_id`,
+`result_sha256`, both text hashes, both locales, `content_type`, glossary and
+policy versions, provider/model identity, software version, both confidence
+decisions, the complete locale quality profile, commercial profile and review,
+the conditional commercial resolution-contract hash, and both escalation
+flags. The full texts and `request_id` itself are excluded from that identity;
+their exact bytes are already bound by `source_sha256` and `target_sha256`.
+The durable store and HTTP adapter independently recompute this same identity.
 
 The adapter adds:
 

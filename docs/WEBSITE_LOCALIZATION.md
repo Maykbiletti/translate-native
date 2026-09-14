@@ -1100,13 +1100,16 @@ source and target, plus their hashes, the CMS event, plan and job identities,
 source and target locales, content type, glossary and policy versions,
 provider/model identity, software version, and a host-chosen
 `evidence_revision`. Its deterministic `request_id` binds all non-text fields
-and the exact validated queue-result hash. The adapter may call an independent
+and the exact validated queue-result hash; both text hashes bind the complete
+source and target bytes. The durable store and HTTPS adapter independently
+recompute the ID from the same closed v8 identity field set before persistence
+or network access. The adapter may call an independent
 model, a qualified native reviewer, or a host-owned review service; no
 provider transport or credential is built into the coordinator.
 
 For deployments that need a concrete network boundary,
 `integrations/website_localization_evidence_http.py` implements that interface
-as one request-bound HTTPS attempt. It validates the exact v4 evidence request,
+as one request-bound HTTPS attempt. It validates the exact v8 evidence request,
 canonicalizes native Unicode without ASCII folding, binds the inner digest and
 deterministic evidence ID in both headers and body, disables redirects, and
 strictly validates the response envelope before the coordinator verifies its

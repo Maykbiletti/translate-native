@@ -19,13 +19,14 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 SCHEMA = "blun.website-localization-release-coordinator.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v7"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v8"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 EVIDENCE_STATE_SCHEMA = "blun.localization-quality-evidence-state.v1"
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
 MAX_RECEIPT_LENGTH = 16_384
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 3_600
@@ -35,6 +36,15 @@ _EVIDENCE_COLUMNS = (
     "evidence_revision", "status", "attempts", "max_attempts",
     "next_attempt_at", "lease_owner", "lease_token", "lease_expires_at",
     "last_error_code", "created_at", "updated_at",
+)
+EVIDENCE_REQUEST_IDENTITY_FIELDS = (
+    "schema", "evidence_revision", "event_id", "plan_id", "job_id",
+    "result_sha256", "source_sha256", "target_sha256", "source_locale",
+    "target_locale", "content_type", "glossary_version", "policy_version",
+    "provider", "software_version", "review_confidence", "quality_profile",
+    "commercial_profile", "commercial_review",
+    "commercial_review_resolution_contract_sha256", "human_review_required",
+    "independent_review_required",
 )
 
 
@@ -214,6 +224,47 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _request_id_for_payload(payload: dict[str, Any]) -> str:
+    identity = {
+        field: payload[field]
+        for field in EVIDENCE_REQUEST_IDENTITY_FIELDS
+    }
+    return "blun-l10n-evidence-" + _hash(_canonical_json(identity))
+
+
+def _validated_request_payload(request: Any) -> dict[str, Any]:
+    if not isinstance(request, QualityEvidenceRequest):
+        raise LocalizationReleaseCoordinatorBlocked("evidence.request.invalid")
+    try:
+        payload = request.as_payload()
+    except Exception:
+        raise LocalizationReleaseCoordinatorBlocked("evidence.request.invalid") from None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != set(EVIDENCE_REQUEST_IDENTITY_FIELDS) | {
+            "request_id", "source_text", "target_text",
+        }
+        or payload.get("schema") != EVIDENCE_REQUEST_SCHEMA
+        or payload.get("request_id") != request.request_id
+        or not isinstance(request.request_id, str)
+        or REQUEST_ID.fullmatch(request.request_id) is None
+        or not isinstance(payload.get("source_text"), str)
+        or not isinstance(payload.get("target_text"), str)
+        or not isinstance(payload.get("source_sha256"), str)
+        or not isinstance(payload.get("target_sha256"), str)
+        or SHA256.fullmatch(payload["source_sha256"]) is None
+        or SHA256.fullmatch(payload["target_sha256"]) is None
+        or _hash(payload["source_text"]) != payload["source_sha256"]
+        or _hash(payload["target_text"]) != payload["target_sha256"]
+    ):
+        raise LocalizationReleaseCoordinatorBlocked("evidence.request.invalid")
+    if request.request_id != _request_id_for_payload(payload):
+        raise LocalizationReleaseCoordinatorBlocked(
+            "evidence.request_id.binding_mismatch",
+        )
+    return payload
+
+
 def _token(value: Any, code: str) -> str:
     if not isinstance(value, str) or TOKEN.fullmatch(value) is None:
         raise LocalizationReleaseCoordinatorBlocked(code)
@@ -310,15 +361,17 @@ class QualityEvidenceStateStore:
 
     @staticmethod
     def _binding(request: QualityEvidenceRequest) -> tuple[str, ...]:
-        if not isinstance(request, QualityEvidenceRequest):
-            raise LocalizationReleaseCoordinatorBlocked("evidence.request.invalid")
+        payload = _validated_request_payload(request)
         values = (
-            _token(request.request_id, "evidence.request_id.invalid"),
-            _token(request.event_id, "coordinator.event_id.invalid"),
-            _token(request.plan_id, "evidence.plan_id.invalid"),
-            _token(request.job_id, "evidence.job_id.invalid"),
-            request.result_sha256,
-            _token(request.evidence_revision, "coordinator.evidence_revision.invalid"),
+            payload["request_id"],
+            _token(payload["event_id"], "coordinator.event_id.invalid"),
+            _token(payload["plan_id"], "evidence.plan_id.invalid"),
+            _token(payload["job_id"], "evidence.job_id.invalid"),
+            payload["result_sha256"],
+            _token(
+                payload["evidence_revision"],
+                "coordinator.evidence_revision.invalid",
+            ),
         )
         if not isinstance(values[4], str) or SHA256.fullmatch(values[4]) is None:
             raise LocalizationReleaseCoordinatorBlocked("evidence.result_sha256.invalid")
@@ -693,7 +746,7 @@ def _request(
         "human_review_required": result["human_review_required"],
         "independent_review_required": result["independent_review_required"],
     }
-    request_id = "blun-l10n-evidence-" + _hash(_canonical_json(binding))
+    request_id = _request_id_for_payload(binding)
     return QualityEvidenceRequest(
         **binding,
         request_id=request_id,
@@ -706,6 +759,7 @@ def _obtain_evidence(
     provider: Any,
     request: QualityEvidenceRequest,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
+    _validated_request_payload(request)
     obtain = getattr(provider, "obtain", None)
     if not callable(obtain):
         raise LocalizationReleaseCoordinatorBlocked("evidence.provider.invalid")
