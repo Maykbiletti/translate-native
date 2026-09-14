@@ -1657,7 +1657,7 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v5` profile plus one exact
+versioned `translate-native.commercial.v6` profile plus one exact
 `translate-native.commercial-locale-quality-profile.v2` object to the job
 payload, job ID and plan ID; the existing seven types retain their previous
 payloads and IDs. It is available for every planner locale, including `mt-MT`

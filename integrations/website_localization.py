@@ -42,7 +42,7 @@ CONTENT_TYPES = frozenset({
     "commercial",
 })
 QUALITY_PASSES = ("target_native", "source_fidelity")
-COMMERCIAL_PROFILE = "translate-native.commercial.v5"
+COMMERCIAL_PROFILE = "translate-native.commercial.v6"
 
 
 class LocalizationPlanBlocked(ValueError):

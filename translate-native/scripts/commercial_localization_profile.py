@@ -9,21 +9,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v5"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v6"
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-summary-capabilities.v2"
+    "translate-native.commercial-review-summary-capabilities.v3"
 )
 REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
-EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v1"
+EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v2"
 COMMERCIAL_LOCALE_PROFILE_SCHEMA = (
     "translate-native.commercial-locale-quality-profile.v2"
 )
 COMMERCIAL_RENDERING_REFERENCE_SCHEMA = (
     "translate-native.commercial-rendering-reference.v1"
 )
+TARGET_LOCALE = re.compile(
+    r"^[a-z]{2,3}(?:-[A-Z][a-z]{3})?-[A-Z]{2}$"
+)
+PROFILE_VERSION = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 
 DIMENSIONS = {
     "amount_currency": "Amounts, currency identity, units and price-to-product association; no conversion or rounding.",
@@ -49,11 +54,27 @@ def _text_sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def evidence_sha256(value: Any, source: str, target: str, profile: str) -> str:
-    """Bind complete evidence to exact UTF-8 texts and the commercial profile."""
+def evidence_sha256(
+    value: Any,
+    source: str,
+    target: str,
+    profile: str,
+    *,
+    target_locale: str,
+    commercial_quality_profile_version: str,
+    commercial_quality_profile_sha256: str,
+) -> str:
+    """Bind evidence to exact texts, locale, and commercial quality generation."""
     binding = {
         "schema": EVIDENCE_BINDING_SCHEMA,
         "profile": profile,
+        "target_locale": target_locale,
+        "commercial_quality_profile_version": (
+            commercial_quality_profile_version
+        ),
+        "commercial_quality_profile_sha256": (
+            commercial_quality_profile_sha256
+        ),
         "source_sha256": _text_sha256(source),
         "target_sha256": _text_sha256(target),
         "evidence": value,
@@ -88,12 +109,16 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
             "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace",
             "binding_schema": EVIDENCE_BINDING_SCHEMA,
             "binding_fields": [
-                "schema", "profile", "source_sha256", "target_sha256",
-                "evidence",
+                "schema", "profile", "target_locale",
+                "commercial_quality_profile_version",
+                "commercial_quality_profile_sha256", "source_sha256",
+                "target_sha256", "evidence",
             ],
             "text_hashing": "exact-utf-8",
             "covers": [
                 "commercial-profile",
+                "exact-target-locale",
+                "commercial-quality-profile-generation",
                 "exact-source-sha256",
                 "exact-target-sha256",
                 "complete-commercial-review-evidence",
@@ -253,6 +278,9 @@ def validate_review(
     target: str,
     schema: str,
     *,
+    target_locale: str,
+    commercial_quality_profile_version: str,
+    commercial_quality_profile_sha256: str,
     allow_uncertain: bool = False,
 ) -> dict[str, Any]:
     """Validate evidence and return a content-free, hash-bound routing summary."""
@@ -268,6 +296,19 @@ def validate_review(
         ):
             invalid()
 
+    if (
+        not isinstance(target_locale, str)
+        or TARGET_LOCALE.fullmatch(target_locale) is None
+        or not isinstance(commercial_quality_profile_version, str)
+        or PROFILE_VERSION.fullmatch(commercial_quality_profile_version) is None
+        or not isinstance(commercial_quality_profile_sha256, str)
+        or len(commercial_quality_profile_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in commercial_quality_profile_sha256
+        )
+    ):
+        invalid()
     if not isinstance(value, dict) or set(value) != {"schema", "coverage", "checks"}:
         invalid()
     if value["schema"] != schema or value["coverage"] not in ("complete", "uncertain"):
@@ -350,7 +391,19 @@ def validate_review(
         "review_required_dimensions": [
             name for name in DIMENSIONS if name in uncertain_dimensions
         ],
-        "evidence_sha256": evidence_sha256(value, source, target, schema),
+        "evidence_sha256": evidence_sha256(
+            value,
+            source,
+            target,
+            schema,
+            target_locale=target_locale,
+            commercial_quality_profile_version=(
+                commercial_quality_profile_version
+            ),
+            commercial_quality_profile_sha256=(
+                commercial_quality_profile_sha256
+            ),
+        ),
     }
     if uncertain_dimensions and not allow_uncertain:
         raise CommercialReviewBlocked("review.commercial.independent_review_required")

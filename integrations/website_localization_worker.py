@@ -596,7 +596,15 @@ def run_localization_job(
         try:
             commercial_summary = _COMMERCIAL.validate_review(
                 commercial_review, job["source"]["text"], candidate,
-                job["commercial_profile"], allow_uncertain=True,
+                job["commercial_profile"],
+                target_locale=locale,
+                commercial_quality_profile_version=(
+                    job["commercial_quality_profile"]["version"]
+                ),
+                commercial_quality_profile_sha256=(
+                    job["commercial_quality_profile"]["sha256"]
+                ),
+                allow_uncertain=True,
             )
         except _COMMERCIAL.CommercialReviewBlocked as error:
             raise LocalizationWorkerBlocked(error.code, retryable=False) from None

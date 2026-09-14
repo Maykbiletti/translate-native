@@ -1366,7 +1366,7 @@ an unresolved generation mismatch cannot be reported as accepted.
 The v11 capability generation and v10 OpenAPI document add
 `GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
 separate body-free operator scope. It returns the exact public
-`translate-native.commercial.v5` profile, its ten ordered preservation and
+`translate-native.commercial.v6` profile, its ten ordered preservation and
 review dimensions, and the complete 24-locale rendering registry. The payload
 contains only policy, version, authority, locale, Unicode rendering, and hash
 data; project prices, brands, products, credentials, source text, and target
@@ -2004,10 +2004,11 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v5` object. Its nested and separately
+`translate-native.commercial-capabilities.v6` object. Its nested and separately
 hashed `review_summary_contract` defines the exact content-free result schema,
 field set, verified/review-required state invariant, ten allowed ordered
-review dimensions, exact source/target/profile/evidence hash semantics, and
+review dimensions, exact source/target/profile/locale-quality/evidence hash
+semantics, and
 excluded sensitive content. A CMS or independent-review adapter can validate
 targeted commercial
 escalation without receiving project prices, brands, source/target text, spans,
@@ -2062,7 +2063,7 @@ receipts, qualified-human identities and reviewer prose are never published.
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": {
-      "profile": "translate-native.commercial.v5",
+      "profile": "translate-native.commercial.v6",
       "locale_quality_profile": {
         "schema": "translate-native.commercial-locale-quality-profile.v2",
         "required": true,
@@ -2074,20 +2075,20 @@ receipts, qualified-human identities and reviewer prose are never published.
       },
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
-        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v1", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-source-sha256", "exact-target-sha256", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
-        "profile": "translate-native.commercial.v5",
+        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "target_locale", "commercial_quality_profile_version", "commercial_quality_profile_sha256", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v2", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-target-locale", "commercial-quality-profile-generation", "exact-source-sha256", "exact-target-sha256", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
+        "profile": "translate-native.commercial.v6",
         "required_fields": ["schema", "profile", "status", "review_required_dimensions", "evidence_sha256"],
         "result_schema": "translate-native.commercial-review-summary.v2",
         "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
-        "schema": "translate-native.commercial-review-summary-capabilities.v2",
+        "schema": "translate-native.commercial-review-summary-capabilities.v3",
         "sha256": "<sha256>",
         "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
       },
-      "schema": "translate-native.commercial-capabilities.v5",
+      "schema": "translate-native.commercial-capabilities.v6",
       "sha256": "<sha256>"
     },
     "commercial_rendering_registry": {
-      "commercial_profile": "translate-native.commercial.v5",
+      "commercial_profile": "translate-native.commercial.v6",
       "content_policy": {"credentials": false, "project_brands": false, "project_prices": false, "source_text": false, "target_text": false},
       "locales": [{
         "commercial_quality_profile": {"sha256": "<sha256>", "version": "commercial-eu-mt-MT-2026-09-2"},

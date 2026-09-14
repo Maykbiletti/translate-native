@@ -603,12 +603,16 @@ class WebsiteLocalizationCMSBridge:
                     ),
                     "binding_schema": _COMMERCIAL.EVIDENCE_BINDING_SCHEMA,
                     "binding_fields": [
-                        "schema", "profile", "source_sha256", "target_sha256",
-                        "evidence",
+                        "schema", "profile", "target_locale",
+                        "commercial_quality_profile_version",
+                        "commercial_quality_profile_sha256", "source_sha256",
+                        "target_sha256", "evidence",
                     ],
                     "text_hashing": "exact-utf-8",
                     "covers": [
                         "commercial-profile",
+                        "exact-target-locale",
+                        "commercial-quality-profile-generation",
                         "exact-source-sha256",
                         "exact-target-sha256",
                         "complete-commercial-review-evidence",

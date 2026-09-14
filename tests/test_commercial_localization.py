@@ -17,6 +17,29 @@ SOURCE = "Save up to €480 a year. All prices exclude VAT."
 TARGET = "Spara upp till 480 € per år. Alla priser är exklusive moms."
 
 
+def review_binding(locale="sv-SE"):
+    profile = PLANNER.commercial_quality_profile_for(locale)
+    return {
+        "target_locale": locale,
+        "commercial_quality_profile_version": profile["version"],
+        "commercial_quality_profile_sha256": profile["sha256"],
+    }
+
+
+def validate_commercial(
+    report, source, target, schema=SCHEMA, *, locale="sv-SE",
+    allow_uncertain=False,
+):
+    return PROFILE.validate_review(
+        report,
+        source,
+        target,
+        schema,
+        **review_binding(locale),
+        allow_uncertain=allow_uncertain,
+    )
+
+
 def evidence_item(source, target, *, offer="offer-1", relation="matched"):
     return {
         "offer": offer,
@@ -72,12 +95,16 @@ class CommercialLocalizationTests(unittest.TestCase):
                 ),
                 "binding_schema": PROFILE.EVIDENCE_BINDING_SCHEMA,
                 "binding_fields": [
-                    "schema", "profile", "source_sha256", "target_sha256",
-                    "evidence",
+                    "schema", "profile", "target_locale",
+                    "commercial_quality_profile_version",
+                    "commercial_quality_profile_sha256", "source_sha256",
+                    "target_sha256", "evidence",
                 ],
                 "text_hashing": "exact-utf-8",
                 "covers": [
                     "commercial-profile",
+                    "exact-target-locale",
+                    "commercial-quality-profile-generation",
                     "exact-source-sha256",
                     "exact-target-sha256",
                     "complete-commercial-review-evidence",
@@ -161,7 +188,9 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(summary["review_required_dimensions"], [])
         self.assertEqual(
             summary["evidence_sha256"],
-            PROFILE.evidence_sha256(evidence(), SOURCE, TARGET, SCHEMA),
+            PROFILE.evidence_sha256(
+                evidence(), SOURCE, TARGET, SCHEMA, **review_binding(),
+            ),
         )
         summary_without_digest = dict(summary)
         summary_without_digest.pop("evidence_sha256")
@@ -176,30 +205,73 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_review_digest_binds_exact_source_target_profile_and_evidence(self):
         report = evidence()
-        baseline = PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+        baseline = validate_commercial(report, SOURCE, TARGET, SCHEMA)
         digests = {
             baseline["evidence_sha256"],
-            PROFILE.validate_review(
+            validate_commercial(
                 report, SOURCE + " ", TARGET, SCHEMA,
             )["evidence_sha256"],
-            PROFILE.validate_review(
+            validate_commercial(
                 report, SOURCE, TARGET + " ", SCHEMA,
             )["evidence_sha256"],
         }
         changed_profile = SCHEMA + ".next"
         changed_report = copy.deepcopy(report)
         changed_report["schema"] = changed_profile
-        digests.add(PROFILE.validate_review(
+        digests.add(validate_commercial(
             changed_report, SOURCE, TARGET, changed_profile,
         )["evidence_sha256"])
         changed_evidence = copy.deepcopy(report)
         changed_evidence["checks"]["amount_currency"]["items"][0][
             "explanation"
         ] += " Exact semantic interpretation changed."
-        digests.add(PROFILE.validate_review(
+        digests.add(validate_commercial(
             changed_evidence, SOURCE, TARGET, SCHEMA,
         )["evidence_sha256"])
-        self.assertEqual(len(digests), 5)
+        digests.add(validate_commercial(
+            report, SOURCE, TARGET, SCHEMA, locale="fi-FI",
+        )["evidence_sha256"])
+        binding = review_binding()
+        digests.add(PROFILE.validate_review(
+            report,
+            SOURCE,
+            TARGET,
+            SCHEMA,
+            **{
+                **binding,
+                "commercial_quality_profile_version": (
+                    binding["commercial_quality_profile_version"] + ".next"
+                ),
+            },
+        )["evidence_sha256"])
+        digests.add(PROFILE.validate_review(
+            report,
+            SOURCE,
+            TARGET,
+            SCHEMA,
+            **{
+                **binding,
+                "commercial_quality_profile_sha256": "0" * 64,
+            },
+        )["evidence_sha256"])
+        self.assertEqual(len(digests), 8)
+
+    def test_review_rejects_missing_or_malformed_locale_profile_binding(self):
+        binding = review_binding()
+        mutations = (
+            {**binding, "target_locale": "all"},
+            {**binding, "target_locale": "sv_SE"},
+            {**binding, "commercial_quality_profile_version": " stale "},
+            {**binding, "commercial_quality_profile_sha256": "G" * 64},
+        )
+        for changed in mutations:
+            with self.subTest(binding=changed), self.assertRaises(
+                PROFILE.CommercialReviewBlocked,
+            ) as error:
+                PROFILE.validate_review(
+                    evidence(), SOURCE, TARGET, SCHEMA, **changed,
+                )
+            self.assertEqual(error.exception.code, "review.commercial.invalid")
 
     def test_all_eu_locales_receive_profile_without_source_language_translation(self):
         plan = PLANNER.plan_website_localization(
@@ -241,7 +313,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v6"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v7"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -358,7 +430,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             }],
         }
         with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
-            PROFILE.validate_review(addition, source, target, SCHEMA)
+            validate_commercial(addition, source, target, SCHEMA)
         self.assertEqual(error.exception.code, "review.commercial.changed")
 
         omission = evidence(source, target)
@@ -374,7 +446,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             }],
         }
         with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
-            PROFILE.validate_review(omission, source, target, SCHEMA)
+            validate_commercial(omission, source, target, SCHEMA)
         self.assertEqual(
             error.exception.code, "review.commercial.independent_review_required",
         )
@@ -394,7 +466,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             with self.subTest(item=item), self.assertRaises(
                 PROFILE.CommercialReviewBlocked,
             ) as error:
-                PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+                validate_commercial(report, SOURCE, TARGET, SCHEMA)
             self.assertEqual(error.exception.code, "review.commercial.invalid")
 
         for status in ("changed", "uncertain"):
@@ -403,7 +475,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises(
                 PROFILE.CommercialReviewBlocked,
             ) as error:
-                PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+                validate_commercial(report, SOURCE, TARGET, SCHEMA)
             self.assertEqual(error.exception.code, "review.commercial.invalid")
 
         report = evidence()
@@ -412,7 +484,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             "items": [evidence_item(SOURCE, TARGET, relation="source_only")],
         }
         with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
-            PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+            validate_commercial(report, SOURCE, TARGET, SCHEMA)
         self.assertEqual(error.exception.code, "review.commercial.invalid")
 
     def test_conditions_require_reviewed_offer_association(self):
@@ -434,7 +506,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             ("1,234.50 €", "1.234,50 €"), ("€480", "480\u00a0€"),
         ):
             with self.subTest(target=target):
-                PROFILE.validate_review(evidence(source, target), source, target, SCHEMA)
+                validate_commercial(evidence(source, target), source, target, SCHEMA)
 
     def test_ambiguous_decimal_and_swapped_offer_prices_require_review(self):
         for source, target, dimension in (
@@ -444,7 +516,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             report = evidence(source, target)
             report["checks"][dimension]["status"] = "uncertain"
             with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
-                PROFILE.validate_review(report, source, target, SCHEMA)
+                validate_commercial(report, source, target, SCHEMA)
             self.assertEqual(error.exception.code, "review.commercial.independent_review_required")
 
     def test_plain_pass_and_major_defect_cannot_bypass_commercial_contract(self):
@@ -581,7 +653,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             source_offset += len(src) + 1
             target_offset += len(tgt) + 1
         report["checks"]["offer_assignment"]["items"] = items
-        PROFILE.validate_review(report, source, target, SCHEMA)
+        validate_commercial(report, source, target, SCHEMA)
 
 
 if __name__ == "__main__":

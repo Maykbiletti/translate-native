@@ -65,7 +65,10 @@ needed for this local check. Run from the skill directory:
 
 ```bash
 python3 scripts/check_commercial_review.py --contract
-python3 scripts/check_commercial_review.py --source source.txt --target target.txt --review review.json
+python3 scripts/check_commercial_review.py --source source.txt --target target.txt --review review.json \
+  --target-locale sv-SE \
+  --commercial-quality-profile-version commercial-eu-sv-SE-2026-09-2 \
+  --commercial-quality-profile-sha256 "${COMMERCIAL_QUALITY_PROFILE_SHA256}"
 ```
 
 The contract is a description, not a completed review. First perform the
@@ -104,7 +107,7 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v5` and the exact target-locale
+The planner binds `translate-native.commercial.v6` and the exact target-locale
 commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
@@ -115,7 +118,8 @@ receiving project prices, product lists, protected terms or deployment secrets.
 Its separately hashed `review_summary_contract` also declares the exact five
 summary fields, both valid statuses, the only permitted ordered dimension
 names, and the evidence-hash canonicalization. The digest input is a versioned
-binding containing the profile, exact UTF-8 source and target hashes, and the
+binding containing the profile, target locale, commercial locale-quality
+profile version and digest, exact UTF-8 source and target hashes, and the
 complete evidence. The summary still explicitly excludes source text, target
 text, spans, reviewer prose, project prices and project brands.
 Adapters therefore do not need to infer the targeted-review envelope from a

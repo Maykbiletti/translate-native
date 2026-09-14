@@ -9,7 +9,9 @@ import sys
 import tempfile
 import unittest
 
-from test_commercial_localization import PROFILE, SCHEMA, SOURCE, TARGET, evidence
+from test_commercial_localization import (
+    PROFILE, SCHEMA, SOURCE, TARGET, evidence, review_binding,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +34,10 @@ class PortableCommercialReviewTests(unittest.TestCase):
             evidence(source, target) if report is None else report, ensure_ascii=False,
         )
         (self.root / "review.json").write_bytes(raw.encode("utf-8"))
-        process = self.command("--source", "source.txt", "--target", "target.txt", "--review", "review.json")
+        process = self.bound_command(
+            "--source", "source.txt", "--target", "target.txt",
+            "--review", "review.json",
+        )
         result = json.loads(process.stdout)
         self.assertFalse(result["release_allowed"])
         self.assertNotIn("release_token", result)
@@ -42,6 +47,17 @@ class PortableCommercialReviewTests(unittest.TestCase):
     def command(self, *args):
         return subprocess.run([sys.executable, "check_commercial_review.py", *args], cwd=self.root,
                               capture_output=True, text=True, timeout=10)
+
+    def bound_command(self, *args):
+        binding = review_binding()
+        return self.command(
+            *args,
+            "--target-locale", binding["target_locale"],
+            "--commercial-quality-profile-version",
+            binding["commercial_quality_profile_version"],
+            "--commercial-quality-profile-sha256",
+            binding["commercial_quality_profile_sha256"],
+        )
 
     def test_skill_only_cli_exposes_current_contract_without_claiming_approval(self):
         process = self.command("--contract")
@@ -56,6 +72,14 @@ class PortableCommercialReviewTests(unittest.TestCase):
         code, payload = self.run_cli()
         self.assertEqual(code, 0)
         self.assertEqual(payload["status"], "EVIDENCE_VALID")
+        for name, value in review_binding().items():
+            self.assertEqual(payload[name], value)
+        self.assertEqual(
+            payload["evidence_sha256"],
+            PROFILE.validate_review(
+                evidence(), SOURCE, TARGET, SCHEMA, **review_binding(),
+            )["evidence_sha256"],
+        )
         for name in ("source", "target", "review"):
             suffix = "json" if name == "review" else "txt"
             self.assertEqual(payload[name + "_sha256"], hashlib.sha256(
@@ -68,7 +92,9 @@ class PortableCommercialReviewTests(unittest.TestCase):
                 report["checks"][dimension]["status"] = status
                 with self.subTest(dimension=dimension, status=status):
                     with self.assertRaises(PROFILE.CommercialReviewBlocked) as blocked:
-                        PROFILE.validate_review(report, SOURCE, TARGET, SCHEMA)
+                        PROFILE.validate_review(
+                            report, SOURCE, TARGET, SCHEMA, **review_binding(),
+                        )
                     code, payload = self.run_cli(report=report)
                     self.assertEqual(code, 1)
                     self.assertEqual(payload["reason"], blocked.exception.code)
@@ -110,16 +136,53 @@ class PortableCommercialReviewTests(unittest.TestCase):
         self.run_cli()
         for raw in (b"\xff", b"\xef\xbb\xbftext"):
             (self.root / "source.txt").write_bytes(raw)
-            process = self.command("--source", "source.txt", "--target", "target.txt", "--review", "review.json")
+            process = self.bound_command(
+                "--source", "source.txt", "--target", "target.txt",
+                "--review", "review.json",
+            )
             self.assertEqual(process.returncode, 1)
             self.assertEqual(json.loads(process.stdout)["reason"], "review.commercial.input_invalid")
-        process = self.command("--source", "private-missing.txt", "--target", "target.txt", "--review", "review.json")
+        process = self.bound_command(
+            "--source", "private-missing.txt", "--target", "target.txt",
+            "--review", "review.json",
+        )
         self.assertEqual(process.returncode, 1)
         self.assertNotIn("private-missing", process.stdout + process.stderr)
 
     def test_incomplete_arguments_cannot_return_success(self):
         for args in ((), ("--source", "source.txt"), ("--contract", "--source", "source.txt")):
             self.assertEqual(self.command(*args).returncode, 2)
+
+    def test_locale_profile_binding_is_required_and_validated(self):
+        self.run_cli()
+        base = (
+            "--source", "source.txt", "--target", "target.txt",
+            "--review", "review.json",
+        )
+        binding = review_binding()
+        for args in (
+            (*base, "--target-locale", "sv-SE"),
+            (
+                *base, "--target-locale", "all",
+                "--commercial-quality-profile-version",
+                binding["commercial_quality_profile_version"],
+                "--commercial-quality-profile-sha256",
+                binding["commercial_quality_profile_sha256"],
+            ),
+            (
+                *base, "--target-locale", binding["target_locale"],
+                "--commercial-quality-profile-version", "stale profile",
+                "--commercial-quality-profile-sha256", "G" * 64,
+            ),
+        ):
+            with self.subTest(args=args):
+                process = self.command(*args)
+                self.assertNotEqual(process.returncode, 0)
+                if process.returncode == 1:
+                    self.assertEqual(
+                        json.loads(process.stdout)["reason"],
+                        "review.commercial.invalid",
+                    )
 
     def test_compatibility_module_executes_the_bundled_implementation(self):
         self.assertEqual(Path(PROFILE.validate_review.__code__.co_filename).resolve(),

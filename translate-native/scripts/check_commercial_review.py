@@ -11,7 +11,7 @@ from pathlib import Path
 from commercial_localization_profile import CommercialReviewBlocked, review_contract, validate_review
 
 
-PROFILE = "translate-native.commercial.v5"
+PROFILE = "translate-native.commercial.v6"
 MAX_INPUT_BYTES = 2_000_000
 
 
@@ -46,21 +46,54 @@ def main(argv=None) -> int:
     parser.add_argument("--source", help="complete source text, UTF-8 without BOM")
     parser.add_argument("--target", help="complete target text, UTF-8 without BOM")
     parser.add_argument("--review", help="source-aware review JSON, UTF-8 without BOM")
+    parser.add_argument("--target-locale", help="exact BCP-47 target locale")
+    parser.add_argument(
+        "--commercial-quality-profile-version",
+        help="exact target-locale commercial quality-profile version",
+    )
+    parser.add_argument(
+        "--commercial-quality-profile-sha256",
+        help="exact target-locale commercial quality-profile SHA-256",
+    )
     args = parser.parse_args(argv)
     if args.contract:
-        if any((args.source, args.target, args.review)):
+        if any((
+            args.source, args.target, args.review, args.target_locale,
+            args.commercial_quality_profile_version,
+            args.commercial_quality_profile_sha256,
+        )):
             parser.error("--contract cannot be combined with input files")
         print(json.dumps({"status": "CONTRACT", "release_allowed": False,
                           "commercial_review": review_contract(PROFILE)}, ensure_ascii=False))
         return 0
-    if not all((args.source, args.target, args.review)):
-        parser.error("--source, --target and --review are required")
-    result = {"schema": "translate-native.commercial-evidence-check.v1",
+    if not all((
+        args.source, args.target, args.review, args.target_locale,
+        args.commercial_quality_profile_version,
+        args.commercial_quality_profile_sha256,
+    )):
+        parser.error(
+            "--source, --target, --review, --target-locale, "
+            "--commercial-quality-profile-version and "
+            "--commercial-quality-profile-sha256 are required"
+        )
+    result = {"schema": "translate-native.commercial-evidence-check.v2",
               "profile": PROFILE, "release_allowed": False}
     try:
         source, target, raw_review = (_read(path) for path in (args.source, args.target, args.review))
         review = json.loads(raw_review, object_pairs_hook=_object, parse_constant=_constant)
-        validate_review(review, source, target, PROFILE)
+        summary = validate_review(
+            review,
+            source,
+            target,
+            PROFILE,
+            target_locale=args.target_locale,
+            commercial_quality_profile_version=(
+                args.commercial_quality_profile_version
+            ),
+            commercial_quality_profile_sha256=(
+                args.commercial_quality_profile_sha256
+            ),
+        )
     except CommercialReviewBlocked as error:
         result.update(status="BLOCK", reason=error.code)
     except (OSError, ValueError, RecursionError):
@@ -68,6 +101,14 @@ def main(argv=None) -> int:
     else:
         result.update(
             status="EVIDENCE_VALID", reason="independent_quality_and_signed_release_required",
+            target_locale=args.target_locale,
+            commercial_quality_profile_version=(
+                args.commercial_quality_profile_version
+            ),
+            commercial_quality_profile_sha256=(
+                args.commercial_quality_profile_sha256
+            ),
+            evidence_sha256=summary["evidence_sha256"],
             source_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),
             target_sha256=hashlib.sha256(target.encode("utf-8")).hexdigest(),
             review_sha256=hashlib.sha256(raw_review.encode("utf-8")).hexdigest(),
