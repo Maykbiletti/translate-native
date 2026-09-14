@@ -90,6 +90,10 @@ def release_evidence(
             "review_required_dimensions": (
                 ["tax_status", "cancellation"] if review_required else []
             ),
+            "review_evidence_contract_sha256": (
+                CMS._RELEASE._WORKER._COMMERCIAL
+                .public_review_evidence_contract(profile)["sha256"]
+            ),
             "evidence_sha256": "5" * 64,
         }
         if review_required:

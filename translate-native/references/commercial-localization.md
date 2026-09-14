@@ -116,10 +116,11 @@ semantic dimensions, exact preservation rules, permitted locale-aware
 rendering, the evidence method and the fail-closed route for ambiguity. CMS
 integrations can therefore preflight the implemented offer contract without
 receiving project prices, product lists, protected terms or deployment secrets.
-Its separately hashed `review_summary_contract` also declares the exact five
+Its separately hashed `review_summary_contract` also declares the exact six
 summary fields, both valid statuses, the only permitted ordered dimension
-names, and the evidence-hash canonicalization. The digest input is a versioned
-binding containing the profile, target locale, commercial locale-quality
+names, the exact current review-evidence-contract SHA-256, and the evidence-hash
+canonicalization. The digest input is a versioned binding containing the
+profile, review-evidence-contract digest, target locale, commercial locale-quality
 profile version and digest, exact UTF-8 source and target hashes, and the
 complete evidence. The summary still explicitly excludes source text, target
 text, spans, reviewer prose, project prices and project brands.
@@ -177,12 +178,13 @@ model receipt bound to the commercial profile and policy. The worker does not
 secretly call an alternative provider.
 
 The worker retains a content-free `commercial_review` summary in result schema
-v5. It contains only the profile, verdict, ordered unresolved dimension names
+v6. It contains only the profile, verdict, exact review-evidence-contract
+SHA-256, ordered unresolved dimension names
 and a hash binding the profile, exact source and target hashes, and complete
 commercial evidence. Prices, text spans, interpretations and reviewer prose do
 not survive in the summary. The same
-summary is bound into quality-evidence request schema v5 and receipt-binding
-schema v2, so an independent adapter receives the exact targeted scope and
+summary is bound into quality-evidence request schema v9 and receipt-binding
+schema v6, so an independent adapter receives the exact targeted scope and
 cannot replace it with a generic approval. Tampered, unknown, reordered or
 contradictory dimensions block before network access or signing.
 

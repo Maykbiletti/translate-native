@@ -302,6 +302,11 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
             "profile": value["commercial_profile"],
             "status": "review_required",
             "review_required_dimensions": ["cancellation"],
+            "review_evidence_contract_sha256": (
+                HTTP._COMMERCIAL.public_review_evidence_contract(
+                    value["commercial_profile"],
+                )["sha256"]
+            ),
             "evidence_sha256": "d" * 64,
         }
         value["commercial_review_resolution_contract_sha256"] = (

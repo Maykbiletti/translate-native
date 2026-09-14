@@ -13,15 +13,15 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v10"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v11"
 REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-evidence-capabilities.v1"
 )
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-summary-capabilities.v4"
+    "translate-native.commercial-review-summary-capabilities.v5"
 )
-REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v3"
-EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v3"
+REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v4"
+EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v4"
 REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-resolution-capabilities.v3"
 )
@@ -72,9 +72,15 @@ def evidence_sha256(
     commercial_quality_profile_sha256: str,
 ) -> str:
     """Bind evidence to exact texts, locale, and commercial quality generation."""
+    review_evidence_contract_sha256 = public_review_evidence_contract(
+        profile,
+    )["sha256"]
     binding = {
         "schema": EVIDENCE_BINDING_SCHEMA,
         "profile": profile,
+        "review_evidence_contract_sha256": (
+            review_evidence_contract_sha256
+        ),
         "target_locale": target_locale,
         "commercial_quality_profile_version": (
             commercial_quality_profile_version
@@ -97,7 +103,7 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
         "profile": profile,
         "required_fields": [
             "schema", "profile", "status", "review_required_dimensions",
-            "evidence_sha256",
+            "review_evidence_contract_sha256", "evidence_sha256",
         ],
         "statuses": {
             "verified": {"review_required_dimensions": "empty"},
@@ -116,7 +122,8 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
             "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace",
             "binding_schema": EVIDENCE_BINDING_SCHEMA,
             "binding_fields": [
-                "schema", "profile", "target_locale",
+                "schema", "profile", "review_evidence_contract_sha256",
+                "target_locale",
                 "commercial_quality_profile_version",
                 "commercial_quality_profile_sha256", "source_sha256",
                 "target_sha256", "evidence",
@@ -124,6 +131,7 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
             "text_hashing": "exact-utf-8",
             "covers": [
                 "commercial-profile",
+                "exact-review-evidence-contract",
                 "exact-target-locale",
                 "commercial-quality-profile-generation",
                 "exact-source-sha256",
@@ -131,6 +139,11 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
                 "offer-registry-and-proposition-assignment",
                 "complete-commercial-review-evidence",
             ],
+        },
+        "review_evidence_contract_sha256": {
+            "algorithm": "sha-256",
+            "equals": public_review_evidence_contract(profile)["sha256"],
+            "purpose": "reject-stale-or-reinterpreted-private-evidence",
         },
         "content_policy": {
             "source_text": False,
@@ -711,6 +724,9 @@ def validate_review(
         "review_required_dimensions": [
             name for name in DIMENSIONS if name in uncertain_dimensions
         ],
+        "review_evidence_contract_sha256": (
+            public_review_evidence_contract(schema)["sha256"]
+        ),
         "evidence_sha256": evidence_sha256(
             value,
             source,
@@ -741,10 +757,12 @@ def validate_summary(
         not isinstance(value, dict)
         or set(value) != {
             "schema", "profile", "status", "review_required_dimensions",
-            "evidence_sha256",
+            "review_evidence_contract_sha256", "evidence_sha256",
         }
         or value["schema"] != REVIEW_SUMMARY_SCHEMA
         or value["profile"] != profile
+        or value["review_evidence_contract_sha256"]
+        != public_review_evidence_contract(profile)["sha256"]
         or value["status"] not in {"verified", "review_required"}
         or not isinstance(value["evidence_sha256"], str)
         or len(value["evidence_sha256"]) != 64

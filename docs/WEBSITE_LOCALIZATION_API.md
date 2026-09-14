@@ -2016,7 +2016,7 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v10` object. Its nested and separately
+`translate-native.commercial-capabilities.v11` object. Its nested and separately
 hashed `review_evidence_contract` defines the exact private report fields,
 coverage values, offer registry, Unicode code-point spans, item relations,
 ten-dimension order, limits, verdict invariants and structural-only trust
@@ -2025,8 +2025,8 @@ CMS backends and the portable checker can therefore consume one canonical
 shape rather than inferring it from examples or prompt prose. The sibling
 `review_summary_contract` defines the exact content-free result schema,
 field set, verified/review-required state invariant, ten allowed ordered
-review dimensions, exact source/target/profile/locale-quality/evidence hash
-semantics, and excluded sensitive content. A CMS or independent-review adapter
+review dimensions, exact review-evidence-contract/source/target/profile/
+locale-quality/evidence hash semantics, and excluded sensitive content. A CMS or independent-review adapter
 can validate targeted commercial escalation without receiving project prices,
 brands, source/target text, spans,
 or reviewer prose. The evidence contract now requires a canonical registry of
@@ -2084,7 +2084,7 @@ rehashed entry returns `503` without a partial registry. Consumers must still
 treat these values as display guidance and route uncertain semantic equality to
 the configured independent review path.
 
-For publication, `blun.website-localization-release-evidence.v7` carries the
+For publication, `blun.website-localization-release-evidence.v8` carries the
 canonical release-evidence-contract SHA-256, content-free
 `evidence_request_id` and `evidence_revision` plus the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
@@ -2162,12 +2162,13 @@ receipts, qualified-human identities and reviewer prose are never published.
       "review_evidence_schema": "translate-native.commercial.v9",
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
-        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "target_locale", "commercial_quality_profile_version", "commercial_quality_profile_sha256", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v3", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-target-locale", "commercial-quality-profile-generation", "exact-source-sha256", "exact-target-sha256", "offer-registry-and-proposition-assignment", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
+        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "review_evidence_contract_sha256", "target_locale", "commercial_quality_profile_version", "commercial_quality_profile_sha256", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v4", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-review-evidence-contract", "exact-target-locale", "commercial-quality-profile-generation", "exact-source-sha256", "exact-target-sha256", "offer-registry-and-proposition-assignment", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
         "profile": "translate-native.commercial.v9",
-        "required_fields": ["schema", "profile", "status", "review_required_dimensions", "evidence_sha256"],
-        "result_schema": "translate-native.commercial-review-summary.v3",
+        "required_fields": ["schema", "profile", "status", "review_required_dimensions", "review_evidence_contract_sha256", "evidence_sha256"],
+        "result_schema": "translate-native.commercial-review-summary.v4",
+        "review_evidence_contract_sha256": {"algorithm": "sha-256", "equals": "<review-evidence-contract-sha256>", "purpose": "reject-stale-or-reinterpreted-private-evidence"},
         "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
-        "schema": "translate-native.commercial-review-summary-capabilities.v4",
+        "schema": "translate-native.commercial-review-summary-capabilities.v5",
         "sha256": "<sha256>",
         "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
       },
@@ -2186,7 +2187,7 @@ receipts, qualified-human identities and reviewer prose are never published.
         "status": "resolved"
       },
       "review_resolution_schema": "translate-native.commercial-review-resolution.v3",
-      "schema": "translate-native.commercial-capabilities.v10",
+      "schema": "translate-native.commercial-capabilities.v11",
       "sha256": "<sha256>"
     },
     "commercial_rendering_registry": {
@@ -2260,6 +2261,7 @@ receipts, qualified-human identities and reviewer prose are never published.
           "content_type": "commercial",
           "non_commercial_fields": "all-null",
           "required_non_null": ["commercial_profile", "commercial_quality_profile", "commercial_review"],
+          "review_evidence_contract_sha256": "exact-current-public-commercial-evidence-contract",
           "resolution": "required-only-when-review-required"
         },
         "content_policy": {
@@ -2272,13 +2274,13 @@ receipts, qualified-human identities and reviewer prose are never published.
           "source_text": false,
           "target_text": false
         },
-        "release_evidence_schema": "blun.website-localization-release-evidence.v7",
+        "release_evidence_schema": "blun.website-localization-release-evidence.v8",
         "required_fields": ["schema", "release_evidence_contract_sha256", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_resolution"],
-        "schema": "blun.website-localization-release-evidence-capabilities.v1",
+        "schema": "blun.website-localization-release-evidence-capabilities.v2",
         "sha256": "<sha256>",
         "tamper_policy": "reject-complete-publication-before-host-commit"
       },
-      "release_evidence_schema": "blun.website-localization-release-evidence.v7",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v8",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v5",
       "sha256": "<sha256>"

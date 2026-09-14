@@ -155,6 +155,17 @@ class CommercialLocalizationTests(unittest.TestCase):
             value["review_required_dimensions"]["order"],
             list(PROFILE.DIMENSIONS),
         )
+        evidence_contract_sha256 = PROFILE.public_review_evidence_contract(
+            SCHEMA,
+        )["sha256"]
+        self.assertEqual(
+            value["review_evidence_contract_sha256"],
+            {
+                "algorithm": "sha-256",
+                "equals": evidence_contract_sha256,
+                "purpose": "reject-stale-or-reinterpreted-private-evidence",
+            },
+        )
         self.assertEqual(
             value["evidence_sha256"],
             {
@@ -164,7 +175,8 @@ class CommercialLocalizationTests(unittest.TestCase):
                 ),
                 "binding_schema": PROFILE.EVIDENCE_BINDING_SCHEMA,
                 "binding_fields": [
-                    "schema", "profile", "target_locale",
+                    "schema", "profile",
+                    "review_evidence_contract_sha256", "target_locale",
                     "commercial_quality_profile_version",
                     "commercial_quality_profile_sha256", "source_sha256",
                     "target_sha256", "evidence",
@@ -172,6 +184,7 @@ class CommercialLocalizationTests(unittest.TestCase):
                 "text_hashing": "exact-utf-8",
                 "covers": [
                     "commercial-profile",
+                    "exact-review-evidence-contract",
                     "exact-target-locale",
                     "commercial-quality-profile-generation",
                     "exact-source-sha256",
@@ -187,7 +200,10 @@ class CommercialLocalizationTests(unittest.TestCase):
             digest,
             PROFILE.hashlib.sha256(PROFILE._canonical_json(unsigned)).hexdigest(),
         )
-        serialized = json.dumps(value).lower()
+        content_only = dict(value)
+        content_only.pop("sha256")
+        content_only.pop("review_evidence_contract_sha256")
+        serialized = json.dumps(content_only).lower()
         for private_value in ("480", "vat", "blun", "offer-1"):
             self.assertNotIn(private_value, serialized)
 
@@ -249,6 +265,9 @@ class CommercialLocalizationTests(unittest.TestCase):
             "profile": SCHEMA,
             "status": "review_required",
             "review_required_dimensions": ["tax_status", "cancellation"],
+            "review_evidence_contract_sha256": (
+                PROFILE.public_review_evidence_contract(SCHEMA)["sha256"]
+            ),
             "evidence_sha256": "5" * 64,
         }
         contract_sha256 = PROFILE.public_review_resolution_contract(
@@ -394,6 +413,10 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(summary["status"], "verified")
         self.assertEqual(summary["review_required_dimensions"], [])
         self.assertEqual(
+            summary["review_evidence_contract_sha256"],
+            PROFILE.public_review_evidence_contract(SCHEMA)["sha256"],
+        )
+        self.assertEqual(
             summary["evidence_sha256"],
             PROFILE.evidence_sha256(
                 evidence(), SOURCE, TARGET, SCHEMA, **review_binding(),
@@ -409,6 +432,20 @@ class CommercialLocalizationTests(unittest.TestCase):
             "version": expected_commercial_quality["version"],
             "sha256": expected_commercial_quality["sha256"],
         })
+
+    def test_stale_review_evidence_contract_blocks_persisted_summary(self):
+        summary = validate_commercial(evidence(), SOURCE, TARGET, SCHEMA)
+        summary["review_evidence_contract_sha256"] = "0" * 64
+        with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
+            PROFILE.validate_summary(
+                summary,
+                SCHEMA,
+                review_required=False,
+            )
+        self.assertEqual(
+            error.exception.code,
+            "review.commercial.summary_invalid",
+        )
 
     def test_review_digest_binds_exact_source_target_profile_and_evidence(self):
         report = evidence()
@@ -921,7 +958,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             publication_evidence = approved.release_evidence
             self.assertEqual(
                 publication_evidence["schema"],
-                "blun.website-localization-release-evidence.v7",
+                RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
             )
             self.assertEqual(
                 publication_evidence["release_evidence_contract_sha256"],

@@ -1031,13 +1031,14 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v5` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v6` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
 confidence, locale quality profile, and, for commercial content, the exact
 nested locale-specific commercial profile plus its content-free targeted-review
-summary, the canonical advertised resolution-contract SHA-256 when targeted
+summary and exact advertised review-evidence-contract SHA-256, the canonical
+advertised resolution-contract SHA-256 when targeted
 review is unresolved, and the human/independent-review
 requirements. It also carries the canonical quality-evidence request ID and
 evidence revision that produced the opaque receipt. The verifier must cryptographically
@@ -1313,13 +1314,14 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v7` object. That content-free
+a `blun.website-localization-release-evidence.v8` object. That content-free
 object binds the exact machine-readable release-evidence-contract SHA-256,
 signed approval and worker-result hashes, quality-receipt
 hash, canonical evidence request ID and evidence revision, and either a null
 commercial scope or the exact commercial-profile ID,
 locale-specific commercial quality-profile version and digest, and validated
-review summary. If that summary requires targeted review, the object also binds
+review summary including its exact review-evidence-contract digest. If that
+summary requires targeted review, the object also binds
 the exact ordered dimensions, commercial profile, resolution-contract digest,
 resolution method, receipt hash, primary provider identity, and independent
 provider identity when a second model was used. The receiver proves the two
@@ -1777,12 +1779,13 @@ Do not classify legal text as commercial to bypass the legal human-review gate.
 The full commercial response hash stays in the normal quality-pass receipt;
 job IDs bind the profile version through queue, signed memory and publication.
 The content-free result summary uses
-`translate-native.commercial-review-summary.v3`; the authenticated capability
+`translate-native.commercial-review-summary.v4`; the authenticated capability
 response publishes its exact separately hashed machine contract, including the
 ordered allowed dimensions and the invariant between status and unresolved
 dimensions. Its evidence digest covers a versioned canonical binding of the
-commercial profile, exact UTF-8 source and target hashes, and complete review
-evidence. Quality-evidence request v5 and receipt-binding v2 carry that exact
+commercial profile, exact advertised review-evidence-contract SHA-256, exact
+UTF-8 source and target hashes, and complete review evidence. Quality-evidence
+request v9 and receipt-binding v6 carry that exact
 summary, so adapters can reject unknown, reordered, contradictory, or
 transplanted review scope without reconstructing it from prose.
 As before, the host must verify an independent quality receipt before signing.

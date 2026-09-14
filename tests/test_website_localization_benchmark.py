@@ -179,6 +179,11 @@ def candidate_result(payload, text=None):
                 "profile": payload["commercial_profile"],
                 "status": "verified",
                 "review_required_dimensions": [],
+                "review_evidence_contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_evidence_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
                 "evidence_sha256": "c" * 64,
             }
             if payload["content_type"] == "commercial" else None

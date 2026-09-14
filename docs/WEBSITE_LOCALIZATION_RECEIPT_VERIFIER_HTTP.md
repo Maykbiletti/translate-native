@@ -25,11 +25,12 @@ retry and its attempt limit.
 ## Request
 
 The adapter canonicalizes the complete
-`blun.localization-quality-receipt-binding.v5` object and validates its native
+`blun.localization-quality-receipt-binding.v6` object and validates its native
 Unicode text, hashes, locales, content type, glossary and policy versions,
 provider/model identities, software version, two-pass confidence, locale
 quality profile, exact locale-specific commercial profile when applicable,
-matching targeted-review summary, the canonical resolution-contract SHA-256
+matching targeted-review summary and its exact review-evidence-contract
+SHA-256, the canonical resolution-contract SHA-256
 for unresolved commercial review, escalation requirements, review purpose,
 canonical quality-evidence request ID, and evidence revision.
 It then sends HTTP POST with JSON content type and these
@@ -47,7 +48,7 @@ The body is exactly:
   "request_id": "blun-l10n-receipt-<sha256>",
   "binding_sha256": "<canonical binding hash>",
   "receipt_sha256": "<opaque receipt hash>",
-  "binding": {"schema": "blun.localization-quality-receipt-binding.v5"},
+  "binding": {"schema": "blun.localization-quality-receipt-binding.v6"},
   "receipt": "<opaque receipt>"
 }
 ```

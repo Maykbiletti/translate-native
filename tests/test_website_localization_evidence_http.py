@@ -321,6 +321,11 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             "profile": base["commercial_profile"],
             "status": "review_required",
             "review_required_dimensions": ["tax_status"],
+            "review_evidence_contract_sha256": (
+                HTTP._COMMERCIAL.public_review_evidence_contract(
+                    base["commercial_profile"],
+                )["sha256"]
+            ),
             "evidence_sha256": "d" * 64,
         }
         base["commercial_review_resolution_contract_sha256"] = (
@@ -363,6 +368,7 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             {"review_required_dimensions": ["private VAT 480"]},
             {"status": "verified"},
             {"schema": "wrong.schema"},
+            {"review_evidence_contract_sha256": "0" * 64},
             {"evidence_sha256": "not-a-digest"},
         ):
             payload = json.loads(json.dumps(base))

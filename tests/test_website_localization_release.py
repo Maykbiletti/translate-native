@@ -120,6 +120,11 @@ def completed_result(
                 "review_required_dimensions": (
                     commercial_review_required_dimensions or []
                 ),
+                "review_evidence_contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_evidence_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
                 "evidence_sha256": "c" * 64,
             }
             if payload["content_type"] == "commercial" else None
@@ -762,6 +767,21 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             ["review_required_dimensions"],
             dimensions,
         )
+        expected_evidence_contract_sha256 = (
+            WORKER._COMMERCIAL.public_review_evidence_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"]
+        )
+        self.assertEqual(
+            approved.release_evidence["commercial_review"]
+            ["review_evidence_contract_sha256"],
+            expected_evidence_contract_sha256,
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]["commercial_review"]
+            ["review_evidence_contract_sha256"],
+            expected_evidence_contract_sha256,
+        )
         expected_contract_sha256 = (
             WORKER._COMMERCIAL.public_review_resolution_contract(
                 PLANNER.COMMERCIAL_PROFILE,
@@ -791,6 +811,20 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                     plan, plan.jobs[0].job_id, self.authority, now=201,
                 )
         self.assertEqual(caught.exception.code, "approval.binding_mismatch")
+
+        with patch.dict(
+            RELEASE._WORKER._COMMERCIAL.validate_summary.__globals__,
+            {
+                "public_review_evidence_contract": (
+                    lambda _profile: {"sha256": "0" * 64}
+                ),
+            },
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                self.store.lookup(
+                    plan, plan.jobs[0].job_id, self.authority, now=201,
+                )
+        self.assertEqual(caught.exception.code, "result.commercial_review.invalid")
 
     def test_commercial_human_resolution_is_bound_without_identity_leak(self):
         plan = make_plan(

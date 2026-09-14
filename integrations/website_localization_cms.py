@@ -713,7 +713,8 @@ class WebsiteLocalizationCMSBridge:
                 set(review_summary_contract) != {
                     "schema", "result_schema", "profile", "required_fields",
                     "statuses", "review_required_dimensions", "evidence_sha256",
-                    "content_policy", "sha256",
+                    "review_evidence_contract_sha256", "content_policy",
+                    "sha256",
                 }
                 or review_summary_contract["schema"]
                 != _COMMERCIAL.REVIEW_SUMMARY_CAPABILITIES_SCHEMA
@@ -723,7 +724,7 @@ class WebsiteLocalizationCMSBridge:
                 != _PLANNER.COMMERCIAL_PROFILE
                 or review_summary_contract["required_fields"] != [
                     "schema", "profile", "status", "review_required_dimensions",
-                    "evidence_sha256",
+                    "review_evidence_contract_sha256", "evidence_sha256",
                 ]
                 or review_summary_contract["statuses"] != {
                     "verified": {"review_required_dimensions": "empty"},
@@ -744,7 +745,8 @@ class WebsiteLocalizationCMSBridge:
                     ),
                     "binding_schema": _COMMERCIAL.EVIDENCE_BINDING_SCHEMA,
                     "binding_fields": [
-                        "schema", "profile", "target_locale",
+                        "schema", "profile",
+                        "review_evidence_contract_sha256", "target_locale",
                         "commercial_quality_profile_version",
                         "commercial_quality_profile_sha256", "source_sha256",
                         "target_sha256", "evidence",
@@ -752,6 +754,7 @@ class WebsiteLocalizationCMSBridge:
                     "text_hashing": "exact-utf-8",
                     "covers": [
                         "commercial-profile",
+                        "exact-review-evidence-contract",
                         "exact-target-locale",
                         "commercial-quality-profile-generation",
                         "exact-source-sha256",
@@ -759,6 +762,15 @@ class WebsiteLocalizationCMSBridge:
                         "offer-registry-and-proposition-assignment",
                         "complete-commercial-review-evidence",
                     ],
+                }
+                or review_summary_contract[
+                    "review_evidence_contract_sha256"
+                ] != {
+                    "algorithm": "sha-256",
+                    "equals": review_evidence_contract["sha256"],
+                    "purpose": (
+                        "reject-stale-or-reinterpreted-private-evidence"
+                    ),
                 }
                 or review_summary_contract["content_policy"] != {
                     "source_text": False,

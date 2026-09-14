@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-receipt-verification-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-receipt-verification-http-response.v1"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v5"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v6"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_TEXT_BYTES = 2_000_000
@@ -32,7 +32,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 EVIDENCE_REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
-COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v3"
+COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v4"
 COMMERCIAL_DIMENSIONS = (
     "amount_currency", "discount_basis", "qualifiers", "tax_status",
     "billing_interval", "commitment", "renewal", "cancellation",
@@ -383,10 +383,15 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
                 not isinstance(commercial_review, dict)
                 or set(commercial_review) != {
                     "schema", "profile", "status",
-                    "review_required_dimensions", "evidence_sha256",
+                    "review_required_dimensions",
+                    "review_evidence_contract_sha256", "evidence_sha256",
                 }
                 or commercial_review["schema"] != COMMERCIAL_REVIEW_SUMMARY_SCHEMA
                 or commercial_review["profile"] != binding["commercial_profile"]
+                or commercial_review["review_evidence_contract_sha256"]
+                != _COMMERCIAL.public_review_evidence_contract(
+                    binding["commercial_profile"],
+                )["sha256"]
                 or commercial_review["status"] not in {
                     "verified", "review_required",
                 }

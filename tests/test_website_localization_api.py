@@ -492,8 +492,14 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             review_summary_contract["required_fields"],
             [
                 "schema", "profile", "status",
-                "review_required_dimensions", "evidence_sha256",
+                "review_required_dimensions",
+                "review_evidence_contract_sha256", "evidence_sha256",
             ],
+        )
+        self.assertEqual(
+            review_summary_contract["review_evidence_contract_sha256"]
+            ["equals"],
+            review_evidence_contract["sha256"],
         )
         self.assertEqual(
             review_summary_contract["review_required_dimensions"]["allowed"],

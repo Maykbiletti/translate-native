@@ -178,6 +178,11 @@ def completed_result(job, candidate):
             "profile": payload["commercial_profile"],
             "status": "verified",
             "review_required_dimensions": [],
+            "review_evidence_contract_sha256": (
+                WORKER._COMMERCIAL.public_review_evidence_contract(
+                    payload["commercial_profile"],
+                )["sha256"]
+            ),
             "evidence_sha256": "a" * 64,
         }
     return {
@@ -524,8 +529,15 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             })
             self.assertEqual(set(evidence["commercial_review"]), {
                 "schema", "profile", "status", "review_required_dimensions",
-                "evidence_sha256",
+                "review_evidence_contract_sha256", "evidence_sha256",
             })
+            self.assertEqual(
+                evidence["commercial_review"]
+                ["review_evidence_contract_sha256"],
+                WORKER._COMMERCIAL.public_review_evidence_contract(
+                    PLANNER.COMMERCIAL_PROFILE,
+                )["sha256"],
+            )
             self.assertIsNone(evidence["commercial_review_resolution"])
             self.assertEqual(evidence["commercial_review"]["status"], "verified")
             self.assertEqual(

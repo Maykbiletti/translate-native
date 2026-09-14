@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Protocol
 WORKER_SCHEMA = "blun.website-localization-worker.v4"
 CANDIDATE_SCHEMA = "blun.website-localization-candidate.v1"
 REVIEW_SCHEMA = "blun.website-localization-review.v2"
-RESULT_SCHEMA = "blun.website-localization-result.v5"
+RESULT_SCHEMA = "blun.website-localization-result.v6"
 MAX_TEXT_BYTES = 2_000_000
 MAX_FIELD_LENGTH = 2_000
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")

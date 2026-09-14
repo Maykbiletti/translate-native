@@ -21,12 +21,12 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v6"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v5"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v7"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v6"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v7"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v8"
 PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
-    "blun.website-localization-release-evidence-capabilities.v1"
+    "blun.website-localization-release-evidence-capabilities.v2"
 )
 PUBLICATION_EVIDENCE_FIELDS = (
     "schema", "release_evidence_contract_sha256", "job_id", "target_locale",
@@ -307,6 +307,9 @@ def _publication_evidence_contract_body() -> dict[str, Any]:
                 "commercial_profile", "commercial_quality_profile",
                 "commercial_review",
             ],
+            "review_evidence_contract_sha256": (
+                "exact-current-public-commercial-evidence-contract"
+            ),
             "resolution": "required-only-when-review-required",
             "non_commercial_fields": "all-null",
         },
