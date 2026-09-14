@@ -1336,6 +1336,20 @@ capability. The binding is content-free and carries no price, currency, tax,
 term, brand, product, source text, target text, credential, or publication
 authority.
 
+The v13 capability generation and v12 OpenAPI document make that
+acknowledgement durable. The caller-owned outbox stores its canonical closed
+binding beside the immutable payload hash and returns it through queue, status,
+and lifecycle state. Claims and retries carry the same value, and every row is
+revalidated against both its source payload and the installed commercial
+profile before a network call or status response. Cancellation, tombstone, and
+non-commercial rows retain an exact `null` binding.
+
+Schema v2 migrates only an exact, empty schema-v1 outbox under a transaction.
+A populated legacy outbox remains byte-for-byte untouched and blocks startup:
+the service cannot truthfully infer which historic commercial contract its
+rows acknowledged. Missing, modified, non-canonical, stale, or cross-content
+bindings likewise block fail-closed rather than being repaired automatically.
+
 The v11 capability generation and v10 OpenAPI document add
 `GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
 separate body-free operator scope. It returns the exact public

@@ -196,6 +196,16 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         self.assertEqual(removed["status"]["operation"], "cancellation")
         self.assertEqual(deleted["status"]["operation"], "tombstone")
         self.assertEqual(status["status"]["request_id"], change["event_id"])
+        self.assertEqual(
+            status["status"]["commercial_contract_binding"],
+            self.client._expected_capabilities["commercial_contract_binding"],
+        )
+        self.assertIsNone(
+            removed["status"]["commercial_contract_binding"]
+        )
+        self.assertIsNone(
+            deleted["status"]["commercial_contract_binding"]
+        )
         self.assertIsNone(
             status["status"]["remote_website_capability_binding"]
         )

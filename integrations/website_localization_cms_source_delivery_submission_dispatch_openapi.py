@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v11"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v12"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -271,6 +271,9 @@ def _status_schema() -> dict[str, Any]:
         "operation": {"type": "string", "enum": ["change", "cancellation", "tombstone"]},
         "request_id": _schema_ref("Token"), "event_id": _schema_ref("Token"),
         "site_id": _schema_ref("Token"), "payload_sha256": _schema_ref("Sha256"),
+        "commercial_contract_binding": {
+            "oneOf": [_schema_ref("CommercialContractBinding"), {"type": "null"}],
+        },
         "source_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
         "delivery_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
         "client_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
@@ -306,6 +309,14 @@ def _status_schema() -> dict[str, Any]:
             {
                 "if": {"properties": {"status": {"const": "accepted"}}},
                 "then": remote_complete, "else": {"not": remote_complete},
+            },
+            {
+                "if": {"properties": {"operation": {
+                    "enum": ["cancellation", "tombstone"],
+                }}},
+                "then": {"properties": {
+                    "commercial_contract_binding": {"type": "null"},
+                }},
             },
         ],
         "x-invariants": [

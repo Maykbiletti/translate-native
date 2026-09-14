@@ -395,6 +395,22 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         )
 
         self.assertEqual(accepted["status"], 202)
+        self.assertEqual(
+            accepted["json"]["status"]["commercial_contract_binding"],
+            expected,
+        )
+        queued = accepted["json"]["status"]
+        status = self.call(HTTP.STATUS_PATH, body={
+            "schema": HTTP.STATUS_REQUEST_SCHEMA,
+            **{name: queued[name] for name in (
+                "operation", "request_id", "event_id", "site_id",
+                "payload_sha256",
+            )},
+        })
+        self.assertEqual(
+            status["json"]["status"]["commercial_contract_binding"],
+            expected,
+        )
         for response in (missing, substituted, injected):
             self.assertEqual(
                 (response["status"], response["json"]["error_code"]),
@@ -406,6 +422,12 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertEqual(
             schemas["CommercialContractBinding"],
             HTTP._OPENAPI._exact_schema(expected),
+        )
+        self.assertEqual(
+            schemas["SubmissionStatus"]["properties"][
+                "commercial_contract_binding"
+            ]["oneOf"][0],
+            {"$ref": "#/components/schemas/CommercialContractBinding"},
         )
         self.assertEqual(len(schemas["EnqueueRequest"]["allOf"]), 1)
 

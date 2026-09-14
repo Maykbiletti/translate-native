@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v12"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v13"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -40,10 +40,10 @@ STATUS_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-status-request.v1"
 LIFECYCLE_REQUEST_SCHEMA = (
     "blun.cms-public-submission-dispatch-lifecycle-request.v1"
 )
-QUEUE_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-queue-response.v2"
-STATUS_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-status-response.v2"
+QUEUE_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-queue-response.v3"
+STATUS_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-status-response.v3"
 LIFECYCLE_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-lifecycle-response.v1"
+    "blun.cms-public-submission-dispatch-lifecycle-response.v2"
 )
 COMMERCIAL_PROFILE_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-commercial-profile-response.v1"
@@ -52,9 +52,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v12"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v13"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v12"
+    "blun.cms-public-submission-dispatch-capabilities-response.v13"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -506,6 +506,7 @@ def _status_payload(
         payload = dataclasses.asdict(value)
         fields = {
             "operation", "request_id", "event_id", "site_id", "payload_sha256",
+            "commercial_contract_binding",
             "source_max_attempts", "delivery_max_attempts", "status", "attempts",
             "client_max_attempts", "next_attempt_at", "lease_expires_at",
             "lease_expired", "last_error_code", "remote_status",
@@ -518,6 +519,12 @@ def _status_payload(
         for name in ("request_id", "event_id", "site_id"):
             _token(payload[name])
         _sha256(payload["payload_sha256"])
+        commercial_binding = payload["commercial_contract_binding"]
+        if commercial_binding is not None:
+            if commercial_binding != _DISPATCH._commercial_contract_binding():
+                raise ValueError
+        if payload["operation"] != "change" and commercial_binding is not None:
+            raise ValueError
         for name in (
             "source_max_attempts", "delivery_max_attempts",
             "client_max_attempts",
@@ -754,6 +761,9 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
     )
     try:
         commercial = _DISPATCH._commercial_contract()
+        commercial_binding = _DISPATCH._commercial_contract_binding()
+        if commercial_binding["schema"] != COMMERCIAL_CONTRACT_BINDING_SCHEMA:
+            raise ValueError
         operations = {}
         for name, path, request_schema, response_schema, status in definitions:
             operations[name] = {
@@ -800,18 +810,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
             "commercial_rendering_registry": (
                 commercial["commercial_rendering_registry"]
             ),
-            "commercial_contract_binding": {
-                "schema": COMMERCIAL_CONTRACT_BINDING_SCHEMA,
-                "commercial_profile": commercial["commercial_profile"][
-                    "profile"
-                ],
-                "commercial_profile_sha256": commercial[
-                    "commercial_profile"
-                ]["sha256"],
-                "commercial_rendering_registry_sha256": commercial[
-                    "commercial_rendering_registry"
-                ]["sha256"],
-            },
+            "commercial_contract_binding": commercial_binding,
             "openapi_document_schema": _OPENAPI.DOCUMENT_SCHEMA,
             "semantics": {
                 "authentication_precedes_json_parsing": True,
@@ -827,6 +826,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "commercial_profile_is_brand_and_price_neutral": True,
                 "commercial_profile_route_verifies_live_website_generation": True,
                 "commercial_enqueue_requires_exact_contract_binding": True,
+                "commercial_contract_binding_is_durable": True,
                 "operational_responses_are_content_free": True,
             },
             "public_submission_capabilities_sha256": _sha256(runtime_digest),

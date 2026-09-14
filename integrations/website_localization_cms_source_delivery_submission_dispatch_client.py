@@ -341,9 +341,13 @@ def _json_response(
     return value
 
 
-def _status(value: Any, identity: Mapping[str, str]) -> dict[str, Any]:
+def _status(
+    value: Any, identity: Mapping[str, str],
+    expected_commercial_binding: Mapping[str, str],
+) -> dict[str, Any]:
     fields = {
         "operation", "request_id", "event_id", "site_id", "payload_sha256",
+        "commercial_contract_binding",
         "source_max_attempts", "delivery_max_attempts", "status", "attempts",
         "client_max_attempts", "next_attempt_at", "lease_expires_at",
         "lease_expired", "last_error_code", "remote_status", "remote_attempts",
@@ -353,6 +357,12 @@ def _status(value: Any, identity: Mapping[str, str]) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != fields:
         _fail("status_binding")
     payload = dict(value)
+    commercial_binding = payload["commercial_contract_binding"]
+    if commercial_binding is not None and (
+        commercial_binding != expected_commercial_binding
+        or payload["operation"] != "change"
+    ):
+        _fail("status_binding")
     valid = (
         payload["operation"] in _HTTP.OPERATIONS
         and all(payload.get(name) == wanted for name, wanted in identity.items())
@@ -556,11 +566,16 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             or response.get("accepted_implies_publication") is not False
         ):
             _fail("enqueue_binding")
-        status = _status(response.get("status"), identity)
+        status = _status(
+            response.get("status"), identity,
+            self._expected_capabilities["commercial_contract_binding"],
+        )
         if (
             status["source_max_attempts"] != source_max_attempts
             or status["delivery_max_attempts"] != delivery_max_attempts
             or status["client_max_attempts"] != client_max_attempts
+            or status["commercial_contract_binding"]
+            != request["commercial_contract_binding"]
         ):
             _fail("enqueue_binding")
         return response
@@ -598,7 +613,10 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             or response.get("accepted_implies_publication") is not False
         ):
             _fail("status_binding")
-        _status(response.get("status"), identity)
+        _status(
+            response.get("status"), identity,
+            self._expected_capabilities["commercial_contract_binding"],
+        )
         return response
 
     def lifecycle(

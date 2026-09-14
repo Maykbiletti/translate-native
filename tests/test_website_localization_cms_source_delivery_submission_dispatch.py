@@ -93,6 +93,11 @@ class DurableSourceDeliverySubmissionDispatcherTests(unittest.TestCase):
             )
             self.assertEqual(queued.status, "pending")
             self.assertIsNone(queued.remote_website_capability_binding)
+            self.assertEqual(
+                queued.commercial_contract_binding,
+                DISPATCH._commercial_contract_binding()
+                if payload is change else None,
+            )
 
         outcomes = []
         while True:
@@ -161,6 +166,110 @@ class DurableSourceDeliverySubmissionDispatcherTests(unittest.TestCase):
             tampered.exception.code,
             "source_delivery_submission_dispatch.state_invalid",
         )
+
+    def test_commercial_contract_binding_survives_claim_retry_and_restart(self):
+        commercial = cms_support.event()
+        binding = DISPATCH._commercial_contract_binding()
+        queued = self.dispatcher.enqueue(
+            commercial, client_max_attempts=3, now=100,
+        )
+        first = self.dispatcher.claim("worker-1", now=100, lease_seconds=40)
+
+        self.assertEqual(queued.commercial_contract_binding, binding)
+        self.assertEqual(first.commercial_contract_binding, binding)
+        retry = self.dispatcher._finish_error(
+            first, "network_failure", retryable=True, now=100,
+        )
+        self.assertEqual(retry.commercial_contract_binding, binding)
+
+        resumed = DISPATCH.DurableCMSSourceDeliverySubmissionDispatcher(
+            self.connection, self.support.digest,
+            base_delay_seconds=5, max_delay_seconds=20,
+        )
+        restarted = resumed.status("change", commercial["event_id"], now=105)
+        second = resumed.claim("worker-2", now=105, lease_seconds=40)
+        self.assertEqual(restarted.commercial_contract_binding, binding)
+        self.assertEqual(second.commercial_contract_binding, binding)
+
+        ordinary = cms_support.event(
+            event_id="marketing-event", content_type="marketing",
+        )
+        ordinary_status = resumed.enqueue(ordinary, now=105)
+        self.assertIsNone(ordinary_status.commercial_contract_binding)
+
+        self.connection.execute("""
+            UPDATE cms_public_submission_outbox
+            SET commercial_contract_binding_json = '{}'
+            WHERE operation = 'change' AND request_id = ?
+        """, (commercial["event_id"],))
+        self.connection.commit()
+        with self.assertRaises(
+            DISPATCH.CMSSourceDeliverySubmissionDispatchBlocked,
+        ) as tampered:
+            resumed.health(now=105)
+        self.assertEqual(
+            tampered.exception.code,
+            "source_delivery_submission_dispatch.state_invalid",
+        )
+
+    def test_only_an_exact_empty_v1_outbox_is_migrated(self):
+        empty = sqlite3.connect(":memory:")
+        populated = sqlite3.connect(":memory:")
+        try:
+            DISPATCH._initialize_legacy_v1_schema(empty, self.support.digest)
+            migrated = DISPATCH.DurableCMSSourceDeliverySubmissionDispatcher(
+                empty, self.support.digest,
+            )
+            self.assertEqual(migrated.health(now=100).counts["pending"], 0)
+            self.assertEqual(
+                empty.execute(
+                    "SELECT schema_version "
+                    "FROM cms_public_submission_outbox_meta"
+                ).fetchone()[0],
+                DISPATCH.SCHEMA_VERSION,
+            )
+            self.assertIn(
+                "commercial_contract_binding_json",
+                [row[1] for row in empty.execute(
+                    "PRAGMA table_info(cms_public_submission_outbox)"
+                )],
+            )
+
+            DISPATCH._initialize_legacy_v1_schema(populated, self.support.digest)
+            payload, identity, payload_json = DISPATCH._payload(cms_support.event())
+            del payload
+            populated.execute("""
+                INSERT INTO cms_public_submission_outbox (
+                    operation, request_id, event_id, site_id, payload_json,
+                    payload_sha256, source_max_attempts, delivery_max_attempts,
+                    client_max_attempts, status, attempts, next_attempt_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 5, 5, 5, 'pending', 0, 100, 100, 100)
+            """, (
+                identity["operation"], identity["request_id"],
+                identity["event_id"], identity["site_id"], payload_json,
+                identity["payload_sha256"],
+            ))
+            populated.commit()
+            with self.assertRaises(
+                DISPATCH.CMSSourceDeliverySubmissionDispatchBlocked,
+            ) as blocked:
+                DISPATCH.DurableCMSSourceDeliverySubmissionDispatcher(
+                    populated, self.support.digest,
+                )
+            self.assertEqual(
+                blocked.exception.code,
+                "source_delivery_submission_dispatch.schema_altered",
+            )
+            self.assertEqual(
+                populated.execute(
+                    "SELECT COUNT(*) FROM cms_public_submission_outbox"
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            empty.close()
+            populated.close()
 
     def test_post_acceptance_crash_replays_exact_idempotent_request(self):
         change = cms_support.event()

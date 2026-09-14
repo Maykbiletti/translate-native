@@ -186,6 +186,8 @@ def _preflight_existing(
         if not actual:
             return
         if actual != expected_schema:
+            if _DISPATCH._is_empty_legacy_v1(connection, digest):
+                return
             raise _blocked("database_schema_altered")
         dispatcher = object.__new__(
             _DISPATCH.DurableCMSSourceDeliverySubmissionDispatcher

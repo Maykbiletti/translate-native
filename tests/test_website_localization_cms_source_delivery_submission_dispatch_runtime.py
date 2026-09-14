@@ -278,6 +278,26 @@ class SubmissionDispatchRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(self.support.transport.calls, [])
 
+    def test_exact_empty_v1_database_is_safely_upgraded_before_use(self):
+        connection = sqlite3.connect(self.database)
+        RUNTIME._DISPATCH._initialize_legacy_v1_schema(
+            connection, self.support.digest,
+        )
+        connection.close()
+        os.chmod(self.database, 0o600)
+
+        runtime = self.open()
+
+        self.assertEqual(runtime.health().counts["pending"], 0)
+        self.assertEqual(
+            runtime._connection.execute(
+                "SELECT schema_version "
+                "FROM cms_public_submission_outbox_meta"
+            ).fetchone()[0],
+            RUNTIME._DISPATCH.SCHEMA_VERSION,
+        )
+        self.assertEqual(self.support.transport.calls, [])
+
     def test_capability_drift_blocks_before_store_or_network_access(self):
         runtime = self.open()
         runtime.enqueue(cms_support.event())
