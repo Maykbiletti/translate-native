@@ -138,6 +138,12 @@ class SubmissionDispatchHealth:
     expected_capabilities_sha256: str
 
 
+@dataclass(frozen=True)
+class SubmissionDispatchLifecycle:
+    dispatch_status: SubmissionDispatchStatus
+    source_lifecycle: dict[str, Any]
+
+
 def _blocked(code: str) -> CMSSourceDeliverySubmissionDispatchBlocked:
     return CMSSourceDeliverySubmissionDispatchBlocked(
         "source_delivery_submission_dispatch." + code
@@ -703,6 +709,77 @@ class DurableCMSSourceDeliverySubmissionDispatcher:
             remote_website_capability_binding=remote_binding,
             response_sha256=row["response_sha256"],
         )
+
+    def lifecycle(
+        self,
+        client: Any,
+        operation: str,
+        request_id: str,
+        *,
+        now: float | int,
+    ) -> SubmissionDispatchLifecycle:
+        """Read the verified downstream lifecycle after durable website intake."""
+
+        self._validate_read_client(client)
+        status = self.status(operation, request_id, now=now)
+        if status.status != "accepted":
+            raise _blocked("lifecycle_not_accepted")
+        identity = {
+            "operation": status.operation,
+            "request_id": status.request_id,
+            "event_id": status.event_id,
+            "site_id": status.site_id,
+            "payload_sha256": status.payload_sha256,
+        }
+        try:
+            response = client.submission_lifecycle(**identity)
+            if (
+                not isinstance(response, Mapping)
+                or set(response) != {
+                    "schema", "api_schema", "result",
+                    "accepted_implies_publication",
+                }
+                or response.get("schema")
+                != _CLIENT._HTTP._SUBMISSION.LIFECYCLE_HTTP_RESPONSE_SCHEMA
+                or response.get("api_schema") != _CLIENT._HTTP.API_SCHEMA
+                or response.get("accepted_implies_publication") is not False
+                or not isinstance(response.get("result"), Mapping)
+            ):
+                raise ValueError
+            normalized = _CLIENT._HTTP._submission_lifecycle_payload(
+                _CLIENT._PayloadView(response["result"]), identity,
+            )
+            if (
+                normalized != response["result"]
+                or normalized["website_capability_binding"]
+                != status.remote_website_capability_binding
+            ):
+                raise ValueError
+            copied = json.loads(_canonical(dict(response), "lifecycle_invalid"))
+        except CMSSourceDeliverySubmissionDispatchBlocked:
+            raise
+        except Exception:
+            raise _blocked("lifecycle_invalid") from None
+        return SubmissionDispatchLifecycle(
+            dispatch_status=status,
+            source_lifecycle=copied,
+        )
+
+    def _validate_read_client(self, client: Any) -> None:
+        if (
+            not callable(getattr(client, "submission_lifecycle", None))
+            or getattr(client, "expected_capabilities_sha256", None)
+            != self.expected_capabilities_sha256
+        ):
+            raise _blocked("client_invalid")
+        timeout = getattr(client, "timeout", None)
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            raise _blocked("client_invalid")
 
     def health(self, *, now: float | int) -> SubmissionDispatchHealth:
         now = _timestamp(now, "time_invalid")

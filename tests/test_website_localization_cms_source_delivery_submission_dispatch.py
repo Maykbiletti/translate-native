@@ -197,6 +197,40 @@ class DurableSourceDeliverySubmissionDispatcherTests(unittest.TestCase):
             "source_delivery_submission_dispatch.claim_lost",
         )
 
+    def test_lifecycle_reads_only_after_verified_website_acceptance(self):
+        change = cms_support.event()
+        self.dispatcher.enqueue(change, now=100)
+        calls_before = len(self.support.transport.calls)
+        with self.assertRaises(
+            DISPATCH.CMSSourceDeliverySubmissionDispatchBlocked,
+        ) as pending:
+            self.dispatcher.lifecycle(
+                self.support.client, "change", change["event_id"], now=100,
+            )
+        self.assertEqual(
+            pending.exception.code,
+            "source_delivery_submission_dispatch.lifecycle_not_accepted",
+        )
+        self.assertEqual(len(self.support.transport.calls), calls_before)
+
+        self.dispatcher.run_once(self.support.client, "worker", now=100)
+        result = self.dispatcher.lifecycle(
+            self.support.client, "change", change["event_id"], now=100,
+        )
+        self.assertEqual(result.dispatch_status.status, "accepted")
+        self.assertEqual(
+            result.source_lifecycle["result"]["submission"]["event_id"],
+            change["event_id"],
+        )
+        self.assertEqual(
+            result.source_lifecycle["result"]["website_capability_binding"],
+            result.dispatch_status.remote_website_capability_binding,
+        )
+        self.assertFalse(result.source_lifecycle["accepted_implies_publication"])
+        rendered = json.dumps(result.source_lifecycle, sort_keys=True)
+        self.assertNotIn(change["localization"]["source_text"], rendered)
+        self.assertNotIn("target_text", rendered)
+
     def test_retryable_failure_is_due_bound_and_attempt_limited(self):
         change = cms_support.event()
         accepted = self.support.client.submit_change(

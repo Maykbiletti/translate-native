@@ -159,7 +159,8 @@ class SubmissionDispatchClientTests(unittest.TestCase):
             self.public_digest,
         )
         self.assertEqual(set(response["capabilities"]["operations"]), {
-            "capabilities", "enqueue", "health", "openapi", "readiness", "status",
+            "capabilities", "enqueue", "health", "lifecycle", "openapi",
+            "readiness", "status",
         })
         self.assertEqual(len(self.transport.calls), 1)
         self.assertEqual(self.auth_calls[0], {
@@ -201,6 +202,72 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         rendered = json.dumps((accepted, status), sort_keys=True)
         self.assertNotIn(change["localization"]["source_text"], rendered)
         self.assertNotIn("target_text", rendered)
+
+    def test_verified_lifecycle_crosses_reference_client_after_acceptance(self):
+        change = cms_support.event()
+        queued = self.client.enqueue(change)["status"]
+        identity = tuple(queued[name] for name in (
+            "operation", "request_id", "event_id", "site_id",
+            "payload_sha256",
+        ))
+
+        with self.assertRaises(
+            CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked,
+        ) as pending:
+            self.client.lifecycle(*identity)
+        self.assertEqual(pending.exception.http_status, 409)
+        self.assertEqual(
+            pending.exception.remote_error_code,
+            "submission_dispatch_http.lifecycle_not_accepted",
+        )
+        self.assertFalse(pending.exception.retryable)
+
+        with self.runtime._lock:
+            self.runtime._dispatcher.run_once(
+                self.runtime._client, "manual-client-lifecycle", now=100,
+            )
+        response = self.client.lifecycle(*identity)
+        lifecycle = response["lifecycle"]
+        self.assertEqual(lifecycle["dispatch_status"]["status"], "accepted")
+        self.assertEqual(
+            lifecycle["source_lifecycle"]["result"]["submission"]["event_id"],
+            change["event_id"],
+        )
+        self.assertFalse(response["accepted_implies_publication"])
+        rendered = json.dumps(response, sort_keys=True)
+        self.assertNotIn(change["localization"]["source_text"], rendered)
+        self.assertNotIn("target_text", rendered)
+
+    def test_substituted_nested_lifecycle_binding_is_rejected(self):
+        change = cms_support.event()
+        queued = self.client.enqueue(change)["status"]
+        identity = tuple(queued[name] for name in (
+            "operation", "request_id", "event_id", "site_id",
+            "payload_sha256",
+        ))
+        with self.runtime._lock:
+            self.runtime._dispatcher.run_once(
+                self.runtime._client, "manual-tamper-lifecycle", now=100,
+            )
+
+        def transform(number, result):
+            if number != 2:
+                return result
+            return replace_json(result, lambda value: value["lifecycle"]
+                ["source_lifecycle"]["result"]["website_capability_binding"]
+                .update({"runtime_capabilities_sha256": "0" * 64}))
+
+        client = self.make_client(transport=TransformingTransport(
+            WSGITransport(self.runtime.http), transform,
+        ))
+        with self.assertRaises(
+            CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked,
+        ) as caught:
+            client.lifecycle(*identity)
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_dispatch_client.lifecycle_binding",
+        )
 
     def test_enqueue_binds_auth_body_headers_identity_and_three_budgets(self):
         change = cms_support.event()

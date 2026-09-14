@@ -34,7 +34,7 @@ MAX_RESPONSE_BYTES = 4_000_000
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-AUTH_CONTEXT_SCHEMA = "blun.cms-public-submission-dispatch-client-auth-context.v2"
+AUTH_CONTEXT_SCHEMA = "blun.cms-public-submission-dispatch-client-auth-context.v3"
 RESERVED_HEADERS = {
     "accept", "connection", "content-length", "content-type", "host",
     "idempotency-key", "transfer-encoding",
@@ -591,6 +591,60 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
         ):
             _fail("status_binding")
         _status(response.get("status"), identity)
+        return response
+
+    def lifecycle(
+        self, operation: str, request_id: str, event_id: str, site_id: str,
+        payload_sha256: str,
+    ) -> Mapping[str, Any]:
+        identity = {
+            "operation": operation, "request_id": request_id,
+            "event_id": event_id, "site_id": site_id,
+            "payload_sha256": payload_sha256,
+        }
+        if (
+            operation not in _HTTP.OPERATIONS
+            or not all(_token(identity[name]) for name in (
+                "request_id", "event_id", "site_id",
+            ))
+            or operation == "change" and request_id != event_id
+            or not _sha256(payload_sha256)
+        ):
+            _fail("request_invalid")
+        contract = self._contract("lifecycle")
+        body = _canonical({"schema": contract["request_schema"], **identity})
+        response = self._request(
+            contract["method"], contract["path"], contract["scope"], body,
+            {contract["success_status"]}, identity, contract["error_codes"],
+        )
+        if (
+            set(response) != {
+                "schema", "api_schema", "lifecycle", "capabilities_sha256",
+                "accepted_implies_publication",
+            }
+            or response.get("schema") != contract["response_schema"]
+            or response.get("api_schema") != _HTTP.API_SCHEMA
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("accepted_implies_publication") is not False
+            or not isinstance(response.get("lifecycle"), Mapping)
+        ):
+            _fail("lifecycle_binding")
+        lifecycle = response["lifecycle"]
+        try:
+            normalized = _HTTP._lifecycle_payload(
+                _HTTP._DISPATCH.SubmissionDispatchLifecycle(
+                    dispatch_status=_HTTP._DISPATCH.SubmissionDispatchStatus(
+                        **lifecycle["dispatch_status"]
+                    ),
+                    source_lifecycle=lifecycle["source_lifecycle"],
+                ),
+                identity,
+            )
+        except Exception:
+            _fail("lifecycle_binding")
+        if normalized != lifecycle:
+            _fail("lifecycle_binding")
         return response
 
     def health(self) -> Mapping[str, Any]:

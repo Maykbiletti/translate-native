@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Verified outer CMS lifecycle read (14 September 2026)
+
+Assume a non-Python CMS safely submitted an edit but learned the wrong
+downstream localization state afterward.
+
+- A lifecycle read could contact the website service before durable outer
+  acceptance, duplicating uncertainty during retries or recovery.
+- A guessed request identifier could reveal another tenant's processing state.
+- A substituted nested lifecycle could retain the request ID while changing
+  the website, sidecar, source, or terminal-receiver generation.
+- A CMS could mistake durable acceptance or a processing state for linguistic
+  approval and publication authority.
+- The runtime, OpenAPI profile, and reference client could disagree about the
+  new route or its exact fail-closed errors.
+
+The v10 public dispatch capability adds one separately scoped lifecycle read
+bound to the complete known request identity and exact capability
+precondition. The durable dispatcher permits its one downstream read only
+after a fully revalidated accepted row, and the runtime, HTTP edge, OpenAPI
+profile, and client each validate the complete nested lifecycle independently.
+Tests cover pre-acceptance zero-I/O blocking, tenant isolation, generation
+parity, content-free output, exact errors, and non-publication semantics.
+
 ## Exact CMS error reasons (13 September 2026)
 
 Assume a CMS handled the advertised success and failure statuses but made an

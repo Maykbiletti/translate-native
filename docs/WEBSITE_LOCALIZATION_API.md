@@ -1243,7 +1243,7 @@ partial, or substituted generation is not treated as a valid status.
 
 `GET /v1/localization/cms-submission-dispatch/openapi` uses its own body-free
 operator scope and returns an origin-free OpenAPI 3.1 document generated from
-that exact capability object. It describes all six routes with their methods,
+that exact capability object. It describes all seven routes with their methods,
 scopes, principal schemas, request and response schemas, required idempotency
 and payload-hash headers, transport limits, retry ownership, and fail-closed
 publication semantics. The response binds the canonical document hash to the
@@ -1340,6 +1340,17 @@ serialization. Invalid framing, authentication outage, capability or storage
 drift, a malformed runtime result, and a dead worker therefore block without
 returning stored source content or invoking the downstream public client.
 
+`POST /v1/localization/cms-submission-dispatch/lifecycle` extends that exact
+tenant identity into the downstream source lifecycle. It is available only
+after the caller-owned outbox has durably recorded website acceptance; every
+earlier outer state returns the advertised non-retryable conflict and performs
+no downstream request. The runtime validates the stored acceptance binding,
+then the pinned public-submission client performs one read and verifies the
+complete nested website, sidecar, source, and source-processing generations.
+The outer HTTP edge validates the lifecycle again before serialization.
+Acceptance at either boundary remains explicitly distinct from linguistic
+approval and publication.
+
 #### Public submission sidecar reference client
 
 `integrations/website_localization_cms_source_delivery_submission_dispatch_client.py`
@@ -1353,7 +1364,9 @@ interchangeable.
 `enqueue()` accepts one complete change, cancellation, or tombstone and keeps
 the source-, delivery-, and client-stage retry ceilings distinct. `status()`
 requires the complete previously known operation, request, event, site, and
-source-payload identity. `health()`, `readiness()`, `capabilities()`, and
+source-payload identity. `lifecycle()` uses the same identity and refuses to
+contact the downstream service until the local status is accepted. `health()`,
+`readiness()`, `capabilities()`, and
 `openapi()` use their separate operator scopes. Each operational method first
 fetches the live capability document, accepts only the exact current closed
 shape, then makes one bounded request without following redirects or retrying

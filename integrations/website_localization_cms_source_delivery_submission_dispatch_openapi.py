@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v8"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v9"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -278,40 +278,22 @@ def _status_schema() -> dict[str, Any]:
         "attempts": {"type": "integer", "minimum": 0, "maximum": 20},
         "next_attempt_at": {"type": "number", "minimum": 0},
         "lease_expires_at": nullable_time, "lease_expired": {"type": "boolean"},
-        "last_error_code": {
-            "oneOf": [_schema_ref("ErrorCode"), {"type": "null"}],
-        },
-        "remote_status": {
-            "type": ["string", "null"],
-            "enum": [None, "failed", "leased", "pending", "retry_wait", "succeeded"],
-        },
+        "last_error_code": {"oneOf": [_schema_ref("ErrorCode"), {"type": "null"}]},
+        "remote_status": {"type": ["string", "null"], "enum": [None, "failed", "leased", "pending", "retry_wait", "succeeded"]},
         "remote_attempts": nullable_count,
         "remote_capabilities_sha256": nullable_sha,
         "remote_binding_sha256": nullable_sha,
-        "remote_website_capability_binding": {
-            "oneOf": [
-                _schema_ref("WebsiteCapabilityBinding"), {"type": "null"},
-            ],
-        },
+        "remote_website_capability_binding": {"oneOf": [_schema_ref("WebsiteCapabilityBinding"), {"type": "null"}]},
         "response_sha256": nullable_sha,
     }
-    remote_complete = {
-        "properties": {
-            "remote_status": {
-                "type": "string",
-                "enum": ["failed", "leased", "pending", "retry_wait", "succeeded"],
-            },
-            "remote_attempts": {
-                "type": "integer", "minimum": 0, "maximum": 20,
-            },
-            "remote_capabilities_sha256": _schema_ref("Sha256"),
-            "remote_binding_sha256": _schema_ref("Sha256"),
-            "remote_website_capability_binding": _schema_ref(
-                "WebsiteCapabilityBinding"
-            ),
-            "response_sha256": _schema_ref("Sha256"),
-        },
-    }
+    remote_complete = {"properties": {
+        "remote_status": {"type": "string", "enum": ["failed", "leased", "pending", "retry_wait", "succeeded"]},
+        "remote_attempts": {"type": "integer", "minimum": 0, "maximum": 20},
+        "remote_capabilities_sha256": _schema_ref("Sha256"),
+        "remote_binding_sha256": _schema_ref("Sha256"),
+        "remote_website_capability_binding": _schema_ref("WebsiteCapabilityBinding"),
+        "response_sha256": _schema_ref("Sha256"),
+    }}
     return {
         "type": "object", "additionalProperties": False,
         "required": sorted(properties), "properties": properties,
@@ -323,17 +305,212 @@ def _status_schema() -> dict[str, Any]:
             },
             {
                 "if": {"properties": {"status": {"const": "accepted"}}},
-                "then": remote_complete,
-                "else": {"not": remote_complete},
+                "then": remote_complete, "else": {"not": remote_complete},
             },
         ],
         "x-invariants": [
-            "attempts_lte_client_max_attempts",
-            "leased_iff_lease_expires_at",
+            "attempts_lte_client_max_attempts", "leased_iff_lease_expires_at",
             "accepted_iff_remote_website_binding_complete_and_valid",
         ],
         "description": "Content-free durable submission state; accepted is not publication.",
     }
+
+
+def _read_request_schema(schema: str) -> dict[str, Any]:
+    return _closed_object({
+        "schema": {"const": schema},
+        "operation": {
+            "type": "string", "enum": ["change", "cancellation", "tombstone"],
+        },
+        "request_id": _schema_ref("Token"),
+        "event_id": _schema_ref("Token"),
+        "site_id": _schema_ref("Token"),
+        "payload_sha256": _schema_ref("Sha256"),
+    })
+
+
+def _downstream_submission_status_schema() -> dict[str, Any]:
+    nullable_count = {
+        "oneOf": [
+            {"type": "integer", "minimum": 0, "maximum": 20},
+            {"type": "null"},
+        ],
+    }
+    return _closed_object({
+        "schema": {"const": "blun.cms-source-delivery-submission-status.v2"},
+        "operation": {
+            "type": "string", "enum": ["change", "cancellation", "tombstone"],
+        },
+        "request_id": _schema_ref("Token"), "event_id": _schema_ref("Token"),
+        "site_id": _schema_ref("Token"), "payload_sha256": _schema_ref("Sha256"),
+        "status": {"type": "string", "enum": ["accepted", "failed", "pending"]},
+        "stage": {"type": "string", "enum": [
+            "website_acceptance", "sidecar_delivery", "source_acceptance",
+        ]},
+        "website_status": {"type": "string", "enum": [
+            "failed", "leased", "pending", "retry_wait", "succeeded",
+        ]},
+        "website_attempts": {"type": "integer", "minimum": 0, "maximum": 20},
+        "website_delivery_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
+        "sidecar_status": {"type": ["string", "null"], "enum": [
+            None, "failed", "leased", "pending", "retry_wait", "succeeded",
+        ]},
+        "sidecar_attempts": nullable_count,
+        "sidecar_delivery_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
+        "source_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
+        "next_attempt_at": {"type": "number", "minimum": 0},
+        "lease_expired": {"type": "boolean"},
+        "error_code": {"oneOf": [_schema_ref("ErrorCode"), {"type": "null"}]},
+        "website_capability_binding": _schema_ref("WebsiteCapabilityBinding"),
+    })
+
+
+def _source_capability_binding_schema() -> dict[str, Any]:
+    return _closed_object({
+        "schema": {"const": "blun.cms-source-capability-binding.v2"},
+        "status": {"const": "verified"},
+        "capabilities_sha256": _schema_ref("Sha256"),
+        "commercial_rendering_registry_sha256": _schema_ref("Sha256"),
+        "database_roles": {
+            "type": "array",
+            "prefixItems": [
+                {"const": "changes"}, {"const": "removals"},
+                {"const": "lifecycle"},
+            ],
+            "items": False, "minItems": 3, "maxItems": 3,
+        },
+    })
+
+
+def _source_status_schema() -> dict[str, Any]:
+    nullable_token = {"oneOf": [_schema_ref("Token"), {"type": "null"}]}
+    nullable_sha = {"oneOf": [_schema_ref("Sha256"), {"type": "null"}]}
+    nullable_error = {"oneOf": [_schema_ref("ErrorCode"), {"type": "null"}]}
+    nullable_retry_count = {"oneOf": [
+        {"type": "integer", "minimum": 0, "maximum": 20}, {"type": "null"},
+    ]}
+    nullable_count = {"oneOf": [
+        {"type": "integer", "minimum": 0, "maximum": 1_000_000},
+        {"type": "null"},
+    ]}
+    locale_array = {
+        "type": "array", "items": _schema_ref("Token"),
+        "maxItems": 24, "uniqueItems": True,
+    }
+    queue_properties = {
+        name: {"type": "integer", "minimum": 0, "maximum": 1_000_000}
+        for name in ("cancelled", "failed", "leased", "pending", "retry_wait", "succeeded")
+    }
+    def queue_count_shape(names: tuple[str, ...]) -> dict[str, Any]:
+        return _closed_object({name: queue_properties[name] for name in names})
+
+    active_queue_states = (
+        "failed", "leased", "pending", "retry_wait", "succeeded",
+    )
+    queue_counts = {"oneOf": [
+        _closed_object({}),
+        queue_count_shape(active_queue_states),
+        queue_count_shape(("cancelled",) + active_queue_states),
+    ]}
+    return _closed_object({
+        "schema": {"const": "blun.cms-source-service-status.v4"},
+        "event_id": _schema_ref("Token"), "site_id": _schema_ref("Token"),
+        "website_version": _schema_ref("Token"),
+        "source_sequence": {
+            "type": "integer", "minimum": 1, "maximum": 1_000_000,
+        },
+        "change_sha256": _schema_ref("Sha256"),
+        "dispatch_status": {"type": "string", "enum": [
+            "failed", "leased", "pending", "retry_wait", "succeeded",
+        ]},
+        "dispatch_attempts": {"type": "integer", "minimum": 0, "maximum": 20},
+        "dispatch_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
+        "dispatch_error_code": nullable_error,
+        "plan_id": nullable_token, "job_count": nullable_count,
+        "lifecycle_state": {"type": ["string", "null"], "enum": [
+            None, "failed", "leased", "pending", "retry_wait", "terminal", "watching",
+        ]},
+        "lifecycle_poll_attempts": {"type": "integer", "minimum": 0, "maximum": 20},
+        "lifecycle_error_code": nullable_error,
+        "remote_status": {"type": ["string", "null"], "enum": [
+            None, "awaiting_approval", "cancelled", "deleted", "deleting",
+            "deletion_failed", "localization_failed", "processing",
+            "publication_blocked", "publication_failed", "published",
+            "publishing", "queue_recovery", "ready", "superseded",
+        ]},
+        "lifecycle_sha256": nullable_sha,
+        "required_locales": locale_array, "approved_locales": locale_array,
+        "blocked_locales": {
+            "type": "array", "maxItems": 24, "items": {
+                "type": "array", "prefixItems": [
+                    _schema_ref("Token"), _schema_ref("ErrorCode"),
+                ], "items": False, "minItems": 2, "maxItems": 2,
+            },
+        },
+        "queue_counts": queue_counts,
+        "notification_state": {"type": "string", "enum": [
+            "awaiting_registration", "awaiting_terminal", "disabled", "failed",
+            "leased", "pending", "retry_wait", "succeeded",
+        ]},
+        "notification_id": nullable_token, "notification_sha256": nullable_sha,
+        "notification_attempts": {"type": "integer", "minimum": 0, "maximum": 20},
+        "notification_max_attempts": nullable_retry_count,
+        "notification_error_code": nullable_error,
+        "terminal_receiver_capabilities_sha256": nullable_sha,
+        "terminal_processing_state": {"type": "string", "enum": [
+            "awaiting_notification", "awaiting_registration", "disabled", "failed",
+            "leased", "pending", "retry_wait", "succeeded", "watching",
+        ]},
+        "terminal_processing_poll_attempts": {
+            "type": "integer", "minimum": 0, "maximum": 1_000_000,
+        },
+        "terminal_processing_failures": {"type": "integer", "minimum": 0, "maximum": 20},
+        "terminal_processing_error_code": nullable_error,
+        "receiver_processing_state": {"type": ["string", "null"], "enum": [
+            None, "failed", "leased", "pending", "retry_wait", "succeeded",
+        ]},
+        "receiver_processing_attempts": nullable_retry_count,
+        "receiver_processing_max_attempts": nullable_retry_count,
+        "receiver_processing_error_code": nullable_error,
+        "receiver_processed_at": {
+            "oneOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
+        },
+    })
+
+
+def _source_lifecycle_schema() -> dict[str, Any]:
+    remote_statuses = [
+        "awaiting_approval", "cancelled", "deleted", "deleting",
+        "deletion_failed", "localization_failed", "processing",
+        "publication_blocked", "publication_failed", "published", "publishing",
+        "queue_recovery", "ready", "superseded",
+    ]
+    result = _closed_object({
+        "schema": {"const": "blun.cms-source-delivery-submission-lifecycle.v4"},
+        "status": {"type": "string", "enum": [
+            "accepted", "failed", "pending", *remote_statuses,
+        ]},
+        "stage": {"type": "string", "enum": [
+            "website_acceptance", "sidecar_delivery", "source_acceptance",
+            "source_processing", "localization_lifecycle",
+        ]},
+        "submission": _schema_ref("DownstreamSubmissionStatus"),
+        "source_status": {
+            "oneOf": [_schema_ref("SourceServiceStatus"), {"type": "null"}],
+        },
+        "source_capability_binding": {
+            "oneOf": [_schema_ref("SourceCapabilityBinding"), {"type": "null"}],
+        },
+        "website_capability_binding": _schema_ref("WebsiteCapabilityBinding"),
+        "sidecar_capabilities_sha256": _schema_ref("Sha256"),
+        "source_capabilities_sha256": _schema_ref("Sha256"),
+    })
+    return _closed_object({
+        "schema": {"const": "blun.cms-source-delivery-submission-lifecycle-response.v1"},
+        "api_schema": {"const": "blun.cms-source-delivery-submission-http.v3"},
+        "result": result,
+        "accepted_implies_publication": {"const": False},
+    })
 
 
 def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
@@ -368,6 +545,15 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 tag="Operations", summary="Read durable outbox health",
                 request_schema=None, response_component="HealthResponse",
                 degraded_response_component="HealthResponse",
+            ),
+        },
+        operations["lifecycle"]["path"]: {
+            "post": _operation(
+                operations["lifecycle"], operation_id="readSubmissionLifecycle",
+                tag="Tenant submissions",
+                summary="Read verified downstream localization lifecycle",
+                request_schema="LifecycleRequest",
+                response_component="LifecycleResponse",
             ),
         },
         operations["openapi"]["path"]: {
@@ -479,19 +665,29 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 "client_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
             },
         },
-        "StatusRequest": {
-            "type": "object", "additionalProperties": False,
-            "required": ["schema", "operation", "request_id", "event_id", "site_id", "payload_sha256"],
-            "properties": {
-                "schema": {"const": operations["status"]["request_schema"]},
-                "operation": {"type": "string", "enum": ["change", "cancellation", "tombstone"]},
-                "request_id": _schema_ref("Token"), "event_id": _schema_ref("Token"),
-                "site_id": _schema_ref("Token"), "payload_sha256": _schema_ref("Sha256"),
-            },
-        },
+        "StatusRequest": _read_request_schema(
+            operations["status"]["request_schema"]
+        ),
+        "LifecycleRequest": _read_request_schema(
+            operations["lifecycle"]["request_schema"]
+        ),
         "SubmissionStatus": _status_schema(),
+        "DownstreamSubmissionStatus": _downstream_submission_status_schema(),
+        "SourceCapabilityBinding": _source_capability_binding_schema(),
+        "SourceServiceStatus": _source_status_schema(),
+        "SourceLifecycle": _source_lifecycle_schema(),
         "QueueResponse": status_envelope(operations["enqueue"]["response_schema"]),
         "StatusResponse": status_envelope(operations["status"]["response_schema"]),
+        "LifecycleResponse": _closed_object({
+            "schema": {"const": operations["lifecycle"]["response_schema"]},
+            "api_schema": {"const": capabilities["api_schema"]},
+            "lifecycle": _closed_object({
+                "dispatch_status": _schema_ref("SubmissionStatus"),
+                "source_lifecycle": _schema_ref("SourceLifecycle"),
+            }),
+            "capabilities_sha256": {"const": capabilities["sha256"]},
+            "accepted_implies_publication": {"const": False},
+        }),
         "Health": {
             "type": "object", "additionalProperties": False,
             "required": ["status", "counts", "operations", "due", "expired_leases", "failed", "expected_capabilities_sha256"],

@@ -69,6 +69,8 @@ def _store_failure(error: Exception) -> CMSSourceDeliverySubmissionDispatchRunti
         return _blocked("idempotency_collision")
     if code.endswith("submission_missing"):
         return _blocked("submission_missing")
+    if code.endswith("lifecycle_not_accepted"):
+        return _blocked("lifecycle_not_accepted")
     if code.endswith(("request_invalid", "attempts_invalid", "identity_invalid")):
         return _blocked("request_invalid")
     return _blocked("outbox_blocked")
@@ -312,6 +314,12 @@ class DurableCMSSourceDeliverySubmissionDispatchRuntime:
 
     def status(self, operation: str, request_id: str) -> Any:
         return self._call("status", operation, request_id, now=_now(self._clock))
+
+    def lifecycle(self, operation: str, request_id: str) -> Any:
+        return self._call(
+            "lifecycle", self._client, operation, request_id,
+            now=_now(self._clock),
+        )
 
     def health(self) -> Any:
         return self._call("health", now=_now(self._clock))

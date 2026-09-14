@@ -185,7 +185,10 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         capabilities = response["json"]["capabilities"]
         self.assertEqual(
             set(capabilities["operations"]),
-            {"capabilities", "enqueue", "health", "openapi", "readiness", "status"},
+            {
+                "capabilities", "enqueue", "health", "lifecycle",
+                "openapi", "readiness", "status",
+            },
         )
         self.assertEqual(
             capabilities["public_submission_capabilities_sha256"],
@@ -205,7 +208,9 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             capabilities["operations"]["capabilities"]
             ["capabilities_precondition_header"]
         )
-        for name in {"enqueue", "health", "openapi", "readiness", "status"}:
+        for name in {
+            "enqueue", "health", "lifecycle", "openapi", "readiness", "status",
+        }:
             self.assertEqual(
                 capabilities["operations"][name]
                 ["capabilities_precondition_header"],
@@ -551,6 +556,44 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             {"$ref": "#/components/schemas/ErrorCode"},
         )
 
+    def test_openapi_closes_the_complete_lifecycle_contract(self):
+        self.open()
+        document = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]
+        schemas = document["components"]["schemas"]
+        operation = document["paths"][HTTP.LIFECYCLE_PATH]["post"]
+
+        self.assertEqual(operation["operationId"], "readSubmissionLifecycle")
+        self.assertEqual(
+            operation["requestBody"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/LifecycleRequest"},
+        )
+        self.assertIn("409", operation["responses"])
+        self.assertEqual(
+            operation["responses"]["409"]["x-error-codes"],
+            ["submission_dispatch_http.lifecycle_not_accepted"],
+        )
+        for name in (
+            "LifecycleRequest", "LifecycleResponse", "SourceLifecycle",
+            "DownstreamSubmissionStatus", "SourceServiceStatus",
+            "SourceCapabilityBinding",
+        ):
+            self.assertFalse(schemas[name]["additionalProperties"], name)
+            self.assertEqual(
+                set(schemas[name]["required"]),
+                set(schemas[name]["properties"]),
+                name,
+            )
+        nested = schemas["LifecycleResponse"]["properties"]["lifecycle"]
+        self.assertFalse(nested["additionalProperties"])
+        self.assertEqual(
+            nested["properties"]["source_lifecycle"],
+            {"$ref": "#/components/schemas/SourceLifecycle"},
+        )
+        self.assertFalse(
+            schemas["SourceLifecycle"]["properties"]["result"]
+            ["additionalProperties"]
+        )
+
     def test_enqueue_commits_before_202_and_status_requires_full_identity(self):
         self.open()
         accepted = self.enqueue()
@@ -629,6 +672,59 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertEqual(
             blocked["json"]["error_code"],
             "submission_dispatch_http.submission_not_found",
+        )
+
+    def test_lifecycle_crosses_the_outer_tenant_edge_fail_closed(self):
+        self.open()
+        queued = self.enqueue()["json"]["status"]
+        identity = {
+            key: queued[key] for key in (
+                "operation", "request_id", "event_id", "site_id",
+                "payload_sha256",
+            )
+        }
+        request = {"schema": HTTP.LIFECYCLE_REQUEST_SCHEMA, **identity}
+
+        pending = self.call(HTTP.LIFECYCLE_PATH, body=request)
+        self.assertEqual(pending["status"], 409)
+        self.assertEqual(
+            pending["json"]["error_code"],
+            "submission_dispatch_http.lifecycle_not_accepted",
+        )
+
+        with self.runtime._lock:
+            self.runtime._dispatcher.run_once(
+                self.runtime._client, "manual-lifecycle-worker", now=self.now,
+            )
+        response = self.call(HTTP.LIFECYCLE_PATH, body=request)
+        self.assertEqual(response["status"], 200)
+        self.assertFalse(response["json"]["accepted_implies_publication"])
+        lifecycle = response["json"]["lifecycle"]
+        self.assertEqual(lifecycle["dispatch_status"]["status"], "accepted")
+        self.assertEqual(
+            lifecycle["source_lifecycle"]["result"]["submission"]["event_id"],
+            identity["event_id"],
+        )
+        self.assertEqual(
+            lifecycle["source_lifecycle"]["result"]
+            ["website_capability_binding"],
+            lifecycle["dispatch_status"]
+            ["remote_website_capability_binding"],
+        )
+        self.assertNotIn("source_text", response["raw"].decode("utf-8"))
+        self.assertNotIn("target_text", response["raw"].decode("utf-8"))
+
+        self.authenticator.site_id = "another-site"
+        hidden = self.call(HTTP.LIFECYCLE_PATH, body=request)
+        self.assertEqual(hidden["status"], 404)
+
+        self.authenticator.site_id = identity["site_id"]
+        self.runtime.lifecycle = lambda operation, request_id: object()
+        malformed = self.call(HTTP.LIFECYCLE_PATH, body=request)
+        self.assertEqual(malformed["status"], 503)
+        self.assertEqual(
+            malformed["json"]["error_code"],
+            "submission_dispatch_http.runtime_response_invalid",
         )
 
     def test_change_cancellation_and_tombstone_are_independent_durable_rows(self):

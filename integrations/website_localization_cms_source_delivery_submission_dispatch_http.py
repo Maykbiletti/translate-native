@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v9"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v10"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -34,15 +34,21 @@ ENQUEUE_REQUEST_SCHEMA = (
     "blun.cms-public-submission-dispatch-enqueue-request.v1"
 )
 STATUS_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-status-request.v1"
+LIFECYCLE_REQUEST_SCHEMA = (
+    "blun.cms-public-submission-dispatch-lifecycle-request.v1"
+)
 QUEUE_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-queue-response.v2"
 STATUS_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-status-response.v2"
+LIFECYCLE_RESPONSE_SCHEMA = (
+    "blun.cms-public-submission-dispatch-lifecycle-response.v1"
+)
 HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1"
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v9"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v10"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v9"
+    "blun.cms-public-submission-dispatch-capabilities-response.v10"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -50,6 +56,7 @@ OPENAPI_RESPONSE_SCHEMA = (
 
 ENQUEUE_PATH = "/v1/localization/cms-submission-dispatch/requests"
 STATUS_PATH = "/v1/localization/cms-submission-dispatch/status"
+LIFECYCLE_PATH = "/v1/localization/cms-submission-dispatch/lifecycle"
 HEALTH_PATH = "/v1/localization/cms-submission-dispatch/health"
 READINESS_PATH = "/v1/localization/cms-submission-dispatch/readiness"
 CAPABILITIES_PATH = "/v1/localization/cms-submission-dispatch/capabilities"
@@ -57,6 +64,7 @@ OPENAPI_PATH = "/v1/localization/cms-submission-dispatch/openapi"
 SCOPES = {
     ENQUEUE_PATH: "cms-submission-dispatch:write",
     STATUS_PATH: "cms-submission-dispatch-status:read",
+    LIFECYCLE_PATH: "cms-submission-dispatch-lifecycle:read",
     HEALTH_PATH: "cms-submission-dispatch-health:read",
     READINESS_PATH: "cms-submission-dispatch-readiness:read",
     CAPABILITIES_PATH: "cms-submission-dispatch-capabilities:read",
@@ -65,12 +73,13 @@ SCOPES = {
 METHODS = {
     ENQUEUE_PATH: "POST",
     STATUS_PATH: "POST",
+    LIFECYCLE_PATH: "POST",
     HEALTH_PATH: "GET",
     READINESS_PATH: "GET",
     CAPABILITIES_PATH: "GET",
     OPENAPI_PATH: "GET",
 }
-TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH}
+TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH, LIFECYCLE_PATH}
 BODYLESS_PATHS = {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH}
 CAPABILITIES_PRECONDITION_HEADER = "X-Localization-Capabilities-SHA256"
 CAPABILITIES_PRECONDITION_PATHS = set(SCOPES) - {CAPABILITIES_PATH}
@@ -170,6 +179,20 @@ ERROR_CODES = {
         415: ("submission_dispatch_http.content_type_invalid",),
         503: _COMMON_503_ERRORS,
     },
+    LIFECYCLE_PATH: {
+        400: _BODY_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        404: ("submission_dispatch_http.submission_not_found",),
+        409: ("submission_dispatch_http.lifecycle_not_accepted",),
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        415: ("submission_dispatch_http.content_type_invalid",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
 }
 ERROR_STATUSES = {
     path: tuple(sorted(statuses)) for path, statuses in ERROR_CODES.items()
@@ -204,6 +227,13 @@ RESPONSE_INVARIANTS = {
         "attempts_lte_client_max_attempts",
         "leased_iff_lease_expires_at",
         "accepted_iff_remote_website_binding_complete_and_valid",
+    ),
+    LIFECYCLE_PATH: (
+        "status_identity_matches_request",
+        "dispatch_must_be_accepted_before_downstream_read",
+        "source_lifecycle_identity_matches_request",
+        "website_binding_matches_durable_acceptance",
+        "accepted_does_not_imply_publication",
     ),
 }
 MAX_BODY_BYTES = 4_000_000
@@ -525,6 +555,55 @@ def _website_capability_binding(value: Any) -> dict[str, Any]:
     return _DISPATCH._CLIENT._HTTP._binding(value)
 
 
+def _lifecycle_payload(
+    value: Any, identity: Mapping[str, str],
+) -> dict[str, Any]:
+    try:
+        payload = dataclasses.asdict(value)
+        if set(payload) != {"dispatch_status", "source_lifecycle"}:
+            raise ValueError
+        dispatch_status = _status_payload(
+            value.dispatch_status,
+            operation=identity["operation"],
+            request_id=identity["request_id"],
+            event_id=identity["event_id"],
+            site_id=identity["site_id"],
+            payload_sha256=identity["payload_sha256"],
+        )
+        if dispatch_status["status"] != "accepted":
+            raise ValueError
+        source = payload["source_lifecycle"]
+        source_http = _DISPATCH._CLIENT._HTTP
+        if (
+            not isinstance(source, Mapping)
+            or set(source) != {
+                "schema", "api_schema", "result",
+                "accepted_implies_publication",
+            }
+            or source.get("schema")
+            != source_http._SUBMISSION.LIFECYCLE_HTTP_RESPONSE_SCHEMA
+            or source.get("api_schema") != source_http.API_SCHEMA
+            or source.get("accepted_implies_publication") is not False
+            or not isinstance(source.get("result"), Mapping)
+        ):
+            raise ValueError
+        normalized = source_http._submission_lifecycle_payload(
+            source_http._PayloadView(source["result"]), identity,
+        )
+        if (
+            normalized != source["result"]
+            or normalized["website_capability_binding"]
+            != dispatch_status["remote_website_capability_binding"]
+        ):
+            raise ValueError
+        return {
+            "dispatch_status": dispatch_status,
+            "source_lifecycle": dict(source),
+        }
+    except Exception:
+        raise _blocked("runtime_response_invalid", 503) from None
+
+
 def _health_payload(value: Any) -> dict[str, Any]:
     try:
         payload = dataclasses.asdict(value)
@@ -605,6 +684,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
         ("capabilities", CAPABILITIES_PATH, None, CAPABILITIES_RESPONSE_SCHEMA, 200),
         ("enqueue", ENQUEUE_PATH, ENQUEUE_REQUEST_SCHEMA, QUEUE_RESPONSE_SCHEMA, 202),
         ("health", HEALTH_PATH, None, HEALTH_RESPONSE_SCHEMA, 200),
+        ("lifecycle", LIFECYCLE_PATH, LIFECYCLE_REQUEST_SCHEMA, LIFECYCLE_RESPONSE_SCHEMA, 200),
         ("openapi", OPENAPI_PATH, None, OPENAPI_RESPONSE_SCHEMA, 200),
         ("readiness", READINESS_PATH, None, READINESS_RESPONSE_SCHEMA, 200),
         ("status", STATUS_PATH, STATUS_REQUEST_SCHEMA, STATUS_RESPONSE_SCHEMA, 200),
@@ -662,6 +742,8 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "accepted_means_website_intake_only": True,
                 "accepted_implies_publication": False,
                 "accepted_status_returns_exact_website_capability_binding": True,
+                "lifecycle_reads_only_after_durable_website_acceptance": True,
+                "lifecycle_preserves_source_and_website_generations": True,
                 "operational_responses_are_content_free": True,
             },
             "public_submission_capabilities_sha256": _sha256(runtime_digest),
@@ -679,7 +761,7 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
 
     def __init__(self, runtime: Any, authenticator: Callable[[dict[str, Any]], Any]):
         if not all(callable(getattr(runtime, name, None)) for name in (
-            "enqueue", "status", "health", "worker_readiness",
+            "enqueue", "status", "lifecycle", "health", "worker_readiness",
         )):
             raise TypeError("runtime must provide submission dispatch operations")
         if not callable(authenticator):
@@ -867,10 +949,14 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                     "capabilities_sha256": capabilities["sha256"],
                     "accepted_implies_publication": False,
                 })
+            expected_request_schema = (
+                LIFECYCLE_REQUEST_SCHEMA
+                if path == LIFECYCLE_PATH else STATUS_REQUEST_SCHEMA
+            )
             if set(request) != {
                 "schema", "operation", "request_id", "event_id",
                 "site_id", "payload_sha256",
-            } or request.get("schema") != STATUS_REQUEST_SCHEMA:
+            } or request.get("schema") != expected_request_schema:
                 raise _blocked("request_invalid", 400)
             try:
                 operation = request["operation"]
@@ -885,14 +971,38 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
             if site_id != principal["site_id"]:
                 raise _blocked("submission_not_found", 404)
             try:
-                status = self.runtime.status(operation, request_id)
+                result = (
+                    self.runtime.lifecycle(operation, request_id)
+                    if path == LIFECYCLE_PATH
+                    else self.runtime.status(operation, request_id)
+                )
             except Exception as error:
                 if getattr(error, "code", "").endswith("submission_missing"):
                     raise _blocked("submission_not_found", 404) from None
+                if getattr(error, "code", "").endswith(
+                    "lifecycle_not_accepted"
+                ):
+                    raise _blocked("lifecycle_not_accepted", 409) from None
                 raise _blocked("runtime_blocked", 503) from error
+            identity = {
+                "operation": operation,
+                "request_id": request_id,
+                "event_id": event_id,
+                "site_id": site_id,
+                "payload_sha256": payload_hash,
+            }
+            if path == LIFECYCLE_PATH:
+                lifecycle = _lifecycle_payload(result, identity)
+                return self._send(start_response, 200, {
+                    "schema": LIFECYCLE_RESPONSE_SCHEMA,
+                    "api_schema": API_SCHEMA,
+                    "lifecycle": lifecycle,
+                    "capabilities_sha256": capabilities["sha256"],
+                    "accepted_implies_publication": False,
+                })
             try:
                 normalized = _status_payload(
-                    status, operation=operation, request_id=request_id,
+                    result, operation=operation, request_id=request_id,
                     event_id=event_id, site_id=site_id,
                     payload_sha256=payload_hash,
                 )
