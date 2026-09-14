@@ -508,6 +508,11 @@ class WebsiteLocalizationCMSBridge:
 
             commercial = _COMMERCIAL.public_profile(_PLANNER.COMMERCIAL_PROFILE)
             rendering_registry = _PLANNER.commercial_rendering_registry()
+            review_evidence_contract = (
+                _COMMERCIAL.public_review_evidence_contract(
+                    _PLANNER.COMMERCIAL_PROFILE,
+                )
+            )
             review_summary_contract = _COMMERCIAL.public_review_summary_contract(
                 _PLANNER.COMMERCIAL_PROFILE,
             )
@@ -522,12 +527,17 @@ class WebsiteLocalizationCMSBridge:
                     "schema", "profile", "applies_to", "dimensions",
                     "preservation", "rendering", "verification",
                     "locale_quality_profile", "protected_terms",
+                    "review_evidence_schema", "review_evidence_contract",
                     "review_summary_schema",
                     "review_summary_contract", "review_resolution_schema",
                     "review_resolution_contract", "sha256",
                 }
                 or commercial["schema"] != _COMMERCIAL.PUBLIC_PROFILE_SCHEMA
                 or commercial["profile"] != _PLANNER.COMMERCIAL_PROFILE
+                or commercial["review_evidence_schema"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or commercial["review_evidence_contract"]
+                != review_evidence_contract
                 or commercial["review_summary_schema"]
                 != _COMMERCIAL.REVIEW_SUMMARY_SCHEMA
                 or commercial["review_summary_contract"] != review_summary_contract
@@ -572,6 +582,127 @@ class WebsiteLocalizationCMSBridge:
                 or [item.get("name") for item in commercial["dimensions"]]
                 != list(_EXPECTED_COMMERCIAL_DIMENSIONS)
                 or tuple(_COMMERCIAL.DIMENSIONS) != _EXPECTED_COMMERCIAL_DIMENSIONS
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+            unsigned_review_evidence_contract = dict(
+                review_evidence_contract
+            )
+            review_evidence_digest = unsigned_review_evidence_contract.pop(
+                "sha256", None,
+            )
+            if (
+                set(review_evidence_contract) != {
+                    "schema", "result_schema", "profile", "required_fields",
+                    "coverage", "offer_registry", "checks", "trust_boundary",
+                    "content_policy", "sha256",
+                }
+                or review_evidence_contract["schema"]
+                != _COMMERCIAL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA
+                or review_evidence_contract["result_schema"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or review_evidence_contract["profile"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or review_evidence_contract["required_fields"] != [
+                    "schema", "coverage", "offers", "checks",
+                ]
+                or review_evidence_contract["coverage"] != {
+                    "allowed": ["complete", "uncertain"],
+                    "complete": (
+                        "every-proposition-and-offer-association-reviewed"
+                    ),
+                    "uncertain": "independent-review-required",
+                }
+                or review_evidence_contract["offer_registry"] != {
+                    "field": "offers",
+                    "max_items": 1000,
+                    "item_required_fields": [
+                        "id", "source_spans", "target_spans",
+                    ],
+                    "identifier": {
+                        "pattern": r"^[A-Za-z0-9_.:-]{1,256}$",
+                        "unique": True,
+                    },
+                    "regions": {
+                        "fields": ["source_spans", "target_spans"],
+                        "span_format": (
+                            "zero-based-unicode-code-points-exclusive-end"
+                        ),
+                        "non_empty_text": True,
+                        "ordered": True,
+                        "overlap": "forbidden-within-and-across-offers",
+                        "discontiguous": True,
+                        "at_least_one_side_non_empty": True,
+                    },
+                }
+                or review_evidence_contract["checks"] != {
+                    "required_dimensions": list(
+                        _EXPECTED_COMMERCIAL_DIMENSIONS
+                    ),
+                    "exact_dimension_set": True,
+                    "max_items_per_dimension": 1000,
+                    "statuses": [
+                        "equivalent", "not_present", "changed", "uncertain",
+                    ],
+                    "status_items": {
+                        "equivalent": "one-or-more-matched",
+                        "not_present": "empty",
+                        "changed": "one-or-more-specific",
+                        "uncertain": "one-or-more-specific",
+                    },
+                    "item": {
+                        "required_fields": [
+                            "offer", "relation", "source_span", "target_span",
+                            "explanation",
+                        ],
+                        "offer": "registered-offer-id",
+                        "relations": [
+                            "matched", "source_only", "target_only",
+                        ],
+                        "matched_requires": "source-and-target-spans",
+                        "source_only_requires": (
+                            "source-span-and-null-target-span"
+                        ),
+                        "target_only_requires": (
+                            "null-source-span-and-target-span"
+                        ),
+                        "span_containment": "inside-named-offer-region",
+                        "duplicates": "forbidden-per-dimension",
+                        "explanation": (
+                            "non-empty-maximum-2000-code-points"
+                        ),
+                    },
+                    "offer_assignment": {
+                        "equivalent": (
+                            "exactly-one-matched-item-per-registered-offer"
+                        ),
+                        "other_equivalent_checks_require_equivalent_assignment": (
+                            True
+                        ),
+                    },
+                }
+                or review_evidence_contract["trust_boundary"] != {
+                    "validates": "structure-offsets-and-verdict-consistency",
+                    "semantic_truth": False,
+                    "numeric_regex_semantic_proof": False,
+                    "unresolved_route": (
+                        "independent-model-or-qualified-native-domain-review"
+                    ),
+                    "publication_authority": False,
+                }
+                or review_evidence_contract["content_policy"] != {
+                    "source_text": False,
+                    "target_text": False,
+                    "source_spans": False,
+                    "target_spans": False,
+                    "reviewer_prose": False,
+                    "project_prices": False,
+                    "project_brands": False,
+                }
+                or not isinstance(review_evidence_digest, str)
+                or SHA256.fullmatch(review_evidence_digest) is None
+                or review_evidence_digest != _hash(
+                    _canonical_json(unsigned_review_evidence_contract)
+                )
             ):
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
             unsigned_review_summary_contract = dict(review_summary_contract)

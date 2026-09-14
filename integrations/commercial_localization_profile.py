@@ -27,6 +27,9 @@ _SPEC.loader.exec_module(_IMPL)
 
 hashlib = _IMPL.hashlib
 PUBLIC_PROFILE_SCHEMA = _IMPL.PUBLIC_PROFILE_SCHEMA
+REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
+    _IMPL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA
+)
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = _IMPL.REVIEW_SUMMARY_CAPABILITIES_SCHEMA
 REVIEW_SUMMARY_SCHEMA = _IMPL.REVIEW_SUMMARY_SCHEMA
 EVIDENCE_BINDING_SCHEMA = _IMPL.EVIDENCE_BINDING_SCHEMA
@@ -41,6 +44,7 @@ COMMERCIAL_RENDERING_REFERENCE_SCHEMA = (
 DIMENSIONS = _IMPL.DIMENSIONS
 _canonical_json = _IMPL._canonical_json
 evidence_sha256 = _IMPL.evidence_sha256
+public_review_evidence_contract = _IMPL.public_review_evidence_contract
 public_review_summary_contract = _IMPL.public_review_summary_contract
 public_review_resolution_contract = _IMPL.public_review_resolution_contract
 validate_review_resolution = _IMPL.validate_review_resolution

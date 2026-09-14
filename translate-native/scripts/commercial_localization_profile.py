@@ -13,7 +13,10 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v9"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v10"
+REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
+    "translate-native.commercial-review-evidence-capabilities.v1"
+)
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-summary-capabilities.v4"
 )
@@ -128,6 +131,99 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
                 "offer-registry-and-proposition-assignment",
                 "complete-commercial-review-evidence",
             ],
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "source_spans": False,
+            "target_spans": False,
+            "reviewer_prose": False,
+            "project_prices": False,
+            "project_brands": False,
+        },
+    }
+    return {
+        **body,
+        "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
+    }
+
+
+def public_review_evidence_contract(profile: str) -> dict[str, Any]:
+    """Return the exact public contract for private commercial evidence."""
+    body = {
+        "schema": REVIEW_EVIDENCE_CAPABILITIES_SCHEMA,
+        "result_schema": profile,
+        "profile": profile,
+        "required_fields": ["schema", "coverage", "offers", "checks"],
+        "coverage": {
+            "allowed": ["complete", "uncertain"],
+            "complete": "every-proposition-and-offer-association-reviewed",
+            "uncertain": "independent-review-required",
+        },
+        "offer_registry": {
+            "field": "offers",
+            "max_items": 1000,
+            "item_required_fields": [
+                "id", "source_spans", "target_spans",
+            ],
+            "identifier": {
+                "pattern": PROFILE_VERSION.pattern,
+                "unique": True,
+            },
+            "regions": {
+                "fields": ["source_spans", "target_spans"],
+                "span_format": (
+                    "zero-based-unicode-code-points-exclusive-end"
+                ),
+                "non_empty_text": True,
+                "ordered": True,
+                "overlap": "forbidden-within-and-across-offers",
+                "discontiguous": True,
+                "at_least_one_side_non_empty": True,
+            },
+        },
+        "checks": {
+            "required_dimensions": list(DIMENSIONS),
+            "exact_dimension_set": True,
+            "max_items_per_dimension": 1000,
+            "statuses": [
+                "equivalent", "not_present", "changed", "uncertain",
+            ],
+            "status_items": {
+                "equivalent": "one-or-more-matched",
+                "not_present": "empty",
+                "changed": "one-or-more-specific",
+                "uncertain": "one-or-more-specific",
+            },
+            "item": {
+                "required_fields": [
+                    "offer", "relation", "source_span", "target_span",
+                    "explanation",
+                ],
+                "offer": "registered-offer-id",
+                "relations": ["matched", "source_only", "target_only"],
+                "matched_requires": "source-and-target-spans",
+                "source_only_requires": "source-span-and-null-target-span",
+                "target_only_requires": "null-source-span-and-target-span",
+                "span_containment": "inside-named-offer-region",
+                "duplicates": "forbidden-per-dimension",
+                "explanation": "non-empty-maximum-2000-code-points",
+            },
+            "offer_assignment": {
+                "equivalent": (
+                    "exactly-one-matched-item-per-registered-offer"
+                ),
+                "other_equivalent_checks_require_equivalent_assignment": True,
+            },
+        },
+        "trust_boundary": {
+            "validates": "structure-offsets-and-verdict-consistency",
+            "semantic_truth": False,
+            "numeric_regex_semantic_proof": False,
+            "unresolved_route": (
+                "independent-model-or-qualified-native-domain-review"
+            ),
+            "publication_authority": False,
         },
         "content_policy": {
             "source_text": False,
@@ -278,6 +374,8 @@ def public_profile(profile: str) -> dict[str, Any]:
     body = {
         "schema": PUBLIC_PROFILE_SCHEMA,
         "profile": profile,
+        "review_evidence_schema": profile,
+        "review_evidence_contract": public_review_evidence_contract(profile),
         "review_summary_schema": REVIEW_SUMMARY_SCHEMA,
         "review_summary_contract": public_review_summary_contract(profile),
         "review_resolution_schema": REVIEW_RESOLUTION_SCHEMA,

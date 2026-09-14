@@ -1731,6 +1731,15 @@ commitment, renewal, cancellation, condition, and offer-assignment rules it
 must preserve without receiving publication authority or any configured
 price, brand, or product value.
 
+The profile now embeds a separately versioned and hashed
+`review_evidence_contract`. It gives CMS and provider adapters the exact closed
+report fields, limits, Unicode code-point span rules, offer containment,
+relation semantics, ten-dimension order and verdict invariants without exposing
+project prices, source or target text, actual spans, brands, or reviewer prose.
+Capability discovery rejects a missing, altered, reordered, or self-rehashed
+contract. The contract validates evidence structure only, grants no publication
+authority, and leaves uncertain meaning on the independent-review route.
+
 The three provider calls stay ordered: transcreation, source-hidden native
 editing, source-aware fidelity. Commercial fidelity additionally returns
 `commercial_review` with the profile schema, `coverage` (`complete` or

@@ -127,6 +127,15 @@ Adapters therefore do not need to infer the targeted-review envelope from a
 schema name or prose. A changed, missing, reordered or unknown dimension makes
 the complete capability response unavailable.
 
+The separately hashed `review_evidence_contract` is the machine-readable
+source of truth for the private source-fidelity report. It closes the exact
+top-level fields, coverage values, ten dimensions, item relations and limits;
+defines Unicode code-point offsets and offer-region containment; and requires
+one matched assignment per registered offer. It contains no project prices,
+text, spans, brands, or reviewer prose. Its structural validator cannot prove
+semantic truth, and the contract explicitly grants no publication authority.
+The portable `--contract` response exposes this same object.
+
 The separately hashed `review_resolution_contract` defines the exact ordered
 dimension acknowledgement and the two permitted resolution methods. A
 qualified-human resolution must omit reviewer provider identity; both methods

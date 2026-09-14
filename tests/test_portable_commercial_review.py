@@ -66,6 +66,10 @@ class PortableCommercialReviewTests(unittest.TestCase):
         self.assertFalse(payload["release_allowed"])
         self.assertEqual(payload["commercial_review"], PROFILE.review_contract(SCHEMA))
         self.assertEqual(
+            payload["commercial_review_evidence_contract"],
+            PROFILE.public_review_evidence_contract(SCHEMA),
+        )
+        self.assertEqual(
             payload["commercial_review_summary_contract"],
             PROFILE.public_review_summary_contract(SCHEMA),
         )

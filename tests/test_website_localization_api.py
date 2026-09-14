@@ -437,6 +437,41 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         commercial = capabilities["commercial_profile"]
         self.assertEqual(commercial["profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
         self.assertEqual(
+            commercial["review_evidence_schema"],
+            CMS._PLANNER.COMMERCIAL_PROFILE,
+        )
+        review_evidence_contract = commercial["review_evidence_contract"]
+        self.assertEqual(
+            review_evidence_contract["schema"],
+            CMS._COMMERCIAL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            review_evidence_contract["required_fields"],
+            ["schema", "coverage", "offers", "checks"],
+        )
+        self.assertEqual(
+            review_evidence_contract["checks"]["required_dimensions"],
+            list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
+        )
+        self.assertEqual(
+            review_evidence_contract["offer_registry"]["regions"]["overlap"],
+            "forbidden-within-and-across-offers",
+        )
+        self.assertEqual(
+            review_evidence_contract["checks"]["offer_assignment"]
+            ["equivalent"],
+            "exactly-one-matched-item-per-registered-offer",
+        )
+        self.assertFalse(
+            review_evidence_contract["trust_boundary"]["semantic_truth"],
+        )
+        unsigned_review_evidence = dict(review_evidence_contract)
+        review_evidence_digest = unsigned_review_evidence.pop("sha256")
+        self.assertEqual(
+            review_evidence_digest,
+            CMS._hash(CMS._canonical_json(unsigned_review_evidence)),
+        )
+        self.assertEqual(
             commercial["review_summary_schema"],
             CMS._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
         )
@@ -1044,6 +1079,48 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             ):
                 status, _, payload = self.capabilities_request(
                     request_id=f"capabilities-commercial-summary-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
+            self.assertNotIn("locales", payload)
+
+    def test_capabilities_block_commercial_evidence_contract_drift(self):
+        current = CMS._COMMERCIAL.public_review_evidence_contract
+
+        def rehashed(profile, mutation):
+            value = current(profile)
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "overlap": lambda value: value["offer_registry"]["regions"].update(
+                overlap="allowed",
+            ),
+            "partial-dimensions": lambda value: value["checks"]
+            ["required_dimensions"].pop(),
+            "semantic-claim": lambda value: value["trust_boundary"].update(
+                semantic_truth=True,
+            ),
+            "publication-authority": lambda value: value[
+                "trust_boundary"
+            ].update(publication_authority=True),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._COMMERCIAL,
+                "public_review_evidence_contract",
+                lambda profile, mutation=mutation: rehashed(
+                    profile, mutation,
+                ),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-commercial-evidence-{label}",
                 )
             self.assertEqual(
                 (status, payload["error"]),

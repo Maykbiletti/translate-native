@@ -10,6 +10,7 @@ from pathlib import Path
 
 from commercial_localization_profile import (
     CommercialReviewBlocked,
+    public_review_evidence_contract,
     public_review_resolution_contract,
     public_review_summary_contract,
     review_contract,
@@ -73,6 +74,9 @@ def main(argv=None) -> int:
             "status": "CONTRACT",
             "release_allowed": False,
             "commercial_review": review_contract(PROFILE),
+            "commercial_review_evidence_contract": (
+                public_review_evidence_contract(PROFILE)
+            ),
             "commercial_review_summary_contract": (
                 public_review_summary_contract(PROFILE)
             ),

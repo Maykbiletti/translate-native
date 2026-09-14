@@ -87,6 +87,59 @@ class CommercialLocalizationTests(unittest.TestCase):
         adapter = provider(report=report)
         return WORKER.run_localization_job(job(SOURCE, "commercial"), assets(), adapter), adapter
 
+    def test_public_review_evidence_contract_is_exact_content_free_and_hashed(self):
+        value = PROFILE.public_review_evidence_contract(SCHEMA)
+        self.assertEqual(
+            value["schema"], PROFILE.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(value["result_schema"], SCHEMA)
+        self.assertEqual(value["profile"], SCHEMA)
+        self.assertEqual(
+            value["required_fields"],
+            ["schema", "coverage", "offers", "checks"],
+        )
+        self.assertEqual(
+            value["checks"]["required_dimensions"],
+            list(PROFILE.DIMENSIONS),
+        )
+        self.assertTrue(value["checks"]["exact_dimension_set"])
+        self.assertEqual(value["offer_registry"]["max_items"], 1000)
+        self.assertTrue(
+            value["offer_registry"]["identifier"]["unique"],
+        )
+        self.assertEqual(
+            value["offer_registry"]["regions"]["overlap"],
+            "forbidden-within-and-across-offers",
+        )
+        self.assertTrue(
+            value["offer_registry"]["regions"]["discontiguous"],
+        )
+        self.assertEqual(
+            value["checks"]["item"]["span_containment"],
+            "inside-named-offer-region",
+        )
+        self.assertEqual(
+            value["checks"]["offer_assignment"]["equivalent"],
+            "exactly-one-matched-item-per-registered-offer",
+        )
+        self.assertFalse(value["trust_boundary"]["semantic_truth"])
+        self.assertFalse(
+            value["trust_boundary"]["numeric_regex_semantic_proof"],
+        )
+        self.assertFalse(value["trust_boundary"]["publication_authority"])
+        self.assertTrue(all(
+            item is False for item in value["content_policy"].values()
+        ))
+        unsigned = dict(value)
+        digest = unsigned.pop("sha256")
+        self.assertEqual(
+            digest,
+            PROFILE.hashlib.sha256(PROFILE._canonical_json(unsigned)).hexdigest(),
+        )
+        serialized = json.dumps(value).lower()
+        for private_value in ("480", "vat", "blun", "offer-1"):
+            self.assertNotIn(private_value, serialized)
+
     def test_public_review_summary_contract_is_exact_content_free_and_hashed(self):
         value = PROFILE.public_review_summary_contract(SCHEMA)
         self.assertEqual(
@@ -250,6 +303,11 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_public_profile_requires_locale_bound_quality_in_all_phases(self):
         value = PROFILE.public_profile(SCHEMA)
+        self.assertEqual(value["review_evidence_schema"], SCHEMA)
+        self.assertEqual(
+            value["review_evidence_contract"],
+            PROFILE.public_review_evidence_contract(SCHEMA),
+        )
         self.assertEqual(
             value["review_resolution_schema"],
             PROFILE.REVIEW_RESOLUTION_SCHEMA,
