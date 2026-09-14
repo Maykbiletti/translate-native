@@ -33,6 +33,8 @@ RELEASE = load(
     "blun_test_fallback_release",
     ROOT / "integrations" / "website_localization_release.py",
 )
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 
 
 def make_plan(**overrides):
@@ -163,6 +165,8 @@ class WebsiteLocalizationFallbackTests(unittest.TestCase):
             "quality-receipt",
             ReceiptVerifier(),
             self.authority,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
             now=100,
             ttl_seconds=ttl_seconds,
         )

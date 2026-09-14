@@ -1017,6 +1017,8 @@ def run_next_release(
             quality_receipt,
             guarded_quality_verifier,
             approval_authority,
+            evidence_request_id=request.request_id,
+            evidence_revision=request.evidence_revision,
             now=approval_now,
             ttl_seconds=approval_ttl_seconds,
             human_review_receipt=human_receipt,

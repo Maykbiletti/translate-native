@@ -129,12 +129,13 @@ numbers, a UTF-8 byte-order mark, wrong bindings, ambiguous content types,
 incorrect lengths, and oversized bodies. The release coordinator then applies
 its existing independent receipt checks. Each opaque receipt must verify
 against the complete canonical
-`blun.localization-quality-receipt-binding.v4` object supplied by the release
+`blun.localization-quality-receipt-binding.v5` object supplied by the release
 coordinator, including the review purpose, job and result hashes, both texts
 and locales, content type, glossary and policy versions, provider/model and
 software identities, locale quality and commercial profiles, the exact
 commercial review scope, canonical resolution-contract SHA-256, confidence,
-and escalation requirements. Reuse across
+escalation requirements, and the exact evidence request ID and revision from
+this response. Reuse across
 a changed field or between quality,
 qualified-human, and independent-model review purposes must fail closed.
 Legal content still requires a

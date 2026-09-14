@@ -1031,7 +1031,7 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v4` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v5` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
@@ -1039,10 +1039,12 @@ confidence, locale quality profile, and, for commercial content, the exact
 nested locale-specific commercial profile plus its content-free targeted-review
 summary, the canonical advertised resolution-contract SHA-256 when targeted
 review is unresolved, and the human/independent-review
-requirements. The verifier must cryptographically
+requirements. It also carries the canonical quality-evidence request ID and
+evidence revision that produced the opaque receipt. The verifier must cryptographically
 bind every field. It must reject a receipt issued for another result, policy,
 model, profile, software version, locale, or review purpose. In particular, a
-quality receipt cannot satisfy a qualified-human or independent-model review.
+quality receipt cannot satisfy a qualified-human or independent-model review,
+and an old receipt cannot be relabelled under a newer evidence response.
 
 For deployments that keep verification behind a network trust boundary,
 `integrations/website_localization_receipt_verifier_http.py` provides one
@@ -1103,7 +1105,9 @@ provider/model identity, software version, and a host-chosen
 and the exact validated queue-result hash; both text hashes bind the complete
 source and target bytes. The durable store and HTTPS adapter independently
 recompute the ID from the same closed v8 identity field set before persistence
-or network access. The adapter may call an independent
+or network access. The coordinator carries that exact ID and revision into
+each v5 receipt binding and the v5 signed approval; missing or substituted
+context blocks before receipt verification or signing. The adapter may call an independent
 model, a qualified native reviewer, or a host-owned review service; no
 provider transport or credential is built into the coordinator.
 

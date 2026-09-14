@@ -107,6 +107,18 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.129.0: evidence-context-bound approval
+
+Version 6.129.0 carries the canonical quality-evidence request ID and evidence
+revision into every purpose-specific receipt-verification binding and into the
+signed durable approval. A provider cannot relabel an otherwise valid quality,
+qualified-human, or independent-model receipt under a newer evidence envelope.
+
+The receipt binding advances to v5 and the signed approval to v5. Missing,
+malformed, stale, or substituted evidence context blocks before verifier or
+signer access; changing either dimension also derives a new verifier HTTP
+idempotency key. Raw receipts remain outside durable translation memory.
+
 ### Version 6.128.0: derived quality-evidence identity
 
 Version 6.128.0 makes the quality-evidence request ID independently
@@ -2015,7 +2027,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.128.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.129.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

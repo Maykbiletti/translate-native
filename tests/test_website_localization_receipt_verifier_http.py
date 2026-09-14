@@ -43,6 +43,8 @@ def binding(*, kind="quality"):
     return {
         "schema": HTTP.RECEIPT_BINDING_SCHEMA,
         "review_kind": kind,
+        "evidence_request_id": "blun-l10n-evidence-" + "a" * 64,
+        "evidence_revision": "native-evidence-1",
         "job_id": "job-finnish-1",
         "result_sha256": "1" * 64,
         "source_text": source,
@@ -162,8 +164,13 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         changed["policy_version"] = "native-web-2"
         verifier.verify(binding=changed, receipt="receipt-one")
         verifier.verify(binding=changed, receipt="receipt-two")
+        changed_context = binding()
+        changed_context["evidence_request_id"] = (
+            "blun-l10n-evidence-" + "b" * 64
+        )
+        verifier.verify(binding=changed_context, receipt="receipt-one")
         ids = [call[1]["Idempotency-Key"] for call in transport.calls]
-        self.assertEqual(len(set(ids)), 3)
+        self.assertEqual(len(set(ids)), 4)
 
     def test_malformed_binding_blocks_before_authentication_or_transport(self):
         auth_calls = []
@@ -180,6 +187,17 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         missing = binding()
         del missing["policy_version"]
         mutations.append(missing)
+        missing_context = binding()
+        del missing_context["evidence_request_id"]
+        mutations.append(missing_context)
+        malformed_context = binding()
+        malformed_context["evidence_request_id"] = (
+            "blun-l10n-evidence-" + "g" * 64
+        )
+        mutations.append(malformed_context)
+        malformed_revision = binding()
+        malformed_revision["evidence_revision"] = " stale "
+        mutations.append(malformed_revision)
         wrong_profile = binding()
         wrong_profile["quality_profile"]["locale"] = "sv-SE"
         mutations.append(wrong_profile)

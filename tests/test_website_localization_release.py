@@ -31,6 +31,8 @@ RELEASE = load(
     "blun_test_website_localization_release",
     ROOT / "integrations" / "website_localization_release.py",
 )
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 QUEUE = RELEASE._QUEUE
 WORKER = RELEASE._WORKER
 
@@ -239,6 +241,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
 
     def approve(self, plan, job, **overrides):
         values = {
+            "evidence_request_id": EVIDENCE_REQUEST_ID,
+            "evidence_revision": EVIDENCE_REVISION,
             "now": 200,
             "ttl_seconds": 100,
         }
@@ -261,6 +265,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             "SELECT approval_json FROM localization_approvals"
         ).fetchone()
         payload = json.loads(row[0])
+        self.assertEqual(payload["evidence_request_id"], EVIDENCE_REQUEST_ID)
+        self.assertEqual(payload["evidence_revision"], EVIDENCE_REVISION)
         self.assertEqual(payload["source_sha256"], plan.jobs[0].as_payload()["source"]["sha256"])
         self.assertEqual(payload["target_sha256"], approved.target_sha256)
         self.assertEqual(payload["glossary_version"], "blun-glossary-3")
@@ -280,6 +286,12 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertEqual(receipt_binding["target_text"], approved.candidate)
         self.assertEqual(receipt_binding["schema"], RELEASE.RECEIPT_BINDING_SCHEMA)
         self.assertEqual(receipt_binding["review_kind"], "quality")
+        self.assertEqual(
+            receipt_binding["evidence_request_id"], EVIDENCE_REQUEST_ID,
+        )
+        self.assertEqual(
+            receipt_binding["evidence_revision"], EVIDENCE_REVISION,
+        )
         self.assertEqual(receipt_binding["job_id"], plan.jobs[0].job_id)
         self.assertEqual(receipt_binding["result_sha256"], payload["result_sha256"])
         self.assertEqual(receipt_binding["source_sha256"], payload["source_sha256"])
@@ -355,6 +367,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             original.jobs[0].as_payload(),
             original_result,
             original_result_sha256,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
             review_kind="quality",
         ))
         self.store.approve(
@@ -363,6 +377,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             receipt,
             verifier,
             self.authority,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
             now=200,
         )
 
@@ -375,10 +391,80 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 receipt,
                 verifier,
                 self.authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=201,
             )
         self.assertEqual(caught.exception.code, "quality.receipt.rejected")
         self.assertEqual(self.authority.sign_calls, 1)
+
+    def test_quality_receipt_cannot_be_relabelled_for_new_evidence_context(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan)
+        result = self.store.validated_result(plan, plan.jobs[0].job_id)
+        result_sha256 = hashlib.sha256(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        verifier = BoundReceiptVerifier()
+        receipt = verifier.issue(RELEASE._receipt_binding(
+            plan.jobs[0].job_id,
+            plan.jobs[0].as_payload(),
+            result,
+            result_sha256,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
+            review_kind="quality",
+        ))
+
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.store.approve(
+                plan,
+                plan.jobs[0].job_id,
+                receipt,
+                verifier,
+                self.authority,
+                evidence_request_id="blun-l10n-evidence-" + "b" * 64,
+                evidence_revision="native-evidence-2",
+                now=200,
+            )
+
+        self.assertEqual(caught.exception.code, "quality.receipt.rejected")
+        self.assertEqual(self.authority.sign_calls, 0)
+
+    def test_invalid_evidence_context_blocks_before_verifier_and_signer(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan)
+        for request_id, revision in (
+            ("blun-l10n-evidence-" + "g" * 64, EVIDENCE_REVISION),
+            (EVIDENCE_REQUEST_ID, " stale "),
+        ):
+            with self.subTest(request_id=request_id, revision=revision):
+                verifier = ExactReceiptVerifier()
+                with self.assertRaises(
+                    RELEASE.LocalizationReleaseBlocked,
+                ) as caught:
+                    self.store.approve(
+                        plan,
+                        plan.jobs[0].job_id,
+                        "quality-receipt",
+                        verifier,
+                        self.authority,
+                        evidence_request_id=request_id,
+                        evidence_revision=revision,
+                        now=200,
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "review.evidence_context.invalid",
+                )
+                self.assertEqual(verifier.calls, [])
+        self.assertEqual(self.authority.sign_calls, 0)
 
     def test_quality_receipt_cannot_satisfy_qualified_human_review(self):
         plan = make_plan(
@@ -405,6 +491,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             plan.jobs[0].as_payload(),
             result,
             result_sha256,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
             review_kind="quality",
         ))
 
@@ -415,6 +503,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 quality_receipt,
                 verifier,
                 self.authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
                 human_review_receipt=quality_receipt,
                 human_review_verifier=verifier,
@@ -475,6 +565,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 "wrong-receipt",
                 self.verifier,
                 self.authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
             )
         self.assertEqual(caught.exception.code, "quality.receipt.rejected")
@@ -498,6 +590,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 "quality-receipt",
                 UnavailableVerifier(),
                 self.authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
             )
         self.assertEqual(caught.exception.code, "quality.verifier.network")

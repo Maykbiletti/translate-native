@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-receipt-verification-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-receipt-verification-http-response.v1"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v4"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v5"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_TEXT_BYTES = 2_000_000
@@ -31,6 +31,7 @@ HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
+EVIDENCE_REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
 COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
 COMMERCIAL_DIMENSIONS = (
     "amount_currency", "discount_basis", "qualifiers", "tax_status",
@@ -38,7 +39,8 @@ COMMERCIAL_DIMENSIONS = (
     "conditions", "offer_assignment",
 )
 BINDING_FIELDS = {
-    "schema", "review_kind", "job_id", "result_sha256", "source_text",
+    "schema", "review_kind", "evidence_request_id", "evidence_revision",
+    "job_id", "result_sha256", "source_text",
     "target_text", "source_sha256", "target_sha256", "source_locale",
     "target_locale", "content_type", "glossary_version", "policy_version",
     "primary_provider", "review_provider", "software_version",
@@ -321,11 +323,18 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         value, code="binding_invalid", maximum=MAX_REQUEST_BYTES,
     ))
     for field in (
-        "job_id", "source_locale", "target_locale", "content_type",
+        "evidence_revision", "job_id", "source_locale", "target_locale", "content_type",
         "glossary_version", "policy_version", "software_version",
     ):
         if not _token(binding[field]):
             _fail("binding_invalid")
+    if (
+        not isinstance(binding["evidence_request_id"], str)
+        or EVIDENCE_REQUEST_ID.fullmatch(
+            binding["evidence_request_id"]
+        ) is None
+    ):
+        _fail("binding_invalid")
     for field in ("result_sha256", "source_sha256", "target_sha256"):
         if not isinstance(binding[field], str) or SHA256.fullmatch(binding[field]) is None:
             _fail("binding_invalid")

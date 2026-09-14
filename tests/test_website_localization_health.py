@@ -32,6 +32,8 @@ RELEASE = CMS._RELEASE
 QUEUE = CMS._QUEUE
 WORKER = RELEASE._WORKER
 COORDINATOR = HEALTH._COORDINATOR
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 
 
 class CMSAuthority:
@@ -324,6 +326,8 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
                 "quality-receipt",
                 self.receipt_verifier,
                 self.approval_authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
                 ttl_seconds=ttl,
             )
@@ -694,6 +698,8 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             "quality-receipt",
             self.receipt_verifier,
             self.approval_authority,
+            evidence_request_id=request.request_id,
+            evidence_revision=request.evidence_revision,
             now=201,
             ttl_seconds=1000,
         )

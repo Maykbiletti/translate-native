@@ -94,6 +94,8 @@ class ReceiptVerifier:
                 binding["target_locale"],
                 request.request_id,
             )
+            and binding["evidence_request_id"] == request.request_id
+            and binding["evidence_revision"] == request.evidence_revision
             for request in self.requests
         )
 
@@ -374,7 +376,7 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
     def test_evidence_request_is_exactly_bound_and_contains_one_locale(self):
         self.complete_all()
         provider = EvidenceProvider()
-        outcome, _, _ = self.run_release(provider)
+        outcome, quality, _ = self.run_release(provider)
         request = provider.requests[0]
         payload = request.as_payload()
 
@@ -395,6 +397,13 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         )
         self.assertTrue(payload["request_id"].startswith("blun-l10n-evidence-"))
         self.assertNotIn("target_locales", json.dumps(payload))
+        receipt_binding = quality.calls[0]["binding"]
+        self.assertEqual(
+            receipt_binding["evidence_request_id"], request.request_id,
+        )
+        self.assertEqual(
+            receipt_binding["evidence_revision"], request.evidence_revision,
+        )
 
         commercial_event = change_event(targets=("sv-SE",), content_type="commercial")
         commercial_plan = PLANNER.plan_from_mapping(commercial_event["localization"])
@@ -758,6 +767,8 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             response["quality_receipt"],
             quality,
             self.approval_authority,
+            evidence_request_id=request.request_id,
+            evidence_revision=request.evidence_revision,
             now=200,
             ttl_seconds=1000,
         )

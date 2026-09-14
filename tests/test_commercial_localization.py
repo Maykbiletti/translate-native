@@ -8,7 +8,14 @@ from unittest.mock import patch
 
 from test_website_localization_worker import WORKER, PLANNER, ScriptedProvider, assets, candidate, job, review
 from test_website_localization_fallback import RUNNER, Clock
-from test_website_localization_release import RELEASE, HmacAuthority, ExactReceiptVerifier, make_plan
+from test_website_localization_release import (
+    EVIDENCE_REQUEST_ID,
+    EVIDENCE_REVISION,
+    RELEASE,
+    ExactReceiptVerifier,
+    HmacAuthority,
+    make_plan,
+)
 
 
 PROFILE = WORKER._COMMERCIAL
@@ -668,9 +675,21 @@ class CommercialLocalizationTests(unittest.TestCase):
             authority = HmacAuthority()
             self.assertFalse(store.readiness(plan, authority, now=300).ready)
             with self.assertRaises(RELEASE.LocalizationReleaseBlocked):
-                store.approve(plan, plan.jobs[0].job_id, "wrong", ExactReceiptVerifier(), authority, now=300)
+                store.approve(
+                    plan, plan.jobs[0].job_id, "wrong",
+                    ExactReceiptVerifier(), authority,
+                    evidence_request_id=EVIDENCE_REQUEST_ID,
+                    evidence_revision=EVIDENCE_REVISION,
+                    now=300,
+                )
             self.assertEqual(authority.sign_calls, 0)
-            store.approve(plan, plan.jobs[0].job_id, "quality-receipt", ExactReceiptVerifier(), authority, now=301)
+            store.approve(
+                plan, plan.jobs[0].job_id, "quality-receipt",
+                ExactReceiptVerifier(), authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
+                now=301,
+            )
             self.assertTrue(store.readiness(plan, authority, now=302).ready)
             self.assertEqual(len(store.publication_bundle(plan, authority, now=302)), 1)
             cached = store.cached_result(plan.jobs[0].as_payload(), authority, now=302)
@@ -703,7 +722,10 @@ class CommercialLocalizationTests(unittest.TestCase):
             with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as blocked:
                 store.approve(
                     plan, plan.jobs[0].job_id, "quality-receipt",
-                    ExactReceiptVerifier(), authority, now=300,
+                    ExactReceiptVerifier(), authority,
+                    evidence_request_id=EVIDENCE_REQUEST_ID,
+                    evidence_revision=EVIDENCE_REVISION,
+                    now=300,
                 )
             self.assertEqual(blocked.exception.code, "human.receipt.required")
             verifier = ExactReceiptVerifier("commercial-independent-receipt")
@@ -718,7 +740,10 @@ class CommercialLocalizationTests(unittest.TestCase):
             }
             approved = store.approve(
                 plan, plan.jobs[0].job_id, "quality-receipt",
-                ExactReceiptVerifier(), authority, now=301,
+                ExactReceiptVerifier(), authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
+                now=301,
                 independent_model_review=review,
                 independent_model_review_verifier=verifier,
             )

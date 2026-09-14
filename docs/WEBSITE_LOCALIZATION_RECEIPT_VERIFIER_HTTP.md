@@ -25,12 +25,13 @@ retry and its attempt limit.
 ## Request
 
 The adapter canonicalizes the complete
-`blun.localization-quality-receipt-binding.v4` object and validates its native
+`blun.localization-quality-receipt-binding.v5` object and validates its native
 Unicode text, hashes, locales, content type, glossary and policy versions,
 provider/model identities, software version, two-pass confidence, locale
 quality profile, exact locale-specific commercial profile when applicable,
 matching targeted-review summary, the canonical resolution-contract SHA-256
-for unresolved commercial review, escalation requirements, and review purpose.
+for unresolved commercial review, escalation requirements, review purpose,
+canonical quality-evidence request ID, and evidence revision.
 It then sends HTTP POST with JSON content type and these
 protected headers:
 
@@ -46,14 +47,15 @@ The body is exactly:
   "request_id": "blun-l10n-receipt-<sha256>",
   "binding_sha256": "<canonical binding hash>",
   "receipt_sha256": "<opaque receipt hash>",
-  "binding": {"schema": "blun.localization-quality-receipt-binding.v4"},
+  "binding": {"schema": "blun.localization-quality-receipt-binding.v5"},
   "receipt": "<opaque receipt>"
 }
 ```
 
 The deterministic request ID is derived from both hashes. Identical retries
 therefore address the same verification operation, while any changed receipt
-or binding dimension receives a different identity. The remote service must
+or binding dimension—including the evidence request ID or revision—receives a
+different identity. The remote service must
 treat an idempotency-key collision with different bytes as a terminal error.
 The adapter recomputes the commercial resolution-contract digest from the
 installed profile before authentication or transport. Verified commercial and
@@ -88,4 +90,6 @@ statuses, binding mismatches, and explicit negative verdicts are terminal.
 
 The same adapter can be configured separately for quality, qualified-human,
 and independent-model receipts. Purpose is part of the signed binding, so a
-receipt accepted for one route cannot satisfy another route.
+receipt accepted for one route cannot satisfy another route. Evidence context
+is also part of the binding, so a receipt cannot be relabelled beneath a newer
+provider response envelope.

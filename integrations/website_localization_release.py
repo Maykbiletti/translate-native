@@ -21,8 +21,8 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v4"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v4"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v5"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v5"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v5"
 MAX_TEXT_BYTES = 2_000_000
@@ -30,6 +30,7 @@ MAX_RECEIPT_LENGTH = 16_384
 MAX_TTL_SECONDS = 31_536_000.0
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+EVIDENCE_REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
 _COLUMNS = (
     "approval_id", "job_id", "target_locale", "target_sha256",
     "result_json", "result_sha256", "approval_json", "approval_sha256",
@@ -333,6 +334,8 @@ def _receipt_binding(
     result: dict[str, Any],
     result_sha256: str,
     *,
+    evidence_request_id: str,
+    evidence_revision: str,
     review_kind: str,
     review_provider: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -342,6 +345,13 @@ def _receipt_binding(
         raise LocalizationReleaseBlocked("review.binding.invalid")
     if (review_kind == "independent_model") != (review_provider is not None):
         raise LocalizationReleaseBlocked("review.binding.invalid")
+    if (
+        not isinstance(evidence_request_id, str)
+        or EVIDENCE_REQUEST_ID.fullmatch(evidence_request_id) is None
+        or not isinstance(evidence_revision, str)
+        or TOKEN.fullmatch(evidence_revision) is None
+    ):
+        raise LocalizationReleaseBlocked("review.evidence_context.invalid")
     commercial_profile = job.get("commercial_profile")
     commercial_review = result["commercial_review"]
     resolution_contract_sha256 = _commercial_resolution_contract_sha256(
@@ -350,6 +360,8 @@ def _receipt_binding(
     binding = {
         "schema": RECEIPT_BINDING_SCHEMA,
         "review_kind": review_kind,
+        "evidence_request_id": evidence_request_id,
+        "evidence_revision": evidence_revision,
         "job_id": job_id,
         "result_sha256": result_sha256,
         "source_text": job["source"]["text"],
@@ -590,6 +602,8 @@ class LocalizationReleaseStore:
         quality_verifier: QualityReceiptVerifier,
         authority: ApprovalAuthority,
         *,
+        evidence_request_id: str,
+        evidence_revision: str,
         now: float | int,
         ttl_seconds: float | int = 2_592_000,
         human_review_receipt: str | None = None,
@@ -607,6 +621,13 @@ class LocalizationReleaseStore:
         result_json = _canonical_json(result)
         result_hash = _hash_text(result_json)
         quality_receipt = _receipt(quality_receipt, "quality.receipt.invalid")
+        if (
+            not isinstance(evidence_request_id, str)
+            or EVIDENCE_REQUEST_ID.fullmatch(evidence_request_id) is None
+            or not isinstance(evidence_revision, str)
+            or TOKEN.fullmatch(evidence_revision) is None
+        ):
+            raise LocalizationReleaseBlocked("review.evidence_context.invalid")
         verifier = getattr(quality_verifier, "verify", None)
         if not callable(verifier):
             raise LocalizationReleaseBlocked("quality.verifier.invalid")
@@ -617,6 +638,8 @@ class LocalizationReleaseStore:
                     job,
                     result,
                     result_hash,
+                    evidence_request_id=evidence_request_id,
+                    evidence_revision=evidence_revision,
                     review_kind="quality",
                 ),
                 receipt=quality_receipt,
@@ -643,6 +666,8 @@ class LocalizationReleaseStore:
                         job,
                         result,
                         result_hash,
+                        evidence_request_id=evidence_request_id,
+                        evidence_revision=evidence_revision,
                         review_kind="qualified_human",
                     ),
                     receipt=human_review_receipt,
@@ -670,6 +695,8 @@ class LocalizationReleaseStore:
                             job,
                             result,
                             result_hash,
+                            evidence_request_id=evidence_request_id,
+                            evidence_revision=evidence_revision,
                             review_kind="independent_model",
                             review_provider=provider,
                         ),
@@ -697,6 +724,8 @@ class LocalizationReleaseStore:
                             job,
                             result,
                             result_hash,
+                            evidence_request_id=evidence_request_id,
+                            evidence_revision=evidence_revision,
                             review_kind="qualified_human",
                         ),
                         receipt=human_review_receipt,
@@ -715,6 +744,8 @@ class LocalizationReleaseStore:
 
         immutable = {
             "schema": APPROVAL_SCHEMA,
+            "evidence_request_id": evidence_request_id,
+            "evidence_revision": evidence_revision,
             "job_id": job_id,
             "source_sha256": result["source_sha256"],
             "target_sha256": result["target_sha256"],
@@ -817,7 +848,8 @@ class LocalizationReleaseStore:
             raise LocalizationReleaseBlocked("translation_memory.json.invalid") from None
         result = _validate_result(job, result)
         expected_keys = {
-            "schema", "job_id", "source_sha256", "target_sha256", "source_locale",
+            "schema", "evidence_request_id", "evidence_revision", "job_id",
+            "source_sha256", "target_sha256", "source_locale",
             "target_locale", "content_type", "glossary_version", "policy_version",
             "provider", "software_version", "worker_schema", "result_sha256",
             "review_confidence",
@@ -831,6 +863,8 @@ class LocalizationReleaseStore:
             raise LocalizationReleaseBlocked("approval.binding_mismatch")
         binding = {
             "schema": APPROVAL_SCHEMA,
+            "evidence_request_id": payload.get("evidence_request_id"),
+            "evidence_revision": payload.get("evidence_revision"),
             "job_id": row["job_id"],
             "source_sha256": result["source_sha256"],
             "target_sha256": result["target_sha256"],
@@ -852,6 +886,14 @@ class LocalizationReleaseStore:
             "expires_at": row["expires_at"],
         }
         if any(payload.get(name) != value for name, value in binding.items()):
+            raise LocalizationReleaseBlocked("approval.binding_mismatch")
+        if (
+            EVIDENCE_REQUEST_ID.fullmatch(
+                str(payload.get("evidence_request_id"))
+            ) is None
+            or not isinstance(payload.get("evidence_revision"), str)
+            or TOKEN.fullmatch(payload["evidence_revision"]) is None
+        ):
             raise LocalizationReleaseBlocked("approval.binding_mismatch")
         if payload.get("approval_id") != row["approval_id"]:
             raise LocalizationReleaseBlocked("approval.binding_mismatch")

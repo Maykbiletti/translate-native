@@ -35,6 +35,8 @@ PLANNER = CMS._PLANNER
 RELEASE = CMS._RELEASE
 QUEUE = CMS._QUEUE
 WORKER = RELEASE._WORKER
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 
 
 class CMSAuthority:
@@ -305,6 +307,8 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 "quality-receipt",
                 self.receipt_verifier,
                 self.approval_authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
                 ttl_seconds=1000,
             )
@@ -428,7 +432,10 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         self.queue.complete(first, completed_result(job, "Natürlicher Zieltext."), now=111)
         self.release_store.approve(
             plan, job.job_id, "quality-receipt", self.receipt_verifier,
-            self.approval_authority, now=200, ttl_seconds=1000,
+            self.approval_authority,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
+            now=200, ttl_seconds=1000,
         )
         with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
             self.prepare()
