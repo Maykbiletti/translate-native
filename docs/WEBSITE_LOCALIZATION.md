@@ -1687,7 +1687,7 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v8` profile plus one exact
+versioned `translate-native.commercial.v9` profile plus one exact
 `translate-native.commercial-locale-quality-profile.v2` object to the job
 payload, job ID and plan ID; the existing seven types retain their previous
 payloads and IDs. It is available for every planner locale, including `mt-MT`
@@ -1734,21 +1734,27 @@ price, brand, or product value.
 The three provider calls stay ordered: transcreation, source-hidden native
 editing, source-aware fidelity. Commercial fidelity additionally returns
 `commercial_review` with the profile schema, `coverage` (`complete` or
-`uncertain`), and `checks` for `amount_currency`, `discount_basis`, `qualifiers`,
+`uncertain`), a canonical `offers` registry, and `checks` for
+`amount_currency`, `discount_basis`, `qualifiers`,
 `tax_status`, `billing_interval`, `commitment`, `renewal`, `cancellation`,
-`conditions`, and `offer_assignment`. Every check has `status` (`equivalent`,
+`conditions`, and `offer_assignment`. Each registered offer has a unique ID and
+ordered, non-overlapping source and target regions; multiple discontiguous
+regions may bind linked footnotes, but no region may overlap another offer.
+Every check has `status` (`equivalent`,
 `not_present`, `changed`, `uncertain`) and `items`; each item has `offer`,
 `relation` (`matched`, `source_only`, or `target_only`), `source_span`,
 `target_span`, and `explanation`. Spans are zero-based Unicode code-point
-offsets with an exclusive end. A one-sided item uses `null` only for the side
+offsets with an exclusive end and must remain inside the named offer's declared
+regions. A one-sided item uses `null` only for the side
 that is absent, so an omitted condition and an invented target claim can be
 represented without fabricating a counterpart. The exact response contract and
 dimension guidance are supplied in each fidelity request.
 
 Equivalent checks require matched evidence; absent dimensions require empty
-items. A dimension-level changed or uncertain verdict requires at least one
-specific evidence item, while globally uncertain coverage may remain span-free
-instead of inventing a location. Changed terms, missing dimensions, invalid
+items, and equivalent `offer_assignment` evidence names every registered offer
+exactly once. A dimension-level changed or uncertain verdict requires at least
+one specific evidence item, while globally uncertain coverage may remain
+span-free instead of inventing a location. Changed terms, missing dimensions, invalid
 relations/spans or a normal PASS without the commercial report block the worker
 without a publishable result. Uncertain coverage, an uncertain dimension or an
 all-absent report instead preserve the candidate as a low-confidence fidelity
@@ -1762,7 +1768,7 @@ Do not classify legal text as commercial to bypass the legal human-review gate.
 The full commercial response hash stays in the normal quality-pass receipt;
 job IDs bind the profile version through queue, signed memory and publication.
 The content-free result summary uses
-`translate-native.commercial-review-summary.v2`; the authenticated capability
+`translate-native.commercial-review-summary.v3`; the authenticated capability
 response publishes its exact separately hashed machine contract, including the
 ordered allowed dimensions and the invariant between status and unresolved
 dimensions. Its evidence digest covers a versioned canonical binding of the

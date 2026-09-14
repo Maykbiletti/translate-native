@@ -64,7 +64,16 @@ def evidence(source=SOURCE, target=TARGET):
             "status": "equivalent",
             "items": [evidence_item(source, target)],
         }
-    return {"schema": SCHEMA, "coverage": "complete", "checks": checks}
+    return {
+        "schema": SCHEMA,
+        "coverage": "complete",
+        "offers": [{
+            "id": "offer-1",
+            "source_spans": [[0, len(source)]],
+            "target_spans": [[0, len(target)]],
+        }],
+        "checks": checks,
+    }
 
 
 def provider(source=SOURCE, target=TARGET, locale="sv-SE", report=None):
@@ -114,6 +123,7 @@ class CommercialLocalizationTests(unittest.TestCase):
                     "commercial-quality-profile-generation",
                     "exact-source-sha256",
                     "exact-target-sha256",
+                    "offer-registry-and-proposition-assignment",
                     "complete-commercial-review-evidence",
                 ],
             },
@@ -280,6 +290,16 @@ class CommercialLocalizationTests(unittest.TestCase):
             tuple(PROFILE.DIMENSIONS),
             PLANNER._QUALITY_PROFILES.COMMERCIAL_REVIEW_CHECKS,
         )
+        self.assertEqual(
+            value["verification"]["offer_registry"],
+            {
+                "identifiers": "unique",
+                "source_and_target_regions": "ordered-non-overlapping",
+                "discontiguous_regions_allowed": True,
+                "every_proposition_contained_in_declared_offer": True,
+                "every_offer_has_exactly_one_assignment_item": True,
+            },
+        )
         unsigned = dict(value)
         digest = unsigned.pop("sha256")
         self.assertEqual(
@@ -305,6 +325,10 @@ class CommercialLocalizationTests(unittest.TestCase):
         fidelity = adapter.requests[2]
         self.assertEqual(fidelity.input["source"]["text"], SOURCE)
         self.assertEqual(set(fidelity.input["response_schema"]["commercial_review"]["checks"]), set(PROFILE.DIMENSIONS))
+        self.assertEqual(
+            set(fidelity.input["response_schema"]["commercial_review"]),
+            {"schema", "coverage", "offers", "checks"},
+        )
         response = review("source_fidelity")
         response["commercial_review"] = evidence()
         self.assertEqual(result["quality_passes"][2]["response_sha256"], WORKER._hash_json(response))
@@ -438,7 +462,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v9"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v10"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -511,6 +535,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             {
                 "schema": SCHEMA,
                 "coverage": "complete",
+                "offers": [],
                 "checks": {
                     name: {"status": "not_present", "items": []}
                     for name in PROFILE.DIMENSIONS
@@ -622,6 +647,82 @@ class CommercialLocalizationTests(unittest.TestCase):
         result, _ = self.run_worker(report)
         self.assertTrue(result["independent_review_required"])
         self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
+
+    def test_offer_registry_rejects_cross_offer_and_overlapping_regions(self):
+        source = (
+            "Basic: €10 monthly.\nPro: €20 monthly.\n"
+            "* Basic offer terms apply."
+        )
+        target = (
+            "Basic: 10 € per månad.\nPro: 20 € per månad.\n"
+            "* Villkoren för Basic-erbjudandet gäller."
+        )
+        source_lines = source.splitlines()
+        target_lines = target.splitlines()
+        source_spans = (
+            [0, len(source_lines[0])],
+            [
+                len(source_lines[0]) + 1,
+                len(source_lines[0]) + 1 + len(source_lines[1]),
+            ],
+        )
+        target_spans = (
+            [0, len(target_lines[0])],
+            [
+                len(target_lines[0]) + 1,
+                len(target_lines[0]) + 1 + len(target_lines[1]),
+            ],
+        )
+        report = evidence(source, target)
+        report["offers"] = [
+            {
+                "id": offer,
+                "source_spans": [source_span] + (
+                    [[len(source) - len(source_lines[2]), len(source)]]
+                    if offer == "basic" else []
+                ),
+                "target_spans": [target_span] + (
+                    [[len(target) - len(target_lines[2]), len(target)]]
+                    if offer == "basic" else []
+                ),
+            }
+            for offer, source_span, target_span in zip(
+                ("basic", "pro"), source_spans, target_spans,
+            )
+        ]
+        items = [
+            {
+                "offer": offer,
+                "relation": "matched",
+                "source_span": source_span,
+                "target_span": target_span,
+                "explanation": "Scripted offer-bound proposition fixture.",
+            }
+            for offer, source_span, target_span in zip(
+                ("basic", "pro"), source_spans, target_spans,
+            )
+        ]
+        for check in report["checks"].values():
+            if check["status"] == "equivalent":
+                check["items"] = copy.deepcopy(items)
+        validate_commercial(report, source, target, SCHEMA)
+
+        mutations = (
+            lambda value: value["checks"]["amount_currency"]["items"][0]
+            .update(offer="pro"),
+            lambda value: value["offers"][1]["source_spans"]
+            .__setitem__(0, [source_spans[0][1] - 1, source_spans[1][1]]),
+            lambda value: value["checks"]["offer_assignment"]["items"].pop(),
+            lambda value: value["offers"][1].update(id="basic"),
+        )
+        for mutation in mutations:
+            changed = copy.deepcopy(report)
+            mutation(changed)
+            with self.subTest(changed=changed), self.assertRaises(
+                PROFILE.CommercialReviewBlocked,
+            ) as error:
+                validate_commercial(changed, source, target, SCHEMA)
+            self.assertEqual(error.exception.code, "review.commercial.invalid")
 
     def test_no_numeric_regex_rejects_semantically_reviewed_native_forms(self):
         # Contract-level fixtures, not claims of independent native approval.
@@ -824,7 +925,17 @@ class CommercialLocalizationTests(unittest.TestCase):
             })
             source_offset += len(src) + 1
             target_offset += len(tgt) + 1
-        report["checks"]["offer_assignment"]["items"] = items
+        report["offers"] = [
+            {
+                "id": item["offer"],
+                "source_spans": [item["source_span"]],
+                "target_spans": [item["target_span"]],
+            }
+            for item in items
+        ]
+        for check in report["checks"].values():
+            if check["status"] == "equivalent":
+                check["items"] = copy.deepcopy(items)
         validate_commercial(report, source, target, SCHEMA)
 
 

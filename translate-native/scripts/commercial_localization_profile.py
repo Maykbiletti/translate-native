@@ -13,16 +13,16 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v8"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v9"
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-summary-capabilities.v3"
+    "translate-native.commercial-review-summary-capabilities.v4"
 )
-REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
-EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v2"
+REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v3"
+EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v3"
 REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-resolution-capabilities.v2"
+    "translate-native.commercial-review-resolution-capabilities.v3"
 )
-REVIEW_RESOLUTION_SCHEMA = "translate-native.commercial-review-resolution.v2"
+REVIEW_RESOLUTION_SCHEMA = "translate-native.commercial-review-resolution.v3"
 COMMERCIAL_LOCALE_PROFILE_SCHEMA = (
     "translate-native.commercial-locale-quality-profile.v2"
 )
@@ -125,6 +125,7 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
                 "commercial-quality-profile-generation",
                 "exact-source-sha256",
                 "exact-target-sha256",
+                "offer-registry-and-proposition-assignment",
                 "complete-commercial-review-evidence",
             ],
         },
@@ -319,6 +320,13 @@ def public_profile(profile: str) -> dict[str, Any]:
             "method": "semantic-provider-evidence",
             "deterministic_numeric_regex_is_sufficient": False,
             "evidence_granularity": "every-proposition-per-offer",
+            "offer_registry": {
+                "identifiers": "unique",
+                "source_and_target_regions": "ordered-non-overlapping",
+                "discontiguous_regions_allowed": True,
+                "every_proposition_contained_in_declared_offer": True,
+                "every_offer_has_exactly_one_assignment_item": True,
+            },
             "directions": ["matched", "source_only", "target_only"],
             "ambiguous_values": "unresolved",
             "unresolved_route": "independent-model-or-qualified-native-domain-review",
@@ -392,6 +400,11 @@ def review_contract(schema: str) -> dict[str, Any]:
     return {
         "schema": schema,
         "coverage": "complete or uncertain",
+        "offers": [{
+            "id": "stable unique offer identifier",
+            "source_spans": [[0, 1]],
+            "target_spans": [[0, 1]],
+        }],
         "checks": {
             name: {
                 "status": "equivalent, not_present, changed or uncertain",
@@ -423,7 +436,7 @@ def validate_review(
     def invalid() -> None:
         raise CommercialReviewBlocked("review.commercial.invalid")
 
-    def span(value: Any, text: str) -> None:
+    def span(value: Any, text: str) -> tuple[int, int]:
         if (
             not isinstance(value, list) or len(value) != 2
             or any(type(offset) is not int for offset in value)
@@ -431,6 +444,18 @@ def validate_review(
             or not text[value[0]:value[1]].strip()
         ):
             invalid()
+        return value[0], value[1]
+
+    def regions(value: Any, text: str) -> tuple[tuple[int, int], ...]:
+        if not isinstance(value, list) or len(value) > 1000:
+            invalid()
+        parsed = tuple(span(item, text) for item in value)
+        if list(parsed) != sorted(parsed) or any(
+            previous[1] > current[0]
+            for previous, current in zip(parsed, parsed[1:])
+        ):
+            invalid()
+        return parsed
 
     if (
         not isinstance(target_locale, str)
@@ -445,10 +470,47 @@ def validate_review(
         )
     ):
         invalid()
-    if not isinstance(value, dict) or set(value) != {"schema", "coverage", "checks"}:
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "coverage", "offers", "checks",
+    }:
         invalid()
     if value["schema"] != schema or value["coverage"] not in ("complete", "uncertain"):
         invalid()
+    offers = value["offers"]
+    if not isinstance(offers, list) or len(offers) > 1000:
+        invalid()
+    offer_regions: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {}
+    occupied = {"source_spans": [], "target_spans": []}
+    for offer in offers:
+        if not isinstance(offer, dict) or set(offer) != {
+            "id", "source_spans", "target_spans",
+        }:
+            invalid()
+        offer_id = offer["id"]
+        if (
+            not isinstance(offer_id, str)
+            or PROFILE_VERSION.fullmatch(offer_id) is None
+            or offer_id in offer_regions
+        ):
+            invalid()
+        parsed = {
+            "source_spans": regions(offer["source_spans"], source),
+            "target_spans": regions(offer["target_spans"], target),
+        }
+        if not parsed["source_spans"] and not parsed["target_spans"]:
+            invalid()
+        offer_regions[offer_id] = parsed
+        for side in occupied:
+            occupied[side].extend(
+                (start, end, offer_id) for start, end in parsed[side]
+            )
+    for side in occupied:
+        ordered = sorted(occupied[side])
+        if any(
+            previous[1] > current[0]
+            for previous, current in zip(ordered, ordered[1:])
+        ):
+            invalid()
     checks = value["checks"]
     if not isinstance(checks, dict) or set(checks) != set(DIMENSIONS):
         invalid()
@@ -475,22 +537,42 @@ def validate_review(
                 "offer", "relation", "source_span", "target_span", "explanation",
             }:
                 invalid()
-            for field in ("offer", "explanation"):
-                if not isinstance(item[field], str) or not item[field].strip() or len(item[field]) > 2000:
-                    invalid()
+            if (
+                not isinstance(item["offer"], str)
+                or PROFILE_VERSION.fullmatch(item["offer"]) is None
+                or item["offer"] not in offer_regions
+                or not isinstance(item["explanation"], str)
+                or not item["explanation"].strip()
+                or len(item["explanation"]) > 2000
+            ):
+                invalid()
             relation = item["relation"]
+            source_span = target_span = None
             if relation == "matched":
-                span(item["source_span"], source)
-                span(item["target_span"], target)
+                source_span = span(item["source_span"], source)
+                target_span = span(item["target_span"], target)
             elif relation == "source_only":
-                span(item["source_span"], source)
+                source_span = span(item["source_span"], source)
                 if item["target_span"] is not None:
                     invalid()
             elif relation == "target_only":
                 if item["source_span"] is not None:
                     invalid()
-                span(item["target_span"], target)
+                target_span = span(item["target_span"], target)
             else:
+                invalid()
+            declared = offer_regions[item["offer"]]
+            if source_span is not None and not any(
+                region[0] <= source_span[0]
+                and source_span[1] <= region[1]
+                for region in declared["source_spans"]
+            ):
+                invalid()
+            if target_span is not None and not any(
+                region[0] <= target_span[0]
+                and target_span[1] <= region[1]
+                for region in declared["target_spans"]
+            ):
                 invalid()
             if status == "equivalent" and relation != "matched":
                 invalid()
@@ -515,8 +597,12 @@ def validate_review(
     ):
         uncertain_dimensions.add("offer_assignment")
     else:
-        offers = {item["offer"] for item in assignment["items"]}
-        if any(item["offer"] not in offers for check in checks.values() for item in check["items"]):
+        assigned = [item["offer"] for item in assignment["items"]]
+        if (
+            any(item["relation"] != "matched" for item in assignment["items"])
+            or len(assigned) != len(set(assigned))
+            or set(assigned) != set(offer_regions)
+        ):
             invalid()
     if coverage_uncertain or not evidenced:
         uncertain_dimensions.update(DIMENSIONS)

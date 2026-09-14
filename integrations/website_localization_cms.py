@@ -625,6 +625,7 @@ class WebsiteLocalizationCMSBridge:
                         "commercial-quality-profile-generation",
                         "exact-source-sha256",
                         "exact-target-sha256",
+                        "offer-registry-and-proposition-assignment",
                         "complete-commercial-review-evidence",
                     ],
                 }

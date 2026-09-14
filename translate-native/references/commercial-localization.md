@@ -1,4 +1,4 @@
-# Commercial localization — profile v2
+# Commercial localization — profile v3
 
 Use for pricing pages, offer cards, checkout copy, subscription CTAs, discounts,
 trials and associated conditions in **any language or script**. The skill is
@@ -108,7 +108,7 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v8` and the exact target-locale
+The planner binds `translate-native.commercial.v9` and the exact target-locale
 commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
@@ -149,11 +149,17 @@ remain eligible; unresolved values require independent model or qualified
 native-domain review.
 The worker uses the existing three ordered passes; the source-fidelity response
 additionally requires `commercial_review`. It contains all ten named dimensions,
-coverage and per-offer evidence. Each item declares `matched`, `source_only`, or
-`target_only` and supplies exact source/target character spans; the absent side
-of a one-sided item is `null`. Equivalent evidence must be matched. A specific
-changed or uncertain verdict needs a concrete item, while globally uncertain
-coverage may remain span-free rather than fabricate a location.
+coverage, a canonical offer registry, and per-offer evidence. Each registry
+entry has a unique stable identifier plus ordered, non-overlapping source and
+target regions. Multiple discontiguous regions are allowed for linked footnotes
+and conditions, but regions cannot overlap across offers. Each evidence item
+declares `matched`, `source_only`, or `target_only`, names a registered offer,
+and supplies exact source/target character spans contained in that offer's
+declared regions; the absent side of a one-sided item is `null`. Equivalent
+evidence must be matched, and `offer_assignment` must name every registered
+offer exactly once. A specific changed or uncertain verdict needs a concrete
+item, while globally uncertain coverage may remain span-free rather than
+fabricate a location.
 Missing/malformed checks, impossible relation/span combinations and changed
 terms produce no result or approval. Uncertainty or an all-absent report preserves the candidate only as a
 low-confidence fidelity result. It remains unpublishable until the host verifies
