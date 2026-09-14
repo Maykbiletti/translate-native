@@ -1305,7 +1305,7 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v3` object. That content-free
+a `blun.website-localization-release-evidence.v4` object. That content-free
 object binds the signed approval and worker-result hashes, quality-receipt
 hash, and either a null commercial scope or the exact commercial-profile ID,
 locale-specific commercial quality-profile version and digest, and validated
@@ -1657,7 +1657,7 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v6` profile plus one exact
+versioned `translate-native.commercial.v7` profile plus one exact
 `translate-native.commercial-locale-quality-profile.v2` object to the job
 payload, job ID and plan ID; the existing seven types retain their previous
 payloads and IDs. It is available for every planner locale, including `mt-MT`

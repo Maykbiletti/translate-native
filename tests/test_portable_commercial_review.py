@@ -65,6 +65,14 @@ class PortableCommercialReviewTests(unittest.TestCase):
         payload = json.loads(process.stdout)
         self.assertFalse(payload["release_allowed"])
         self.assertEqual(payload["commercial_review"], PROFILE.review_contract(SCHEMA))
+        self.assertEqual(
+            payload["commercial_review_summary_contract"],
+            PROFILE.public_review_summary_contract(SCHEMA),
+        )
+        self.assertEqual(
+            payload["commercial_review_resolution_contract"],
+            PROFILE.public_review_resolution_contract(SCHEMA),
+        )
         code, payload = self.run_cli(report=payload["commercial_review"])
         self.assertEqual(code, 1)
 

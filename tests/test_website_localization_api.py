@@ -491,6 +491,48 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             CMS._hash(CMS._canonical_json(unsigned_review_summary)),
         )
         self.assertEqual(
+            commercial["review_resolution_schema"],
+            CMS._COMMERCIAL.REVIEW_RESOLUTION_SCHEMA,
+        )
+        review_resolution_contract = commercial[
+            "review_resolution_contract"
+        ]
+        self.assertEqual(
+            review_resolution_contract["schema"],
+            CMS._COMMERCIAL.REVIEW_RESOLUTION_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            review_resolution_contract["result_schema"],
+            CMS._COMMERCIAL.REVIEW_RESOLUTION_SCHEMA,
+        )
+        self.assertEqual(
+            review_resolution_contract["reviewed_dimensions"]["order"],
+            list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
+        )
+        self.assertTrue(
+            review_resolution_contract["reviewed_dimensions"]
+            ["must_equal_review_summary"],
+        )
+        self.assertEqual(
+            review_resolution_contract["methods"]["qualified_human"]
+            ["provider"],
+            "null",
+        )
+        self.assertTrue(
+            review_resolution_contract["methods"]["independent_model"]
+            ["must_differ_from_primary_provider"],
+        )
+        self.assertTrue(all(
+            value is False
+            for value in review_resolution_contract["content_policy"].values()
+        ))
+        unsigned_review_resolution = dict(review_resolution_contract)
+        review_resolution_digest = unsigned_review_resolution.pop("sha256")
+        self.assertEqual(
+            review_resolution_digest,
+            CMS._hash(CMS._canonical_json(unsigned_review_resolution)),
+        )
+        self.assertEqual(
             [item["name"] for item in commercial["dimensions"]],
             list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
         )
@@ -949,6 +991,49 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             ):
                 status, _, payload = self.capabilities_request(
                     request_id=f"capabilities-commercial-summary-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
+            self.assertNotIn("locales", payload)
+
+    def test_capabilities_block_commercial_resolution_contract_drift(self):
+        current = CMS._COMMERCIAL.public_review_resolution_contract
+
+        def rehashed(profile, mutation):
+            value = current(profile)
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "partial-dimensions": lambda value: value[
+                "reviewed_dimensions"
+            ].update(must_equal_review_summary=False),
+            "human-provider": lambda value: value["methods"]
+            ["qualified_human"].update(provider="required"),
+            "model-not-independent": lambda value: value["methods"]
+            ["independent_model"].update(
+                must_differ_from_primary_provider=False,
+            ),
+            "raw-receipt": lambda value: value["content_policy"].update(
+                raw_receipt=True,
+            ),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._COMMERCIAL,
+                "public_review_resolution_contract",
+                lambda profile, mutation=mutation: rehashed(
+                    profile, mutation,
+                ),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-commercial-resolution-{label}",
                 )
             self.assertEqual(
                 (status, payload["error"]),

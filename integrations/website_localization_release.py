@@ -24,10 +24,7 @@ SCHEMA_VERSION = 1
 APPROVAL_SCHEMA = "blun.website-localization-approval.v3"
 RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v3"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v3"
-COMMERCIAL_REVIEW_RESOLUTION_SCHEMA = (
-    "blun.website-localization-commercial-review-resolution.v1"
-)
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v4"
 MAX_TEXT_BYTES = 2_000_000
 MAX_RECEIPT_LENGTH = 16_384
 MAX_TTL_SECONDS = 31_536_000.0
@@ -58,6 +55,9 @@ _QUEUE = _load_module(
 _WORKER = _load_module(
     "blun_website_localization_release_worker",
     _ROOT / "integrations" / "website_localization_worker.py",
+)
+COMMERCIAL_REVIEW_RESOLUTION_SCHEMA = (
+    _WORKER._COMMERCIAL.REVIEW_RESOLUTION_SCHEMA
 )
 
 

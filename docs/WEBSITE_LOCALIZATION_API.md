@@ -1366,7 +1366,7 @@ an unresolved generation mismatch cannot be reported as accepted.
 The v11 capability generation and v10 OpenAPI document add
 `GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
 separate body-free operator scope. It returns the exact public
-`translate-native.commercial.v6` profile, its ten ordered preservation and
+`translate-native.commercial.v7` profile, its ten ordered preservation and
 review dimensions, and the complete 24-locale rendering registry. The payload
 contains only policy, version, authority, locale, Unicode rendering, and hash
 data; project prices, brands, products, credentials, source text, and target
@@ -1996,7 +1996,7 @@ disabled, so a CMS can fail closed before submitting work. The object uses
 over every other canonical field. Paths and schemas come from the same runtime
 constants used for routing; they are not copied into a second configuration.
 
-The nested `blun.website-localization-capabilities.v5` object carries a
+The nested `blun.website-localization-capabilities.v6` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
 runtime rebuilds and validates the complete registry on every read; duplicate,
@@ -2004,7 +2004,7 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v6` object. Its nested and separately
+`translate-native.commercial-capabilities.v7` object. Its nested and separately
 hashed `review_summary_contract` defines the exact content-free result schema,
 field set, verified/review-required state invariant, ten allowed ordered
 review dimensions, exact source/target/profile/locale-quality/evidence hash
@@ -2014,6 +2014,14 @@ targeted commercial
 escalation without receiving project prices, brands, source/target text, spans,
 or reviewer prose. Any registry or digest drift blocks the whole discovery
 response rather than advertising a partial contract.
+
+The separately hashed `review_resolution_contract` makes the escalation result
+fully machine-readable. It requires the exact ordered unresolved dimensions,
+one resolved status and either a qualified-human route with a null provider or
+an independent-model route with the exact provider ID, model ID and model
+version distinct from the primary provider. Only the verified receipt SHA-256
+crosses the publication boundary. Raw receipts, qualified-human identity,
+reviewer prose, project prices, brands, source text and target text are excluded.
 
 The commercial capability additionally requires schema
 `translate-native.commercial-locale-quality-profile.v2` in every commercial
@@ -2043,7 +2051,7 @@ rehashed entry returns `503` without a partial registry. Consumers must still
 treat these values as display guidance and route uncertain semantic equality to
 the configured independent review path.
 
-For publication, `blun.website-localization-release-evidence.v3` carries the
+For publication, `blun.website-localization-release-evidence.v4` carries the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
 commercial content and requires all three fields to be null for every other
 content type. The reference CMS receiver recomputes the canonical version and
@@ -2063,7 +2071,7 @@ receipts, qualified-human identities and reviewer prose are never published.
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": {
-      "profile": "translate-native.commercial.v6",
+      "profile": "translate-native.commercial.v7",
       "locale_quality_profile": {
         "schema": "translate-native.commercial-locale-quality-profile.v2",
         "required": true,
@@ -2076,7 +2084,7 @@ receipts, qualified-human identities and reviewer prose are never published.
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
         "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "target_locale", "commercial_quality_profile_version", "commercial_quality_profile_sha256", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v2", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-target-locale", "commercial-quality-profile-generation", "exact-source-sha256", "exact-target-sha256", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
-        "profile": "translate-native.commercial.v6",
+        "profile": "translate-native.commercial.v7",
         "required_fields": ["schema", "profile", "status", "review_required_dimensions", "evidence_sha256"],
         "result_schema": "translate-native.commercial-review-summary.v2",
         "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
@@ -2084,11 +2092,25 @@ receipts, qualified-human identities and reviewer prose are never published.
         "sha256": "<sha256>",
         "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
       },
-      "schema": "translate-native.commercial-capabilities.v6",
+      "review_resolution_contract": {
+        "applies_when": {"review_summary_status": "review_required", "reviewed_dimensions": "exact-ordered-review-summary-dimensions"},
+        "content_policy": {"project_brands": false, "project_prices": false, "qualified_human_identity": false, "raw_receipt": false, "reviewer_prose": false, "source_text": false, "target_text": false},
+        "methods": {"independent_model": {"must_differ_from_primary_provider": true, "provider": "required", "provider_fields": ["id", "model_id", "model_version"], "receipt": "verified-independent-model-review"}, "qualified_human": {"provider": "null", "receipt": "verified-qualified-human-review"}},
+        "profile": "translate-native.commercial.v7",
+        "receipt_sha256": {"algorithm": "sha-256", "covers": "exact-verified-review-receipt", "raw_receipt_published": false},
+        "required_fields": ["schema", "status", "reviewed_dimensions", "method", "receipt_sha256", "provider"],
+        "result_schema": "translate-native.commercial-review-resolution.v1",
+        "reviewed_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true, "must_equal_review_summary": true},
+        "schema": "translate-native.commercial-review-resolution-capabilities.v1",
+        "sha256": "<sha256>",
+        "status": "resolved"
+      },
+      "review_resolution_schema": "translate-native.commercial-review-resolution.v1",
+      "schema": "translate-native.commercial-capabilities.v7",
       "sha256": "<sha256>"
     },
     "commercial_rendering_registry": {
-      "commercial_profile": "translate-native.commercial.v6",
+      "commercial_profile": "translate-native.commercial.v7",
       "content_policy": {"credentials": false, "project_brands": false, "project_prices": false, "source_text": false, "target_text": false},
       "locales": [{
         "commercial_quality_profile": {"sha256": "<sha256>", "version": "commercial-eu-mt-MT-2026-09-2"},
@@ -2147,14 +2169,14 @@ receipts, qualified-human identities and reviewer prose are never published.
         "response_schema": "blun.cms-localization-publication-http-ack.v1"
       }],
       "request_content_type": "application/json; charset=utf-8",
-      "release_evidence_schema": "blun.website-localization-release-evidence.v3",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v4",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v2",
       "sha256": "<sha256>"
     },
     "publication_schema": "blun.cms-localization-publication.v3",
     "quality_passes": ["target_native", "source_fidelity"],
-    "schema": "blun.website-localization-capabilities.v5",
+    "schema": "blun.website-localization-capabilities.v6",
     "sha256": "<sha256>"
   },
   "api_contract": {

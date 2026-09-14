@@ -8,10 +8,16 @@ import hashlib
 import json
 from pathlib import Path
 
-from commercial_localization_profile import CommercialReviewBlocked, review_contract, validate_review
+from commercial_localization_profile import (
+    CommercialReviewBlocked,
+    public_review_resolution_contract,
+    public_review_summary_contract,
+    review_contract,
+    validate_review,
+)
 
 
-PROFILE = "translate-native.commercial.v6"
+PROFILE = "translate-native.commercial.v7"
 MAX_INPUT_BYTES = 2_000_000
 
 
@@ -63,8 +69,17 @@ def main(argv=None) -> int:
             args.commercial_quality_profile_sha256,
         )):
             parser.error("--contract cannot be combined with input files")
-        print(json.dumps({"status": "CONTRACT", "release_allowed": False,
-                          "commercial_review": review_contract(PROFILE)}, ensure_ascii=False))
+        print(json.dumps({
+            "status": "CONTRACT",
+            "release_allowed": False,
+            "commercial_review": review_contract(PROFILE),
+            "commercial_review_summary_contract": (
+                public_review_summary_contract(PROFILE)
+            ),
+            "commercial_review_resolution_contract": (
+                public_review_resolution_contract(PROFILE)
+            ),
+        }, ensure_ascii=False, sort_keys=True))
         return 0
     if not all((
         args.source, args.target, args.review, args.target_locale,

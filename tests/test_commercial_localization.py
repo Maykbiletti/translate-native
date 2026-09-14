@@ -121,8 +121,67 @@ class CommercialLocalizationTests(unittest.TestCase):
         for private_value in ("480", "vat", "blun", "offer-1"):
             self.assertNotIn(private_value, serialized)
 
+    def test_public_review_resolution_contract_is_exact_content_free_and_hashed(self):
+        value = PROFILE.public_review_resolution_contract(SCHEMA)
+        self.assertEqual(
+            value["schema"], PROFILE.REVIEW_RESOLUTION_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(value["result_schema"], PROFILE.REVIEW_RESOLUTION_SCHEMA)
+        self.assertEqual(value["profile"], SCHEMA)
+        self.assertEqual(value["status"], "resolved")
+        self.assertEqual(
+            value["applies_when"],
+            {
+                "review_summary_status": "review_required",
+                "reviewed_dimensions": (
+                    "exact-ordered-review-summary-dimensions"
+                ),
+            },
+        )
+        self.assertEqual(
+            value["reviewed_dimensions"],
+            {
+                "allowed": list(PROFILE.DIMENSIONS),
+                "order": list(PROFILE.DIMENSIONS),
+                "unique": True,
+                "must_equal_review_summary": True,
+            },
+        )
+        self.assertEqual(
+            value["methods"]["qualified_human"]["provider"], "null",
+        )
+        self.assertEqual(
+            value["methods"]["independent_model"]["provider_fields"],
+            ["id", "model_id", "model_version"],
+        )
+        self.assertTrue(
+            value["methods"]["independent_model"]
+            ["must_differ_from_primary_provider"],
+        )
+        self.assertFalse(value["receipt_sha256"]["raw_receipt_published"])
+        self.assertTrue(all(
+            item is False for item in value["content_policy"].values()
+        ))
+        unsigned = dict(value)
+        digest = unsigned.pop("sha256")
+        self.assertEqual(
+            digest,
+            PROFILE.hashlib.sha256(PROFILE._canonical_json(unsigned)).hexdigest(),
+        )
+        serialized = json.dumps(value).lower()
+        for private_value in ("480", "vat", "blun", "offer-1"):
+            self.assertNotIn(private_value, serialized)
+
     def test_public_profile_requires_locale_bound_quality_in_all_phases(self):
         value = PROFILE.public_profile(SCHEMA)
+        self.assertEqual(
+            value["review_resolution_schema"],
+            PROFILE.REVIEW_RESOLUTION_SCHEMA,
+        )
+        self.assertEqual(
+            value["review_resolution_contract"],
+            PROFILE.public_review_resolution_contract(SCHEMA),
+        )
         contract = value["locale_quality_profile"]
         self.assertEqual(
             contract["schema"], PROFILE.COMMERCIAL_LOCALE_PROFILE_SCHEMA,
@@ -313,7 +372,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v7"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v8"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -598,7 +657,7 @@ class CommercialLocalizationTests(unittest.TestCase):
                 },
                 "receipt": "commercial-independent-receipt",
             }
-            store.approve(
+            approved = store.approve(
                 plan, plan.jobs[0].job_id, "quality-receipt",
                 ExactReceiptVerifier(), authority, now=301,
                 independent_model_review=review,
@@ -615,6 +674,15 @@ class CommercialLocalizationTests(unittest.TestCase):
             self.assertEqual(binding["policy_version"], "native-web-1")
             self.assertEqual(
                 binding["review_confidence"]["source_fidelity"], "low",
+            )
+            publication_evidence = approved.release_evidence
+            self.assertEqual(
+                publication_evidence["schema"],
+                "blun.website-localization-release-evidence.v4",
+            )
+            self.assertEqual(
+                publication_evidence["commercial_review_resolution"]["schema"],
+                PROFILE.REVIEW_RESOLUTION_SCHEMA,
             )
 
     def test_release_rejects_tampered_commercial_routing_summary(self):

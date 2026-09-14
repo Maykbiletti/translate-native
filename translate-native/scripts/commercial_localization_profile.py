@@ -13,12 +13,16 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v6"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v7"
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-summary-capabilities.v3"
 )
 REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
 EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v2"
+REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
+    "translate-native.commercial-review-resolution-capabilities.v1"
+)
+REVIEW_RESOLUTION_SCHEMA = "translate-native.commercial-review-resolution.v1"
 COMMERCIAL_LOCALE_PROFILE_SCHEMA = (
     "translate-native.commercial-locale-quality-profile.v2"
 )
@@ -140,6 +144,60 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
     }
 
 
+def public_review_resolution_contract(profile: str) -> dict[str, Any]:
+    """Return the exact content-free contract for resolving uncertain checks."""
+    body = {
+        "schema": REVIEW_RESOLUTION_CAPABILITIES_SCHEMA,
+        "result_schema": REVIEW_RESOLUTION_SCHEMA,
+        "profile": profile,
+        "applies_when": {
+            "review_summary_status": "review_required",
+            "reviewed_dimensions": "exact-ordered-review-summary-dimensions",
+        },
+        "required_fields": [
+            "schema", "status", "reviewed_dimensions", "method",
+            "receipt_sha256", "provider",
+        ],
+        "status": "resolved",
+        "methods": {
+            "qualified_human": {
+                "provider": "null",
+                "receipt": "verified-qualified-human-review",
+            },
+            "independent_model": {
+                "provider": "required",
+                "provider_fields": ["id", "model_id", "model_version"],
+                "must_differ_from_primary_provider": True,
+                "receipt": "verified-independent-model-review",
+            },
+        },
+        "reviewed_dimensions": {
+            "allowed": list(DIMENSIONS),
+            "order": list(DIMENSIONS),
+            "unique": True,
+            "must_equal_review_summary": True,
+        },
+        "receipt_sha256": {
+            "algorithm": "sha-256",
+            "covers": "exact-verified-review-receipt",
+            "raw_receipt_published": False,
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "raw_receipt": False,
+            "reviewer_prose": False,
+            "qualified_human_identity": False,
+            "project_prices": False,
+            "project_brands": False,
+        },
+    }
+    return {
+        **body,
+        "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
+    }
+
+
 def public_profile(profile: str) -> dict[str, Any]:
     """Return the public, brand-neutral contract implemented by this module."""
     body = {
@@ -147,6 +205,10 @@ def public_profile(profile: str) -> dict[str, Any]:
         "profile": profile,
         "review_summary_schema": REVIEW_SUMMARY_SCHEMA,
         "review_summary_contract": public_review_summary_contract(profile),
+        "review_resolution_schema": REVIEW_RESOLUTION_SCHEMA,
+        "review_resolution_contract": public_review_resolution_contract(
+            profile,
+        ),
         "applies_to": {
             "content_type": "commercial",
             "locales": "all-supported-target-locales",

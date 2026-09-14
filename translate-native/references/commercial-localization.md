@@ -71,7 +71,8 @@ python3 scripts/check_commercial_review.py --source source.txt --target target.t
   --commercial-quality-profile-sha256 "${COMMERCIAL_QUALITY_PROFILE_SHA256}"
 ```
 
-The contract is a description, not a completed review. First perform the
+The contract response contains the review-input shape plus the content-free,
+hashed summary and resolution contracts; it is not a completed review. First perform the
 source-blind native review, then have the source-aware reviewer produce the
 `commercial_review` object; save that object alone as `review.json`. Do not
 manufacture positive evidence to satisfy the checker. Supply the full unchanged
@@ -107,7 +108,7 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v6` and the exact target-locale
+The planner binds `translate-native.commercial.v7` and the exact target-locale
 commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
@@ -125,6 +126,16 @@ text, spans, reviewer prose, project prices and project brands.
 Adapters therefore do not need to infer the targeted-review envelope from a
 schema name or prose. A changed, missing, reordered or unknown dimension makes
 the complete capability response unavailable.
+
+The separately hashed `review_resolution_contract` defines the exact ordered
+dimension acknowledgement and the two permitted resolution methods. A
+qualified-human resolution must omit provider identity; an independent-model
+resolution must carry the exact provider ID, model ID and model version and
+must differ from the primary provider. Both routes publish only the verified
+receipt SHA-256. Raw receipts, reviewer prose, qualified-human identity, source
+and target text, project prices and project brands remain excluded. The
+release-evidence schema uses the same provider-neutral resolution schema, so a
+consumer does not need to infer these conditional rules from documentation.
 
 Every commercial locale profile also carries an exact Unicode CLDR 48 numbers
 reference. Use its resolved locale, numbering system, grouping threshold,
