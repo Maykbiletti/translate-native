@@ -399,8 +399,29 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertNotIn(SOURCE, native)
         self.assertNotIn('"source_span"', native)
         self.assertNotIn('"commercial_review"', native)
+        self.assertNotIn("commercial_review_evidence_contract", native)
+        self.assertNotIn(
+            "commercial_review_evidence_contract",
+            adapter.requests[0].input,
+        )
         fidelity = adapter.requests[2]
         self.assertEqual(fidelity.input["source"]["text"], SOURCE)
+        evidence_contract = PROFILE.public_review_evidence_contract(SCHEMA)
+        self.assertEqual(
+            fidelity.input["commercial_review_evidence_contract"],
+            evidence_contract,
+        )
+        changed_input = copy.deepcopy(fidelity.input)
+        changed_input["commercial_review_evidence_contract"]["sha256"] = (
+            "0" * 64
+        )
+        changed_request = WORKER._request(
+            job(SOURCE, "commercial"),
+            "source_fidelity",
+            fidelity.system_instruction,
+            changed_input,
+        )
+        self.assertNotEqual(changed_request.request_id, fidelity.request_id)
         self.assertEqual(set(fidelity.input["response_schema"]["commercial_review"]["checks"]), set(PROFILE.DIMENSIONS))
         self.assertEqual(
             set(fidelity.input["response_schema"]["commercial_review"]),
@@ -414,7 +435,7 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(summary["review_required_dimensions"], [])
         self.assertEqual(
             summary["review_evidence_contract_sha256"],
-            PROFILE.public_review_evidence_contract(SCHEMA)["sha256"],
+            evidence_contract["sha256"],
         )
         self.assertEqual(
             summary["evidence_sha256"],
@@ -432,6 +453,31 @@ class CommercialLocalizationTests(unittest.TestCase):
             "version": expected_commercial_quality["version"],
             "sha256": expected_commercial_quality["sha256"],
         })
+
+    def test_commercial_evidence_contract_drift_blocks_before_provider(self):
+        canonical = PROFILE.public_review_evidence_contract(SCHEMA)
+        altered = copy.deepcopy(canonical)
+        altered["trust_boundary"]["publication_authority"] = True
+        unsigned = dict(altered)
+        unsigned.pop("sha256")
+        altered["sha256"] = PROFILE.hashlib.sha256(
+            PROFILE._canonical_json(unsigned)
+        ).hexdigest()
+        adapter = provider()
+        with patch.object(
+            WORKER._COMMERCIAL,
+            "public_review_evidence_contract",
+            return_value=altered,
+        ), self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
+            WORKER.run_localization_job(
+                job(SOURCE, "commercial"), assets(), adapter,
+            )
+        self.assertEqual(
+            error.exception.code,
+            "commercial_review_evidence_contract.binding_mismatch",
+        )
+        self.assertFalse(error.exception.retryable)
+        self.assertEqual(adapter.requests, [])
 
     def test_stale_review_evidence_contract_blocks_persisted_summary(self):
         summary = validate_commercial(evidence(), SOURCE, TARGET, SCHEMA)

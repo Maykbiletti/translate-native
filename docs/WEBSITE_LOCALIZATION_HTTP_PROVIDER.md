@@ -80,7 +80,7 @@ The JSON envelope has exactly four fields:
   "request_id": "<deterministic phase request ID>",
   "request_sha256": "<SHA-256 of canonical request JSON>",
   "request": {
-    "schema": "blun.website-localization-worker.v4",
+    "schema": "blun.website-localization-worker.v5",
     "request_id": "<same deterministic phase request ID>",
     "phase": "transcreation",
     "provider_id": "customer-llm",
@@ -97,6 +97,16 @@ inside `input` as untrusted data. It must not combine phases. In particular,
 the `target_native` input intentionally excludes the source text and
 source-language glossary terms; reconstructing or fetching that source would
 invalidate the independent, source-blind review.
+
+For commercial content, only `source_fidelity` receives
+`commercial_review_evidence_contract`. This is the complete content-free,
+SHA-256-bound public contract for the required offer registry, Unicode spans,
+ten checks, verdict invariants, limits, and fail-closed trust boundary. The
+worker verifies it against the installed public commercial profile before the
+first provider call. Transcreation and source-blind native review do not receive
+this contract. The provider still returns the private evidence only under
+`response_schema.commercial_review`; the public contract itself contains no
+project price, brand, source, target, span, or reviewer prose.
 
 `request_sha256` is the lowercase hexadecimal SHA-256 of `request` encoded as
 UTF-8 JSON with keys sorted, no insignificant whitespace, native Unicode

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
-WORKER_SCHEMA = "blun.website-localization-worker.v4"
+WORKER_SCHEMA = "blun.website-localization-worker.v5"
 CANDIDATE_SCHEMA = "blun.website-localization-candidate.v1"
 REVIEW_SCHEMA = "blun.website-localization-review.v2"
 RESULT_SCHEMA = "blun.website-localization-result.v6"
@@ -481,6 +481,41 @@ def _base_context(job: dict[str, Any], assets: LocalizationAssets) -> dict[str, 
     return context
 
 
+def _commercial_review_evidence_contract(profile: str) -> dict[str, Any]:
+    """Resolve the exact public evidence contract before any provider access."""
+    try:
+        contract = _COMMERCIAL.public_review_evidence_contract(profile)
+        public_contract = _COMMERCIAL.public_profile(profile)[
+            "review_evidence_contract"
+        ]
+        if not isinstance(contract, dict) or not isinstance(
+            public_contract, dict
+        ):
+            raise TypeError
+        unsigned = dict(contract)
+        digest = unsigned.pop("sha256")
+    except (KeyError, TypeError, ValueError) as error:
+        raise LocalizationWorkerBlocked(
+            "commercial_review_evidence_contract.binding_mismatch",
+            retryable=False,
+        ) from error
+    if (
+        contract != public_contract
+        or contract.get("schema")
+        != _COMMERCIAL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA
+        or contract.get("result_schema") != profile
+        or contract.get("profile") != profile
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != _hash_json(unsigned)
+    ):
+        raise LocalizationWorkerBlocked(
+            "commercial_review_evidence_contract.binding_mismatch",
+            retryable=False,
+        )
+    return json.loads(_canonical_json(contract))
+
+
 def run_localization_job(
     job_payload: Any,
     assets: LocalizationAssets,
@@ -501,8 +536,12 @@ def run_localization_job(
     locale = job["target"]["locale"]
     base = _base_context(job, assets)
     commercial = job["content_type"] == "commercial"
+    commercial_evidence_contract = None
     if commercial:
         base["commercial_profile"] = job["commercial_profile"]
+        commercial_evidence_contract = _commercial_review_evidence_contract(
+            job["commercial_profile"]
+        )
     full_glossary = [asdict(term) for term in assets.glossary]
     target_terms = [
         {"target": term.target}
@@ -574,6 +613,15 @@ def run_localization_job(
         "source": job["source"],
         "candidate": candidate,
         "glossary": full_glossary,
+        **(
+            {
+                "commercial_review_evidence_contract": (
+                    commercial_evidence_contract
+                ),
+            }
+            if commercial
+            else {}
+        ),
         "response_schema": {
             "schema": REVIEW_SCHEMA,
             "phase": "source_fidelity",

@@ -1758,8 +1758,12 @@ Every check has `status` (`equivalent`,
 offsets with an exclusive end and must remain inside the named offer's declared
 regions. A one-sided item uses `null` only for the side
 that is absent, so an omitted condition and an invented target claim can be
-represented without fabricating a counterpart. The exact response contract and
-dimension guidance are supplied in each fidelity request.
+represented without fabricating a counterpart. The illustrative response shape
+and dimension guidance are supplied alongside the complete, separately hashed
+`review_evidence_contract` in each commercial fidelity request. The worker
+verifies that contract against the installed public commercial profile before
+any provider access. It remains absent from transcreation and source-hidden
+native review, preserving the independent first quality stage.
 
 Equivalent checks require matched evidence; absent dimensions require empty
 items, and equivalent `offer_assignment` evidence names every registered offer
