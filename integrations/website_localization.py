@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA = "blun.website-localization-plan.v2"
-JOB_SCHEMA = "blun.website-localization-job.v2"
+SCHEMA = "blun.website-localization-plan.v3"
+JOB_SCHEMA = "blun.website-localization-job.v3"
 EU_LANGUAGE_SOURCE = (
     "https://european-union.europa.eu/principles-countries-history/languages_en"
 )
@@ -83,6 +83,22 @@ COMMERCIAL_RENDERING_REGISTRY_SCHEMA = (
 )
 
 
+def _load_commercial_profile():
+    path = Path(__file__).with_name("commercial_localization_profile.py")
+    spec = importlib.util.spec_from_file_location(
+        "blun_website_planner_commercial_profile", path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load commercial localization profile")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_COMMERCIAL = _load_commercial_profile()
+
+
 def _locale(locale: str, eu_code: str, language: str, native_name: str, script: str) -> LocaleProfile:
     quality = _QUALITY_PROFILES.quality_profile_for(locale)
     return LocaleProfile(
@@ -137,6 +153,42 @@ def commercial_rendering_registry() -> dict[str, Any]:
     return _QUALITY_PROFILES.commercial_rendering_registry(COMMERCIAL_PROFILE)
 
 
+def commercial_review_evidence_contract_sha256() -> str:
+    """Return the exact current evidence-contract generation or fail closed."""
+    try:
+        contract = _COMMERCIAL.public_review_evidence_contract(
+            COMMERCIAL_PROFILE,
+        )
+        public_contract = _COMMERCIAL.public_profile(COMMERCIAL_PROFILE)[
+            "review_evidence_contract"
+        ]
+        if not isinstance(contract, dict) or not isinstance(
+            public_contract, dict
+        ):
+            raise TypeError
+        unsigned = dict(contract)
+        digest = unsigned.pop("sha256")
+        computed_digest = _digest(unsigned)
+    except (KeyError, TypeError, ValueError) as error:
+        raise LocalizationPlanBlocked(
+            "commercial review-evidence contract is invalid"
+        ) from error
+    if (
+        contract != public_contract
+        or contract.get("schema")
+        != _COMMERCIAL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA
+        or contract.get("result_schema") != COMMERCIAL_PROFILE
+        or contract.get("profile") != COMMERCIAL_PROFILE
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or digest != computed_digest
+    ):
+        raise LocalizationPlanBlocked(
+            "commercial review-evidence contract is invalid"
+        )
+    return digest
+
+
 @dataclass(frozen=True)
 class LocalizationJob:
     job_id: str
@@ -153,6 +205,7 @@ class LocalizationJob:
     model_id: str
     model_version: str
     software_version: str
+    commercial_review_evidence_contract_sha256: str | None = None
 
     def as_payload(self) -> dict[str, Any]:
         """Return the provider-neutral queue payload for one target locale."""
@@ -161,6 +214,18 @@ class LocalizationJob:
             if self.content_type == "commercial"
             else None
         )
+        commercial_evidence_sha256 = (
+            commercial_review_evidence_contract_sha256()
+            if commercial is not None
+            else None
+        )
+        if (
+            self.commercial_review_evidence_contract_sha256
+            != commercial_evidence_sha256
+        ):
+            raise LocalizationPlanBlocked(
+                "commercial review-evidence contract binding is stale"
+            )
         return {
             "schema": JOB_SCHEMA,
             "job_id": self.job_id,
@@ -188,6 +253,9 @@ class LocalizationJob:
                 {
                     "commercial_profile": COMMERCIAL_PROFILE,
                     "commercial_quality_profile": commercial,
+                    "commercial_review_evidence_contract_sha256": (
+                        commercial_evidence_sha256
+                    ),
                 }
                 if commercial is not None
                 else {}
@@ -345,8 +413,15 @@ def plan_website_localization(
         "software_version": software_version,
         "quality_passes": QUALITY_PASSES,
     }
+    commercial_evidence_sha256 = None
     if content_type == "commercial":
         common["commercial_profile"] = COMMERCIAL_PROFILE
+        commercial_evidence_sha256 = (
+            commercial_review_evidence_contract_sha256()
+        )
+        common["commercial_review_evidence_contract_sha256"] = (
+            commercial_evidence_sha256
+        )
     jobs_list = []
     for profile in profiles:
         job_binding = {**common, "target": asdict(profile)}
@@ -369,6 +444,9 @@ def plan_website_localization(
             model_id=model_id,
             model_version=model_version,
             software_version=software_version,
+            commercial_review_evidence_contract_sha256=(
+                commercial_evidence_sha256
+            ),
         ))
     jobs = tuple(jobs_list)
     plan_binding = {

@@ -107,6 +107,19 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.139.0: evidence-contract-bound commercial job identity
+
+Version 6.139.0 binds the exact public commercial review-evidence-contract
+SHA-256 into plan v3, every commercial job v3, its deterministic job and
+idempotency key, and the overall plan ID. A change to offer-registry, Unicode
+span, dimension, or verdict semantics now creates new work identity even when
+the parent commercial profile identifier remains stable.
+
+Before any provider access, the worker joins the job-bound digest to the
+separately verified full contract supplied to source-fidelity review. Missing,
+stale, or replaced bindings fail closed; non-commercial jobs remain free of
+commercial metadata and no provider is hardwired.
+
 ### Version 6.138.0: exact provider-side commercial evidence contract
 
 Version 6.138.0 gives the source-aware commercial fidelity provider the exact,
@@ -2152,7 +2165,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.138.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.139.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

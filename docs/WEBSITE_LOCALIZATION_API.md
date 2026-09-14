@@ -2214,7 +2214,7 @@ receipts, qualified-human identities and reviewer prose are never published.
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
     "default_target_policy": "all-eu-official-locales-except-source-language",
     "eu_language_source": "https://european-union.europa.eu/principles-countries-history/languages_en",
-    "job_schema": "blun.website-localization-job.v2",
+    "job_schema": "blun.website-localization-job.v3",
     "locales": [{
       "direction": "ltr",
       "eu_code": "MT",
@@ -2227,7 +2227,7 @@ receipts, qualified-human identities and reviewer prose are never published.
       "commercial_quality_profile_version": "commercial-eu-mt-MT-2026-09-2",
       "script": "Latn"
     }],
-    "plan_schema": "blun.website-localization-plan.v2",
+    "plan_schema": "blun.website-localization-plan.v3",
     "publication_http": {
       "binding_headers": [
         {"binding": "delivery_id", "name": "Idempotency-Key"},

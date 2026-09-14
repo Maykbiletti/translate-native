@@ -1,5 +1,25 @@
 # Version 6 premortem
 
+## Commercial evidence-contract identity at planning (14 September 2026)
+
+Assume the public commercial review-evidence contract changed while its parent
+commercial profile identifier remained stable.
+
+- A queue could deduplicate the new work against a job created under the old
+  evidence semantics.
+- A translation-memory lookup could reuse a candidate whose source-fidelity
+  review followed stale offer, span, or verdict rules.
+- A caller could replace the job's contract digest while preserving all other
+  valid profile and locale-quality bindings.
+- The provider request could carry the current full contract without proving
+  that it is the contract that created the job identity.
+
+The v3 plan and job contracts bind the exact canonical review-evidence-contract
+SHA-256 into every commercial job, idempotency key, and plan ID. The worker
+joins that stored digest to the separately validated full fidelity contract
+before any provider access. Tests cover contract-only generation changes,
+tampered job bindings, stale jobs, and unchanged non-commercial payloads.
+
 ## Commercial contract acknowledgement at enqueue (14 September 2026)
 
 Assume a CMS discovered the public price and offer profile but enqueued work

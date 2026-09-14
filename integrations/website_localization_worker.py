@@ -542,6 +542,14 @@ def run_localization_job(
         commercial_evidence_contract = _commercial_review_evidence_contract(
             job["commercial_profile"]
         )
+        if (
+            job["commercial_review_evidence_contract_sha256"]
+            != commercial_evidence_contract["sha256"]
+        ):
+            raise LocalizationWorkerBlocked(
+                "commercial_review_evidence_contract.binding_mismatch",
+                retryable=False,
+            )
     full_glossary = [asdict(term) for term in assets.glossary]
     target_terms = [
         {"target": term.target}

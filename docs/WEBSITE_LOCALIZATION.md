@@ -1780,8 +1780,12 @@ publish. The evidence request and independent verifier both receive the bound
 commercial profile and policy context. The old known-good translation remains.
 Do not classify legal text as commercial to bypass the legal human-review gate.
 
-The full commercial response hash stays in the normal quality-pass receipt;
-job IDs bind the profile version through queue, signed memory and publication.
+The full commercial response hash stays in the normal quality-pass receipt.
+Plan v3 and job v3 also carry the exact current review-evidence-contract
+SHA-256. That digest participates in every commercial job ID, idempotency key,
+and plan ID, and the worker joins it to the complete fidelity-request contract
+before provider access. A contract-only policy change therefore creates new
+work identity and cannot reuse a stale queue or translation-memory entry.
 The content-free result summary uses
 `translate-native.commercial-review-summary.v4`; the authenticated capability
 response publishes its exact separately hashed machine contract, including the

@@ -408,6 +408,12 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(fidelity.input["source"]["text"], SOURCE)
         evidence_contract = PROFILE.public_review_evidence_contract(SCHEMA)
         self.assertEqual(
+            job(SOURCE, "commercial")[
+                "commercial_review_evidence_contract_sha256"
+            ],
+            evidence_contract["sha256"],
+        )
+        self.assertEqual(
             fidelity.input["commercial_review_evidence_contract"],
             evidence_contract,
         )
@@ -615,6 +621,73 @@ class CommercialLocalizationTests(unittest.TestCase):
             WORKER._validated_job(after)
         self.assertNotIn("commercial_profile", job(SOURCE, "marketing"))
         self.assertNotIn("commercial_quality_profile", job(SOURCE, "marketing"))
+        self.assertNotIn(
+            "commercial_review_evidence_contract_sha256",
+            job(SOURCE, "marketing"),
+        )
+
+    def test_evidence_contract_only_change_invalidates_plan_and_job_ids(self):
+        before_plan = PLANNER.plan_website_localization(
+            source_id="pricing", source_revision="1", source_text=SOURCE,
+            source_locale="en-IE", content_type="commercial",
+            glossary_version="g1", policy_version="p1",
+            provider_id="own-model", model_id="model", model_version="1",
+            software_version="1", target_locales=["sv-SE"],
+        )
+        before = before_plan.jobs[0].as_payload()
+        altered = copy.deepcopy(
+            PLANNER._COMMERCIAL.public_review_evidence_contract(SCHEMA)
+        )
+        altered["trust_boundary"]["publication_authority"] = True
+        unsigned = dict(altered)
+        unsigned.pop("sha256")
+        altered["sha256"] = PLANNER._digest(unsigned)
+        public_profile = copy.deepcopy(
+            PLANNER._COMMERCIAL.public_profile(SCHEMA)
+        )
+        public_profile["review_evidence_contract"] = altered
+        with patch.object(
+            PLANNER._COMMERCIAL,
+            "public_review_evidence_contract",
+            return_value=altered,
+        ), patch.object(
+            PLANNER._COMMERCIAL,
+            "public_profile",
+            return_value=public_profile,
+        ):
+            after_plan = PLANNER.plan_website_localization(
+                source_id="pricing", source_revision="1", source_text=SOURCE,
+                source_locale="en-IE", content_type="commercial",
+                glossary_version="g1", policy_version="p1",
+                provider_id="own-model", model_id="model", model_version="1",
+                software_version="1", target_locales=["sv-SE"],
+            )
+            after = after_plan.jobs[0].as_payload()
+        self.assertEqual(before["commercial_profile"], after["commercial_profile"])
+        self.assertEqual(
+            before["commercial_quality_profile"],
+            after["commercial_quality_profile"],
+        )
+        self.assertNotEqual(
+            before["commercial_review_evidence_contract_sha256"],
+            after["commercial_review_evidence_contract_sha256"],
+        )
+        self.assertNotEqual(before["job_id"], after["job_id"])
+        self.assertNotEqual(before_plan.plan_id, after_plan.plan_id)
+        adapter = provider()
+        with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
+            WORKER.run_localization_job(after, assets(), adapter)
+        self.assertEqual(error.exception.code, "job.binding_mismatch")
+        self.assertEqual(adapter.requests, [])
+
+    def test_commercial_evidence_contract_job_tamper_blocks_before_provider(self):
+        payload = job(SOURCE, "commercial")
+        payload["commercial_review_evidence_contract_sha256"] = "0" * 64
+        adapter = provider()
+        with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
+            WORKER.run_localization_job(payload, assets(), adapter)
+        self.assertEqual(error.exception.code, "job.binding_mismatch")
+        self.assertEqual(adapter.requests, [])
 
     def test_commercial_locale_profile_tamper_blocks_before_provider(self):
         for mutate in (
