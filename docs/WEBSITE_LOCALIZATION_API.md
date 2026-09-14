@@ -1350,6 +1350,19 @@ the service cannot truthfully infer which historic commercial contract its
 rows acknowledged. Missing, modified, non-canonical, stale, or cross-content
 bindings likewise block fail-closed rather than being repaired automatically.
 
+The v14 capability generation and v13 OpenAPI document bind that durable CMS
+acknowledgement to the website generation that actually accepts the work. For
+an accepted commercial change, the downstream
+`commercial_rendering_registry_sha256` must equal the same field in the stored
+`commercial_contract_binding`. A different website binding is rejected even
+when all of its fields and its own `binding_sha256` are internally consistent.
+
+This cross-generation invariant is checked before the acceptance transaction,
+again whenever the stored row is read after a restart or by health, and once
+more at both the HTTP serialization boundary and the reference client. The
+status and lifecycle remain content-free and grant no publication authority;
+an unresolved generation mismatch cannot be reported as accepted.
+
 The v11 capability generation and v10 OpenAPI document add
 `GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
 separate body-free operator scope. It returns the exact public

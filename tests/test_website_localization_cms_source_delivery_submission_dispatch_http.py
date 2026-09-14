@@ -215,6 +215,10 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             capabilities["semantics"]
             ["non_discovery_operations_require_exact_capability_precondition"]
         )
+        self.assertTrue(
+            capabilities["semantics"]
+            ["accepted_commercial_contract_matches_remote_registry"]
+        )
         self.assertIsNone(
             capabilities["operations"]["capabilities"]
             ["capabilities_precondition_header"]
@@ -656,6 +660,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             "attempts_lte_client_max_attempts",
             "leased_iff_lease_expires_at",
             "accepted_iff_remote_website_binding_complete_and_valid",
+            "accepted_commercial_contract_matches_remote_registry",
         ])
         self.assertEqual(
             status["allOf"][0]["then"]["properties"]["lease_expires_at"]["type"],
@@ -799,6 +804,31 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertEqual(accepted["status"], 200)
         self.assertEqual(status["status"], "accepted")
         self.assertEqual(status["remote_website_capability_binding"], expected)
+
+        different_registry = dict(expected)
+        different_registry["commercial_rendering_registry_sha256"] = "0" * 64
+        different_registry["binding_sha256"] = hashlib.sha256("\x00".join((
+            different_registry["schema"], different_registry["database_role"],
+            different_registry["delivery_capabilities_sha256"],
+            different_registry["runtime_capabilities_sha256"],
+            different_registry["commercial_rendering_registry_sha256"],
+            different_registry["terminal_receiver_capabilities_sha256"],
+        )).encode("utf-8")).hexdigest()
+        mismatched_status = dataclasses.replace(
+            self.runtime.status(queued["operation"], queued["request_id"]),
+            remote_website_capability_binding=different_registry,
+            remote_binding_sha256=hashlib.sha256(
+                self.canonical(different_registry)
+            ).hexdigest(),
+        )
+        with self.assertRaises(
+            HTTP.CMSSourceDeliverySubmissionDispatchHTTPBlocked,
+        ) as mismatched:
+            HTTP._status_payload(mismatched_status)
+        self.assertEqual(
+            (mismatched.exception.code, mismatched.exception.status),
+            ("submission_dispatch_http.runtime_response_invalid", 503),
+        )
 
         invalid_binding = dict(expected)
         invalid_binding["terminal_receiver_capabilities_sha256"] = "0" * 64

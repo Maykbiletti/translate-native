@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v13"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v14"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -52,9 +52,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v13"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v14"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v13"
+    "blun.cms-public-submission-dispatch-capabilities-response.v14"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -239,6 +239,7 @@ RESPONSE_INVARIANTS = {
         "attempts_lte_client_max_attempts",
         "leased_iff_lease_expires_at",
         "accepted_iff_remote_website_binding_complete_and_valid",
+        "accepted_commercial_contract_matches_remote_registry",
     ),
     HEALTH_PATH: (
         "queue_count_sum_matches_operation_count_sum",
@@ -573,6 +574,9 @@ def _status_payload(
             != payload["remote_capabilities_sha256"]
             or hashlib.sha256(_canonical(remote_binding)).hexdigest()
             != payload["remote_binding_sha256"]
+            or commercial_binding is not None
+            and remote_binding["commercial_rendering_registry_sha256"]
+            != commercial_binding["commercial_rendering_registry_sha256"]
         ):
             raise ValueError
         expected = {
@@ -827,6 +831,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "commercial_profile_route_verifies_live_website_generation": True,
                 "commercial_enqueue_requires_exact_contract_binding": True,
                 "commercial_contract_binding_is_durable": True,
+                "accepted_commercial_contract_matches_remote_registry": True,
                 "operational_responses_are_content_free": True,
             },
             "public_submission_capabilities_sha256": _sha256(runtime_digest),

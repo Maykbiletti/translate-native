@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v12"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v13"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -322,6 +322,7 @@ def _status_schema() -> dict[str, Any]:
         "x-invariants": [
             "attempts_lte_client_max_attempts", "leased_iff_lease_expires_at",
             "accepted_iff_remote_website_binding_complete_and_valid",
+            "accepted_commercial_contract_matches_remote_registry",
         ],
         "description": "Content-free durable submission state; accepted is not publication.",
     }

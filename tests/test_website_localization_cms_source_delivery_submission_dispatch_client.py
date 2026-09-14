@@ -248,6 +248,54 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         self.assertNotIn(change["localization"]["source_text"], rendered)
         self.assertNotIn("target_text", rendered)
 
+    def test_status_rejects_a_self_consistent_cross_registry_acceptance(self):
+        change = cms_support.event()
+        queued = self.client.enqueue(change)["status"]
+        identity = tuple(queued[name] for name in (
+            "operation", "request_id", "event_id", "site_id", "payload_sha256",
+        ))
+        with self.runtime._lock:
+            self.runtime._dispatcher.run_once(
+                self.runtime._client, "manual-cross-registry", now=100,
+            )
+
+        def transform(number, result):
+            if number != 2:
+                return result
+
+            def substitute(value):
+                status = value["status"]
+                binding = dict(status["remote_website_capability_binding"])
+                binding["commercial_rendering_registry_sha256"] = "0" * 64
+                binding["binding_sha256"] = hashlib.sha256("\x00".join((
+                    binding["schema"], binding["database_role"],
+                    binding["delivery_capabilities_sha256"],
+                    binding["runtime_capabilities_sha256"],
+                    binding["commercial_rendering_registry_sha256"],
+                    binding["terminal_receiver_capabilities_sha256"],
+                )).encode("utf-8")).hexdigest()
+                status["remote_website_capability_binding"] = binding
+                status["remote_binding_sha256"] = hashlib.sha256(
+                    json.dumps(
+                        binding, ensure_ascii=False, allow_nan=False,
+                        sort_keys=True, separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+
+            return replace_json(result, substitute)
+
+        client = self.make_client(transport=TransformingTransport(
+            WSGITransport(self.runtime.http), transform,
+        ))
+        with self.assertRaises(
+            CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked,
+        ) as blocked:
+            client.status(*identity)
+        self.assertEqual(
+            blocked.exception.code,
+            "source_delivery_submission_dispatch_client.status_binding",
+        )
+
     def test_substituted_nested_lifecycle_binding_is_rejected(self):
         change = cms_support.event()
         queued = self.client.enqueue(change)["status"]

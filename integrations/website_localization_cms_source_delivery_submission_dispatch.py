@@ -852,6 +852,13 @@ class DurableCMSSourceDeliverySubmissionDispatcher:
             and normalized_binding == binding
             and copied.get("capabilities_sha256")
             == binding.get("delivery_capabilities_sha256")
+            and (
+                claim.commercial_contract_binding is None
+                or binding.get("commercial_rendering_registry_sha256")
+                == claim.commercial_contract_binding[
+                    "commercial_rendering_registry_sha256"
+                ]
+            )
         )
         if not valid:
             raise _blocked("response_invalid")
@@ -1201,6 +1208,11 @@ class DurableCMSSourceDeliverySubmissionDispatcher:
     def _valid_stored_response(self, row: sqlite3.Row, response_json: str) -> bool:
         try:
             response = json.loads(response_json)
+            payload = json.loads(row["payload_json"])
+            commercial_binding = _stored_commercial_binding(
+                row["commercial_contract_binding_json"], payload,
+                "state_invalid",
+            )
             binding = _CLIENT._HTTP._binding(
                 response.get("website_capability_binding")
             )
@@ -1238,6 +1250,13 @@ class DurableCMSSourceDeliverySubmissionDispatcher:
                 == row["remote_capabilities_sha256"]
                 and response["capabilities_sha256"]
                 == binding["delivery_capabilities_sha256"]
+                and (
+                    commercial_binding is None
+                    or binding["commercial_rendering_registry_sha256"]
+                    == commercial_binding[
+                        "commercial_rendering_registry_sha256"
+                    ]
+                )
                 and _digest(_canonical(binding, "state_invalid"))
                 == row["remote_binding_sha256"]
                 and response["website_capability_binding"] == binding

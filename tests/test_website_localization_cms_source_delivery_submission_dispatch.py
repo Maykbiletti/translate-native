@@ -39,6 +39,19 @@ DISPATCH = load(
 )
 
 
+def with_commercial_registry(binding, digest):
+    changed = dict(binding)
+    changed["commercial_rendering_registry_sha256"] = digest
+    changed["binding_sha256"] = hashlib.sha256("\x00".join((
+        changed["schema"], changed["database_role"],
+        changed["delivery_capabilities_sha256"],
+        changed["runtime_capabilities_sha256"],
+        changed["commercial_rendering_registry_sha256"],
+        changed["terminal_receiver_capabilities_sha256"],
+    )).encode("utf-8")).hexdigest()
+    return changed
+
+
 class ScriptedClient:
     timeout = 30.0
 
@@ -209,6 +222,68 @@ class DurableSourceDeliverySubmissionDispatcherTests(unittest.TestCase):
             resumed.health(now=105)
         self.assertEqual(
             tampered.exception.code,
+            "source_delivery_submission_dispatch.state_invalid",
+        )
+
+    def test_commercial_acceptance_requires_the_acknowledged_remote_registry(self):
+        commercial = cms_support.event()
+        response = self.support.client.submit_change(commercial)
+        response["website_capability_binding"] = with_commercial_registry(
+            response["website_capability_binding"], "0" * 64,
+        )
+        self.dispatcher.enqueue(commercial, now=100)
+
+        outcome = self.dispatcher.run_once(
+            ScriptedClient(self.support.digest, response), "worker", now=100,
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(
+            outcome.error_code,
+            "source_delivery_submission_dispatch.response_invalid",
+        )
+
+    def test_stored_commercial_acceptance_revalidates_the_remote_registry(self):
+        commercial = cms_support.event()
+        self.dispatcher.enqueue(commercial, now=100)
+        self.dispatcher.run_once(self.support.client, "worker", now=100)
+        row = self.connection.execute(
+            "SELECT response_json FROM cms_public_submission_outbox "
+            "WHERE operation = 'change' AND request_id = ?",
+            (commercial["event_id"],),
+        ).fetchone()
+        response = json.loads(row[0])
+        binding = with_commercial_registry(
+            response["website_capability_binding"], "0" * 64,
+        )
+        response["website_capability_binding"] = binding
+        response_json = json.dumps(
+            response, ensure_ascii=False, allow_nan=False, sort_keys=True,
+            separators=(",", ":"),
+        )
+        binding_json = json.dumps(
+            binding, ensure_ascii=False, allow_nan=False, sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.connection.execute("""
+            UPDATE cms_public_submission_outbox
+            SET response_json = ?, response_sha256 = ?,
+                remote_binding_sha256 = ?
+            WHERE operation = 'change' AND request_id = ?
+        """, (
+            response_json,
+            hashlib.sha256(response_json.encode("utf-8")).hexdigest(),
+            hashlib.sha256(binding_json.encode("utf-8")).hexdigest(),
+            commercial["event_id"],
+        ))
+        self.connection.commit()
+
+        with self.assertRaises(
+            DISPATCH.CMSSourceDeliverySubmissionDispatchBlocked,
+        ) as blocked:
+            self.dispatcher.health(now=101)
+        self.assertEqual(
+            blocked.exception.code,
             "source_delivery_submission_dispatch.state_invalid",
         )
 

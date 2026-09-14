@@ -413,6 +413,9 @@ def _status(
             != payload["remote_capabilities_sha256"]
             or hashlib.sha256(_canonical(binding)).hexdigest()
             != payload["remote_binding_sha256"]
+            or commercial_binding is not None
+            and binding["commercial_rendering_registry_sha256"]
+            != commercial_binding["commercial_rendering_registry_sha256"]
         )
     ):
         _fail("status_binding")
