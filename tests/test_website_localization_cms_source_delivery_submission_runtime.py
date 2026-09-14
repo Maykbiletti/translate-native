@@ -213,6 +213,9 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             "commercial_rendering_registry_sha256": (
                 self.remote.expected_commercial_rendering_registry_sha256
             ),
+            "terminal_receiver_capabilities_sha256": (
+                self.remote.expected_terminal_receiver_capabilities_sha256
+            ),
             "sidecar_delivery_max_attempts": 4,
             "clock": lambda: self.now,
             "nonce_factory": self.nonces,
@@ -234,6 +237,24 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         )
         self.runtimes.append(runtime)
         return runtime
+
+    def replace_website_binding_with_legacy(self, runtime):
+        delivery = SUBMISSION._RUNTIME._DELIVERY
+        row = delivery._legacy_capability_binding_row(
+            runtime._adapter.legacy_expected_capabilities_sha256,
+            runtime._adapter.expected_runtime_capabilities_sha256,
+            runtime._adapter.expected_commercial_rendering_registry_sha256,
+        )
+        with sqlite3.connect(self.website_database) as connection:
+            connection.execute(
+                "DROP TABLE cms_source_delivery_runtime_capability_binding"
+            )
+            connection.execute(delivery.LEGACY_CAPABILITY_BINDING_SQL)
+            connection.execute(
+                "INSERT INTO cms_source_delivery_runtime_capability_binding "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
 
     @staticmethod
     def payload_hash(value):
@@ -271,7 +292,8 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         stored = runtime._delivery._connection.execute(
             "SELECT database_role, delivery_capabilities_sha256, "
             "runtime_capabilities_sha256, "
-            "commercial_rendering_registry_sha256 "
+            "commercial_rendering_registry_sha256, "
+            "terminal_receiver_capabilities_sha256 "
             "FROM cms_source_delivery_runtime_capability_binding"
         ).fetchone()
 
@@ -280,6 +302,7 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             runtime.expected_capabilities_sha256,
             self.remote.expected_runtime_capabilities_sha256,
             self.remote.expected_commercial_rendering_registry_sha256,
+            self.remote.expected_terminal_receiver_capabilities_sha256,
         ))
         self.assertEqual(
             runtime._adapter.expected_runtime_capabilities_sha256,
@@ -288,6 +311,10 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(
             runtime._adapter.expected_commercial_rendering_registry_sha256,
             self.remote.expected_commercial_rendering_registry_sha256,
+        )
+        self.assertEqual(
+            runtime._adapter.expected_terminal_receiver_capabilities_sha256,
+            self.remote.expected_terminal_receiver_capabilities_sha256,
         )
         self.assertEqual(
             [urlsplit(call[1]).path for call in self.transport.calls],
@@ -300,13 +327,14 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
     def test_website_capability_binding_reports_the_durable_generation(self):
         runtime = self.open()
         before = len(self.transport.calls)
-        schema = "blun.cms-source-delivery-runtime-capability-binding.v1"
+        schema = "blun.cms-source-delivery-runtime-capability-binding.v2"
         binding_hash = hashlib.sha256("\x00".join((
             schema,
             "source_delivery",
             runtime.expected_capabilities_sha256,
             self.remote.expected_runtime_capabilities_sha256,
             self.remote.expected_commercial_rendering_registry_sha256,
+            self.remote.expected_terminal_receiver_capabilities_sha256,
         )).encode("utf-8")).hexdigest()
 
         binding = runtime.website_capability_binding()
@@ -324,6 +352,9 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
             ),
             "commercial_rendering_registry_sha256": (
                 self.remote.expected_commercial_rendering_registry_sha256
+            ),
+            "terminal_receiver_capabilities_sha256": (
+                self.remote.expected_terminal_receiver_capabilities_sha256
             ),
             "binding_sha256": binding_hash,
         })
@@ -881,6 +912,40 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(transport.calls, [])
 
+    def test_restart_rejects_nonempty_legacy_receiver_binding_before_network(self):
+        runtime = self.open()
+        runtime.enqueue_change(cms_support.event())
+        runtime.close()
+        self.replace_website_binding_with_legacy(runtime)
+        transport = NoNetworkTransport()
+
+        with self.assertRaises(
+            SUBMISSION.HMACCMSSourceDeliverySubmissionRuntimeBlocked,
+        ) as caught:
+            self.open(transport=transport)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery_submission_runtime."
+            "local_database_generation_unbound",
+        )
+        self.assertEqual(transport.calls, [])
+
+    def test_restart_migrates_only_empty_legacy_receiver_binding(self):
+        runtime = self.open()
+        runtime.close()
+        self.replace_website_binding_with_legacy(runtime)
+        before = len(self.transport.calls)
+
+        reopened = self.open()
+        binding = reopened.website_capability_binding()
+
+        self.assertEqual(
+            binding["terminal_receiver_capabilities_sha256"],
+            self.remote.expected_terminal_receiver_capabilities_sha256,
+        )
+        self.assertEqual(len(self.transport.calls), before + 2)
+
     def test_restart_adopts_empty_unbound_database_after_remote_preflight(self):
         runtime = self.open()
         runtime.close()
@@ -893,13 +958,15 @@ class SourceDeliverySubmissionRuntimeTests(unittest.TestCase):
         reopened = self.open()
         stored = reopened._delivery._connection.execute(
             "SELECT runtime_capabilities_sha256, "
-            "commercial_rendering_registry_sha256 "
+            "commercial_rendering_registry_sha256, "
+            "terminal_receiver_capabilities_sha256 "
             "FROM cms_source_delivery_runtime_capability_binding"
         ).fetchone()
 
         self.assertEqual(tuple(stored), (
             self.remote.expected_runtime_capabilities_sha256,
             self.remote.expected_commercial_rendering_registry_sha256,
+            self.remote.expected_terminal_receiver_capabilities_sha256,
         ))
         self.assertEqual(len(self.transport.calls), before + 2)
 

@@ -44,7 +44,7 @@ class ScriptedClient:
         self.expected_capabilities_sha256 = digest
         self.expected_runtime_capabilities_sha256 = "c" * 64
         self.expected_commercial_rendering_registry_sha256 = "d" * 64
-        self.terminal_receiver_capabilities_sha256 = "e" * 64
+        self.expected_terminal_receiver_capabilities_sha256 = "e" * 64
         self.timeout = 30
         self.calls = []
         self.failures = []
@@ -135,7 +135,7 @@ class ScriptedClient:
                 "notification_max_attempts": None,
                 "notification_error_code": None,
                 "terminal_receiver_capabilities_sha256": (
-                    self.terminal_receiver_capabilities_sha256
+                    self.expected_terminal_receiver_capabilities_sha256
                 ),
                 "terminal_processing_state": "awaiting_notification",
                 "terminal_processing_poll_attempts": 0,
@@ -233,11 +233,11 @@ class ScriptedClient:
                     "expired_leases": 0,
                     "failed": 0,
                     "expected_capabilities_sha256": (
-                        self.terminal_receiver_capabilities_sha256
+                        self.expected_terminal_receiver_capabilities_sha256
                     ),
                 },
                 "terminal_receiver_capabilities_sha256": (
-                    self.terminal_receiver_capabilities_sha256
+                    self.expected_terminal_receiver_capabilities_sha256
                 ),
                 "error_code": None,
             },
@@ -261,6 +261,22 @@ class SourceDeliveryTests(unittest.TestCase):
 
     def tearDown(self):
         self.connection.close()
+
+    def install_legacy_binding(self):
+        self.connection.execute(
+            "DROP TABLE cms_source_delivery_runtime_capability_binding"
+        )
+        self.connection.execute(DELIVERY.LEGACY_CAPABILITY_BINDING_SQL)
+        self.connection.execute(
+            "INSERT INTO cms_source_delivery_runtime_capability_binding "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            DELIVERY._legacy_capability_binding_row(
+                self.client.expected_capabilities_sha256,
+                self.client.expected_runtime_capabilities_sha256,
+                self.client.expected_commercial_rendering_registry_sha256,
+            ),
+        )
+        self.connection.commit()
 
     def test_change_is_persisted_before_one_bound_delivery(self):
         change = cms_support.event()
@@ -304,7 +320,7 @@ class SourceDeliveryTests(unittest.TestCase):
         ])
         self.assertEqual(
             response["status"]["terminal_receiver_capabilities_sha256"],
-            self.client.terminal_receiver_capabilities_sha256,
+            self.client.expected_terminal_receiver_capabilities_sha256,
         )
         self.assertEqual(self.client.calls[-1], (
             "status", change["event_id"], change["site_id"],
@@ -357,13 +373,13 @@ class SourceDeliveryTests(unittest.TestCase):
         self.assertEqual(response["health"]["changes"]["failed"], 0)
         self.assertEqual(
             response["health"]["terminal_receiver_capabilities_sha256"],
-            self.client.terminal_receiver_capabilities_sha256,
+            self.client.expected_terminal_receiver_capabilities_sha256,
         )
         self.assertEqual(
             response["health"]["terminal_processing"][
                 "expected_capabilities_sha256"
             ],
-            self.client.terminal_receiver_capabilities_sha256,
+            self.client.expected_terminal_receiver_capabilities_sha256,
         )
         self.assertEqual(response["capabilities_sha256"], "a" * 64)
         self.assertEqual(self.client.calls, [("health",)])
@@ -559,13 +575,73 @@ class SourceDeliveryTests(unittest.TestCase):
         )
         self.assertEqual(replacement.calls, [])
 
+    def test_receiver_generation_change_blocks_restart_before_network(self):
+        self.outbox.enqueue_change(cms_support.event())
+        replacement = ScriptedClient()
+        replacement.expected_terminal_receiver_capabilities_sha256 = "f" * 64
+
+        with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
+            DELIVERY.DurableCMSSourceDeliveryOutbox(
+                self.connection, replacement, clock=lambda: self.now,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery.capability_database_mismatch",
+        )
+        self.assertEqual(replacement.calls, [])
+
+    def test_runtime_receiver_pin_drift_blocks_before_network(self):
+        self.outbox.enqueue_change(cms_support.event())
+        self.client.expected_terminal_receiver_capabilities_sha256 = "f" * 64
+
+        with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
+            self.outbox.run_once("worker-1", lease_seconds=60)
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery.capability_binding_changed",
+        )
+        self.assertEqual(self.client.calls, [])
+
+    def test_empty_legacy_binding_migrates_to_receiver_bound_generation(self):
+        self.install_legacy_binding()
+
+        migrated = DELIVERY.DurableCMSSourceDeliveryOutbox(
+            self.connection, self.client, clock=lambda: self.now,
+        )
+        binding = migrated.capability_binding()
+
+        self.assertEqual(binding["schema"], DELIVERY.CAPABILITY_BINDING_SCHEMA)
+        self.assertEqual(
+            binding["terminal_receiver_capabilities_sha256"], "e" * 64,
+        )
+        self.assertRegex(binding["binding_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_nonempty_legacy_binding_cannot_adopt_receiver_generation(self):
+        self.outbox.enqueue_change(cms_support.event())
+        self.install_legacy_binding()
+        replacement = ScriptedClient()
+
+        with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
+            DELIVERY.DurableCMSSourceDeliveryOutbox(
+                self.connection, replacement, clock=lambda: self.now,
+            )
+
+        self.assertEqual(
+            caught.exception.code,
+            "source_delivery.capability_database_unbound",
+        )
+        self.assertEqual(replacement.calls, [])
+
     def test_pinned_restart_preserves_exact_generation_and_pending_work(self):
         change = cms_support.event()
         self.outbox.enqueue_change(change)
         stored = self.connection.execute(
             "SELECT singleton, schema, database_role, "
             "delivery_capabilities_sha256, runtime_capabilities_sha256, "
-            "commercial_rendering_registry_sha256, binding_sha256 "
+            "commercial_rendering_registry_sha256, "
+            "terminal_receiver_capabilities_sha256, binding_sha256 "
             "FROM cms_source_delivery_runtime_capability_binding"
         ).fetchone()
 
@@ -575,15 +651,16 @@ class SourceDeliveryTests(unittest.TestCase):
         )
         outcome = restarted.run_once("restarted-worker", lease_seconds=60)
 
-        self.assertEqual(tuple(stored)[:6], (
+        self.assertEqual(tuple(stored)[:7], (
             1,
             DELIVERY.CAPABILITY_BINDING_SCHEMA,
             "source_delivery",
             "a" * 64,
             "c" * 64,
             "d" * 64,
+            "e" * 64,
         ))
-        self.assertRegex(stored[6], r"^[0-9a-f]{64}$")
+        self.assertRegex(stored[7], r"^[0-9a-f]{64}$")
         self.assertEqual((outcome.status, outcome.attempt), ("succeeded", 1))
         self.assertEqual(len(restarted_client.calls), 1)
 
@@ -627,6 +704,7 @@ class SourceDeliveryTests(unittest.TestCase):
             client = ScriptedClient()
             client.expected_runtime_capabilities_sha256 = None
             client.expected_commercial_rendering_registry_sha256 = None
+            client.expected_terminal_receiver_capabilities_sha256 = None
             return client
 
         empty = sqlite3.connect(":memory:")
@@ -662,6 +740,7 @@ class SourceDeliveryTests(unittest.TestCase):
         unpinned = ScriptedClient()
         unpinned.expected_runtime_capabilities_sha256 = None
         unpinned.expected_commercial_rendering_registry_sha256 = None
+        unpinned.expected_terminal_receiver_capabilities_sha256 = None
 
         with self.assertRaises(DELIVERY.CMSSourceDeliveryBlocked) as caught:
             DELIVERY.DurableCMSSourceDeliveryOutbox(

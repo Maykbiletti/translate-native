@@ -863,20 +863,21 @@ keeps the database connection open; close it only after the worker finishes.
 Worker exceptions are reduced to `source_delivery_runtime.worker_blocked`, and
 the failed runtime cannot accept more managed source events.
 
-When the source client supplies the verified runtime-capability and commercial
-rendering-registry pins, the durable outbox also creates one canonical
-`source_delivery` binding record. It binds those two generations together with
-the source-delivery contract hash and validates the table shape, exact row, and
-derived digest before every queue operation. A same-generation restart resumes
-pending work. Only an empty unbound legacy database may be bound automatically;
-a non-empty legacy queue, changed generation, altered metadata, or unpinned
-reopen of an already bound database blocks before queue or network access. The
-production HMAC website-to-sidecar composition binds its separate outer database
-to the same verified runtime and rendering generations. On restart it checks the
-existing file and canonical binding read-only before any capability request. A
-local schema, file-safety, or generation failure therefore makes no network
-request; a new database or empty unbound legacy database proceeds to the
-authenticated downstream preflight before creation or migration.
+When the source client supplies the verified runtime-capability, commercial
+rendering-registry, and terminal-receiver pins, the durable outbox also creates
+one canonical `source_delivery` binding record. It binds all three generations
+together with the source-delivery contract hash and validates the table shape,
+exact row, and derived digest before every queue operation. A same-generation
+restart resumes pending work. Only an empty unbound database, or an exact empty
+v1 binding whose historical adapter digest can be reconstructed, may be bound
+or migrated automatically. A non-empty legacy queue, changed generation,
+altered metadata, or unpinned reopen of an already bound database blocks before
+queue or network access. The production HMAC website-to-sidecar composition
+binds its separate outer database to the same three verified generations. On
+restart it checks the existing file and canonical binding read-only before any
+capability request. A local schema, file-safety, or generation failure therefore
+makes no network request; a new database or safely migratable empty database
+proceeds to the authenticated downstream preflight before creation or migration.
 
 #### Website-source delivery HTTP sidecar
 
@@ -1000,23 +1001,26 @@ one `CMSSourceDeliverySidecarOutboxAdapter`, and one guarded SQLite runtime.
 
 Supply the initial `HMACCredential`, exact HTTPS origin, trusted sidecar and
 downstream capability hashes, the expected source-runtime capability SHA-256,
-the expected commercial rendering-registry SHA-256, worker identity, and the
-middle `sidecar_delivery_max_attempts` once. Before opening the website SQLite
-file, the composition reads source readiness through the authenticated sidecar
-and requires its verified capability binding to match both generation pins.
+the expected commercial rendering-registry SHA-256, the expected terminal-
+receiver capability SHA-256, worker identity, and the middle
+`sidecar_delivery_max_attempts` once. Before opening the website SQLite file,
+the composition reads source readiness through the authenticated sidecar and
+requires its verified capability binding to match all three generation pins.
 Unavailable, missing, partial, malformed, or substituted evidence blocks with
 a stable content-free error before database creation. The hosted factory still
 validates all loop delays before that preflight.
 
-Both verified generation values become part of the adapter capability digest
-and the outer outbox's role-specific durable binding. A restart therefore
-resumes pending website work only under the exact same sidecar adapter,
-source-runtime, and commercial rendering generation. The SQLite file retains
-the existing owner-only, process-bound, inode-guarded lifecycle.
+All three verified generation values become part of the v3 adapter capability
+digest and the outer outbox's v2 role-specific durable binding. A restart
+therefore resumes pending website work only under the exact same sidecar
+adapter, source-runtime, commercial-rendering, and terminal-receiver
+generation. The SQLite file retains the existing owner-only, process-bound,
+inode-guarded lifecycle. Only an exact empty v1 binding can migrate, using the
+reconstructed v2 adapter digest; existing legacy work is never relabelled.
 
 Call `submission_capabilities()` to discover the exact live contract of this
 complete website edge. The content-free
-`blun.cms-source-delivery-submission-capabilities.v6` snapshot advertises the
+`blun.cms-source-delivery-submission-capabilities.v7` snapshot advertises the
 public change, removal, acceptance-status, and lifecycle HTTPS contracts, all
 six composed operational
 projection schemas, the separately owned website, sidecar and source retry
@@ -1397,9 +1401,9 @@ quality review, release approval, or publication succeeded.
 The `website_capability_binding` field is independently recomputed from the
 validated, role-specific SQLite generation before the status is projected. It
 contains only the outer adapter capability hash, source-runtime hash,
-commercial rendering-registry hash, database role, and their canonical binding
-hash. A missing, changed, or malformed binding blocks locally before a sidecar
-status request.
+commercial rendering-registry hash, terminal-receiver capability hash,
+database role, and their canonical binding hash. A missing, changed, or
+malformed binding blocks locally before a sidecar status request.
 
 `submission_lifecycle()` extends that accepted state with the independently
 validated source lifecycle. Its

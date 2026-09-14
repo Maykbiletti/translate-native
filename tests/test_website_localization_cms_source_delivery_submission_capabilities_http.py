@@ -59,14 +59,23 @@ class Runtime:
 
 def capability_payload():
     binding = {
-        "schema": "blun.cms-source-delivery-runtime-capability-binding.v1",
+        "schema": "blun.cms-source-delivery-runtime-capability-binding.v2",
         "status": "verified",
         "database_role": "source_delivery",
         "delivery_capabilities_sha256": "a" * 64,
         "runtime_capabilities_sha256": "b" * 64,
         "commercial_rendering_registry_sha256": "c" * 64,
-        "binding_sha256": "d" * 64,
+        "terminal_receiver_capabilities_sha256": "d" * 64,
+        "binding_sha256": "0" * 64,
     }
+    binding["binding_sha256"] = hashlib.sha256("\x00".join((
+        binding["schema"],
+        binding["database_role"],
+        binding["delivery_capabilities_sha256"],
+        binding["runtime_capabilities_sha256"],
+        binding["commercial_rendering_registry_sha256"],
+        binding["terminal_receiver_capabilities_sha256"],
+    )).encode("utf-8")).hexdigest()
     body = {
         "schema": SUBMISSION.CAPABILITIES_SCHEMA,
         "operations": {
@@ -345,6 +354,18 @@ class SubmissionCapabilitiesHTTPTests(unittest.TestCase):
         stale_hash = capability_payload()
         stale_hash["operations"]["submission_status"]["kind"] = "write"
         mutations.append(stale_hash)
+
+        substituted_receiver = capability_payload()
+        substituted_receiver["website_capability_binding"][
+            "terminal_receiver_capabilities_sha256"
+        ] = "e" * 64
+        substituted_receiver["sha256"] = hashlib.sha256(
+            HTTP._canonical({
+                key: value for key, value in substituted_receiver.items()
+                if key != "sha256"
+            })
+        ).hexdigest()
+        mutations.append(substituted_receiver)
 
         for payload in mutations:
             with self.subTest(mutation=repr(payload)[:80]):
