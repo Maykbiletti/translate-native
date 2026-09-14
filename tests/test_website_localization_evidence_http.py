@@ -86,6 +86,7 @@ def evidence_request():
         quality_profile={"locale": "fi-FI", "version": "fi-native-1", "sha256": "c" * 64},
         commercial_profile=None,
         commercial_review=None,
+        commercial_review_resolution_contract_sha256=None,
         human_review_required=False,
         independent_review_required=False,
     )
@@ -283,6 +284,11 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             "review_required_dimensions": ["tax_status"],
             "evidence_sha256": "d" * 64,
         }
+        base["commercial_review_resolution_contract_sha256"] = (
+            HTTP._COMMERCIAL.public_review_resolution_contract(
+                base["commercial_profile"],
+            )["sha256"]
+        )
         base["independent_review_required"] = True
 
         class CommercialRequest:
@@ -304,6 +310,12 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
         self.assertEqual(
             sent["quality_profile"]["commercial"],
             base["quality_profile"]["commercial"],
+        )
+        self.assertEqual(
+            sent["commercial_review_resolution_contract_sha256"],
+            HTTP._COMMERCIAL.public_review_resolution_contract(
+                base["commercial_profile"],
+            )["sha256"],
         )
         self.assertNotIn("VAT", json.dumps(sent["commercial_review"]))
 
@@ -334,6 +346,12 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             lambda payload: payload["quality_profile"]["commercial"].update(
                 sha256="not-a-digest"
             ),
+            lambda payload: payload.update(
+                commercial_review_resolution_contract_sha256="0" * 64,
+            ),
+            lambda payload: payload.update(
+                commercial_review_resolution_contract_sha256=None,
+            ),
         )
         for mutate in profile_mutations:
             payload = json.loads(json.dumps(base))
@@ -350,6 +368,13 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
         noncommercial["quality_profile"]["commercial"] = base[
             "quality_profile"
         ]["commercial"]
+        invalid_transport = FakeTransport(response_for)
+        with self.assertRaises(HTTP.HTTPEvidenceProviderFailed):
+            adapter(invalid_transport).obtain(CommercialRequest(noncommercial))
+        self.assertEqual(invalid_transport.calls, [])
+
+        noncommercial = evidence_request().as_payload()
+        noncommercial["commercial_review_resolution_contract_sha256"] = "0" * 64
         invalid_transport = FakeTransport(response_for)
         with self.assertRaises(HTTP.HTTPEvidenceProviderFailed):
             adapter(invalid_transport).obtain(CommercialRequest(noncommercial))

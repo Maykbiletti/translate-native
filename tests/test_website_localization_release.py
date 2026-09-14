@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -266,6 +267,9 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertEqual(payload["policy_version"], "native-web-1")
         self.assertEqual(payload["provider"]["model_id"], "king")
         self.assertEqual(payload["software_version"], "6.43.0-dev")
+        self.assertIsNone(
+            payload["commercial_review_resolution_contract_sha256"],
+        )
         self.assertEqual(payload["quality_profile"], {
             "locale": "sv-SE",
             "version": plan.jobs[0].target.quality_profile_version,
@@ -289,6 +293,9 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertEqual(receipt_binding["software_version"], "6.43.0-dev")
         self.assertEqual(receipt_binding["quality_profile"], payload["quality_profile"])
         self.assertIsNone(receipt_binding["review_provider"])
+        self.assertIsNone(
+            receipt_binding["commercial_review_resolution_contract_sha256"],
+        )
 
     def test_translation_memory_reuses_one_job_across_plan_compositions(self):
         single = make_plan(("sv-SE",))
@@ -610,13 +617,14 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             "receipt": "commercial-independent-receipt",
         }
 
+        independent_verifier = ExactReceiptVerifier(
+            "commercial-independent-receipt",
+        )
         approved = self.approve(
             plan,
             plan.jobs[0],
             independent_model_review=reviewer,
-            independent_model_review_verifier=ExactReceiptVerifier(
-                "commercial-independent-receipt",
-            ),
+            independent_model_review_verifier=independent_verifier,
         )
 
         resolution = approved.release_evidence["commercial_review_resolution"]
@@ -646,6 +654,35 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             ["review_required_dimensions"],
             dimensions,
         )
+        expected_contract_sha256 = (
+            WORKER._COMMERCIAL.public_review_resolution_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"]
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]
+            ["commercial_review_resolution_contract_sha256"],
+            expected_contract_sha256,
+        )
+        approval_payload = json.loads(self.release_connection.execute(
+            "SELECT approval_json FROM localization_approvals",
+        ).fetchone()[0])
+        self.assertEqual(
+            approval_payload[
+                "commercial_review_resolution_contract_sha256"
+            ],
+            expected_contract_sha256,
+        )
+        with patch.object(
+            WORKER._COMMERCIAL,
+            "public_review_resolution_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                self.store.lookup(
+                    plan, plan.jobs[0].job_id, self.authority, now=201,
+                )
+        self.assertEqual(caught.exception.code, "approval.binding_mismatch")
 
     def test_commercial_human_resolution_is_bound_without_identity_leak(self):
         plan = make_plan(

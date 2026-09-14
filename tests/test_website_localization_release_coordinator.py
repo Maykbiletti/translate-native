@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -388,6 +389,9 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             "sha256": self.plan.jobs[0].target.quality_profile_sha256,
         })
         self.assertIsNone(payload["commercial_profile"])
+        self.assertIsNone(
+            payload["commercial_review_resolution_contract_sha256"],
+        )
         self.assertTrue(payload["request_id"].startswith("blun-l10n-evidence-"))
         self.assertNotIn("target_locales", json.dumps(payload))
 
@@ -436,6 +440,65 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
                 "review_required_dimensions"
             ],
             ["amount_currency"],
+        )
+        expected_contract_sha256 = (
+            COORDINATOR._CMS._COMMERCIAL.public_review_resolution_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"]
+        )
+        self.assertEqual(
+            commercial_request.as_payload()[
+                "commercial_review_resolution_contract_sha256"
+            ],
+            expected_contract_sha256,
+        )
+        with patch.object(
+            COORDINATOR._CMS._COMMERCIAL,
+            "public_review_resolution_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            changed_contract_request = COORDINATOR._request(
+                commercial_event,
+                commercial_plan,
+                commercial_job,
+                commercial_result,
+                commercial_result_hash,
+                "commercial-evidence-1",
+            )
+        self.assertNotEqual(
+            changed_contract_request.request_id,
+            commercial_request.request_id,
+        )
+
+        verified_commercial_result = completed_result(
+            commercial_job,
+            "Spara 480 € per år. Alla priser är exklusive moms.",
+        )
+        verified_commercial_result_hash = hashlib.sha256(
+            json.dumps(
+                verified_commercial_result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        verified_commercial_request = COORDINATOR._request(
+            commercial_event,
+            commercial_plan,
+            commercial_job,
+            verified_commercial_result,
+            verified_commercial_result_hash,
+            "commercial-evidence-verified-1",
+        )
+        self.assertEqual(
+            verified_commercial_request.commercial_review["status"],
+            "verified",
+        )
+        self.assertIsNone(
+            verified_commercial_request.as_payload()[
+                "commercial_review_resolution_contract_sha256"
+            ],
         )
 
     def test_outer_operation_guard_blocks_before_evidence_provider_call(self):

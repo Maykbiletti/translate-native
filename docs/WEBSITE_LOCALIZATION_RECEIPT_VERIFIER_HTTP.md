@@ -25,11 +25,12 @@ retry and its attempt limit.
 ## Request
 
 The adapter canonicalizes the complete
-`blun.localization-quality-receipt-binding.v3` object and validates its native
+`blun.localization-quality-receipt-binding.v4` object and validates its native
 Unicode text, hashes, locales, content type, glossary and policy versions,
 provider/model identities, software version, two-pass confidence, locale
 quality profile, exact locale-specific commercial profile when applicable,
-matching targeted-review summary, escalation requirements, and review purpose.
+matching targeted-review summary, the canonical resolution-contract SHA-256
+for unresolved commercial review, escalation requirements, and review purpose.
 It then sends HTTP POST with JSON content type and these
 protected headers:
 
@@ -45,7 +46,7 @@ The body is exactly:
   "request_id": "blun-l10n-receipt-<sha256>",
   "binding_sha256": "<canonical binding hash>",
   "receipt_sha256": "<opaque receipt hash>",
-  "binding": {"schema": "blun.localization-quality-receipt-binding.v3"},
+  "binding": {"schema": "blun.localization-quality-receipt-binding.v4"},
   "receipt": "<opaque receipt>"
 }
 ```
@@ -54,6 +55,9 @@ The deterministic request ID is derived from both hashes. Identical retries
 therefore address the same verification operation, while any changed receipt
 or binding dimension receives a different identity. The remote service must
 treat an idempotency-key collision with different bytes as a terminal error.
+The adapter recomputes the commercial resolution-contract digest from the
+installed profile before authentication or transport. Verified commercial and
+non-commercial bindings require this field to be `null`.
 
 ## Response
 

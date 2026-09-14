@@ -21,8 +21,8 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v3"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v3"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v4"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v4"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v5"
 MAX_TEXT_BYTES = 2_000_000
@@ -226,11 +226,9 @@ def _commercial_review_resolution(
     return {
         "schema": COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
         "profile": review["profile"],
-        "contract_sha256": (
-            _WORKER._COMMERCIAL.public_review_resolution_contract(
-                review["profile"],
-            )["sha256"]
-        ),
+        "contract_sha256": approval[
+            "commercial_review_resolution_contract_sha256"
+        ],
         "status": "resolved",
         "reviewed_dimensions": json.loads(_canonical_json(
             review["review_required_dimensions"]
@@ -313,6 +311,22 @@ def _independent_model_review(value: Any, primary_provider: dict[str, Any]) -> t
     return normalized, _receipt(value.get("receipt"), "independent_model_review.receipt.required")
 
 
+def _commercial_resolution_contract_sha256(
+    job: dict[str, Any],
+    result: dict[str, Any],
+) -> str | None:
+    commercial_profile = job.get("commercial_profile")
+    commercial_review = result["commercial_review"]
+    return (
+        _WORKER._COMMERCIAL.public_review_resolution_contract(
+            commercial_profile,
+        )["sha256"]
+        if commercial_profile is not None
+        and commercial_review["status"] == "review_required"
+        else None
+    )
+
+
 def _receipt_binding(
     job_id: str,
     job: dict[str, Any],
@@ -328,6 +342,11 @@ def _receipt_binding(
         raise LocalizationReleaseBlocked("review.binding.invalid")
     if (review_kind == "independent_model") != (review_provider is not None):
         raise LocalizationReleaseBlocked("review.binding.invalid")
+    commercial_profile = job.get("commercial_profile")
+    commercial_review = result["commercial_review"]
+    resolution_contract_sha256 = _commercial_resolution_contract_sha256(
+        job, result,
+    )
     binding = {
         "schema": RECEIPT_BINDING_SCHEMA,
         "review_kind": review_kind,
@@ -347,8 +366,11 @@ def _receipt_binding(
         "software_version": result["software_version"],
         "review_confidence": result["review_confidence"],
         "quality_profile": result["quality_profile"],
-        "commercial_profile": job.get("commercial_profile"),
-        "commercial_review": result["commercial_review"],
+        "commercial_profile": commercial_profile,
+        "commercial_review": commercial_review,
+        "commercial_review_resolution_contract_sha256": (
+            resolution_contract_sha256
+        ),
         "human_review_required": result["human_review_required"],
         "independent_review_required": result["independent_review_required"],
     }
@@ -710,6 +732,9 @@ class LocalizationReleaseStore:
             "quality_receipt_sha256": _hash_text(quality_receipt),
             "human_review_receipt_sha256": human_hash,
             "independent_model_review": independent_binding,
+            "commercial_review_resolution_contract_sha256": (
+                _commercial_resolution_contract_sha256(job, result)
+            ),
         }
         approval_id = "blun-l10n-approval-" + _hash_text(_canonical_json(immutable))
         payload = {
@@ -799,6 +824,7 @@ class LocalizationReleaseStore:
             "quality_profile",
             "quality_receipt_sha256", "human_review_receipt_sha256",
             "independent_model_review", "approval_id",
+            "commercial_review_resolution_contract_sha256",
             "approved_at", "expires_at",
         }
         if set(payload) != expected_keys:
@@ -819,6 +845,9 @@ class LocalizationReleaseStore:
             "review_confidence": result["review_confidence"],
             "quality_profile": result["quality_profile"],
             "result_sha256": row["result_sha256"],
+            "commercial_review_resolution_contract_sha256": (
+                _commercial_resolution_contract_sha256(job, result)
+            ),
             "approved_at": row["approved_at"],
             "expires_at": row["expires_at"],
         }

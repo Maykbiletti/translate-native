@@ -4,20 +4,23 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import re
 import socket
+import sys
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
 REQUEST_SCHEMA = "blun.localization-receipt-verification-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-receipt-verification-http-response.v1"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v3"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v4"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_TEXT_BYTES = 2_000_000
@@ -40,7 +43,7 @@ BINDING_FIELDS = {
     "target_locale", "content_type", "glossary_version", "policy_version",
     "primary_provider", "review_provider", "software_version",
     "review_confidence", "quality_profile", "commercial_profile",
-    "commercial_review",
+    "commercial_review", "commercial_review_resolution_contract_sha256",
     "human_review_required", "independent_review_required",
 }
 RESERVED_HEADERS = {
@@ -64,6 +67,23 @@ class HTTPReceiptVerifierFailed(RuntimeError):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load receipt dependency: {path.name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+_COMMERCIAL = _load_module(
+    "blun_website_localization_receipt_http_commercial",
+    _ROOT / "integrations" / "commercial_localization_profile.py",
+)
 
 
 @dataclass(frozen=True)
@@ -387,6 +407,19 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         )
         or type(binding["human_review_required"]) is not bool
         or type(binding["independent_review_required"]) is not bool
+    ):
+        _fail("binding_invalid")
+    expected_resolution_contract_sha256 = (
+        _COMMERCIAL.public_review_resolution_contract(
+            binding["commercial_profile"],
+        )["sha256"]
+        if commercial_review is not None
+        and commercial_review["status"] == "review_required"
+        else None
+    )
+    if (
+        binding["commercial_review_resolution_contract_sha256"]
+        != expected_resolution_contract_sha256
     ):
         _fail("binding_invalid")
     return binding, _canonical_json(

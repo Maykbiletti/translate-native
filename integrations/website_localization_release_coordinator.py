@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 SCHEMA = "blun.website-localization-release-coordinator.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v6"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v7"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 EVIDENCE_STATE_SCHEMA = "blun.localization-quality-evidence-state.v1"
@@ -140,6 +140,7 @@ class QualityEvidenceRequest:
     quality_profile: dict[str, Any]
     commercial_profile: str | None
     commercial_review: dict[str, Any] | None
+    commercial_review_resolution_contract_sha256: str | None
     human_review_required: bool
     independent_review_required: bool
 
@@ -656,6 +657,16 @@ def _request(
     result_sha256: str,
     evidence_revision: str,
 ) -> QualityEvidenceRequest:
+    commercial_profile = job.as_payload().get("commercial_profile")
+    commercial_review = json.loads(_canonical_json(result["commercial_review"]))
+    resolution_contract_sha256 = (
+        _CMS._COMMERCIAL.public_review_resolution_contract(
+            commercial_profile,
+        )["sha256"]
+        if commercial_profile is not None
+        and commercial_review["status"] == "review_required"
+        else None
+    )
     binding = {
         "schema": EVIDENCE_REQUEST_SCHEMA,
         "evidence_revision": evidence_revision,
@@ -674,8 +685,11 @@ def _request(
         "software_version": result["software_version"],
         "review_confidence": json.loads(_canonical_json(result["review_confidence"])),
         "quality_profile": json.loads(_canonical_json(result["quality_profile"])),
-        "commercial_profile": job.as_payload().get("commercial_profile"),
-        "commercial_review": json.loads(_canonical_json(result["commercial_review"])),
+        "commercial_profile": commercial_profile,
+        "commercial_review": commercial_review,
+        "commercial_review_resolution_contract_sha256": (
+            resolution_contract_sha256
+        ),
         "human_review_required": result["human_review_required"],
         "independent_review_required": result["independent_review_required"],
     }

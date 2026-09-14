@@ -4,20 +4,23 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import re
 import socket
+import sys
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
 REQUEST_SCHEMA = "blun.localization-quality-evidence-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-quality-evidence-http-response.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v6"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v7"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
@@ -42,6 +45,7 @@ REQUEST_FIELDS = {
     "policy_version", "provider", "software_version", "source_text",
     "target_text", "review_confidence", "quality_profile",
     "commercial_profile", "commercial_review", "human_review_required",
+    "commercial_review_resolution_contract_sha256",
     "independent_review_required",
 }
 EVIDENCE_FIELDS = {
@@ -69,6 +73,23 @@ class HTTPEvidenceProviderFailed(RuntimeError):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load evidence dependency: {path.name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+_COMMERCIAL = _load_module(
+    "blun_website_localization_evidence_http_commercial",
+    _ROOT / "integrations" / "commercial_localization_profile.py",
+)
 
 
 @dataclass(frozen=True)
@@ -394,6 +415,19 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
                 or SHA256.fullmatch(commercial_review["evidence_sha256"]) is None
             )
         )
+    ):
+        raise HTTPEvidenceProviderFailed("request_invalid", retryable=False)
+    expected_resolution_contract_sha256 = (
+        _COMMERCIAL.public_review_resolution_contract(
+            payload["commercial_profile"],
+        )["sha256"]
+        if commercial_review is not None
+        and commercial_review["status"] == "review_required"
+        else None
+    )
+    if (
+        payload["commercial_review_resolution_contract_sha256"]
+        != expected_resolution_contract_sha256
     ):
         raise HTTPEvidenceProviderFailed("request_invalid", retryable=False)
     return payload, _canonical_json(

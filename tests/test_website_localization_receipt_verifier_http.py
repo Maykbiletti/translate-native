@@ -72,6 +72,7 @@ def binding(*, kind="quality"):
         },
         "commercial_profile": None,
         "commercial_review": None,
+        "commercial_review_resolution_contract_sha256": None,
         "human_review_required": False,
         "independent_review_required": False,
     }
@@ -285,6 +286,11 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
             "review_required_dimensions": ["cancellation"],
             "evidence_sha256": "d" * 64,
         }
+        value["commercial_review_resolution_contract_sha256"] = (
+            HTTP._COMMERCIAL.public_review_resolution_contract(
+                value["commercial_profile"],
+            )["sha256"]
+        )
         value["independent_review_required"] = True
         transport = Transport(response_for)
         self.adapter(transport).verify(binding=value, receipt="signed-receipt")
@@ -296,6 +302,12 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         self.assertEqual(
             sent["quality_profile"]["commercial"],
             value["quality_profile"]["commercial"],
+        )
+        self.assertEqual(
+            sent["commercial_review_resolution_contract_sha256"],
+            HTTP._COMMERCIAL.public_review_resolution_contract(
+                value["commercial_profile"],
+            )["sha256"],
         )
 
         value["commercial_review"]["review_required_dimensions"] = [
@@ -315,6 +327,12 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
                 profile="another-commercial-profile"
             ),
             lambda payload: payload.update(content_type="marketing"),
+            lambda payload: payload.update(
+                commercial_review_resolution_contract_sha256="0" * 64,
+            ),
+            lambda payload: payload.update(
+                commercial_review_resolution_contract_sha256=None,
+            ),
         ):
             changed = json.loads(json.dumps(value))
             changed["commercial_review"]["review_required_dimensions"] = [
@@ -335,6 +353,15 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         noncommercial["quality_profile"]["commercial"] = value[
             "quality_profile"
         ]["commercial"]
+        invalid_transport = Transport(response_for)
+        with self.assertRaises(HTTP.HTTPReceiptVerifierFailed):
+            self.adapter(invalid_transport).verify(
+                binding=noncommercial, receipt="signed-receipt",
+            )
+        self.assertEqual(invalid_transport.calls, [])
+
+        noncommercial = binding()
+        noncommercial["commercial_review_resolution_contract_sha256"] = "0" * 64
         invalid_transport = Transport(response_for)
         with self.assertRaises(HTTP.HTTPReceiptVerifierFailed):
             self.adapter(invalid_transport).verify(
