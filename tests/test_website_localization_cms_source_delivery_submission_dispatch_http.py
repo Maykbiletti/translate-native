@@ -186,8 +186,8 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertEqual(
             set(capabilities["operations"]),
             {
-                "capabilities", "enqueue", "health", "lifecycle",
-                "openapi", "readiness", "status",
+                "capabilities", "commercial_profile", "enqueue", "health",
+                "lifecycle", "openapi", "readiness", "status",
             },
         )
         self.assertEqual(
@@ -209,7 +209,8 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             ["capabilities_precondition_header"]
         )
         for name in {
-            "enqueue", "health", "lifecycle", "openapi", "readiness", "status",
+            "commercial_profile", "enqueue", "health", "lifecycle",
+            "openapi", "readiness", "status",
         }:
             self.assertEqual(
                 capabilities["operations"][name]
@@ -236,8 +237,17 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         digest = unsigned.pop("sha256")
         self.assertEqual(digest, hashlib.sha256(self.canonical(unsigned)).hexdigest())
         rendered = response["raw"].decode("utf-8")
-        self.assertNotIn("source_text", rendered)
-        self.assertNotIn("target_text", rendered)
+        self.assertNotIn(cms_support.event()["localization"]["source_text"], rendered)
+        self.assertEqual(
+            capabilities["commercial_rendering_registry"]["content_policy"],
+            {
+                "credentials": False,
+                "project_brands": False,
+                "project_prices": False,
+                "source_text": False,
+                "target_text": False,
+            },
+        )
 
     def test_openapi_is_capability_bound_origin_free_and_content_free(self):
         self.open()
@@ -285,9 +295,67 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         rendered = response["raw"].decode("utf-8")
         for private in (
             cms_support.event()["localization"]["source_text"],
-            "target_text", "Bearer test", "site-1",
+            "Bearer test", "site-1",
         ):
             self.assertNotIn(private, rendered)
+
+    def test_commercial_profile_is_exact_closed_and_live_bound(self):
+        self.open()
+        response = self.call(HTTP.COMMERCIAL_PROFILE_PATH)
+
+        self.assertEqual(response["status"], 200)
+        payload = response["json"]
+        self.assertEqual(
+            set(payload),
+            {
+                "schema", "api_schema", "commercial_profile",
+                "commercial_rendering_registry", "website_capability_binding",
+                "capabilities_sha256", "content_free",
+                "publication_authority",
+            },
+        )
+        self.assertTrue(payload["content_free"])
+        self.assertFalse(payload["publication_authority"])
+        self.assertEqual(len(payload["commercial_profile"]["dimensions"]), 10)
+        locales = [
+            item["locale"]
+            for item in payload["commercial_rendering_registry"]["locales"]
+        ]
+        self.assertEqual(tuple(locales), HTTP._OPENAPI.EU_TARGET_LOCALES)
+        self.assertIn("mt-MT", locales)
+        self.assertIn("fi-FI", locales)
+        self.assertEqual(
+            payload["website_capability_binding"]
+            ["commercial_rendering_registry_sha256"],
+            payload["commercial_rendering_registry"]["sha256"],
+        )
+        schemas = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"][
+            "components"
+        ]["schemas"]
+        operation = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]["paths"][
+            HTTP.COMMERCIAL_PROFILE_PATH
+        ]["get"]
+        self.assertEqual(
+            operation["operationId"], "readCommercialLocalizationProfile"
+        )
+        self.assertNotIn("requestBody", operation)
+        for name in (
+            "CommercialProfile", "CommercialRenderingRegistry",
+            "CommercialProfileResponse",
+        ):
+            self.assertFalse(schemas[name]["additionalProperties"], name)
+            self.assertEqual(
+                set(schemas[name]["required"]),
+                set(schemas[name]["properties"]),
+                name,
+            )
+
+        self.runtime.commercial_profile = lambda: object()
+        blocked = self.call(HTTP.COMMERCIAL_PROFILE_PATH)
+        self.assertEqual(
+            (blocked["status"], blocked["json"]["error_code"]),
+            (503, "submission_dispatch_http.runtime_response_invalid"),
+        )
 
     def test_openapi_describes_all_three_exact_source_payloads(self):
         self.open()

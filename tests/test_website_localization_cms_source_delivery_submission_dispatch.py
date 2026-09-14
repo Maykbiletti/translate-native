@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from tests import test_website_localization_cms_client as cms_support
 from tests import (
@@ -230,6 +231,51 @@ class DurableSourceDeliverySubmissionDispatcherTests(unittest.TestCase):
         rendered = json.dumps(result.source_lifecycle, sort_keys=True)
         self.assertNotIn(change["localization"]["source_text"], rendered)
         self.assertNotIn("target_text", rendered)
+
+    def test_commercial_profile_is_exact_live_bound_and_content_free(self):
+        result = self.dispatcher.commercial_profile(self.support.client)
+
+        self.assertEqual(
+            [item["name"] for item in result.commercial_profile["dimensions"]],
+            list(DISPATCH._CLIENT._CMS._COMMERCIAL.DIMENSIONS),
+        )
+        self.assertEqual(
+            [item["locale"] for item in result.commercial_rendering_registry["locales"]],
+            [
+                item.locale
+                for item in DISPATCH._CLIENT._CMS._PLANNER.EU_OFFICIAL_LOCALES
+            ],
+        )
+        self.assertEqual(
+            result.website_capability_binding[
+                "commercial_rendering_registry_sha256"
+            ],
+            result.commercial_rendering_registry["sha256"],
+        )
+        self.assertEqual(
+            result.commercial_rendering_registry["content_policy"],
+            {
+                "credentials": False,
+                "project_brands": False,
+                "project_prices": False,
+                "source_text": False,
+                "target_text": False,
+            },
+        )
+
+        original = DISPATCH._commercial_contract()
+        drifted = copy.deepcopy(original)
+        drifted["commercial_rendering_registry"]["sha256"] = "0" * 64
+        with mock.patch.object(
+            DISPATCH, "_commercial_contract", return_value=drifted,
+        ), self.assertRaises(
+            DISPATCH.CMSSourceDeliverySubmissionDispatchBlocked,
+        ) as blocked:
+            self.dispatcher.commercial_profile(self.support.client)
+        self.assertEqual(
+            blocked.exception.code,
+            "source_delivery_submission_dispatch.commercial_profile_invalid",
+        )
 
     def test_retryable_failure_is_due_bound_and_attempt_limited(self):
         change = cms_support.event()

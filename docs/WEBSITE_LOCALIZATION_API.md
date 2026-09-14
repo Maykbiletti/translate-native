@@ -1243,7 +1243,7 @@ partial, or substituted generation is not treated as a valid status.
 
 `GET /v1/localization/cms-submission-dispatch/openapi` uses its own body-free
 operator scope and returns an origin-free OpenAPI 3.1 document generated from
-that exact capability object. It describes all seven routes with their methods,
+that exact capability object. It describes all eight routes with their methods,
 scopes, principal schemas, request and response schemas, required idempotency
 and payload-hash headers, transport limits, retry ownership, and fail-closed
 publication semantics. The response binds the canonical document hash to the
@@ -1321,6 +1321,23 @@ discovery and operation cannot persist or expose work under an unexpected
 contract. Discovery itself remains the bootstrap and therefore requires no
 self-referential precondition.
 
+The v11 capability generation and v10 OpenAPI document add
+`GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
+separate body-free operator scope. It returns the exact public
+`translate-native.commercial.v5` profile, its ten ordered preservation and
+review dimensions, and the complete 24-locale rendering registry. The payload
+contains only policy, version, authority, locale, Unicode rendering, and hash
+data; project prices, brands, products, credentials, source text, and target
+text are excluded by the closed contract. It is explicitly content-free and
+grants no publication authority.
+
+Before producing that response, the dispatcher fetches and revalidates the
+live downstream website capability generation. The website binding's
+commercial-rendering SHA-256 must equal the canonical registry returned by the
+route. Missing capability preconditions, stale website generations, registry
+drift, malformed locale sets, or substituted profile fields block before any
+response is serialized.
+
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
 tenant principal must match the payload's `site_id`; `Idempotency-Key` must
@@ -1366,7 +1383,7 @@ the source-, delivery-, and client-stage retry ceilings distinct. `status()`
 requires the complete previously known operation, request, event, site, and
 source-payload identity. `lifecycle()` uses the same identity and refuses to
 contact the downstream service until the local status is accepted. `health()`,
-`readiness()`, `capabilities()`, and
+`readiness()`, `capabilities()`, `commercial_profile()`, and
 `openapi()` use their separate operator scopes. Each operational method first
 fetches the live capability document, accepts only the exact current closed
 shape, then makes one bounded request without following redirects or retrying

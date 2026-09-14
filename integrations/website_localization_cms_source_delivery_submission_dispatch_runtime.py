@@ -71,6 +71,8 @@ def _store_failure(error: Exception) -> CMSSourceDeliverySubmissionDispatchRunti
         return _blocked("submission_missing")
     if code.endswith("lifecycle_not_accepted"):
         return _blocked("lifecycle_not_accepted")
+    if code.endswith("commercial_profile_invalid"):
+        return _blocked("commercial_profile_invalid")
     if code.endswith(("request_invalid", "attempts_invalid", "identity_invalid")):
         return _blocked("request_invalid")
     return _blocked("outbox_blocked")
@@ -320,6 +322,9 @@ class DurableCMSSourceDeliverySubmissionDispatchRuntime:
             "lifecycle", self._client, operation, request_id,
             now=_now(self._clock),
         )
+
+    def commercial_profile(self) -> Any:
+        return self._call("commercial_profile", self._client)
 
     def health(self) -> Any:
         return self._call("health", now=_now(self._clock))

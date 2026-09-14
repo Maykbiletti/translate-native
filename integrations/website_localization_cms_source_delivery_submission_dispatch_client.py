@@ -34,7 +34,7 @@ MAX_RESPONSE_BYTES = 4_000_000
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-AUTH_CONTEXT_SCHEMA = "blun.cms-public-submission-dispatch-client-auth-context.v3"
+AUTH_CONTEXT_SCHEMA = "blun.cms-public-submission-dispatch-client-auth-context.v4"
 RESERVED_HEADERS = {
     "accept", "connection", "content-length", "content-type", "host",
     "idempotency-key", "transfer-encoding",
@@ -645,6 +645,56 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             _fail("lifecycle_binding")
         if normalized != lifecycle:
             _fail("lifecycle_binding")
+        return response
+
+    def commercial_profile(self) -> Mapping[str, Any]:
+        """Return the exact live-bound, content-free commercial contract."""
+        contract = self._contract("commercial_profile")
+        response = self._request(
+            contract["method"], contract["path"], contract["scope"], None,
+            {contract["success_status"]}, {}, contract["error_codes"],
+        )
+        if (
+            set(response) != {
+                "schema", "api_schema", "commercial_profile",
+                "commercial_rendering_registry", "website_capability_binding",
+                "capabilities_sha256", "content_free",
+                "publication_authority",
+            }
+            or response.get("schema") != contract["response_schema"]
+            or response.get("api_schema") != _HTTP.API_SCHEMA
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("content_free") is not True
+            or response.get("publication_authority") is not False
+            or response.get("commercial_profile")
+            != self._expected_capabilities["commercial_profile"]
+            or response.get("commercial_rendering_registry")
+            != self._expected_capabilities["commercial_rendering_registry"]
+            or not isinstance(response.get("website_capability_binding"), Mapping)
+        ):
+            _fail("commercial_profile_binding")
+        try:
+            value = _HTTP._DISPATCH.SubmissionDispatchCommercialProfile(
+                commercial_profile=response["commercial_profile"],
+                commercial_rendering_registry=response[
+                    "commercial_rendering_registry"
+                ],
+                website_capability_binding=response[
+                    "website_capability_binding"
+                ],
+            )
+            normalized = _HTTP._commercial_profile_payload(value)
+        except Exception:
+            _fail("commercial_profile_binding")
+        if (
+            normalized["commercial_profile"] != response["commercial_profile"]
+            or normalized["commercial_rendering_registry"]
+            != response["commercial_rendering_registry"]
+            or normalized["website_capability_binding"]
+            != response["website_capability_binding"]
+        ):
+            _fail("commercial_profile_binding")
         return response
 
     def health(self) -> Mapping[str, Any]:

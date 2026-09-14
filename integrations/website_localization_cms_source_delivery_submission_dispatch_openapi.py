@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v9"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v10"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -530,6 +530,16 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 request_schema=None, response_component="CapabilitiesResponse",
             ),
         },
+        operations["commercial_profile"]["path"]: {
+            "get": _operation(
+                operations["commercial_profile"],
+                operation_id="readCommercialLocalizationProfile",
+                tag="Commercial localization",
+                summary="Read the live-bound brand-neutral price and offer profile",
+                request_schema=None,
+                response_component="CommercialProfileResponse",
+            ),
+        },
         operations["enqueue"]["path"]: {
             "post": _operation(
                 operations["enqueue"], operation_id="enqueueSubmission",
@@ -650,6 +660,28 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
             ),
             "x-capabilities-sha256": capabilities["sha256"],
         },
+        "CommercialProfile": _exact_schema(
+            capabilities["commercial_profile"]
+        ),
+        "CommercialRenderingRegistry": _exact_schema(
+            capabilities["commercial_rendering_registry"]
+        ),
+        "CommercialProfileResponse": _closed_object({
+            "schema": {
+                "const": operations["commercial_profile"]["response_schema"],
+            },
+            "api_schema": {"const": capabilities["api_schema"]},
+            "commercial_profile": _schema_ref("CommercialProfile"),
+            "commercial_rendering_registry": _schema_ref(
+                "CommercialRenderingRegistry"
+            ),
+            "website_capability_binding": _schema_ref(
+                "WebsiteCapabilityBinding"
+            ),
+            "capabilities_sha256": {"const": capabilities["sha256"]},
+            "content_free": {"const": True},
+            "publication_authority": {"const": False},
+        }),
         **_source_payload_schemas(capabilities),
         "EnqueueRequest": {
             "type": "object", "additionalProperties": False,
@@ -773,7 +805,8 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
             ),
         },
         "tags": [
-            {"name": "Discovery"}, {"name": "Tenant submissions"},
+            {"name": "Discovery"}, {"name": "Commercial localization"},
+            {"name": "Tenant submissions"},
             {"name": "Operations"},
         ],
         "paths": dict(sorted(path_specs.items())),

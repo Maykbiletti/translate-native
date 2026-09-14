@@ -1691,6 +1691,16 @@ while exact values and currency identities must survive without rounding or
 conversion. Any ambiguity is routed to an independent model or qualified
 native-domain review and remains blocked until resolved.
 
+At the outer CMS dispatch boundary,
+`GET /v1/localization/cms-submission-dispatch/commercial-profile` exposes this
+same complete profile and 24-locale rendering registry without project
+content. The separately scoped response is bound to both the public dispatch
+capability and the live website capability generation. A CMS can therefore
+discover the exact amount, currency, discount basis, qualifier, tax, billing,
+commitment, renewal, cancellation, condition, and offer-assignment rules it
+must preserve without receiving publication authority or any configured
+price, brand, or product value.
+
 The three provider calls stay ordered: transcreation, source-hidden native
 editing, source-aware fidelity. Commercial fidelity additionally returns
 `commercial_review` with the profile schema, `coverage` (`complete` or

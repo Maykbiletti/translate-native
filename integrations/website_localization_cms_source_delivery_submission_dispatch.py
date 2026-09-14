@@ -144,6 +144,13 @@ class SubmissionDispatchLifecycle:
     source_lifecycle: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class SubmissionDispatchCommercialProfile:
+    commercial_profile: dict[str, Any]
+    commercial_rendering_registry: dict[str, Any]
+    website_capability_binding: dict[str, Any]
+
+
 def _blocked(code: str) -> CMSSourceDeliverySubmissionDispatchBlocked:
     return CMSSourceDeliverySubmissionDispatchBlocked(
         "source_delivery_submission_dispatch." + code
@@ -202,6 +209,55 @@ def _canonical(value: Any, code: str) -> str:
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _commercial_contract() -> dict[str, dict[str, Any]]:
+    """Build and validate the content-free public commercial generation."""
+
+    try:
+        commercial = _CLIENT._CMS._COMMERCIAL
+        planner = _CLIENT._CMS._PLANNER
+        profile = commercial.public_profile(planner.COMMERCIAL_PROFILE)
+        registry = planner.commercial_rendering_registry()
+        profile_unsigned = dict(profile)
+        profile_sha256 = profile_unsigned.pop("sha256")
+        registry_unsigned = dict(registry)
+        registry_sha256 = registry_unsigned.pop("sha256")
+        expected_locales = [item.locale for item in planner.EU_OFFICIAL_LOCALES]
+        if (
+            profile.get("schema") != commercial.PUBLIC_PROFILE_SCHEMA
+            or profile.get("profile") != planner.COMMERCIAL_PROFILE
+            or [item.get("name") for item in profile.get("dimensions", ())]
+            != list(commercial.DIMENSIONS)
+            or profile.get("protected_terms") != "project-configuration-only"
+            or profile_sha256
+            != _digest(_canonical(profile_unsigned, "commercial_profile_invalid"))
+            or registry.get("schema")
+            != planner.COMMERCIAL_RENDERING_REGISTRY_SCHEMA
+            or registry.get("commercial_profile") != planner.COMMERCIAL_PROFILE
+            or registry.get("content_policy") != {
+                "source_text": False,
+                "target_text": False,
+                "project_prices": False,
+                "project_brands": False,
+                "credentials": False,
+            }
+            or [item.get("locale") for item in registry.get("locales", ())]
+            != expected_locales
+            or len(set(expected_locales)) != 24
+            or registry_sha256
+            != _digest(_canonical(registry_unsigned, "commercial_profile_invalid"))
+        ):
+            raise ValueError
+        copied = json.loads(_canonical({
+            "commercial_profile": profile,
+            "commercial_rendering_registry": registry,
+        }, "commercial_profile_invalid"))
+        return copied
+    except CMSSourceDeliverySubmissionDispatchBlocked:
+        raise
+    except Exception:
+        raise _blocked("commercial_profile_invalid") from None
 
 
 def _payload(value: Any) -> tuple[dict[str, Any], dict[str, str], str]:
@@ -780,6 +836,64 @@ class DurableCMSSourceDeliverySubmissionDispatcher:
             or float(timeout) <= 0
         ):
             raise _blocked("client_invalid")
+
+    def commercial_profile(
+        self, client: Any,
+    ) -> SubmissionDispatchCommercialProfile:
+        """Return the public offer contract bound to the live website generation."""
+
+        if (
+            not callable(getattr(client, "capabilities", None))
+            or getattr(client, "expected_capabilities_sha256", None)
+            != self.expected_capabilities_sha256
+        ):
+            raise _blocked("client_invalid")
+        timeout = getattr(client, "timeout", None)
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            raise _blocked("client_invalid")
+        try:
+            response = client.capabilities()
+            if (
+                not isinstance(response, Mapping)
+                or set(response) != {"schema", "api_schema", "capabilities"}
+                or response.get("schema")
+                != _CLIENT._HTTP._SUBMISSION.CAPABILITIES_HTTP_RESPONSE_SCHEMA
+                or response.get("api_schema")
+                != _CLIENT._HTTP._CAPABILITIES.API_SCHEMA
+                or not isinstance(response.get("capabilities"), Mapping)
+            ):
+                raise ValueError
+            normalized = _CLIENT._HTTP._CAPABILITIES._capabilities(
+                _CLIENT._PayloadView(response["capabilities"])
+            )
+            if (
+                normalized != response["capabilities"]
+                or normalized["sha256"] != self.expected_capabilities_sha256
+            ):
+                raise ValueError
+            contract = _commercial_contract()
+            binding = normalized["website_capability_binding"]
+            if (
+                binding["commercial_rendering_registry_sha256"]
+                != contract["commercial_rendering_registry"]["sha256"]
+            ):
+                raise ValueError
+            return SubmissionDispatchCommercialProfile(
+                commercial_profile=contract["commercial_profile"],
+                commercial_rendering_registry=(
+                    contract["commercial_rendering_registry"]
+                ),
+                website_capability_binding=dict(binding),
+            )
+        except CMSSourceDeliverySubmissionDispatchBlocked:
+            raise
+        except Exception:
+            raise _blocked("commercial_profile_invalid") from None
 
     def health(self, *, now: float | int) -> SubmissionDispatchHealth:
         now = _timestamp(now, "time_invalid")

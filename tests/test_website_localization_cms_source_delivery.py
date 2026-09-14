@@ -43,7 +43,11 @@ class ScriptedClient:
     def __init__(self, digest="a" * 64):
         self.expected_capabilities_sha256 = digest
         self.expected_runtime_capabilities_sha256 = "c" * 64
-        self.expected_commercial_rendering_registry_sha256 = "d" * 64
+        self.expected_commercial_rendering_registry_sha256 = (
+            cms_support.CLIENT._CMS._PLANNER.commercial_rendering_registry()[
+                "sha256"
+            ]
+        )
         self.expected_terminal_receiver_capabilities_sha256 = "e" * 64
         self.timeout = 30
         self.calls = []
@@ -657,7 +661,7 @@ class SourceDeliveryTests(unittest.TestCase):
             "source_delivery",
             "a" * 64,
             "c" * 64,
-            "d" * 64,
+            self.client.expected_commercial_rendering_registry_sha256,
             "e" * 64,
         ))
         self.assertRegex(stored[7], r"^[0-9a-f]{64}$")

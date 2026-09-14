@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Public commercial profile at the outer CMS edge (14 September 2026)
+
+Assume a CMS discovered a price and offer contract but still published under
+the wrong commercial rules.
+
+- The public response could accidentally include project prices, brands,
+  products, credentials, or website content.
+- A locally valid profile could be returned while the live website is pinned
+  to another commercial-rendering generation.
+- A caller could skip capability discovery or reuse an earlier generation
+  between discovery and the commercial-profile read.
+- OpenAPI or a reference client could accept a merely similar profile and miss
+  a removed locale, changed semantic dimension, or added publication flag.
+
+The v11 public dispatch capability exposes the exact content-free commercial
+profile and all 24 locale rendering bindings through one separately scoped
+body-free route. The dispatcher revalidates the live website capability and
+requires its commercial registry hash to equal the canonical local registry;
+the HTTP edge, OpenAPI profile, and client then independently require exact
+closed values. Tests cover Maltese and Finnish presence, profile and registry
+tampering, capability preconditions, project-content exclusion, and explicit
+non-publication semantics.
+
 ## Verified outer CMS lifecycle read (14 September 2026)
 
 Assume a non-Python CMS safely submitted an edit but learned the wrong

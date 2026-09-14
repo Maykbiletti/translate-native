@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v10"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v11"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -42,13 +42,16 @@ STATUS_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-status-response.v2
 LIFECYCLE_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-lifecycle-response.v1"
 )
+COMMERCIAL_PROFILE_RESPONSE_SCHEMA = (
+    "blun.cms-public-submission-dispatch-commercial-profile-response.v1"
+)
 HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1"
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v10"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v11"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v10"
+    "blun.cms-public-submission-dispatch-capabilities-response.v11"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -57,6 +60,9 @@ OPENAPI_RESPONSE_SCHEMA = (
 ENQUEUE_PATH = "/v1/localization/cms-submission-dispatch/requests"
 STATUS_PATH = "/v1/localization/cms-submission-dispatch/status"
 LIFECYCLE_PATH = "/v1/localization/cms-submission-dispatch/lifecycle"
+COMMERCIAL_PROFILE_PATH = (
+    "/v1/localization/cms-submission-dispatch/commercial-profile"
+)
 HEALTH_PATH = "/v1/localization/cms-submission-dispatch/health"
 READINESS_PATH = "/v1/localization/cms-submission-dispatch/readiness"
 CAPABILITIES_PATH = "/v1/localization/cms-submission-dispatch/capabilities"
@@ -65,6 +71,7 @@ SCOPES = {
     ENQUEUE_PATH: "cms-submission-dispatch:write",
     STATUS_PATH: "cms-submission-dispatch-status:read",
     LIFECYCLE_PATH: "cms-submission-dispatch-lifecycle:read",
+    COMMERCIAL_PROFILE_PATH: "cms-submission-dispatch-commercial-profile:read",
     HEALTH_PATH: "cms-submission-dispatch-health:read",
     READINESS_PATH: "cms-submission-dispatch-readiness:read",
     CAPABILITIES_PATH: "cms-submission-dispatch-capabilities:read",
@@ -74,13 +81,17 @@ METHODS = {
     ENQUEUE_PATH: "POST",
     STATUS_PATH: "POST",
     LIFECYCLE_PATH: "POST",
+    COMMERCIAL_PROFILE_PATH: "GET",
     HEALTH_PATH: "GET",
     READINESS_PATH: "GET",
     CAPABILITIES_PATH: "GET",
     OPENAPI_PATH: "GET",
 }
 TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH, LIFECYCLE_PATH}
-BODYLESS_PATHS = {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH}
+BODYLESS_PATHS = {
+    COMMERCIAL_PROFILE_PATH, HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH,
+    OPENAPI_PATH,
+}
 CAPABILITIES_PRECONDITION_HEADER = "X-Localization-Capabilities-SHA256"
 CAPABILITIES_PRECONDITION_PATHS = set(SCOPES) - {CAPABILITIES_PATH}
 _AUTHENTICATION_ERRORS = {
@@ -122,6 +133,17 @@ ERROR_CODES = {
         411: ("submission_dispatch_http.content_length_required",),
         413: ("submission_dispatch_http.body_too_large",),
         503: _COMMON_503_ERRORS,
+    },
+    COMMERCIAL_PROFILE_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
     },
     ENQUEUE_PATH: {
         400: tuple(sorted((
@@ -200,6 +222,13 @@ ERROR_STATUSES = {
 RESPONSE_INVARIANTS = {
     CAPABILITIES_PATH: (
         "exact_capability_generation",
+    ),
+    COMMERCIAL_PROFILE_PATH: (
+        "exact_brand_neutral_commercial_profile",
+        "all_24_locale_rendering_bindings_present",
+        "registry_matches_live_website_capability_binding",
+        "project_prices_brands_and_content_absent",
+        "profile_grants_no_publication_authority",
     ),
     ENQUEUE_PATH: (
         "status_identity_matches_request",
@@ -604,6 +633,35 @@ def _lifecycle_payload(
         raise _blocked("runtime_response_invalid", 503) from None
 
 
+def _commercial_profile_payload(value: Any) -> dict[str, Any]:
+    try:
+        payload = dataclasses.asdict(value)
+        if set(payload) != {
+            "commercial_profile", "commercial_rendering_registry",
+            "website_capability_binding",
+        }:
+            raise ValueError
+        expected = _DISPATCH._commercial_contract()
+        binding = _website_capability_binding(
+            payload["website_capability_binding"]
+        )
+        if (
+            payload["commercial_profile"] != expected["commercial_profile"]
+            or payload["commercial_rendering_registry"]
+            != expected["commercial_rendering_registry"]
+            or binding != payload["website_capability_binding"]
+            or binding["commercial_rendering_registry_sha256"]
+            != expected["commercial_rendering_registry"]["sha256"]
+        ):
+            raise ValueError
+        return {
+            **expected,
+            "website_capability_binding": binding,
+        }
+    except Exception:
+        raise _blocked("runtime_response_invalid", 503) from None
+
+
 def _health_payload(value: Any) -> dict[str, Any]:
     try:
         payload = dataclasses.asdict(value)
@@ -682,6 +740,7 @@ def _readiness_payload(value: Any, expected_digest: str) -> dict[str, Any]:
 def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
     definitions = (
         ("capabilities", CAPABILITIES_PATH, None, CAPABILITIES_RESPONSE_SCHEMA, 200),
+        ("commercial_profile", COMMERCIAL_PROFILE_PATH, None, COMMERCIAL_PROFILE_RESPONSE_SCHEMA, 200),
         ("enqueue", ENQUEUE_PATH, ENQUEUE_REQUEST_SCHEMA, QUEUE_RESPONSE_SCHEMA, 202),
         ("health", HEALTH_PATH, None, HEALTH_RESPONSE_SCHEMA, 200),
         ("lifecycle", LIFECYCLE_PATH, LIFECYCLE_REQUEST_SCHEMA, LIFECYCLE_RESPONSE_SCHEMA, 200),
@@ -690,6 +749,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
         ("status", STATUS_PATH, STATUS_REQUEST_SCHEMA, STATUS_RESPONSE_SCHEMA, 200),
     )
     try:
+        commercial = _DISPATCH._commercial_contract()
         operations = {}
         for name, path, request_schema, response_schema, status in definitions:
             operations[name] = {
@@ -732,6 +792,10 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "cancellation": _DISPATCH._CLIENT._CMS.CANCELLATION_SCHEMA,
                 "tombstone": _DISPATCH._CLIENT._CMS.TOMBSTONE_SCHEMA,
             },
+            "commercial_profile": commercial["commercial_profile"],
+            "commercial_rendering_registry": (
+                commercial["commercial_rendering_registry"]
+            ),
             "openapi_document_schema": _OPENAPI.DOCUMENT_SCHEMA,
             "semantics": {
                 "authentication_precedes_json_parsing": True,
@@ -744,6 +808,8 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "accepted_status_returns_exact_website_capability_binding": True,
                 "lifecycle_reads_only_after_durable_website_acceptance": True,
                 "lifecycle_preserves_source_and_website_generations": True,
+                "commercial_profile_is_brand_and_price_neutral": True,
+                "commercial_profile_route_verifies_live_website_generation": True,
                 "operational_responses_are_content_free": True,
             },
             "public_submission_capabilities_sha256": _sha256(runtime_digest),
@@ -761,7 +827,8 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
 
     def __init__(self, runtime: Any, authenticator: Callable[[dict[str, Any]], Any]):
         if not all(callable(getattr(runtime, name, None)) for name in (
-            "enqueue", "status", "lifecycle", "health", "worker_readiness",
+            "enqueue", "status", "lifecycle", "commercial_profile", "health",
+            "worker_readiness",
         )):
             raise TypeError("runtime must provide submission dispatch operations")
         if not callable(authenticator):
@@ -869,6 +936,23 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                     "openapi": document,
                     "openapi_sha256": _OPENAPI.document_sha256(document),
                     "capabilities_sha256": capabilities["sha256"],
+                })
+            if path == COMMERCIAL_PROFILE_PATH:
+                try:
+                    profile = _commercial_profile_payload(
+                        self.runtime.commercial_profile()
+                    )
+                except CMSSourceDeliverySubmissionDispatchHTTPBlocked:
+                    raise
+                except Exception as error:
+                    raise _blocked("runtime_blocked", 503) from error
+                return self._send(start_response, 200, {
+                    "schema": COMMERCIAL_PROFILE_RESPONSE_SCHEMA,
+                    "api_schema": API_SCHEMA,
+                    **profile,
+                    "capabilities_sha256": capabilities["sha256"],
+                    "content_free": True,
+                    "publication_authority": False,
                 })
             if path == HEALTH_PATH:
                 health = _health_payload(self.runtime.health())

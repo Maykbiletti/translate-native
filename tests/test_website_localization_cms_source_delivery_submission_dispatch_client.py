@@ -159,8 +159,8 @@ class SubmissionDispatchClientTests(unittest.TestCase):
             self.public_digest,
         )
         self.assertEqual(set(response["capabilities"]["operations"]), {
-            "capabilities", "enqueue", "health", "lifecycle", "openapi",
-            "readiness", "status",
+            "capabilities", "commercial_profile", "enqueue", "health",
+            "lifecycle", "openapi", "readiness", "status",
         })
         self.assertEqual(len(self.transport.calls), 1)
         self.assertEqual(self.auth_calls[0], {
@@ -304,6 +304,40 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         self.assertEqual(readiness["readiness"]["capabilities_sha256"], self.public_digest)
         self.assertEqual(readiness["readiness"]["status"], "ready")
         self.assertNotIn("payload", json.dumps((health, readiness)))
+
+    def test_commercial_profile_is_exact_live_bound_and_tamper_evident(self):
+        response = self.client.commercial_profile()
+
+        self.assertEqual(len(self.transport.calls), 2)
+        self.assertEqual(
+            response["commercial_profile"],
+            self.client._expected_capabilities["commercial_profile"],
+        )
+        self.assertEqual(
+            response["website_capability_binding"]
+            ["commercial_rendering_registry_sha256"],
+            response["commercial_rendering_registry"]["sha256"],
+        )
+        self.assertTrue(response["content_free"])
+        self.assertFalse(response["publication_authority"])
+
+        transport = TransformingTransport(
+            WSGITransport(self.runtime.http),
+            lambda call, result: replace_json(
+                result,
+                lambda value: value["commercial_profile"].update(
+                    {"protected_terms": "embedded-product-list"}
+                ),
+            ) if call == 2 else result,
+        )
+        with self.assertRaises(
+            CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked,
+        ) as blocked:
+            self.make_client(transport=transport).commercial_profile()
+        self.assertEqual(
+            blocked.exception.code,
+            "source_delivery_submission_dispatch_client.commercial_profile_binding",
+        )
 
     def test_openapi_is_fresh_exact_and_uses_its_own_scope(self):
         response = self.client.openapi()
