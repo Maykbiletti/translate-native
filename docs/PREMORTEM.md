@@ -1,5 +1,24 @@
 # Version 6 premortem
 
+## Commercial contract acknowledgement at enqueue (14 September 2026)
+
+Assume a CMS discovered the public price and offer profile but enqueued work
+under a different or unspecified commercial generation.
+
+- A commercial change could omit the discovered profile acknowledgement.
+- A caller could substitute one syntactically valid profile or rendering hash.
+- An ordinary content change, cancellation, or tombstone could inject
+  commercial scope and later be mistaken for reviewed offer content.
+- OpenAPI and the reference client could disagree with the runtime-only rule.
+
+The v12 public dispatch contract carries one exact, content-free commercial
+binding in every enqueue envelope. It must equal the current profile and
+24-locale rendering-registry generations for commercial changes and must be
+`null` for all other operations. The authenticated raw body, runtime,
+capability response, OpenAPI conditional, and reference client bind the same
+value; omission, substitution, stale discovery, and cross-scope injection all
+block before durable intake.
+
 ## Public commercial profile at the outer CMS edge (14 September 2026)
 
 Assume a CMS discovered a price and offer contract but still published under

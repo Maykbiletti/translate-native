@@ -1321,6 +1321,21 @@ discovery and operation cannot persist or expose work under an unexpected
 contract. Discovery itself remains the bootstrap and therefore requires no
 self-referential precondition.
 
+The v12 capability generation and v11 OpenAPI document bind commercial-profile
+discovery to the actual enqueue operation. Every enqueue request includes
+`commercial_contract_binding`. For a `commercial` change it must exactly match
+the active profile identifier, profile SHA-256, and complete 24-locale
+rendering-registry SHA-256 advertised by the same capability generation. For
+all other content types, cancellations, and tombstones it must be `null`.
+
+The binding is part of the body authenticated before JSON parsing. The runtime
+then compares it with the freshly reconstructed capability before durable
+enqueue. The OpenAPI schema expresses the same content-type conditional, and
+the reference client derives the value only from its independently pinned
+capability. The binding is content-free and carries no price, currency, tax,
+term, brand, product, source text, target text, credential, or publication
+authority.
+
 The v11 capability generation and v10 OpenAPI document add
 `GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
 separate body-free operator scope. It returns the exact public

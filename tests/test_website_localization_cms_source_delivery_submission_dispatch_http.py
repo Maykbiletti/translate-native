@@ -151,14 +151,25 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         response["json"] = json.loads(response["raw"])
         return response
 
-    @staticmethod
-    def enqueue_request(payload, **overrides):
+    def enqueue_request(self, payload, **overrides):
+        capabilities = HTTP._capabilities_payload(
+            self.support.digest
+        )
+        commercial = (
+            payload.get("schema") == HTTP._DISPATCH._CLIENT._CMS.CHANGE_SCHEMA
+            and payload.get("localization", {}).get("content_type")
+            == "commercial"
+        )
         request = {
             "schema": HTTP.ENQUEUE_REQUEST_SCHEMA,
             "payload": payload,
             "source_max_attempts": 3,
             "delivery_max_attempts": 4,
             "client_max_attempts": 2,
+            "commercial_contract_binding": (
+                capabilities["commercial_contract_binding"]
+                if commercial else None
+            ),
         }
         request.update(overrides)
         return request
@@ -356,6 +367,47 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             (blocked["status"], blocked["json"]["error_code"]),
             (503, "submission_dispatch_http.runtime_response_invalid"),
         )
+
+    def test_commercial_enqueue_requires_exact_discovered_contract_binding(self):
+        self.open()
+        commercial = cms_support.event()
+        commercial["localization"]["content_type"] = "commercial"
+        expected = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )["commercial_contract_binding"]
+
+        accepted = self.enqueue(commercial)
+        missing = self.enqueue(
+            {**commercial, "event_id": "commercial-missing"},
+            commercial_contract_binding=None,
+        )
+        wrong = dict(expected)
+        wrong["commercial_profile_sha256"] = "0" * 64
+        substituted = self.enqueue(
+            {**commercial, "event_id": "commercial-substituted"},
+            commercial_contract_binding=wrong,
+        )
+        ordinary = cms_support.event()
+        ordinary["event_id"] = "ordinary-injected"
+        ordinary["localization"]["content_type"] = "marketing"
+        injected = self.enqueue(
+            ordinary, commercial_contract_binding=expected,
+        )
+
+        self.assertEqual(accepted["status"], 202)
+        for response in (missing, substituted, injected):
+            self.assertEqual(
+                (response["status"], response["json"]["error_code"]),
+                (400, "submission_dispatch_http.binding_invalid"),
+            )
+        schemas = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"][
+            "components"
+        ]["schemas"]
+        self.assertEqual(
+            schemas["CommercialContractBinding"],
+            HTTP._OPENAPI._exact_schema(expected),
+        )
+        self.assertEqual(len(schemas["EnqueueRequest"]["allOf"]), 1)
 
     def test_openapi_describes_all_three_exact_source_payloads(self):
         self.open()

@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v10"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v11"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -666,6 +666,9 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
         "CommercialRenderingRegistry": _exact_schema(
             capabilities["commercial_rendering_registry"]
         ),
+        "CommercialContractBinding": _exact_schema(
+            capabilities["commercial_contract_binding"]
+        ),
         "CommercialProfileResponse": _closed_object({
             "schema": {
                 "const": operations["commercial_profile"]["response_schema"],
@@ -688,6 +691,7 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
             "required": [
                 "schema", "payload", "source_max_attempts",
                 "delivery_max_attempts", "client_max_attempts",
+                "commercial_contract_binding",
             ],
             "properties": {
                 "schema": {"const": operations["enqueue"]["request_schema"]},
@@ -695,7 +699,51 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
                 "source_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
                 "delivery_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
                 "client_max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
+                "commercial_contract_binding": {
+                    "oneOf": [
+                        _schema_ref("CommercialContractBinding"),
+                        {"type": "null"},
+                    ],
+                    "description": (
+                        "Exact current binding for commercial changes; null "
+                        "for every other content type and removal operation."
+                    ),
+                },
             },
+            "allOf": [{
+                "if": {
+                    "properties": {
+                        "payload": {
+                            "type": "object",
+                            "required": ["schema", "localization"],
+                            "properties": {
+                                "schema": {"const": capabilities[
+                                    "source_payload_schemas"
+                                ]["change"]},
+                                "localization": {
+                                    "type": "object",
+                                    "required": ["content_type"],
+                                    "properties": {
+                                        "content_type": {"const": "commercial"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                "then": {
+                    "properties": {
+                        "commercial_contract_binding": _schema_ref(
+                            "CommercialContractBinding"
+                        ),
+                    },
+                },
+                "else": {
+                    "properties": {
+                        "commercial_contract_binding": {"type": "null"},
+                    },
+                },
+            }],
         },
         "StatusRequest": _read_request_schema(
             operations["status"]["request_schema"]

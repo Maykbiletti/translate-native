@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v11"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v12"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -31,7 +31,10 @@ OPERATOR_PRINCIPAL_SCHEMA = (
     "blun.cms-public-submission-dispatch-operator-principal.v1"
 )
 ENQUEUE_REQUEST_SCHEMA = (
-    "blun.cms-public-submission-dispatch-enqueue-request.v1"
+    "blun.cms-public-submission-dispatch-enqueue-request.v2"
+)
+COMMERCIAL_CONTRACT_BINDING_SCHEMA = (
+    "blun.cms-public-submission-dispatch-commercial-contract-binding.v1"
 )
 STATUS_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-status-request.v1"
 LIFECYCLE_REQUEST_SCHEMA = (
@@ -49,9 +52,9 @@ HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v11"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v12"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v11"
+    "blun.cms-public-submission-dispatch-capabilities-response.v12"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -231,6 +234,7 @@ RESPONSE_INVARIANTS = {
         "profile_grants_no_publication_authority",
     ),
     ENQUEUE_PATH: (
+        "commercial_contract_binding_matches_content_type",
         "status_identity_matches_request",
         "attempts_lte_client_max_attempts",
         "leased_iff_lease_expires_at",
@@ -796,6 +800,18 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
             "commercial_rendering_registry": (
                 commercial["commercial_rendering_registry"]
             ),
+            "commercial_contract_binding": {
+                "schema": COMMERCIAL_CONTRACT_BINDING_SCHEMA,
+                "commercial_profile": commercial["commercial_profile"][
+                    "profile"
+                ],
+                "commercial_profile_sha256": commercial[
+                    "commercial_profile"
+                ]["sha256"],
+                "commercial_rendering_registry_sha256": commercial[
+                    "commercial_rendering_registry"
+                ]["sha256"],
+            },
             "openapi_document_schema": _OPENAPI.DOCUMENT_SCHEMA,
             "semantics": {
                 "authentication_precedes_json_parsing": True,
@@ -810,6 +826,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "lifecycle_preserves_source_and_website_generations": True,
                 "commercial_profile_is_brand_and_price_neutral": True,
                 "commercial_profile_route_verifies_live_website_generation": True,
+                "commercial_enqueue_requires_exact_contract_binding": True,
                 "operational_responses_are_content_free": True,
             },
             "public_submission_capabilities_sha256": _sha256(runtime_digest),
@@ -985,11 +1002,23 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                 if set(request) != {
                     "schema", "payload", "source_max_attempts",
                     "delivery_max_attempts", "client_max_attempts",
+                    "commercial_contract_binding",
                 } or request.get("schema") != ENQUEUE_REQUEST_SCHEMA:
                     raise _blocked("request_invalid", 400)
                 try:
                     _copied, identity, payload_json = _DISPATCH._payload(
                         request["payload"]
+                    )
+                    commercial = (
+                        request["payload"].get("schema")
+                        == _DISPATCH._CLIENT._CMS.CHANGE_SCHEMA
+                        and request["payload"].get("localization", {}).get(
+                            "content_type"
+                        ) == "commercial"
+                    )
+                    expected_commercial_binding = (
+                        capabilities["commercial_contract_binding"]
+                        if commercial else None
                     )
                     source_max = _count(request["source_max_attempts"], minimum=1)
                     delivery_max = _count(
@@ -998,6 +1027,11 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                     client_max = _count(request["client_max_attempts"], minimum=1)
                 except Exception:
                     raise _blocked("request_invalid", 400) from None
+                if (
+                    request["commercial_contract_binding"]
+                    != expected_commercial_binding
+                ):
+                    raise _blocked("binding_invalid", 400)
                 payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
                 if (
                     identity["site_id"] != principal["site_id"]

@@ -296,6 +296,23 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         self.assertEqual(self.auth_calls[1]["site_id"], "site-1")
         self.assertEqual(response["status"]["client_max_attempts"], 4)
 
+    def test_enqueue_binds_commercial_profile_and_rejects_cross_scope_injection(self):
+        commercial = cms_support.event()
+        commercial["localization"]["content_type"] = "commercial"
+        self.client.enqueue(commercial)
+        commercial_request = json.loads(self.transport.calls[1][3])
+        self.assertEqual(
+            commercial_request["commercial_contract_binding"],
+            self.client._expected_capabilities["commercial_contract_binding"],
+        )
+
+        ordinary = cms_support.event()
+        ordinary["event_id"] = "ordinary-binding-null"
+        ordinary["localization"]["content_type"] = "marketing"
+        self.client.enqueue(ordinary)
+        ordinary_request = json.loads(self.transport.calls[3][3])
+        self.assertIsNone(ordinary_request["commercial_contract_binding"])
+
     def test_health_and_readiness_are_separate_content_free_and_bound(self):
         health = self.client.health()
         readiness = self.client.readiness()

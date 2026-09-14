@@ -524,6 +524,14 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             "source_max_attempts": source_max_attempts,
             "delivery_max_attempts": delivery_max_attempts,
             "client_max_attempts": client_max_attempts,
+            "commercial_contract_binding": (
+                self._expected_capabilities["commercial_contract_binding"]
+                if (
+                    copied.get("schema") == _HTTP._DISPATCH._CLIENT._CMS.CHANGE_SCHEMA
+                    and copied.get("localization", {}).get("content_type")
+                    == "commercial"
+                ) else None
+            ),
         }
         body = _canonical(request)
         response = self._request(
