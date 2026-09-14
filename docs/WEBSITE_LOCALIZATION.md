@@ -1417,8 +1417,12 @@ signed payload with a host-supplied
 `PublicationExpectation`. That expectation binds the exact current event,
 site, website version, plan, source identity, source generation and hash,
 complete sorted required-locale set, content type, and commercial profile.
+The public capabilities additionally carry a separately hashed release-evidence
+contract with the exact field, digest, lineage, commercial-scope, and privacy
+rules. The runtime validates that complete contract against its canonical
+registry, so an altered but self-rehashed substitute blocks before host code.
 For commercial content, the receiver also recomputes each locale's canonical
-commercial quality-profile version and digest and requires the signed v2
+commercial quality-profile version and digest and requires the signed v6
 release evidence to match it exactly. A correctly signed but partial, stale,
 cross-locale, or differently scoped publication is therefore rejected before
 any CMS write.

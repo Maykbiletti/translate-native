@@ -499,6 +499,30 @@ class CMSLocalizationHTTPClientTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "response_binding")
         self.assertEqual(len(transport.calls), 1)
 
+    def test_self_rehashed_release_evidence_contract_substitution_blocks(self):
+        def substitute_contract(result):
+            def transform(value):
+                capabilities = value["capabilities"]
+                publication = capabilities["publication_http"]
+                contract = publication["release_evidence_contract"]
+                contract["bindings"]["lineage_fields"].pop()
+                rehash(contract)
+                rehash(publication)
+                rehash(capabilities)
+            return replace_json(result, transform)
+
+        transport = TransformingTransport(self.transport, substitute_contract)
+        client = CLIENT.CMSLocalizationHTTPClient(
+            "https://localization.example.test", lambda: {}, self.authority,
+            transport=transport, clock=lambda: 100,
+        )
+
+        with self.assertRaises(CLIENT.CMSClientFailed) as caught:
+            client.capabilities(request_id="self-rehashed-release-contract-1")
+
+        self.assertEqual(caught.exception.code, "response_binding")
+        self.assertEqual(len(transport.calls), 1)
+
     def test_network_failure_is_one_retryable_attempt(self):
         class FailedTransport:
             def __init__(self):

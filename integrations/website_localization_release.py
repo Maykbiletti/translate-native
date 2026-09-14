@@ -25,6 +25,16 @@ APPROVAL_SCHEMA = "blun.website-localization-approval.v5"
 RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v5"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v6"
+PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
+    "blun.website-localization-release-evidence-capabilities.v1"
+)
+PUBLICATION_EVIDENCE_FIELDS = (
+    "schema", "job_id", "target_locale", "target_sha256", "approval_id",
+    "content_type", "result_sha256", "approval_sha256",
+    "quality_receipt_sha256", "evidence_request_id", "evidence_revision",
+    "commercial_profile", "commercial_quality_profile", "commercial_review",
+    "commercial_review_resolution",
+)
 MAX_TEXT_BYTES = 2_000_000
 MAX_RECEIPT_LENGTH = 16_384
 MAX_TTL_SECONDS = 31_536_000.0
@@ -129,14 +139,7 @@ class WebsiteReadiness:
 def validate_publication_evidence(value: Any) -> dict[str, Any]:
     """Validate the content-free release proof carried to a CMS."""
 
-    if not isinstance(value, dict) or set(value) != {
-        "schema", "job_id", "target_locale", "target_sha256", "approval_id",
-        "content_type", "result_sha256", "approval_sha256",
-        "quality_receipt_sha256", "evidence_request_id", "evidence_revision",
-        "commercial_profile",
-        "commercial_quality_profile", "commercial_review",
-        "commercial_review_resolution",
-    }:
+    if not isinstance(value, dict) or set(value) != set(PUBLICATION_EVIDENCE_FIELDS):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
     if (
         value.get("schema") != PUBLICATION_EVIDENCE_SCHEMA
@@ -277,6 +280,60 @@ def _canonical_json(value: Any) -> str:
 
 def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _publication_evidence_contract_body() -> dict[str, Any]:
+    return {
+        "schema": PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA,
+        "release_evidence_schema": PUBLICATION_EVIDENCE_SCHEMA,
+        "required_fields": list(PUBLICATION_EVIDENCE_FIELDS),
+        "bindings": {
+            "sha256_fields": [
+                "target_sha256", "result_sha256", "approval_sha256",
+                "quality_receipt_sha256",
+            ],
+            "lineage_fields": ["evidence_request_id", "evidence_revision"],
+            "target_identity_fields": [
+                "job_id", "target_locale", "target_sha256", "approval_id",
+            ],
+            "signed_container": "blun.cms-localization-publication.v3",
+        },
+        "commercial_scope": {
+            "content_type": "commercial",
+            "required_non_null": [
+                "commercial_profile", "commercial_quality_profile",
+                "commercial_review",
+            ],
+            "resolution": "required-only-when-review-required",
+            "non_commercial_fields": "all-null",
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "raw_receipt": False,
+            "reviewer_identity": False,
+            "reviewer_prose": False,
+            "project_prices": False,
+            "project_brands": False,
+            "authentication_material": False,
+        },
+        "tamper_policy": "reject-complete-publication-before-host-commit",
+    }
+
+
+def publication_evidence_contract() -> dict[str, Any]:
+    """Return the exact content-free contract advertised to CMS adapters."""
+    body = _publication_evidence_contract_body()
+    return {**body, "sha256": _hash_text(_canonical_json(body))}
+
+
+def validate_publication_evidence_contract(value: Any) -> dict[str, Any]:
+    """Reject a partial, reordered, altered, or merely rehashed contract."""
+    body = _publication_evidence_contract_body()
+    expected = {**body, "sha256": _hash_text(_canonical_json(body))}
+    if value != expected:
+        raise LocalizationReleaseBlocked("publication.evidence_contract.invalid")
+    return json.loads(_canonical_json(expected))
 
 
 def _text(value: Any, code: str, *, limit: int = 256) -> str:

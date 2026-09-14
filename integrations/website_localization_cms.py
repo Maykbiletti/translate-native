@@ -31,9 +31,9 @@ PUBLICATION_SCHEMA = "blun.cms-localization-publication.v3"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
-CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v7"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v8"
 PUBLICATION_HTTP_CONTRACT_SCHEMA = (
-    "blun.cms-localization-publication-http-capabilities.v3"
+    "blun.cms-localization-publication-http-capabilities.v4"
 )
 PUBLICATION_HTTP_REQUEST_SCHEMA = "blun.cms-localization-publication-http.v1"
 PUBLICATION_HTTP_RESPONSE_SCHEMA = "blun.cms-localization-publication-http-ack.v1"
@@ -881,6 +881,11 @@ class WebsiteLocalizationCMSBridge:
     def _publication_http_capabilities() -> dict[str, Any]:
         """Describe the built-in outbound adapter without deployment secrets."""
         try:
+            release_evidence_contract = (
+                _RELEASE.validate_publication_evidence_contract(
+                    _RELEASE.publication_evidence_contract()
+                )
+            )
             operations = [
                 {
                     "name": "publication",
@@ -973,6 +978,7 @@ class WebsiteLocalizationCMSBridge:
                     _RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
                     "cms.capabilities.registry_invalid",
                 ),
+                "release_evidence_contract": release_evidence_contract,
                 "binding_headers": headers,
                 "health_binding_headers": [
                     {

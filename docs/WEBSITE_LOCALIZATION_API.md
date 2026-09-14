@@ -1996,7 +1996,7 @@ disabled, so a CMS can fail closed before submitting work. The object uses
 over every other canonical field. Paths and schemas come from the same runtime
 constants used for routing; they are not copied into a second configuration.
 
-The nested `blun.website-localization-capabilities.v7` object carries a
+The nested `blun.website-localization-capabilities.v8` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
 runtime rebuilds and validates the complete registry on every read; duplicate,
@@ -2013,6 +2013,13 @@ can validate targeted commercial escalation without receiving project prices,
 brands, source/target text, spans,
 or reviewer prose. Any registry or digest drift blocks the whole discovery
 response rather than advertising a partial contract.
+
+The `publication_http.release_evidence_contract` is independently hashed and
+fixes the complete public evidence field set, its target, digest, and evidence
+lineage bindings, commercial nullability, signed publication container, and
+excluded private content. The runtime compares the whole object with its
+canonical registry, so removing or reordering a field and recomputing both
+public hashes still blocks capability discovery before publication.
 
 The separately hashed `review_resolution_contract` makes the escalation result
 fully machine-readable. It requires the exact ordered unresolved dimensions,
@@ -2175,14 +2182,43 @@ receipts, qualified-human identities and reviewer prose are never published.
         "response_schema": "blun.cms-localization-publication-http-ack.v1"
       }],
       "request_content_type": "application/json; charset=utf-8",
+      "release_evidence_contract": {
+        "bindings": {
+          "lineage_fields": ["evidence_request_id", "evidence_revision"],
+          "sha256_fields": ["target_sha256", "result_sha256", "approval_sha256", "quality_receipt_sha256"],
+          "signed_container": "blun.cms-localization-publication.v3",
+          "target_identity_fields": ["job_id", "target_locale", "target_sha256", "approval_id"]
+        },
+        "commercial_scope": {
+          "content_type": "commercial",
+          "non_commercial_fields": "all-null",
+          "required_non_null": ["commercial_profile", "commercial_quality_profile", "commercial_review"],
+          "resolution": "required-only-when-review-required"
+        },
+        "content_policy": {
+          "authentication_material": false,
+          "project_brands": false,
+          "project_prices": false,
+          "raw_receipt": false,
+          "reviewer_identity": false,
+          "reviewer_prose": false,
+          "source_text": false,
+          "target_text": false
+        },
+        "release_evidence_schema": "blun.website-localization-release-evidence.v6",
+        "required_fields": ["schema", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_resolution"],
+        "schema": "blun.website-localization-release-evidence-capabilities.v1",
+        "sha256": "<sha256>",
+        "tamper_policy": "reject-complete-publication-before-host-commit"
+      },
       "release_evidence_schema": "blun.website-localization-release-evidence.v6",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
-      "schema": "blun.cms-localization-publication-http-capabilities.v3",
+      "schema": "blun.cms-localization-publication-http-capabilities.v4",
       "sha256": "<sha256>"
     },
     "publication_schema": "blun.cms-localization-publication.v3",
     "quality_passes": ["target_native", "source_fidelity"],
-    "schema": "blun.website-localization-capabilities.v7",
+    "schema": "blun.website-localization-capabilities.v8",
     "sha256": "<sha256>"
   },
   "api_contract": {

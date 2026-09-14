@@ -697,7 +697,8 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(set(publication_http), {
             "schema", "method", "request_content_type", "response_content_types",
             "delivery_semantics", "binding_headers", "health_binding_headers",
-            "release_evidence_schema", "operations", "sha256",
+            "release_evidence_schema", "release_evidence_contract",
+            "operations", "sha256",
         })
         unsigned_publication_http = dict(publication_http)
         publication_http_digest = unsigned_publication_http.pop("sha256")
@@ -727,6 +728,41 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(
             publication_http["release_evidence_schema"],
             CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+        )
+        release_contract = publication_http["release_evidence_contract"]
+        self.assertEqual(
+            release_contract["schema"],
+            CMS._RELEASE.PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            release_contract["release_evidence_schema"],
+            CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+        )
+        self.assertEqual(release_contract["required_fields"], [
+            "schema", "job_id", "target_locale", "target_sha256",
+            "approval_id", "content_type", "result_sha256",
+            "approval_sha256", "quality_receipt_sha256",
+            "evidence_request_id", "evidence_revision",
+            "commercial_profile", "commercial_quality_profile",
+            "commercial_review", "commercial_review_resolution",
+        ])
+        self.assertEqual(
+            release_contract["bindings"]["lineage_fields"],
+            ["evidence_request_id", "evidence_revision"],
+        )
+        self.assertEqual(
+            release_contract["commercial_scope"]["non_commercial_fields"],
+            "all-null",
+        )
+        self.assertTrue(all(
+            value is False
+            for value in release_contract["content_policy"].values()
+        ))
+        unsigned_release_contract = dict(release_contract)
+        release_contract_digest = unsigned_release_contract.pop("sha256")
+        self.assertEqual(
+            release_contract_digest,
+            CMS._hash(CMS._canonical_json(unsigned_release_contract)),
         )
         self.assertEqual(
             publication_operations["publication"]["acknowledgement_schema"],
@@ -1119,6 +1155,40 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
         )
         self.assertNotIn("capabilities", payload)
+
+    def test_capabilities_block_release_evidence_contract_drift(self):
+        current = CMS._RELEASE.publication_evidence_contract
+
+        def rehashed(mutation):
+            value = current()
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "missing-lineage": lambda value: value["bindings"]
+            ["lineage_fields"].pop(),
+            "reordered-fields": lambda value: value["required_fields"].reverse(),
+            "private-target": lambda value: value["content_policy"].update(
+                target_text=True,
+            ),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._RELEASE,
+                "publication_evidence_contract",
+                lambda mutation=mutation: rehashed(mutation),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-release-evidence-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
 
     def test_signature_idempotency_and_source_sequence_collisions_fail_closed(self):
         value = event()
