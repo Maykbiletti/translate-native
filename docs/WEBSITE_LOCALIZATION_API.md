@@ -1178,11 +1178,16 @@ stored request; the website edge's idempotency remains authoritative.
 
 `status()` and `health()` expose content-free identities, counters, stable
 failure codes, capability hashes, and response hashes. They never expose the
-stored payload. Every read revalidates the complete row; altered source text,
-hashes, retry limits, leases, response evidence, schema, or generation metadata
-block fail-closed. Local `accepted` records only durable website intake and
-does not mean source acceptance, quality approval, translation completion, or
-publication readiness.
+stored payload. Once—and only once—a record is locally `accepted`, `status()`
+also returns the complete verified website capability binding from the
+canonical stored intake response. This identifies the exact delivery, runtime,
+commercial-rendering registry, and terminal-receiver generations without
+revealing website content. The binding's own hash and delivery capability pin
+are rechecked at every projection. Every read revalidates the complete row;
+altered source text, hashes, retry limits, leases, response evidence, schema,
+or generation metadata block fail-closed. Local `accepted` records only durable
+website intake and do not mean source acceptance, quality approval,
+translation completion, or publication readiness.
 
 #### Owned public-submission runtime
 
@@ -1228,6 +1233,13 @@ capability pin. The complete object has its own canonical SHA-256. Health and
 readiness use separate body-free operator scopes. Health describes durable
 outbox integrity; readiness additionally requires the supervised worker to be
 alive and the outbox to be healthy.
+
+Queue and status responses share a closed status shape. A pending, leased,
+retrying, or failed row has a null `remote_website_capability_binding`; an
+accepted row must contain the exact complete binding and matching
+`remote_binding_sha256` and `remote_capabilities_sha256` values. The HTTP
+server and reference client independently enforce this invariant, so a stale,
+partial, or substituted generation is not treated as a valid status.
 
 `GET /v1/localization/cms-submission-dispatch/openapi` uses its own body-free
 operator scope and returns an origin-free OpenAPI 3.1 document generated from

@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v7"
+DOCUMENT_SCHEMA = "blun.cms-public-submission-dispatch-openapi.v8"
 RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-openapi-response.v1"
 EU_TARGET_LOCALES = (
     "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
@@ -288,6 +288,11 @@ def _status_schema() -> dict[str, Any]:
         "remote_attempts": nullable_count,
         "remote_capabilities_sha256": nullable_sha,
         "remote_binding_sha256": nullable_sha,
+        "remote_website_capability_binding": {
+            "oneOf": [
+                _schema_ref("WebsiteCapabilityBinding"), {"type": "null"},
+            ],
+        },
         "response_sha256": nullable_sha,
     }
     remote_complete = {
@@ -301,6 +306,9 @@ def _status_schema() -> dict[str, Any]:
             },
             "remote_capabilities_sha256": _schema_ref("Sha256"),
             "remote_binding_sha256": _schema_ref("Sha256"),
+            "remote_website_capability_binding": _schema_ref(
+                "WebsiteCapabilityBinding"
+            ),
             "response_sha256": _schema_ref("Sha256"),
         },
     }
@@ -322,7 +330,7 @@ def _status_schema() -> dict[str, Any]:
         "x-invariants": [
             "attempts_lte_client_max_attempts",
             "leased_iff_lease_expires_at",
-            "accepted_iff_remote_binding_complete",
+            "accepted_iff_remote_website_binding_complete_and_valid",
         ],
         "description": "Content-free durable submission state; accepted is not publication.",
     }
@@ -427,6 +435,18 @@ def build_document(capabilities: Mapping[str, Any]) -> dict[str, Any]:
         "Sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "Token": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,256}$"},
         "ErrorCode": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
+        "WebsiteCapabilityBinding": _closed_object({
+            "schema": {
+                "const": "blun.cms-source-delivery-runtime-capability-binding.v2",
+            },
+            "status": {"const": "verified"},
+            "database_role": {"const": "source_delivery"},
+            "delivery_capabilities_sha256": _schema_ref("Sha256"),
+            "runtime_capabilities_sha256": _schema_ref("Sha256"),
+            "commercial_rendering_registry_sha256": _schema_ref("Sha256"),
+            "terminal_receiver_capabilities_sha256": _schema_ref("Sha256"),
+            "binding_sha256": _schema_ref("Sha256"),
+        }),
         "Error": {
             "type": "object", "additionalProperties": False,
             "required": ["schema", "status", "error_code"],

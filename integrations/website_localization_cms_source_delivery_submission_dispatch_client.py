@@ -347,7 +347,8 @@ def _status(value: Any, identity: Mapping[str, str]) -> dict[str, Any]:
         "source_max_attempts", "delivery_max_attempts", "status", "attempts",
         "client_max_attempts", "next_attempt_at", "lease_expires_at",
         "lease_expired", "last_error_code", "remote_status", "remote_attempts",
-        "remote_capabilities_sha256", "remote_binding_sha256", "response_sha256",
+        "remote_capabilities_sha256", "remote_binding_sha256",
+        "remote_website_capability_binding", "response_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         _fail("status_binding")
@@ -379,12 +380,31 @@ def _status(value: Any, identity: Mapping[str, str]) -> dict[str, Any]:
             "remote_capabilities_sha256", "remote_binding_sha256", "response_sha256",
         ))
     )
+    binding = payload["remote_website_capability_binding"]
+    if binding is not None:
+        try:
+            normalized_binding = _HTTP._website_capability_binding(binding)
+        except Exception:
+            _fail("status_binding")
+        if normalized_binding != binding:
+            _fail("status_binding")
+        binding = normalized_binding
     remote = (
         payload["remote_status"], payload["remote_attempts"],
         payload["remote_capabilities_sha256"], payload["remote_binding_sha256"],
-        payload["response_sha256"],
+        binding, payload["response_sha256"],
     )
-    if not valid or (payload["status"] == "accepted") != all(item is not None for item in remote):
+    accepted = payload["status"] == "accepted"
+    if (
+        not valid
+        or accepted != all(item is not None for item in remote)
+        or accepted and (
+            binding["delivery_capabilities_sha256"]
+            != payload["remote_capabilities_sha256"]
+            or hashlib.sha256(_canonical(binding)).hexdigest()
+            != payload["remote_binding_sha256"]
+        )
+    ):
         _fail("status_binding")
     return payload
 

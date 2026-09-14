@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -90,6 +91,7 @@ class DurableSourceDeliverySubmissionDispatcherTests(unittest.TestCase):
                 delivery_max_attempts=4, client_max_attempts=2, now=100,
             )
             self.assertEqual(queued.status, "pending")
+            self.assertIsNone(queued.remote_website_capability_binding)
 
         outcomes = []
         while True:
@@ -116,6 +118,22 @@ class DurableSourceDeliverySubmissionDispatcherTests(unittest.TestCase):
                 self.support.runtime.submission_capabilities().as_payload()[
                     "website_capability_binding"
                 ]["delivery_capabilities_sha256"],
+            )
+            self.assertEqual(
+                status.remote_website_capability_binding,
+                self.support.runtime.submission_capabilities().as_payload()[
+                    "website_capability_binding"
+                ],
+            )
+            self.assertEqual(
+                hashlib.sha256(
+                    json.dumps(
+                        status.remote_website_capability_binding,
+                        ensure_ascii=False, allow_nan=False, sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                status.remote_binding_sha256,
             )
         health = self.dispatcher.health(now=100)
         self.assertEqual(health.status, "ok")
@@ -355,6 +373,40 @@ class DurableSourceDeliverySubmissionDispatcherTests(unittest.TestCase):
             finally:
                 second_connection.close()
                 first_connection.close()
+
+    def test_accepted_website_binding_survives_a_validated_restart(self):
+        change = cms_support.event()
+        expected = self.support.runtime.submission_capabilities().as_payload()[
+            "website_capability_binding"
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "accepted-submission.sqlite3"
+            first_connection = sqlite3.connect(database)
+            first = DISPATCH.DurableCMSSourceDeliverySubmissionDispatcher(
+                first_connection, self.support.digest,
+            )
+            first.enqueue(change, now=100)
+            first.run_once(self.support.client, "worker-1", now=100)
+            self.assertEqual(
+                first.status("change", change["event_id"], now=100)
+                .remote_website_capability_binding,
+                expected,
+            )
+            first_connection.close()
+
+            second_connection = sqlite3.connect(database)
+            try:
+                restarted = DISPATCH.DurableCMSSourceDeliverySubmissionDispatcher(
+                    second_connection, self.support.digest,
+                )
+                status = restarted.status(
+                    "change", change["event_id"], now=101,
+                )
+                self.assertEqual(
+                    status.remote_website_capability_binding, expected,
+                )
+            finally:
+                second_connection.close()
 
 
 if __name__ == "__main__":

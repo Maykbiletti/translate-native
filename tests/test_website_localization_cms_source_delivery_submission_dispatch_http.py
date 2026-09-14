@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
@@ -507,7 +508,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertEqual(status["x-invariants"], [
             "attempts_lte_client_max_attempts",
             "leased_iff_lease_expires_at",
-            "accepted_iff_remote_binding_complete",
+            "accepted_iff_remote_website_binding_complete_and_valid",
         ])
         self.assertEqual(
             status["allOf"][0]["then"]["properties"]["lease_expires_at"]["type"],
@@ -520,6 +521,23 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertEqual(
             status["allOf"][1]["then"]["properties"]["remote_status"]["type"],
             "string",
+        )
+        website_binding = schemas["WebsiteCapabilityBinding"]
+        self.assertFalse(website_binding["additionalProperties"])
+        self.assertEqual(
+            set(website_binding["properties"]),
+            {
+                "binding_sha256", "commercial_rendering_registry_sha256",
+                "database_role", "delivery_capabilities_sha256",
+                "runtime_capabilities_sha256", "schema", "status",
+                "terminal_receiver_capabilities_sha256",
+            },
+        )
+        self.assertEqual(
+            status["allOf"][1]["then"]["properties"][
+                "remote_website_capability_binding"
+            ],
+            {"$ref": "#/components/schemas/WebsiteCapabilityBinding"},
         )
         self.assertEqual(
             schemas["Health"]["allOf"][0]["then"]["properties"]["failed"],
@@ -541,6 +559,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertFalse(accepted["json"]["accepted_implies_publication"])
         status = accepted["json"]["status"]
         self.assertEqual(status["status"], "pending")
+        self.assertIsNone(status["remote_website_capability_binding"])
         self.assertEqual(
             (
                 status["source_max_attempts"],
@@ -568,6 +587,48 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertNotIn(
             cms_support.event()["localization"]["source_text"],
             found["raw"].decode("utf-8"),
+        )
+
+    def test_accepted_status_exposes_only_the_verified_website_binding(self):
+        self.open()
+        queued = self.enqueue()["json"]["status"]
+        with self.runtime._lock:
+            self.runtime._dispatcher.run_once(
+                self.runtime._client, "manual-test-worker", now=self.now,
+            )
+        query = {
+            "schema": HTTP.STATUS_REQUEST_SCHEMA,
+            **{
+                key: queued[key]
+                for key in (
+                    "operation", "request_id", "event_id", "site_id",
+                    "payload_sha256",
+                )
+            },
+        }
+        accepted = self.call(HTTP.STATUS_PATH, body=query)
+        status = accepted["json"]["status"]
+        expected = self.support.runtime.submission_capabilities().as_payload()[
+            "website_capability_binding"
+        ]
+        self.assertEqual(accepted["status"], 200)
+        self.assertEqual(status["status"], "accepted")
+        self.assertEqual(status["remote_website_capability_binding"], expected)
+
+        invalid_binding = dict(expected)
+        invalid_binding["terminal_receiver_capabilities_sha256"] = "0" * 64
+        invalid_status = dataclasses.replace(
+            self.runtime.status(queued["operation"], queued["request_id"]),
+            remote_website_capability_binding=invalid_binding,
+        )
+        with mock.patch.object(
+            self.runtime, "status", return_value=invalid_status,
+        ):
+            blocked = self.call(HTTP.STATUS_PATH, body=query)
+        self.assertEqual(blocked["status"], 404)
+        self.assertEqual(
+            blocked["json"]["error_code"],
+            "submission_dispatch_http.submission_not_found",
         )
 
     def test_change_cancellation_and_tombstone_are_independent_durable_rows(self):

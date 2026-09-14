@@ -195,6 +195,9 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         self.assertEqual(removed["status"]["operation"], "cancellation")
         self.assertEqual(deleted["status"]["operation"], "tombstone")
         self.assertEqual(status["status"]["request_id"], change["event_id"])
+        self.assertIsNone(
+            status["status"]["remote_website_capability_binding"]
+        )
         rendered = json.dumps((accepted, status), sort_keys=True)
         self.assertNotIn(change["localization"]["source_text"], rendered)
         self.assertNotIn("target_text", rendered)
@@ -352,6 +355,39 @@ class SubmissionDispatchClientTests(unittest.TestCase):
         with self.assertRaises(CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked) as substituted:
             client.status(*identity)
         self.assertEqual(substituted.exception.code, "source_delivery_submission_dispatch_client.status_binding")
+
+    def test_modified_accepted_website_binding_is_rejected(self):
+        queued = self.client.enqueue(cms_support.event())["status"]
+        with self.runtime._lock:
+            self.runtime._dispatcher.run_once(
+                self.runtime._client, "manual-client-test-worker",
+                now=self.support.now,
+            )
+        identity = tuple(queued[name] for name in (
+            "operation", "request_id", "event_id", "site_id",
+            "payload_sha256",
+        ))
+
+        def mutate(number, result):
+            if number == 2:
+                def change_binding(value):
+                    value["status"]["remote_website_capability_binding"][
+                        "terminal_receiver_capabilities_sha256"
+                    ] = "0" * 64
+                return replace_json(result, change_binding)
+            return result
+
+        client = self.make_client(
+            transport=TransformingTransport(self.transport, mutate),
+        )
+        with self.assertRaises(
+            CLIENT.CMSSourceDeliverySubmissionDispatchClientBlocked,
+        ) as blocked:
+            client.status(*identity)
+        self.assertEqual(
+            blocked.exception.code,
+            "source_delivery_submission_dispatch_client.status_binding",
+        )
 
     def test_reserved_authentication_headers_and_invalid_payload_block_locally(self):
         client = self.make_client(headers={"Idempotency-Key": "attacker"})

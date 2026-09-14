@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v8"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v9"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -34,15 +34,15 @@ ENQUEUE_REQUEST_SCHEMA = (
     "blun.cms-public-submission-dispatch-enqueue-request.v1"
 )
 STATUS_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-status-request.v1"
-QUEUE_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-queue-response.v1"
-STATUS_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-status-response.v1"
+QUEUE_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-queue-response.v2"
+STATUS_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-status-response.v2"
 HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1"
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v8"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v9"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v8"
+    "blun.cms-public-submission-dispatch-capabilities-response.v9"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -182,7 +182,7 @@ RESPONSE_INVARIANTS = {
         "status_identity_matches_request",
         "attempts_lte_client_max_attempts",
         "leased_iff_lease_expires_at",
-        "accepted_iff_remote_binding_complete",
+        "accepted_iff_remote_website_binding_complete_and_valid",
     ),
     HEALTH_PATH: (
         "queue_count_sum_matches_operation_count_sum",
@@ -203,7 +203,7 @@ RESPONSE_INVARIANTS = {
         "status_identity_matches_request",
         "attempts_lte_client_max_attempts",
         "leased_iff_lease_expires_at",
-        "accepted_iff_remote_binding_complete",
+        "accepted_iff_remote_website_binding_complete_and_valid",
     ),
 }
 MAX_BODY_BYTES = 4_000_000
@@ -447,7 +447,8 @@ def _status_payload(
             "client_max_attempts", "next_attempt_at", "lease_expires_at",
             "lease_expired", "last_error_code", "remote_status",
             "remote_attempts", "remote_capabilities_sha256",
-            "remote_binding_sha256", "response_sha256",
+            "remote_binding_sha256", "remote_website_capability_binding",
+            "response_sha256",
         }
         if set(payload) != fields or payload["operation"] not in OPERATIONS:
             raise ValueError
@@ -479,6 +480,11 @@ def _status_payload(
             "response_sha256",
         ):
             _optional(payload[name], _sha256)
+        remote_binding = payload["remote_website_capability_binding"]
+        if remote_binding is not None:
+            remote_binding = _website_capability_binding(remote_binding)
+            if remote_binding != payload["remote_website_capability_binding"]:
+                raise ValueError
         if payload["status"] not in STATUSES:
             raise ValueError
         if (payload["status"] == "leased") != (lease is not None):
@@ -487,9 +493,17 @@ def _status_payload(
         remote_fields = (
             remote_status, remote_attempts,
             payload["remote_capabilities_sha256"],
-            payload["remote_binding_sha256"], payload["response_sha256"],
+            payload["remote_binding_sha256"], remote_binding,
+            payload["response_sha256"],
         )
         if accepted != all(item is not None for item in remote_fields):
+            raise ValueError
+        if accepted and (
+            remote_binding["delivery_capabilities_sha256"]
+            != payload["remote_capabilities_sha256"]
+            or hashlib.sha256(_canonical(remote_binding)).hexdigest()
+            != payload["remote_binding_sha256"]
+        ):
             raise ValueError
         expected = {
             "operation": operation, "request_id": request_id,
@@ -505,6 +519,10 @@ def _status_payload(
         return payload
     except Exception:
         raise _blocked("runtime_response_invalid", 503) from None
+
+
+def _website_capability_binding(value: Any) -> dict[str, Any]:
+    return _DISPATCH._CLIENT._HTTP._binding(value)
 
 
 def _health_payload(value: Any) -> dict[str, Any]:
@@ -643,6 +661,7 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "write_requires_ready_managed_worker": True,
                 "accepted_means_website_intake_only": True,
                 "accepted_implies_publication": False,
+                "accepted_status_returns_exact_website_capability_binding": True,
                 "operational_responses_are_content_free": True,
             },
             "public_submission_capabilities_sha256": _sha256(runtime_digest),

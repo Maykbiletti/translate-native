@@ -112,6 +112,7 @@ class SubmissionDispatchStatus:
     remote_attempts: int | None
     remote_capabilities_sha256: str | None
     remote_binding_sha256: str | None
+    remote_website_capability_binding: dict[str, Any] | None
     response_sha256: str | None
 
 
@@ -664,6 +665,21 @@ class DurableCMSSourceDeliverySubmissionDispatcher:
             raise _blocked("submission_missing")
         self._validated_row(row)
         lease_expires_at = row["lease_expires_at"]
+        remote_binding = None
+        if row["status"] == "accepted":
+            try:
+                response = json.loads(row["response_json"])
+                remote_binding = _CLIENT._HTTP._binding(
+                    response["website_capability_binding"]
+                )
+                if (
+                    response["website_capability_binding"] != remote_binding
+                    or _digest(_canonical(remote_binding, "state_invalid"))
+                    != row["remote_binding_sha256"]
+                ):
+                    raise ValueError
+            except Exception:
+                raise _blocked("state_invalid") from None
         return SubmissionDispatchStatus(
             operation=row["operation"], request_id=row["request_id"],
             event_id=row["event_id"], site_id=row["site_id"],
@@ -684,6 +700,7 @@ class DurableCMSSourceDeliverySubmissionDispatcher:
             remote_attempts=row["remote_attempts"],
             remote_capabilities_sha256=row["remote_capabilities_sha256"],
             remote_binding_sha256=row["remote_binding_sha256"],
+            remote_website_capability_binding=remote_binding,
             response_sha256=row["response_sha256"],
         )
 
