@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,7 +91,9 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
     def setUp(self):
         self.connection = sqlite3.connect(":memory:")
         self.store = STORE.DurableCMSReceiverStore(
-            self.connection, clock=lambda: 1000,
+            self.connection,
+            release_evidence_validator=RECEIVER.release_evidence_is_current,
+            clock=lambda: 1000,
         )
         self.assertEqual(
             self.connection.execute("PRAGMA secure_delete").fetchone()[0], 1,
@@ -425,6 +428,65 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
                 contract_sha256=self.contract_sha256,
             ))
 
+    def test_expired_active_authorization_blocks_read_health_and_replay(self):
+        now = [1000]
+        self.store.clock = lambda: now[0]
+        publication = HELPERS.publication_payload(expires_at=2000)
+        expected = HELPERS.expectation(publication)
+        verified = HELPERS.request(publication, self.publication_authority)
+        self.store.register_source(expected)
+        self.store.commit(verified)
+        now[0] = 2000
+
+        operations = (
+            lambda: self.store.read_active_bundle(expected),
+            lambda: self.store.commit(verified),
+            lambda: self.store.check(SimpleNamespace(
+                probe_id="publisher-health-probe-401",
+                contract_sha256=self.contract_sha256,
+            )),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                    operation()
+
+    def test_contract_stale_active_bundle_blocks_but_can_be_deleted(self):
+        publication = HELPERS.publication_payload()
+        expected = HELPERS.expectation(publication)
+        verified = HELPERS.request(publication, self.publication_authority)
+        self.store.register_source(expected)
+        self.store.commit(verified)
+        tombstone = tombstone_for(publication, verified.payload_sha256)
+        deletion = HELPERS.tombstone_request(
+            tombstone, self.publication_authority,
+        )
+
+        with patch.object(
+            CMS._RELEASE,
+            "publication_evidence_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            operations = (
+                lambda: self.store.read_active_bundle(expected),
+                lambda: self.store.commit(verified),
+                lambda: self.store.check(SimpleNamespace(
+                    probe_id="publisher-health-probe-401",
+                    contract_sha256=self.contract_sha256,
+                )),
+            )
+            for operation in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                        operation()
+            self.store.register_tombstone(
+                HELPERS.tombstone_expectation(tombstone),
+            )
+            deleted = self.store.delete(deletion)
+
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertIsNone(self.store.read_active_bundle(expected))
+
     def test_direct_commit_rejects_inconsistent_commercial_quality_binding(self):
         publication = HELPERS.publication_payload()
         self.store.register_source(HELPERS.expectation(publication))
@@ -481,7 +543,9 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
             path = Path(directory) / "cms-receiver.sqlite3"
             first_connection = sqlite3.connect(path)
             first = STORE.DurableCMSReceiverStore(
-                first_connection, clock=lambda: 1000,
+                first_connection,
+                release_evidence_validator=RECEIVER.release_evidence_is_current,
+                clock=lambda: 1000,
             )
             first.register_source(HELPERS.expectation(publication))
             verified = HELPERS.request(publication, self.publication_authority)
@@ -490,7 +554,9 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
 
             second_connection = sqlite3.connect(path)
             second = STORE.DurableCMSReceiverStore(
-                second_connection, clock=lambda: 1001,
+                second_connection,
+                release_evidence_validator=RECEIVER.release_evidence_is_current,
+                clock=lambda: 1001,
             )
             replay = second.commit(verified)
             active = second.read_active_bundle(HELPERS.expectation(publication))
@@ -506,7 +572,11 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.connection.commit()
 
         with self.assertRaises(STORE.CMSReceiverStoreBlocked):
-            STORE.DurableCMSReceiverStore(self.connection, clock=lambda: 1000)
+            STORE.DurableCMSReceiverStore(
+                self.connection,
+                release_evidence_validator=RECEIVER.release_evidence_is_current,
+                clock=lambda: 1000,
+            )
 
 
 if __name__ == "__main__":

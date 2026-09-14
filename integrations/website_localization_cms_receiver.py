@@ -156,6 +156,23 @@ class HealthChecker(Protocol):
     def __call__(self, probe: VerifiedHealthProbe) -> Mapping[str, Any]: ...
 
 
+def release_evidence_is_current(
+    value: Any,
+    *,
+    locale: Any,
+    target_sha256: Any,
+    approval_id: Any,
+) -> bool:
+    """Apply the same current release contract at ingress and durable reads."""
+
+    return _CMS._valid_release_evidence(
+        value,
+        locale=locale,
+        target_sha256=target_sha256,
+        approval_id=approval_id,
+    )
+
+
 class PublicationExpectationResolver(Protocol):
     def __call__(
         self, publication: VerifiedPublication,
@@ -365,7 +382,7 @@ def _verify_publication(value: Any, payload_sha256: str, *, now: float) -> bytes
             or not isinstance(approval_id, str)
             or TOKEN.fullmatch(approval_id) is None
             or _timestamp(item.get("approval_expires_at")) <= now
-            or not _CMS._valid_release_evidence(
+            or not release_evidence_is_current(
                 item.get("release_evidence"),
                 locale=locale,
                 target_sha256=target_sha256,

@@ -1481,7 +1481,8 @@ must redact authorization headers and verified target text from logs.
 Deployments without an existing atomic CMS transaction can use
 `integrations/website_localization_cms_receiver_store.py` as the durable
 reference host behind that WSGI application. Give `DurableCMSReceiverStore` a
-dedicated host-owned SQLite connection. The trusted CMS first calls
+dedicated host-owned SQLite connection and the receiver's canonical
+`release_evidence_is_current` validator. The trusted CMS first calls
 `register_source` with its exact current source expectation, then wires the
 store's publication resolver, commit, tombstone resolver, delete, and health
 methods directly into `CMSReceiverApplication`. Resolver results are exact
@@ -1503,8 +1504,13 @@ publication ID, payload hash, generation, and locale set. A successful delete
 atomically clears the active pointer, removes localized prose, and retains only
 content-free publication and tombstone bindings for replay detection. Startup
 and health verify the schema, SQLite integrity, active pointers, canonical
-payload and expectation hashes, every locale row, and tombstone state. This
-reference store is not a substitute for an existing CMS authorization model:
+payload and expectation hashes, every locale row, current release-evidence
+contract, approval expiry, and tombstone state. Active rendering and exact
+publication replay perform the same authorization check after every restart.
+Structural-only tombstone operations deliberately remain available when an
+approval expires or a contract advances, so stale content can still be removed.
+This reference store is not a substitute for an existing CMS authorization
+model:
 source and tombstone registration remain trusted host operations and its
 content-reading method
 requires the complete trusted publication expectation for the exact page

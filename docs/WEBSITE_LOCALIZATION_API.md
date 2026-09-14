@@ -1933,8 +1933,10 @@ text out of access logs.
 `DurableCMSReceiverStore` in
 `integrations/website_localization_cms_receiver_store.py` supplies a complete
 SQLite reference implementation for the five stateful host callbacks. It uses
-one dedicated host-owned connection. The CMS registers each monotonic current
-source before delivery and explicitly pre-registers a tombstone against the
+one dedicated host-owned connection and requires the canonical
+`release_evidence_is_current` validator supplied by the receiver. The CMS
+registers each monotonic current source before delivery and explicitly
+pre-registers a tombstone against the
 exact active publication before deletion. Commit and delete recheck those
 bindings inside `BEGIN IMMEDIATE`, so the earlier resolver lookup cannot race a
 source change. Replays are bound to immutable delivery and payload hashes, a
@@ -1943,8 +1945,13 @@ commits. The successful replacement transaction then securely deletes the
 superseded payload and locale rows while retaining only content-free replay
 evidence; any cleanup failure rolls the switch back to the previous active
 bundle. Explicit deletion follows the same content-minimizing rule. The store's
-health callback validates schema, SQLite integrity, canonical payloads, locale rows, active pointers, and
-tombstone state before confirming the probe. Source and tombstone expectations
+health callback validates schema, SQLite integrity, canonical payloads, locale
+rows, active pointers, the current release-evidence contract, approval expiry,
+and tombstone state before confirming the probe. Active reads and idempotent
+publication replay run the same authorization checks after restart. Tombstone
+registration and deletion retain a structural-only path so an expired or
+contract-stale active bundle can always be removed without becoming publishable.
+Source and tombstone expectations
 carry separate canonical hashes, so a syntactically valid field substitution
 also blocks. `read_active_bundle` is for trusted
 CMS rendering code only. It requires the complete trusted publication

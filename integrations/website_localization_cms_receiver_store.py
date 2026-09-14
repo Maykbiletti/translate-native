@@ -216,13 +216,17 @@ class DurableCMSReceiverStore:
         self,
         connection: sqlite3.Connection,
         *,
+        release_evidence_validator: Callable[..., bool],
         clock: Callable[[], float | int] = time.time,
     ):
         if not isinstance(connection, sqlite3.Connection) or connection.in_transaction:
             raise CMSReceiverStoreBlocked("connection must be an idle SQLite connection")
+        if not callable(release_evidence_validator):
+            raise CMSReceiverStoreBlocked("release evidence validator is required")
         if not callable(clock):
             raise CMSReceiverStoreBlocked("clock must be callable")
         self.connection = connection
+        self._release_evidence_validator = release_evidence_validator
         self.clock = clock
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
@@ -409,7 +413,11 @@ class DurableCMSReceiverStore:
         return result
 
     def _validate_publication_row(
-        self, row: sqlite3.Row,
+        self,
+        row: sqlite3.Row,
+        *,
+        require_current_authorization: bool = True,
+        now: float | int | None = None,
     ) -> dict[str, Any] | None:
         delivery_id = _token(row["delivery_id"], field="delivery_id")
         payload_sha256 = _sha256(row["payload_sha256"], field="payload_sha256")
@@ -479,6 +487,10 @@ class DurableCMSReceiverStore:
             raise CMSReceiverStoreBlocked("stored locale bundle is incomplete")
         if len(localizations) != len(expected) or locales != sorted(set(locales)):
             raise CMSReceiverStoreBlocked("stored locale bundle is incomplete")
+        checked_at = (
+            _timestamp(self.clock() if now is None else now)
+            if require_current_authorization else None
+        )
         for stored, item in zip(localizations, expected):
             if not isinstance(item, dict):
                 raise CMSReceiverStoreBlocked("stored locale is invalid")
@@ -498,11 +510,29 @@ class DurableCMSReceiverStore:
                 != stored["target_sha256"]
             ):
                 raise CMSReceiverStoreBlocked("stored locale binding is invalid")
+            if require_current_authorization:
+                approval_expires_at = _timestamp(stored["approval_expires_at"])
+                try:
+                    evidence_valid = self._release_evidence_validator(
+                        evidence,
+                        locale=stored["locale"],
+                        target_sha256=stored["target_sha256"],
+                        approval_id=stored["approval_id"],
+                    ) is True
+                except Exception:
+                    evidence_valid = False
+                if approval_expires_at <= checked_at or not evidence_valid:
+                    raise CMSReceiverStoreBlocked(
+                        "stored release authorization is no longer current"
+                    )
         return payload
 
-    @staticmethod
     def _assert_publication_binding(
-        payload: Mapping[str, Any], expectation: Mapping[str, Any],
+        self,
+        payload: Mapping[str, Any],
+        expectation: Mapping[str, Any],
+        *,
+        now: float | int,
     ) -> None:
         for field in (
             "event_id", "site_id", "website_version", "plan_id", "source_id",
@@ -516,8 +546,9 @@ class DurableCMSReceiverStore:
         locales = tuple(item.get("locale") for item in localizations if isinstance(item, dict))
         if locales != expectation["required_locales"] or len(locales) != len(localizations):
             raise CMSReceiverStoreBlocked("publication locale set is no longer current")
+        checked_at = _timestamp(now)
         for item in localizations:
-            evidence = item.get("release_evidence")
+            evidence = item.get("release_evidence") if isinstance(item, Mapping) else None
             commercial_quality = (
                 evidence.get("commercial_quality_profile")
                 if isinstance(evidence, dict)
@@ -538,12 +569,26 @@ class DurableCMSReceiverStore:
                 quality_valid = commercial_quality is None
             if (
                 not isinstance(evidence, dict)
+                or _timestamp(item.get("approval_expires_at")) <= checked_at
                 or evidence.get("content_type") != expectation["content_type"]
                 or evidence.get("commercial_profile")
                 != expectation["commercial_profile"]
                 or not quality_valid
             ):
                 raise CMSReceiverStoreBlocked("publication scope is no longer current")
+            try:
+                evidence_valid = self._release_evidence_validator(
+                    evidence,
+                    locale=item.get("locale"),
+                    target_sha256=item.get("target_sha256"),
+                    approval_id=item.get("approval_id"),
+                ) is True
+            except Exception:
+                evidence_valid = False
+            if not evidence_valid:
+                raise CMSReceiverStoreBlocked(
+                    "publication release authorization is no longer current"
+                )
 
     def register_source(self, expectation: Any) -> Mapping[str, Any]:
         """Register or monotonically advance one trusted current source."""
@@ -652,7 +697,7 @@ class DurableCMSReceiverStore:
             if row is None:
                 raise CMSReceiverStoreBlocked("source expectation is missing")
             current = self._source_from_row(row)
-            self._assert_publication_binding(payload, current)
+            self._assert_publication_binding(payload, current, now=now)
             existing = self.connection.execute(
                 "SELECT * FROM cms_receiver_publications WHERE delivery_id = ?",
                 (delivery_id,),
@@ -662,7 +707,7 @@ class DurableCMSReceiverStore:
                     existing["payload_sha256"] == payload_sha256
                     and existing["status"] == "active"
                     and row["active_delivery_id"] == delivery_id
-                    and self._validate_publication_row(existing) == payload
+                    and self._validate_publication_row(existing, now=now) == payload
                 ):
                     return {
                         "delivery_id": delivery_id,
@@ -777,10 +822,11 @@ class DurableCMSReceiverStore:
             or publication["source_id"] != source_id
         ):
             raise CMSReceiverStoreBlocked("active publication is invalid")
-        payload = self._validate_publication_row(publication)
+        now = _timestamp(self.clock())
+        payload = self._validate_publication_row(publication, now=now)
         if payload is None:
             raise CMSReceiverStoreBlocked("active publication was deleted")
-        self._assert_publication_binding(payload, expected)
+        self._assert_publication_binding(payload, expected, now=now)
         return payload
 
     def register_tombstone(self, expectation: Any) -> Mapping[str, Any]:
@@ -825,7 +871,9 @@ class DurableCMSReceiverStore:
                 or source["active_delivery_id"] != value["publication_delivery_id"]
             ):
                 raise CMSReceiverStoreBlocked("tombstone publication is not active")
-            payload = self._validate_publication_row(publication)
+            payload = self._validate_publication_row(
+                publication, require_current_authorization=False,
+            )
             if (
                 not isinstance(payload, dict)
                 or payload.get("event_id") != value["event_id"]
@@ -904,7 +952,9 @@ class DurableCMSReceiverStore:
                     ).fetchone()
                     if (
                         publication is None
-                        or self._validate_publication_row(publication) is not None
+                        or self._validate_publication_row(
+                            publication, require_current_authorization=False,
+                        ) is not None
                         or publication["status"] != "deleted"
                         or publication["payload_sha256"]
                         != expected["publication_payload_sha256"]
@@ -942,7 +992,9 @@ class DurableCMSReceiverStore:
                 != expected["publication_delivery_id"]
             ):
                 raise CMSReceiverStoreBlocked("tombstone publication changed")
-            if self._validate_publication_row(publication) is None:
+            if self._validate_publication_row(
+                publication, require_current_authorization=False,
+            ) is None:
                 raise CMSReceiverStoreBlocked("tombstone publication was deleted")
             self.connection.execute(
                 "DELETE FROM cms_receiver_localizations WHERE delivery_id = ?",
@@ -993,6 +1045,7 @@ class DurableCMSReceiverStore:
         contract_sha256 = _sha256(
             getattr(probe, "contract_sha256", None), field="contract_sha256",
         )
+        now = _timestamp(self.clock())
         self._verify_schema()
         if self.connection.in_transaction:
             raise CMSReceiverStoreBlocked("health cannot join an external transaction")
@@ -1036,7 +1089,7 @@ class DurableCMSReceiverStore:
             "SELECT * FROM cms_receiver_publications ORDER BY delivery_id"
         ).fetchall()
         for publication in publications:
-            self._validate_publication_row(publication)
+            self._validate_publication_row(publication, now=now)
         tombstones = self.connection.execute(
             "SELECT * FROM cms_receiver_tombstones ORDER BY tombstone_id"
         ).fetchall()
