@@ -319,6 +319,30 @@ def _signature(value: Any) -> Any:
     )
 
 
+def message_signature_is_valid(
+    payload: Any,
+    signature: Any,
+    authority: Any,
+) -> bool:
+    """Verify one canonical message without trusting stored signature fields."""
+
+    if (
+        not isinstance(payload, bytes)
+        or not payload
+        or not callable(getattr(authority, "verify", None))
+    ):
+        return False
+    try:
+        normalized = (
+            signature
+            if isinstance(signature, _CMS.CMSMessageSignature)
+            else _signature(signature)
+        )
+        return authority.verify(payload, normalized) is True
+    except Exception:
+        return False
+
+
 def _timestamp(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise CMSReceiverBlocked(
@@ -674,11 +698,9 @@ def _verify_publication_transport(
             "receiver.framing_invalid", retryable=False, http_status=400,
         )
     signature = _signature(envelope.get("signature"))
-    try:
-        verified = publication_authority.verify(payload_bytes, signature) is True
-    except Exception:
-        verified = False
-    if not verified:
+    if not message_signature_is_valid(
+        payload_bytes, signature, publication_authority,
+    ):
         raise CMSReceiverBlocked(
             "receiver.signature_invalid", retryable=False, http_status=401,
         )
@@ -750,11 +772,9 @@ def _verify_tombstone_transport(
             "receiver.framing_invalid", retryable=False, http_status=400,
         )
     signature = _signature(envelope.get("signature"))
-    try:
-        verified = publication_authority.verify(payload_bytes, signature) is True
-    except Exception:
-        verified = False
-    if not verified:
+    if not message_signature_is_valid(
+        payload_bytes, signature, publication_authority,
+    ):
         raise CMSReceiverBlocked(
             "receiver.signature_invalid", retryable=False, http_status=401,
         )

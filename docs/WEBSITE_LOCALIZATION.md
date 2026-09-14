@@ -1481,8 +1481,9 @@ must redact authorization headers and verified target text from logs.
 Deployments without an existing atomic CMS transaction can use
 `integrations/website_localization_cms_receiver_store.py` as the durable
 reference host behind that WSGI application. Give `DurableCMSReceiverStore` a
-dedicated host-owned SQLite connection and the receiver's canonical
-`release_evidence_is_current` validator. The trusted CMS first calls
+dedicated host-owned SQLite connection, the receiver's canonical
+`release_evidence_is_current` validator, and a closed validator backed by the
+configured publisher authority. The trusted CMS first calls
 `register_source` with its exact current source expectation, then wires the
 store's publication resolver, commit, tombstone resolver, delete, and health
 methods directly into `CMSReceiverApplication`. Resolver results are exact
@@ -1502,11 +1503,15 @@ Backups and filesystem-level retention remain the host's responsibility. For
 deletion, the trusted host must separately call `register_tombstone` with the exact active
 publication ID, payload hash, generation, and locale set. A successful delete
 atomically clears the active pointer, removes localized prose, and retains only
-content-free publication and tombstone bindings for replay detection. Startup
-and health verify the schema, SQLite integrity, active pointers, canonical
-payload and expectation hashes, every locale row, current release-evidence
-contract, approval expiry, and tombstone state. Active rendering and exact
-publication replay perform the same authorization check after every restart.
+content-free publication and tombstone bindings for replay detection. The exact
+canonical publisher signature is stored beside each active payload. Startup and
+health verify the schema, SQLite integrity, active pointers, canonical payload
+and expectation hashes, that publisher signature, every locale row, current
+release-evidence contract, approval expiry, and tombstone state. Active
+rendering and exact publication replay perform the same authorization checks
+after every restart. Schema v1 databases migrate to v2 without fabricating
+signatures: legacy active rows without the original proof stay blocked and
+unhealthy but remain structurally deletable.
 Structural-only tombstone operations deliberately remain available when an
 approval expires or a contract advances, so stale content can still be removed.
 This reference store is not a substitute for an existing CMS authorization

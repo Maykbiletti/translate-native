@@ -3,8 +3,11 @@
 
 The trusted host registers its current source and tombstone expectations. The
 receiver invokes this store only after transport and signature verification.
-Every callback rechecks the current binding inside one SQLite write transaction
-so a concurrent source change cannot publish or delete the wrong generation.
+The store retains and continuously rechecks that publisher signature together
+with the current binding, so restart or database tampering cannot silently
+authorize different content. Every write callback also rechecks the binding in
+one SQLite transaction so a concurrent source change cannot affect the wrong
+generation.
 """
 
 from __future__ import annotations
@@ -19,10 +22,13 @@ from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Mapping
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 4_000_000
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+SIGNATURE_VALUE = re.compile(r"^[A-Za-z0-9_.:/+=-]{1,4096}$")
+SIGNATURE_FIELDS = ("algorithm", "key_id", "signature")
 CONTENT_TYPES = {
     "headline", "cta", "marketing", "ui", "documentation", "seo", "legal",
     "commercial",
@@ -99,6 +105,31 @@ def _sha256(value: Any, *, field: str) -> str:
     if not isinstance(value, str) or SHA256.fullmatch(value) is None:
         raise CMSReceiverStoreBlocked(f"{field} is invalid")
     return value
+
+
+def _message_signature(value: Any) -> dict[str, str]:
+    if isinstance(value, Mapping):
+        result = dict(value)
+    else:
+        missing = object()
+        result = {
+            field: getattr(value, field, missing)
+            for field in SIGNATURE_FIELDS
+        }
+        if any(item is missing for item in result.values()):
+            raise CMSReceiverStoreBlocked("publication signature is invalid")
+    if set(result) != set(SIGNATURE_FIELDS):
+        raise CMSReceiverStoreBlocked("publication signature is invalid")
+    if (
+        not isinstance(result["algorithm"], str)
+        or TOKEN.fullmatch(result["algorithm"]) is None
+        or not isinstance(result["key_id"], str)
+        or TOKEN.fullmatch(result["key_id"]) is None
+        or not isinstance(result["signature"], str)
+        or SIGNATURE_VALUE.fullmatch(result["signature"]) is None
+    ):
+        raise CMSReceiverStoreBlocked("publication signature is invalid")
+    return result
 
 
 def _sequence(value: Any) -> int:
@@ -217,16 +248,22 @@ class DurableCMSReceiverStore:
         connection: sqlite3.Connection,
         *,
         release_evidence_validator: Callable[..., bool],
+        publication_signature_validator: Callable[
+            [bytes, Mapping[str, str]], bool
+        ],
         clock: Callable[[], float | int] = time.time,
     ):
         if not isinstance(connection, sqlite3.Connection) or connection.in_transaction:
             raise CMSReceiverStoreBlocked("connection must be an idle SQLite connection")
         if not callable(release_evidence_validator):
             raise CMSReceiverStoreBlocked("release evidence validator is required")
+        if not callable(publication_signature_validator):
+            raise CMSReceiverStoreBlocked("publication signature validator is required")
         if not callable(clock):
             raise CMSReceiverStoreBlocked("clock must be callable")
         self.connection = connection
         self._release_evidence_validator = release_evidence_validator
+        self._publication_signature_validator = publication_signature_validator
         self.clock = clock
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
@@ -235,10 +272,12 @@ class DurableCMSReceiverStore:
         if int(self.connection.execute("PRAGMA secure_delete").fetchone()[0]) != 1:
             raise CMSReceiverStoreBlocked("secure deletion is unavailable")
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, SCHEMA_VERSION}:
+        if version not in {0, LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
             raise CMSReceiverStoreBlocked("unsupported CMS receiver store schema")
         if version == 0:
             self._create_schema()
+        elif version == LEGACY_SCHEMA_VERSION:
+            self._migrate_schema()
         self._verify_schema()
 
     def _create_schema(self) -> None:
@@ -286,6 +325,7 @@ class DurableCMSReceiverStore:
                     tombstone_payload_sha256 TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
+                    signature_json TEXT,
                     UNIQUE (site_id, source_id, source_sequence)
                 )
             """)
@@ -330,7 +370,24 @@ class DurableCMSReceiverStore:
             )
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def _verify_schema(self) -> None:
+    def _migrate_schema(self) -> None:
+        with _transaction(self.connection):
+            self._verify_schema(
+                expected_version=LEGACY_SCHEMA_VERSION,
+                legacy=True,
+            )
+            self.connection.execute(
+                "ALTER TABLE cms_receiver_publications "
+                "ADD COLUMN signature_json TEXT"
+            )
+            self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _verify_schema(
+        self,
+        *,
+        expected_version: int = SCHEMA_VERSION,
+        legacy: bool = False,
+    ) -> None:
         if int(self.connection.execute("PRAGMA secure_delete").fetchone()[0]) != 1:
             raise CMSReceiverStoreBlocked("secure deletion was disabled")
         expected = {
@@ -346,7 +403,7 @@ class DurableCMSReceiverStore:
                 "source_sequence", "source_revision", "payload_json", "status",
                 "tombstone_delivery_id", "tombstone_payload_sha256", "created_at",
                 "updated_at",
-            ),
+            ) + (() if legacy else ("signature_json",)),
             "cms_receiver_localizations": (
                 "delivery_id", "locale", "target_text", "target_sha256",
                 "approval_id", "approval_expires_at", "release_evidence_json",
@@ -360,7 +417,7 @@ class DurableCMSReceiverStore:
             ),
         }
         version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
-        if version != SCHEMA_VERSION:
+        if version != expected_version:
             raise CMSReceiverStoreBlocked("CMS receiver store schema version is invalid")
         for table, columns in expected.items():
             actual = tuple(
@@ -412,6 +469,24 @@ class DurableCMSReceiverStore:
             raise CMSReceiverStoreBlocked("tombstone expectation hash is invalid")
         return result
 
+    def _verify_publication_signature(
+        self,
+        payload_json: str,
+        signature: Any,
+    ) -> dict[str, str]:
+        normalized = _message_signature(signature)
+        try:
+            valid = self._publication_signature_validator(
+                payload_json.encode("utf-8"), normalized,
+            ) is True
+        except Exception:
+            valid = False
+        if not valid:
+            raise CMSReceiverStoreBlocked(
+                "publication signature is no longer valid"
+            )
+        return normalized
+
     def _validate_publication_row(
         self,
         row: sqlite3.Row,
@@ -434,6 +509,7 @@ class DurableCMSReceiverStore:
         if row["status"] in {"deleted", "superseded"}:
             if (
                 row["payload_json"] is not None
+                or row["signature_json"] is not None
                 or localizations
             ):
                 raise CMSReceiverStoreBlocked(
@@ -465,7 +541,8 @@ class DurableCMSReceiverStore:
             or row["tombstone_payload_sha256"] is not None
         ):
             raise CMSReceiverStoreBlocked("publication state is invalid")
-        payload = _decode_json(row["payload_json"], field="payload_json")
+        payload_json = row["payload_json"]
+        payload = _decode_json(payload_json, field="payload_json")
         if (
             not isinstance(payload, dict)
             or payload.get("delivery_id") != delivery_id
@@ -491,6 +568,11 @@ class DurableCMSReceiverStore:
             _timestamp(self.clock() if now is None else now)
             if require_current_authorization else None
         )
+        if require_current_authorization:
+            signature = _decode_json(
+                row["signature_json"], field="signature_json",
+            )
+            self._verify_publication_signature(payload_json, signature)
         for stored, item in zip(localizations, expected):
             if not isinstance(item, dict):
                 raise CMSReceiverStoreBlocked("stored locale is invalid")
@@ -687,6 +769,11 @@ class DurableCMSReceiverStore:
         delivery_id, payload_sha256, payload, payload_json = _verified(
             publication, kind="publication",
         )
+        signature = self._verify_publication_signature(
+            payload_json,
+            getattr(publication, "signature", None),
+        )
+        signature_json = _canonical_json(signature)
         now = _timestamp(self.clock())
         with _transaction(self.connection):
             self._verify_schema()
@@ -736,12 +823,13 @@ class DurableCMSReceiverStore:
                         delivery_id, payload_sha256, site_id, source_id,
                         source_sequence, source_revision, payload_json, status,
                         tombstone_delivery_id, tombstone_payload_sha256,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, ?, ?)
+                        created_at, updated_at, signature_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, ?, ?, ?)
                 """, (
                     delivery_id, payload_sha256, current["site_id"],
                     current["source_id"], current["source_sequence"],
                     current["source_revision"], payload_json, now, now,
+                    signature_json,
                 ))
                 for item in payload["localizations"]:
                     self.connection.execute("""
@@ -777,7 +865,8 @@ class DurableCMSReceiverStore:
                     )
                     changed = self.connection.execute("""
                         UPDATE cms_receiver_publications
-                        SET payload_json = NULL, updated_at = ?
+                        SET payload_json = NULL, signature_json = NULL,
+                            updated_at = ?
                         WHERE delivery_id = ? AND status = 'superseded'
                     """, (now, old_delivery_id)).rowcount
                 except sqlite3.Error as error:
@@ -1002,7 +1091,8 @@ class DurableCMSReceiverStore:
             )
             changed = self.connection.execute("""
                 UPDATE cms_receiver_publications
-                SET payload_json = NULL, status = 'deleted',
+                SET payload_json = NULL, signature_json = NULL,
+                    status = 'deleted',
                     tombstone_delivery_id = ?, tombstone_payload_sha256 = ?,
                     updated_at = ?
                 WHERE delivery_id = ? AND status = 'active'

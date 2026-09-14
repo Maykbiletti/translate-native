@@ -385,6 +385,11 @@ def open_durable_cms_receiver(
             release_evidence_validator=(
                 _RECEIVER.release_evidence_is_current
             ),
+            publication_signature_validator=lambda payload, signature: (
+                _RECEIVER.message_signature_is_valid(
+                    payload, signature, publication_authority,
+                )
+            ),
             clock=clock,
         )
         database_guard()
