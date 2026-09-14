@@ -129,6 +129,8 @@ def release_evidence(
         "result_sha256": "3" * 64,
         "approval_sha256": "4" * 64,
         "quality_receipt_sha256": "6" * 64,
+        "evidence_request_id": "blun-l10n-evidence-" + "9" * 64,
+        "evidence_revision": "native-evidence-1",
         "commercial_profile": profile,
         "commercial_quality_profile": quality_profile,
         "commercial_review": review,
@@ -535,6 +537,11 @@ class CMSPublicationReceiverTests(unittest.TestCase):
         })
         self.assertEqual(evidence["commercial_review"]["status"], "verified")
         self.assertIsNone(evidence["commercial_review_resolution"])
+        self.assertEqual(
+            evidence["evidence_request_id"],
+            "blun-l10n-evidence-" + "9" * 64,
+        )
+        self.assertEqual(evidence["evidence_revision"], "native-evidence-1")
 
     def test_targeted_commercial_resolution_reaches_commit_content_free(self):
         for method in ("independent_model", "qualified_human"):
@@ -673,6 +680,15 @@ class CMSPublicationReceiverTests(unittest.TestCase):
         mutations = (
             lambda value: value["localizations"][0]["release_evidence"].pop(
                 "quality_receipt_sha256"
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].pop(
+                "evidence_request_id"
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                evidence_request_id="blun-l10n-evidence-" + "a" * 63
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                evidence_revision=" stale-evidence-1"
             ),
             lambda value: value["localizations"][0]["release_evidence"].update(
                 target_locale="mt-MT"

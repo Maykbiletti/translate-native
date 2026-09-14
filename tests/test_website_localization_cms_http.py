@@ -92,6 +92,8 @@ def publication_request(authority=None):
                 "result_sha256": "1" * 64,
                 "approval_sha256": "2" * 64,
                 "quality_receipt_sha256": "3" * 64,
+                "evidence_request_id": "blun-l10n-evidence-" + "5" * 64,
+                "evidence_revision": "native-evidence-1",
                 "commercial_profile": None,
                 "commercial_quality_profile": None,
                 "commercial_review": None,

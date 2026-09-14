@@ -164,6 +164,14 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.assertEqual(first["status"], "accepted")
         self.assertEqual(replay, first)
         self.assertEqual(active, publication)
+        self.assertEqual(
+            active["localizations"][0]["release_evidence"]["evidence_request_id"],
+            "blun-l10n-evidence-" + "9" * 64,
+        )
+        self.assertEqual(
+            active["localizations"][0]["release_evidence"]["evidence_revision"],
+            "native-evidence-1",
+        )
         self.assertEqual(deleted["status"], "deleted")
         self.assertEqual(deleted_replay, deleted)
         self.assertEqual(registration_replay["status"], "deleted")

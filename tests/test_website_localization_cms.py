@@ -474,6 +474,8 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 evidence["quality_receipt_sha256"],
                 hashlib.sha256(b"quality-receipt").hexdigest(),
             )
+            self.assertEqual(evidence["evidence_request_id"], EVIDENCE_REQUEST_ID)
+            self.assertEqual(evidence["evidence_revision"], EVIDENCE_REVISION)
             self.assertIsNone(evidence["commercial_profile"])
             self.assertIsNone(evidence["commercial_quality_profile"])
             self.assertIsNone(evidence["commercial_review"])
@@ -501,7 +503,8 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.assertEqual(set(evidence), {
                 "schema", "job_id", "target_locale", "content_type",
                 "target_sha256", "result_sha256", "quality_receipt_sha256",
-                "approval_id", "approval_sha256", "commercial_profile",
+                "approval_id", "approval_sha256", "evidence_request_id",
+                "evidence_revision", "commercial_profile",
                 "commercial_quality_profile", "commercial_review",
                 "commercial_review_resolution",
             })

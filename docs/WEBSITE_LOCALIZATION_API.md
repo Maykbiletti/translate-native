@@ -2053,7 +2053,8 @@ rehashed entry returns `503` without a partial registry. Consumers must still
 treat these values as display guidance and route uncertain semantic equality to
 the configured independent review path.
 
-For publication, `blun.website-localization-release-evidence.v5` carries the
+For publication, `blun.website-localization-release-evidence.v6` carries the
+canonical content-free `evidence_request_id` and `evidence_revision` plus the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
 commercial content and requires all three fields to be null for every other
 content type. The reference CMS receiver recomputes the canonical version and
@@ -2174,7 +2175,7 @@ receipts, qualified-human identities and reviewer prose are never published.
         "response_schema": "blun.cms-localization-publication-http-ack.v1"
       }],
       "request_content_type": "application/json; charset=utf-8",
-      "release_evidence_schema": "blun.website-localization-release-evidence.v5",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v6",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v3",
       "sha256": "<sha256>"

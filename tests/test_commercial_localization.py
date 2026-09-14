@@ -762,7 +762,13 @@ class CommercialLocalizationTests(unittest.TestCase):
             publication_evidence = approved.release_evidence
             self.assertEqual(
                 publication_evidence["schema"],
-                "blun.website-localization-release-evidence.v5",
+                "blun.website-localization-release-evidence.v6",
+            )
+            self.assertEqual(
+                publication_evidence["evidence_request_id"], EVIDENCE_REQUEST_ID,
+            )
+            self.assertEqual(
+                publication_evidence["evidence_revision"], EVIDENCE_REVISION,
             )
             self.assertEqual(
                 publication_evidence["commercial_review_resolution"]["schema"],

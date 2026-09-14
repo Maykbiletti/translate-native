@@ -24,7 +24,7 @@ SCHEMA_VERSION = 1
 APPROVAL_SCHEMA = "blun.website-localization-approval.v5"
 RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v5"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v5"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v6"
 MAX_TEXT_BYTES = 2_000_000
 MAX_RECEIPT_LENGTH = 16_384
 MAX_TTL_SECONDS = 31_536_000.0
@@ -132,7 +132,8 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "schema", "job_id", "target_locale", "target_sha256", "approval_id",
         "content_type", "result_sha256", "approval_sha256",
-        "quality_receipt_sha256", "commercial_profile",
+        "quality_receipt_sha256", "evidence_request_id", "evidence_revision",
+        "commercial_profile",
         "commercial_quality_profile", "commercial_review",
         "commercial_review_resolution",
     }:
@@ -151,6 +152,10 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
                 "quality_receipt_sha256",
             )
         )
+        or not isinstance(value.get("evidence_request_id"), str)
+        or EVIDENCE_REQUEST_ID.fullmatch(value["evidence_request_id"]) is None
+        or not isinstance(value.get("evidence_revision"), str)
+        or TOKEN.fullmatch(value["evidence_revision"]) is None
     ):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
     profile = value.get("commercial_profile")
@@ -967,6 +972,8 @@ class LocalizationReleaseStore:
                 "result_sha256": row["result_sha256"],
                 "approval_sha256": row["approval_sha256"],
                 "quality_receipt_sha256": payload["quality_receipt_sha256"],
+                "evidence_request_id": payload["evidence_request_id"],
+                "evidence_revision": payload["evidence_revision"],
                 "commercial_profile": job.get("commercial_profile"),
                 "commercial_quality_profile": (
                     json.loads(_canonical_json(
