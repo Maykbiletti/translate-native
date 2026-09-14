@@ -108,7 +108,7 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v7` and the exact target-locale
+The planner binds `translate-native.commercial.v8` and the exact target-locale
 commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
@@ -129,10 +129,12 @@ the complete capability response unavailable.
 
 The separately hashed `review_resolution_contract` defines the exact ordered
 dimension acknowledgement and the two permitted resolution methods. A
-qualified-human resolution must omit provider identity; an independent-model
-resolution must carry the exact provider ID, model ID and model version and
-must differ from the primary provider. Both routes publish only the verified
-receipt SHA-256. Raw receipts, reviewer prose, qualified-human identity, source
+qualified-human resolution must omit reviewer provider identity; both methods
+must carry the primary provider's exact ID, model ID and model version. An
+independent-model resolution additionally carries the same fields for the
+second provider, whose provider ID must differ. Each result binds the advertised
+resolution-contract SHA-256 and publishes only the verified receipt SHA-256.
+Raw receipts, credentials, reviewer prose, qualified-human identity, source
 and target text, project prices and project brands remain excluded. The
 release-evidence schema uses the same provider-neutral resolution schema, so a
 consumer does not need to infer these conditional rules from documentation.

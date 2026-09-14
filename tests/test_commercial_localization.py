@@ -151,13 +151,14 @@ class CommercialLocalizationTests(unittest.TestCase):
             value["methods"]["qualified_human"]["provider"], "null",
         )
         self.assertEqual(
-            value["methods"]["independent_model"]["provider_fields"],
+            value["provider_identity"]["fields"],
             ["id", "model_id", "model_version"],
         )
         self.assertTrue(
             value["methods"]["independent_model"]
-            ["must_differ_from_primary_provider"],
+            ["provider_id_must_differ_from_primary_provider"],
         )
+        self.assertFalse(value["provider_identity"]["credentials_published"])
         self.assertFalse(value["receipt_sha256"]["raw_receipt_published"])
         self.assertTrue(all(
             item is False for item in value["content_policy"].values()
@@ -171,6 +172,64 @@ class CommercialLocalizationTests(unittest.TestCase):
         serialized = json.dumps(value).lower()
         for private_value in ("480", "vat", "blun", "offer-1"):
             self.assertNotIn(private_value, serialized)
+
+    def test_review_resolution_binds_contract_and_proves_model_independence(self):
+        summary = {
+            "schema": PROFILE.REVIEW_SUMMARY_SCHEMA,
+            "profile": SCHEMA,
+            "status": "review_required",
+            "review_required_dimensions": ["tax_status", "cancellation"],
+            "evidence_sha256": "5" * 64,
+        }
+        contract_sha256 = PROFILE.public_review_resolution_contract(
+            SCHEMA,
+        )["sha256"]
+        primary_provider = {
+            "id": "customer-llm",
+            "model_id": "king",
+            "model_version": "2026-09-14",
+        }
+        resolution = {
+            "schema": PROFILE.REVIEW_RESOLUTION_SCHEMA,
+            "profile": SCHEMA,
+            "contract_sha256": contract_sha256,
+            "status": "resolved",
+            "reviewed_dimensions": ["tax_status", "cancellation"],
+            "method": "independent_model",
+            "receipt_sha256": "7" * 64,
+            "primary_provider": primary_provider,
+            "provider": {
+                "id": "independent-provider",
+                "model_id": "review-model",
+                "model_version": "2026-09-14",
+            },
+        }
+        self.assertEqual(
+            PROFILE.validate_review_resolution(resolution, summary, SCHEMA),
+            resolution,
+        )
+        human = copy.deepcopy(resolution)
+        human.update(method="qualified_human", provider=None)
+        self.assertEqual(
+            PROFILE.validate_review_resolution(human, summary, SCHEMA), human,
+        )
+        mutations = (
+            lambda value: value.update(profile=SCHEMA + ".stale"),
+            lambda value: value.update(contract_sha256="8" * 64),
+            lambda value: value.update(primary_provider=None),
+            lambda value: value["primary_provider"].update(model_id=""),
+            lambda value: value["provider"].update(id="customer-llm"),
+        )
+        for mutation in mutations:
+            changed = copy.deepcopy(resolution)
+            mutation(changed)
+            with self.subTest(changed=changed), self.assertRaises(
+                PROFILE.CommercialReviewBlocked,
+            ) as error:
+                PROFILE.validate_review_resolution(changed, summary, SCHEMA)
+            self.assertEqual(
+                error.exception.code, "review.commercial.resolution_invalid",
+            )
 
     def test_public_profile_requires_locale_bound_quality_in_all_phases(self):
         value = PROFILE.public_profile(SCHEMA)
@@ -372,7 +431,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v8"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v9"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -678,11 +737,21 @@ class CommercialLocalizationTests(unittest.TestCase):
             publication_evidence = approved.release_evidence
             self.assertEqual(
                 publication_evidence["schema"],
-                "blun.website-localization-release-evidence.v4",
+                "blun.website-localization-release-evidence.v5",
             )
             self.assertEqual(
                 publication_evidence["commercial_review_resolution"]["schema"],
                 PROFILE.REVIEW_RESOLUTION_SCHEMA,
+            )
+            resolution = publication_evidence["commercial_review_resolution"]
+            self.assertEqual(resolution["profile"], SCHEMA)
+            self.assertEqual(
+                resolution["contract_sha256"],
+                PROFILE.public_review_resolution_contract(SCHEMA)["sha256"],
+            )
+            self.assertEqual(
+                resolution["primary_provider"],
+                plan.jobs[0].as_payload()["provider"],
             )
 
     def test_release_rejects_tampered_commercial_routing_summary(self):

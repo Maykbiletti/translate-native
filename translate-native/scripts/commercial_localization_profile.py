@@ -13,16 +13,16 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v7"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v8"
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-summary-capabilities.v3"
 )
 REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
 EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v2"
 REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-resolution-capabilities.v1"
+    "translate-native.commercial-review-resolution-capabilities.v2"
 )
-REVIEW_RESOLUTION_SCHEMA = "translate-native.commercial-review-resolution.v1"
+REVIEW_RESOLUTION_SCHEMA = "translate-native.commercial-review-resolution.v2"
 COMMERCIAL_LOCALE_PROFILE_SCHEMA = (
     "translate-native.commercial-locale-quality-profile.v2"
 )
@@ -155,21 +155,28 @@ def public_review_resolution_contract(profile: str) -> dict[str, Any]:
             "reviewed_dimensions": "exact-ordered-review-summary-dimensions",
         },
         "required_fields": [
-            "schema", "status", "reviewed_dimensions", "method",
-            "receipt_sha256", "provider",
+            "schema", "profile", "contract_sha256", "status",
+            "reviewed_dimensions", "method", "receipt_sha256",
+            "primary_provider", "provider",
         ],
         "status": "resolved",
         "methods": {
             "qualified_human": {
+                "primary_provider": "required",
                 "provider": "null",
                 "receipt": "verified-qualified-human-review",
             },
             "independent_model": {
+                "primary_provider": "required",
                 "provider": "required",
-                "provider_fields": ["id", "model_id", "model_version"],
-                "must_differ_from_primary_provider": True,
+                "provider_id_must_differ_from_primary_provider": True,
                 "receipt": "verified-independent-model-review",
             },
+        },
+        "provider_identity": {
+            "fields": ["id", "model_id", "model_version"],
+            "primary_provider": "required",
+            "credentials_published": False,
         },
         "reviewed_dimensions": {
             "allowed": list(DIMENSIONS),
@@ -196,6 +203,73 @@ def public_review_resolution_contract(profile: str) -> dict[str, Any]:
         **body,
         "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
     }
+
+
+def _resolution_provider(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "id", "model_id", "model_version",
+    }:
+        raise CommercialReviewBlocked("review.commercial.resolution_invalid")
+    if any(
+        not isinstance(value.get(field), str)
+        or PROFILE_VERSION.fullmatch(value[field]) is None
+        for field in value
+    ):
+        raise CommercialReviewBlocked("review.commercial.resolution_invalid")
+    return json.loads(_canonical_json(value))
+
+
+def validate_review_resolution(
+    value: Any,
+    summary: Any,
+    profile: str,
+) -> dict[str, Any]:
+    """Validate exact review-resolution routing without trusting reviewer prose."""
+    summary = validate_summary(summary, profile, review_required=True)
+    contract = public_review_resolution_contract(profile)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "profile", "contract_sha256", "status",
+            "reviewed_dimensions", "method", "receipt_sha256",
+            "primary_provider", "provider",
+        }
+        or value.get("schema") != REVIEW_RESOLUTION_SCHEMA
+        or value.get("profile") != profile
+        or value.get("contract_sha256") != contract["sha256"]
+        or value.get("status") != "resolved"
+        or value.get("reviewed_dimensions")
+        != summary["review_required_dimensions"]
+        or value.get("method") not in {
+            "qualified_human", "independent_model",
+        }
+        or not isinstance(value.get("receipt_sha256"), str)
+        or len(value["receipt_sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in value["receipt_sha256"]
+        )
+    ):
+        raise CommercialReviewBlocked("review.commercial.resolution_invalid")
+    primary_provider = _resolution_provider(value.get("primary_provider"))
+    provider = _resolution_provider(value.get("provider"))
+    if primary_provider is None or (
+        value["method"] == "qualified_human" and provider is not None
+    ) or (
+        value["method"] == "independent_model"
+        and (
+            provider is None
+            or provider["id"] == primary_provider["id"]
+        )
+    ):
+        raise CommercialReviewBlocked("review.commercial.resolution_invalid")
+    return json.loads(_canonical_json({
+        **value,
+        "primary_provider": primary_provider,
+        "provider": provider,
+    }))
 
 
 def public_profile(profile: str) -> dict[str, Any]:

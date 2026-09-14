@@ -43,6 +43,7 @@ _canonical_json = _IMPL._canonical_json
 evidence_sha256 = _IMPL.evidence_sha256
 public_review_summary_contract = _IMPL.public_review_summary_contract
 public_review_resolution_contract = _IMPL.public_review_resolution_contract
+validate_review_resolution = _IMPL.validate_review_resolution
 public_profile = _IMPL.public_profile
 CREATION_GUIDANCE = _IMPL.CREATION_GUIDANCE
 NATIVE_GUIDANCE = _IMPL.NATIVE_GUIDANCE

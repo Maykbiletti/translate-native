@@ -17,7 +17,7 @@ from commercial_localization_profile import (
 )
 
 
-PROFILE = "translate-native.commercial.v7"
+PROFILE = "translate-native.commercial.v8"
 MAX_INPUT_BYTES = 2_000_000
 
 

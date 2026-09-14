@@ -622,12 +622,23 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         resolution = approved.release_evidence["commercial_review_resolution"]
         self.assertEqual(resolution, {
             "schema": RELEASE.COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
+            "profile": PLANNER.COMMERCIAL_PROFILE,
+            "contract_sha256": (
+                WORKER._COMMERCIAL.public_review_resolution_contract(
+                    PLANNER.COMMERCIAL_PROFILE,
+                )["sha256"]
+            ),
             "status": "resolved",
             "reviewed_dimensions": dimensions,
             "method": "independent_model",
             "receipt_sha256": hashlib.sha256(
                 b"commercial-independent-receipt"
             ).hexdigest(),
+            "primary_provider": {
+                "id": "customer-llm",
+                "model_id": "king",
+                "model_version": "2026-08-29",
+            },
             "provider": reviewer["provider"],
         })
         self.assertEqual(
@@ -664,6 +675,14 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         resolution = approved.release_evidence["commercial_review_resolution"]
         self.assertEqual(resolution["method"], "qualified_human")
         self.assertEqual(resolution["reviewed_dimensions"], ["cancellation"])
+        self.assertEqual(resolution["profile"], PLANNER.COMMERCIAL_PROFILE)
+        self.assertEqual(
+            resolution["contract_sha256"],
+            WORKER._COMMERCIAL.public_review_resolution_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"],
+        )
+        self.assertEqual(resolution["primary_provider"]["id"], "customer-llm")
         self.assertIsNone(resolution["provider"])
         self.assertNotIn("qualified-commercial-review", json.dumps(resolution))
 

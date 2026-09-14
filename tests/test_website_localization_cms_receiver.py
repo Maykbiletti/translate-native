@@ -93,12 +93,23 @@ def release_evidence(
             "evidence_sha256": "5" * 64,
         }
         if review_required:
+            primary_provider = {
+                "id": "customer-llm",
+                "model_id": "king",
+                "model_version": "2026-09-12",
+            }
             resolution = {
                 "schema": CMS._RELEASE.COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
+                "profile": profile,
+                "contract_sha256": (
+                    CMS._RELEASE._WORKER._COMMERCIAL
+                    .public_review_resolution_contract(profile)["sha256"]
+                ),
                 "status": "resolved",
                 "reviewed_dimensions": ["tax_status", "cancellation"],
                 "method": resolution_method,
                 "receipt_sha256": "7" * 64,
+                "primary_provider": primary_provider,
                 "provider": (
                     {
                         "id": "independent-reviewer",
@@ -558,6 +569,10 @@ class CMSPublicationReceiverTests(unittest.TestCase):
                     ["tax_status", "cancellation"],
                 )
                 self.assertNotIn("receipt", resolution)
+                self.assertEqual(resolution["profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
+                self.assertEqual(
+                    resolution["primary_provider"]["id"], "customer-llm",
+                )
 
     def test_invalid_targeted_commercial_resolution_never_reaches_commit(self):
         mutations = (
@@ -575,6 +590,14 @@ class CMSPublicationReceiverTests(unittest.TestCase):
             lambda value: value["localizations"][0]["release_evidence"]
             ["commercial_review_resolution"].update(
                 receipt_sha256="8" * 63,
+            ),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"].update(
+                contract_sha256="8" * 64,
+            ),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"]["provider"].update(
+                id="customer-llm",
             ),
         )
         for mutation in mutations:

@@ -24,7 +24,7 @@ SCHEMA_VERSION = 1
 APPROVAL_SCHEMA = "blun.website-localization-approval.v3"
 RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v3"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v4"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v5"
 MAX_TEXT_BYTES = 2_000_000
 MAX_RECEIPT_LENGTH = 16_384
 MAX_TTL_SECONDS = 31_536_000.0
@@ -184,39 +184,15 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
             )
         except _WORKER._COMMERCIAL.CommercialReviewBlocked:
             raise LocalizationReleaseBlocked("publication.evidence.invalid") from None
-        dimensions = review["review_required_dimensions"]
         if review["status"] == "verified":
             if resolution is not None:
                 raise LocalizationReleaseBlocked("publication.evidence.invalid")
-        elif (
-            not isinstance(resolution, dict)
-            or set(resolution) != {
-                "schema", "status", "reviewed_dimensions", "method",
-                "receipt_sha256", "provider",
-            }
-            or resolution.get("schema") != COMMERCIAL_REVIEW_RESOLUTION_SCHEMA
-            or resolution.get("status") != "resolved"
-            or resolution.get("reviewed_dimensions") != dimensions
-            or resolution.get("method") not in {
-                "independent_model", "qualified_human",
-            }
-            or HEX64.fullmatch(str(resolution.get("receipt_sha256"))) is None
-        ):
-            raise LocalizationReleaseBlocked("publication.evidence.invalid")
         else:
-            provider = resolution.get("provider")
-            if resolution["method"] == "qualified_human":
-                if provider is not None:
-                    raise LocalizationReleaseBlocked("publication.evidence.invalid")
-            elif (
-                not isinstance(provider, dict)
-                or set(provider) != {"id", "model_id", "model_version"}
-                or any(
-                    not isinstance(provider.get(field), str)
-                    or TOKEN.fullmatch(provider[field]) is None
-                    for field in provider
+            try:
+                resolution = _WORKER._COMMERCIAL.validate_review_resolution(
+                    resolution, review, profile,
                 )
-            ):
+            except _WORKER._COMMERCIAL.CommercialReviewBlocked:
                 raise LocalizationReleaseBlocked("publication.evidence.invalid")
     elif resolution is not None:
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
@@ -249,12 +225,19 @@ def _commercial_review_resolution(
         provider = json.loads(_canonical_json(independent["provider"]))
     return {
         "schema": COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
+        "profile": review["profile"],
+        "contract_sha256": (
+            _WORKER._COMMERCIAL.public_review_resolution_contract(
+                review["profile"],
+            )["sha256"]
+        ),
         "status": "resolved",
         "reviewed_dimensions": json.loads(_canonical_json(
             review["review_required_dimensions"]
         )),
         "method": method,
         "receipt_sha256": receipt_sha256,
+        "primary_provider": json.loads(_canonical_json(result["provider"])),
         "provider": provider,
     }
 

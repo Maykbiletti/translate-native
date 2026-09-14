@@ -31,9 +31,9 @@ PUBLICATION_SCHEMA = "blun.cms-localization-publication.v3"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
-CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v6"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v7"
 PUBLICATION_HTTP_CONTRACT_SCHEMA = (
-    "blun.cms-localization-publication-http-capabilities.v2"
+    "blun.cms-localization-publication-http-capabilities.v3"
 )
 PUBLICATION_HTTP_REQUEST_SCHEMA = "blun.cms-localization-publication-http.v1"
 PUBLICATION_HTTP_RESPONSE_SCHEMA = "blun.cms-localization-publication-http-ack.v1"
@@ -653,7 +653,7 @@ class WebsiteLocalizationCMSBridge:
                 set(review_resolution_contract) != {
                     "schema", "result_schema", "profile", "applies_when",
                     "required_fields", "status", "methods",
-                    "reviewed_dimensions", "receipt_sha256",
+                    "provider_identity", "reviewed_dimensions", "receipt_sha256",
                     "content_policy", "sha256",
                 }
                 or review_resolution_contract["schema"]
@@ -669,23 +669,28 @@ class WebsiteLocalizationCMSBridge:
                     ),
                 }
                 or review_resolution_contract["required_fields"] != [
-                    "schema", "status", "reviewed_dimensions", "method",
-                    "receipt_sha256", "provider",
+                    "schema", "profile", "contract_sha256", "status",
+                    "reviewed_dimensions", "method", "receipt_sha256",
+                    "primary_provider", "provider",
                 ]
                 or review_resolution_contract["status"] != "resolved"
                 or review_resolution_contract["methods"] != {
                     "qualified_human": {
+                        "primary_provider": "required",
                         "provider": "null",
                         "receipt": "verified-qualified-human-review",
                     },
                     "independent_model": {
+                        "primary_provider": "required",
                         "provider": "required",
-                        "provider_fields": [
-                            "id", "model_id", "model_version",
-                        ],
-                        "must_differ_from_primary_provider": True,
+                        "provider_id_must_differ_from_primary_provider": True,
                         "receipt": "verified-independent-model-review",
                     },
+                }
+                or review_resolution_contract["provider_identity"] != {
+                    "fields": ["id", "model_id", "model_version"],
+                    "primary_provider": "required",
+                    "credentials_published": False,
                 }
                 or review_resolution_contract["reviewed_dimensions"] != {
                     "allowed": list(_EXPECTED_COMMERCIAL_DIMENSIONS),

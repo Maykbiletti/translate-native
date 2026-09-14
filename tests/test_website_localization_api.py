@@ -520,7 +520,15 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         )
         self.assertTrue(
             review_resolution_contract["methods"]["independent_model"]
-            ["must_differ_from_primary_provider"],
+            ["provider_id_must_differ_from_primary_provider"],
+        )
+        self.assertEqual(
+            review_resolution_contract["provider_identity"]["fields"],
+            ["id", "model_id", "model_version"],
+        )
+        self.assertFalse(
+            review_resolution_contract["provider_identity"]
+            ["credentials_published"],
         )
         self.assertTrue(all(
             value is False
@@ -1018,8 +1026,11 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             ["qualified_human"].update(provider="required"),
             "model-not-independent": lambda value: value["methods"]
             ["independent_model"].update(
-                must_differ_from_primary_provider=False,
+                provider_id_must_differ_from_primary_provider=False,
             ),
+            "missing-primary-provider": lambda value: value[
+                "provider_identity"
+            ].update(primary_provider="optional"),
             "raw-receipt": lambda value: value["content_policy"].update(
                 raw_receipt=True,
             ),
