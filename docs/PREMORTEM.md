@@ -1,5 +1,23 @@
 # Version 6 premortem
 
+## Current job bindings in read-only health (15 September 2026)
+
+Assume a durable commercial job remains queued across an evidence-contract
+deployment change.
+
+- Its stored JSON and unkeyed payload hash could still be internally valid.
+- Health could report the queue as healthy until a worker leases the stale job.
+- Operators could see a green service immediately before deterministic worker
+  rejection, delaying safe replanning.
+- Drift detection must not depend on a provider response, mutate the queue, or
+  disclose source or target text.
+
+The read-only health monitor now revalidates every stored job through the exact
+current planner and worker contract. A stale or substituted binding emits only
+`queue.job_binding_invalid`, blocks overall health through local validation, and
+leaves durable state unchanged. Tests exercise a contract-only commercial
+generation change while keeping the profile identifier and stored bytes valid.
+
 ## Commercial evidence-contract identity at planning (14 September 2026)
 
 Assume the public commercial review-evidence contract changed while its parent

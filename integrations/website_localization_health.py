@@ -399,6 +399,11 @@ class LocalizationHealthMonitor:
                     raise ValueError
                 if payload.get("target", {}).get("locale") != row["target_locale"]:
                     raise ValueError
+                try:
+                    _RELEASE._validated_job_payload(payload)
+                except _RELEASE.LocalizationReleaseBlocked:
+                    reasons.add("queue.job_binding_invalid")
+                    continue
                 if row["status"] == "succeeded":
                     self.queue.result(row["job_id"])
                 if row["status"] == "leased" and float(row["lease_expires_at"]) <= now:
@@ -1432,6 +1437,7 @@ class LocalizationHealthMonitor:
         benchmark_references = self._check_native_reference_queue(now)
         blocking_workflow = {
             "queue.state_invalid",
+            "queue.job_binding_invalid",
             "evidence.state_invalid",
             "release.approval_invalid",
             "cms.delivery.invalid",

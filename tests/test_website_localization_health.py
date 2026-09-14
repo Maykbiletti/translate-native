@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -381,6 +382,53 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             dict(self.component(report, "evidence").counts),
             {status: 0 for status in HEALTH.EVIDENCE_STATUSES},
         )
+
+    def test_commercial_contract_stale_queue_job_blocks_read_only_health(self):
+        plan = PLANNER.plan_website_localization(
+            source_id="pricing", source_revision="1",
+            source_text="Save up to €480 a year. All prices exclude VAT.",
+            source_locale="en-IE", content_type="commercial",
+            glossary_version="g1", policy_version="p1",
+            provider_id="customer-llm", model_id="king",
+            model_version="2026-09-14", software_version="6.140.0",
+            target_locales=["sv-SE"],
+        )
+        self.queue.enqueue_plan(plan, now=100)
+        self.assertEqual(self.report().status, "healthy")
+        planner = WORKER._PLANNER
+        commercial = planner._COMMERCIAL
+        contract = commercial.public_review_evidence_contract(
+            planner.COMMERCIAL_PROFILE,
+        )
+        altered = json.loads(json.dumps(contract))
+        altered["trust_boundary"]["publication_authority"] = True
+        unsigned = dict(altered)
+        unsigned.pop("sha256")
+        altered["sha256"] = planner._digest(unsigned)
+        public_profile = commercial.public_profile(
+            planner.COMMERCIAL_PROFILE,
+        )
+        public_profile = json.loads(json.dumps(public_profile))
+        public_profile["review_evidence_contract"] = altered
+        changes_before = self.queue_connection.total_changes
+        with patch.object(
+            commercial,
+            "public_review_evidence_contract",
+            return_value=altered,
+        ), patch.object(
+            commercial,
+            "public_profile",
+            return_value=public_profile,
+        ):
+            report = self.report()
+        self.assertEqual(report.status, "blocked")
+        self.assertEqual(
+            self.component(report, "queue").reasons,
+            ("queue.job_binding_invalid",),
+        )
+        self.assertEqual(self.queue_connection.total_changes, changes_before)
+        self.assertEqual(self.probe.calls, [])
+        self.assertEqual(self.report().status, "healthy")
 
     def test_supervisor_liveness_is_part_of_read_only_health(self):
         probe = SupervisorProbe(status="leased")

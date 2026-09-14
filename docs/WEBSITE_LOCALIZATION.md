@@ -87,7 +87,8 @@ are derived from canonical JSON bound to:
   plus content type;
 - glossary and quality-policy versions;
 - provider, model ID, and model version;
-- Translate Native software version.
+- Translate Native software version;
+- for commercial work, the exact current review-evidence-contract SHA-256.
 
 Changing any bound value creates a new job and plan identity. A queue may
 therefore deduplicate an exact retry, while stale work cannot silently survive
@@ -110,6 +111,11 @@ states, bounded attempt counts, the next eligible attempt time, result hashes,
 and stable error codes. Free-form error detail is represented only by a
 SHA-256 hash so status inspection does not disclose customer prose. Payloads
 are hashed on insertion and checked again before a worker receives them.
+The read-only health monitor additionally replays the complete current
+planner/worker validation for every stored job. Canonical but obsolete jobs,
+including commercial jobs from an earlier evidence-contract generation, block
+health locally with `queue.job_binding_invalid`, independently of provider
+health and without changing queue state.
 
 Queue `succeeded` means only that a worker returned finite, NFC JSON. It is not
 a native-quality attestation, signed release, or publication permission. The
