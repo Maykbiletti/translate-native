@@ -1014,6 +1014,53 @@ class CommercialLocalizationTests(unittest.TestCase):
             self.assertFalse(store.readiness(changed, authority, now=302).ready)
             self.assertEqual(store.cached_result(plan.jobs[0].as_payload(), authority, now=302), cached)
 
+    def test_stale_commercial_contract_is_terminal_before_queue_lease(self):
+        plan = make_plan(
+            targets=("sv-SE",),
+            source_text=SOURCE,
+            content_type="commercial",
+            software_version="6.141.0",
+        )
+        with sqlite3.connect(":memory:") as connection:
+            queue = RUNNER._QUEUE.LocalizationQueue(connection)
+            queue.enqueue_plan(plan, now=100)
+            planner = RUNNER._WORKER._PLANNER
+            commercial = planner._COMMERCIAL
+            contract = commercial.public_review_evidence_contract(
+                planner.COMMERCIAL_PROFILE,
+            )
+            altered = copy.deepcopy(contract)
+            altered["trust_boundary"]["publication_authority"] = True
+            unsigned = dict(altered)
+            unsigned.pop("sha256")
+            altered["sha256"] = planner._digest(unsigned)
+            public_profile = copy.deepcopy(commercial.public_profile(
+                planner.COMMERCIAL_PROFILE,
+            ))
+            public_profile["review_evidence_contract"] = altered
+            calls = []
+            with patch.object(
+                commercial,
+                "public_review_evidence_contract",
+                return_value=altered,
+            ), patch.object(
+                commercial,
+                "public_profile",
+                return_value=public_profile,
+            ), self.assertRaises(RUNNER._QUEUE.LocalizationQueueBlocked):
+                RUNNER.run_next_localization_job(
+                    queue,
+                    "commercial-worker",
+                    lambda payload: calls.append("provider"),
+                    lambda payload: calls.append("assets"),
+                    clock=lambda: 110,
+                )
+            status = queue.status(plan.jobs[0].job_id)
+            self.assertEqual(status.status, "failed")
+            self.assertEqual(status.attempts, 0)
+            self.assertEqual(status.last_error_code, "job_binding_invalid")
+            self.assertEqual(calls, [])
+
     def test_uncertainty_survives_queue_but_requires_bound_independent_review(self):
         plan = make_plan(targets=("sv-SE",), source_text=SOURCE, content_type="commercial")
         report = evidence()

@@ -1,5 +1,24 @@
 # Version 6 premortem
 
+## Current job bindings before lease (15 September 2026)
+
+Assume a canonical durable job outlives the planner or worker contract that
+created it and a worker starts without first consulting service health.
+
+- The stale job could consume a lease and retry attempt before local rejection.
+- Translation memory or host-owned asset resolution could run against obsolete
+  identity before the worker validates the job.
+- A validator outage could be mistaken for proven staleness and destroy
+  recoverable work.
+- A validator could mutate the decoded payload between integrity checking and
+  execution.
+
+Every claim now replays the current job binding inside the lease transaction.
+Expected mismatch becomes terminal and content-free without incrementing the
+attempt counter; unexpected validator failure or mutation rolls the complete
+transaction back. The runner supplies its exact worker validator, and the queue
+loads the same current contract by default for direct trusted-host claims.
+
 ## Current job bindings in read-only health (15 September 2026)
 
 Assume a durable commercial job remains queued across an evidence-contract

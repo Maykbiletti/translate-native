@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -316,6 +317,33 @@ class WebsiteLocalizationRunnerTests(unittest.TestCase):
         )
         self.assertIsNone(outcome)
         self.assertEqual(called, [])
+
+    def test_stale_binding_fails_before_lease_or_dependency_resolution(self):
+        current = plan()
+        self.queue.enqueue_plan(current, now=90)
+        calls = []
+        with patch.object(
+            RUNNER._WORKER,
+            "_validated_job",
+            side_effect=WORKER.LocalizationWorkerBlocked(
+                "job.binding_mismatch",
+                retryable=False,
+            ),
+        ), self.assertRaises(QUEUE.LocalizationQueueBlocked):
+            RUNNER.run_next_localization_job(
+                self.queue,
+                "worker-a",
+                lambda payload: calls.append("provider"),
+                lambda payload: calls.append("assets"),
+                clock=lambda: 100,
+                lease_seconds=10,
+            )
+        status = self.queue.status(current.jobs[0].job_id)
+        self.assertEqual(status.status, "failed")
+        self.assertEqual(status.attempts, 0)
+        self.assertEqual(status.last_error_code, "job_binding_invalid")
+        self.assertIsNone(status.last_error_detail_hash)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

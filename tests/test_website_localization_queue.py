@@ -313,6 +313,43 @@ class WebsiteLocalizationQueueTests(unittest.TestCase):
         self.assertEqual(status.status, "failed")
         self.assertEqual(status.last_error_code, "payload_integrity")
 
+    def test_binding_validator_failure_rolls_back_without_consuming_attempt(self) -> None:
+        current = plan(("sv-SE",))
+        self.queue.enqueue_plan(current, now=100)
+
+        def unavailable(_payload):
+            raise RuntimeError("validator deployment unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "validator deployment unavailable"):
+            self.queue.claim(
+                "worker-a", now=100, lease_seconds=10,
+                binding_validator=unavailable,
+            )
+        status = self.queue.status(current.jobs[0].job_id)
+        self.assertEqual(status.status, "pending")
+        self.assertEqual(status.attempts, 0)
+        self.assertIsNone(status.last_error_code)
+
+    def test_binding_validator_cannot_mutate_payload_before_lease(self) -> None:
+        current = plan(("sv-SE",))
+        self.queue.enqueue_plan(current, now=100)
+
+        def mutating(payload):
+            payload["source"]["text"] = "Mutated after integrity check."
+            return True
+
+        with self.assertRaisesRegex(
+            QUEUE.LocalizationQueueBlocked,
+            "must not mutate queued payload",
+        ):
+            self.queue.claim(
+                "worker-a", now=100, lease_seconds=10,
+                binding_validator=mutating,
+            )
+        status = self.queue.status(current.jobs[0].job_id)
+        self.assertEqual(status.status, "pending")
+        self.assertEqual(status.attempts, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -111,6 +111,12 @@ states, bounded attempt counts, the next eligible attempt time, result hashes,
 and stable error codes. Free-form error detail is represented only by a
 SHA-256 hash so status inspection does not disclose customer prose. Payloads
 are hashed on insertion and checked again before a worker receives them.
+Immediately before leasing, the queue also replays the exact current worker
+binding. A stale but internally consistent job becomes terminal with
+`job_binding_invalid` without consuming an attempt or reaching caches, asset
+resolvers, or providers. Expected contract mismatch is distinct from validator
+unavailability: unexpected failure or payload mutation rolls back and leaves
+the job pending.
 The read-only health monitor additionally replays the complete current
 planner/worker validation for every stored job. Canonical but obsolete jobs,
 including commercial jobs from an earlier evidence-contract generation, block
