@@ -468,6 +468,10 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.assertEqual(
                 evidence["schema"], RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
             )
+            self.assertEqual(
+                evidence["release_evidence_contract_sha256"],
+                RELEASE.publication_evidence_contract()["sha256"],
+            )
             self.assertEqual(evidence["result_sha256"], row["result_sha256"])
             self.assertEqual(evidence["approval_sha256"], row["approval_sha256"])
             self.assertEqual(
@@ -501,7 +505,8 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         for item in request.payload["localizations"]:
             evidence = item["release_evidence"]
             self.assertEqual(set(evidence), {
-                "schema", "job_id", "target_locale", "content_type",
+                "schema", "release_evidence_contract_sha256", "job_id",
+                "target_locale", "content_type",
                 "target_sha256", "result_sha256", "quality_receipt_sha256",
                 "approval_id", "approval_sha256", "evidence_request_id",
                 "evidence_revision", "commercial_profile",

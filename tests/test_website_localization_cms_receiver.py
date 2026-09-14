@@ -121,6 +121,9 @@ def release_evidence(
             }
     return {
         "schema": CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+        "release_evidence_contract_sha256": (
+            CMS._RELEASE.publication_evidence_contract()["sha256"]
+        ),
         "job_id": "blun-l10n-job-" + "1" * 64,
         "target_locale": locale,
         "target_sha256": target_sha256,
@@ -678,6 +681,12 @@ class CMSPublicationReceiverTests(unittest.TestCase):
 
     def test_invalid_publication_never_reaches_commit(self):
         mutations = (
+            lambda value: value["localizations"][0]["release_evidence"].pop(
+                "release_evidence_contract_sha256"
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                release_evidence_contract_sha256="0" * 64
+            ),
             lambda value: value["localizations"][0]["release_evidence"].pop(
                 "quality_receipt_sha256"
             ),

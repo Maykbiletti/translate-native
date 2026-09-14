@@ -172,6 +172,11 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
             active["localizations"][0]["release_evidence"]["evidence_revision"],
             "native-evidence-1",
         )
+        self.assertEqual(
+            active["localizations"][0]["release_evidence"]
+            ["release_evidence_contract_sha256"],
+            CMS._RELEASE.publication_evidence_contract()["sha256"],
+        )
         self.assertEqual(deleted["status"], "deleted")
         self.assertEqual(deleted_replay, deleted)
         self.assertEqual(registration_replay["status"], "deleted")

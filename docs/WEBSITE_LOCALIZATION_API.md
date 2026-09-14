@@ -1996,7 +1996,7 @@ disabled, so a CMS can fail closed before submitting work. The object uses
 over every other canonical field. Paths and schemas come from the same runtime
 constants used for routing; they are not copied into a second configuration.
 
-The nested `blun.website-localization-capabilities.v8` object carries a
+The nested `blun.website-localization-capabilities.v9` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
 runtime rebuilds and validates the complete registry on every read; duplicate,
@@ -2060,15 +2060,18 @@ rehashed entry returns `503` without a partial registry. Consumers must still
 treat these values as display guidance and route uncertain semantic equality to
 the configured independent review path.
 
-For publication, `blun.website-localization-release-evidence.v6` carries the
-canonical content-free `evidence_request_id` and `evidence_revision` plus the
+For publication, `blun.website-localization-release-evidence.v7` carries the
+canonical release-evidence-contract SHA-256, content-free
+`evidence_request_id` and `evidence_revision` plus the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
 commercial content and requires all three fields to be null for every other
-content type. The reference CMS receiver recomputes the canonical version and
-digest for each exact target locale before calling host code. A syntactically
-valid digest, a binding from another EU locale, or a prior profile generation
-is therefore not accepted merely because the generic commercial profile still
-matches. An unresolved commercial summary additionally requires
+content type. The release service and reference CMS receiver recompute the
+canonical contract digest before publication and host code; a prior signed
+approval cannot be rewrapped under a newer contract. The receiver also
+recomputes the canonical quality-profile version and digest for each exact
+target locale. A syntactically valid digest, a binding from another EU locale,
+or a prior profile generation is therefore not accepted merely because the
+generic commercial profile still matches. An unresolved commercial summary additionally requires
 `commercial_review_resolution` with the exact ordered dimensions, a
 commercial profile and resolution-contract SHA-256, a `qualified_human` or
 `independent_model` method, the verified receipt hash, the primary provider
@@ -2185,7 +2188,7 @@ receipts, qualified-human identities and reviewer prose are never published.
       "release_evidence_contract": {
         "bindings": {
           "lineage_fields": ["evidence_request_id", "evidence_revision"],
-          "sha256_fields": ["target_sha256", "result_sha256", "approval_sha256", "quality_receipt_sha256"],
+          "sha256_fields": ["release_evidence_contract_sha256", "target_sha256", "result_sha256", "approval_sha256", "quality_receipt_sha256"],
           "signed_container": "blun.cms-localization-publication.v3",
           "target_identity_fields": ["job_id", "target_locale", "target_sha256", "approval_id"]
         },
@@ -2205,20 +2208,20 @@ receipts, qualified-human identities and reviewer prose are never published.
           "source_text": false,
           "target_text": false
         },
-        "release_evidence_schema": "blun.website-localization-release-evidence.v6",
-        "required_fields": ["schema", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_resolution"],
+        "release_evidence_schema": "blun.website-localization-release-evidence.v7",
+        "required_fields": ["schema", "release_evidence_contract_sha256", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_resolution"],
         "schema": "blun.website-localization-release-evidence-capabilities.v1",
         "sha256": "<sha256>",
         "tamper_policy": "reject-complete-publication-before-host-commit"
       },
-      "release_evidence_schema": "blun.website-localization-release-evidence.v6",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v7",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
-      "schema": "blun.cms-localization-publication-http-capabilities.v4",
+      "schema": "blun.cms-localization-publication-http-capabilities.v5",
       "sha256": "<sha256>"
     },
     "publication_schema": "blun.cms-localization-publication.v3",
     "quality_passes": ["target_native", "source_fidelity"],
-    "schema": "blun.website-localization-capabilities.v8",
+    "schema": "blun.website-localization-capabilities.v9",
     "sha256": "<sha256>"
   },
   "api_contract": {

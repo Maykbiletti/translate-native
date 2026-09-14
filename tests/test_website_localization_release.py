@@ -267,6 +267,10 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         payload = json.loads(row[0])
         self.assertEqual(payload["evidence_request_id"], EVIDENCE_REQUEST_ID)
         self.assertEqual(payload["evidence_revision"], EVIDENCE_REVISION)
+        self.assertEqual(
+            payload["release_evidence_contract_sha256"],
+            RELEASE.publication_evidence_contract()["sha256"],
+        )
         self.assertEqual(payload["source_sha256"], plan.jobs[0].as_payload()["source"]["sha256"])
         self.assertEqual(payload["target_sha256"], approved.target_sha256)
         self.assertEqual(payload["glossary_version"], "blun-glossary-3")
@@ -308,6 +312,16 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertIsNone(
             receipt_binding["commercial_review_resolution_contract_sha256"],
         )
+        with patch.object(
+            RELEASE,
+            "publication_evidence_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                self.store.lookup(
+                    plan, plan.jobs[0].job_id, self.authority, now=201,
+                )
+        self.assertEqual(caught.exception.code, "approval.binding_mismatch")
 
     def test_translation_memory_reuses_one_job_across_plan_compositions(self):
         single = make_plan(("sv-SE",))

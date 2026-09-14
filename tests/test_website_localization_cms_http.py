@@ -84,6 +84,9 @@ def publication_request(authority=None):
             "approval_expires_at": 2000,
             "release_evidence": {
                 "schema": CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+                "release_evidence_contract_sha256": (
+                    CMS._RELEASE.publication_evidence_contract()["sha256"]
+                ),
                 "job_id": "blun-l10n-job-" + "4" * 64,
                 "target_locale": "fi-FI",
                 "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),

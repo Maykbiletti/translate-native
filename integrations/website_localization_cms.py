@@ -31,9 +31,9 @@ PUBLICATION_SCHEMA = "blun.cms-localization-publication.v3"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
-CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v8"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v9"
 PUBLICATION_HTTP_CONTRACT_SCHEMA = (
-    "blun.cms-localization-publication-http-capabilities.v4"
+    "blun.cms-localization-publication-http-capabilities.v5"
 )
 PUBLICATION_HTTP_REQUEST_SCHEMA = "blun.cms-localization-publication-http.v1"
 PUBLICATION_HTTP_RESPONSE_SCHEMA = "blun.cms-localization-publication-http-ack.v1"

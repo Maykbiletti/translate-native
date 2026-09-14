@@ -21,15 +21,16 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v5"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v6"
 RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v5"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v6"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v7"
 PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
     "blun.website-localization-release-evidence-capabilities.v1"
 )
 PUBLICATION_EVIDENCE_FIELDS = (
-    "schema", "job_id", "target_locale", "target_sha256", "approval_id",
+    "schema", "release_evidence_contract_sha256", "job_id", "target_locale",
+    "target_sha256", "approval_id",
     "content_type", "result_sha256", "approval_sha256",
     "quality_receipt_sha256", "evidence_request_id", "evidence_revision",
     "commercial_profile", "commercial_quality_profile", "commercial_review",
@@ -143,6 +144,8 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
     if (
         value.get("schema") != PUBLICATION_EVIDENCE_SCHEMA
+        or value.get("release_evidence_contract_sha256")
+        != publication_evidence_contract()["sha256"]
         or any(
             not isinstance(value.get(field), str)
             or TOKEN.fullmatch(value[field]) is None
@@ -289,8 +292,8 @@ def _publication_evidence_contract_body() -> dict[str, Any]:
         "required_fields": list(PUBLICATION_EVIDENCE_FIELDS),
         "bindings": {
             "sha256_fields": [
-                "target_sha256", "result_sha256", "approval_sha256",
-                "quality_receipt_sha256",
+                "release_evidence_contract_sha256", "target_sha256",
+                "result_sha256", "approval_sha256", "quality_receipt_sha256",
             ],
             "lineage_fields": ["evidence_request_id", "evidence_revision"],
             "target_identity_fields": [
@@ -806,6 +809,9 @@ class LocalizationReleaseStore:
 
         immutable = {
             "schema": APPROVAL_SCHEMA,
+            "release_evidence_contract_sha256": (
+                publication_evidence_contract()["sha256"]
+            ),
             "evidence_request_id": evidence_request_id,
             "evidence_revision": evidence_revision,
             "job_id": job_id,
@@ -910,7 +916,8 @@ class LocalizationReleaseStore:
             raise LocalizationReleaseBlocked("translation_memory.json.invalid") from None
         result = _validate_result(job, result)
         expected_keys = {
-            "schema", "evidence_request_id", "evidence_revision", "job_id",
+            "schema", "release_evidence_contract_sha256",
+            "evidence_request_id", "evidence_revision", "job_id",
             "source_sha256", "target_sha256", "source_locale",
             "target_locale", "content_type", "glossary_version", "policy_version",
             "provider", "software_version", "worker_schema", "result_sha256",
@@ -925,6 +932,9 @@ class LocalizationReleaseStore:
             raise LocalizationReleaseBlocked("approval.binding_mismatch")
         binding = {
             "schema": APPROVAL_SCHEMA,
+            "release_evidence_contract_sha256": (
+                publication_evidence_contract()["sha256"]
+            ),
             "evidence_request_id": payload.get("evidence_request_id"),
             "evidence_revision": payload.get("evidence_revision"),
             "job_id": row["job_id"],
@@ -1021,6 +1031,9 @@ class LocalizationReleaseStore:
             candidate=result["candidate"],
             release_evidence=validate_publication_evidence({
                 "schema": PUBLICATION_EVIDENCE_SCHEMA,
+                "release_evidence_contract_sha256": payload[
+                    "release_evidence_contract_sha256"
+                ],
                 "job_id": row["job_id"],
                 "target_locale": row["target_locale"],
                 "target_sha256": row["target_sha256"],

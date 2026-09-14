@@ -739,13 +739,22 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
         )
         self.assertEqual(release_contract["required_fields"], [
-            "schema", "job_id", "target_locale", "target_sha256",
+            "schema", "release_evidence_contract_sha256", "job_id",
+            "target_locale", "target_sha256",
             "approval_id", "content_type", "result_sha256",
             "approval_sha256", "quality_receipt_sha256",
             "evidence_request_id", "evidence_revision",
             "commercial_profile", "commercial_quality_profile",
             "commercial_review", "commercial_review_resolution",
         ])
+        self.assertEqual(
+            release_contract["bindings"]["sha256_fields"],
+            [
+                "release_evidence_contract_sha256", "target_sha256",
+                "result_sha256", "approval_sha256",
+                "quality_receipt_sha256",
+            ],
+        )
         self.assertEqual(
             release_contract["bindings"]["lineage_fields"],
             ["evidence_request_id", "evidence_revision"],

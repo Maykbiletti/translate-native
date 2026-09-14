@@ -1313,8 +1313,9 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v6` object. That content-free
-object binds the signed approval and worker-result hashes, quality-receipt
+a `blun.website-localization-release-evidence.v7` object. That content-free
+object binds the exact machine-readable release-evidence-contract SHA-256,
+signed approval and worker-result hashes, quality-receipt
 hash, canonical evidence request ID and evidence revision, and either a null
 commercial scope or the exact commercial-profile ID,
 locale-specific commercial quality-profile version and digest, and validated
@@ -1326,7 +1327,7 @@ provider IDs differ and rejects a missing, stale, unexpected, cross-scope, or
 method-inconsistent resolution before the host commit. It contains no source
 text, target text, amount,
 currency, tax wording, brand, or reviewer explanation. A CMS can therefore
-identify the exact evidence generation, pin the advertised profile, and reject
+identify the exact evidence and contract generation, pin the advertised profile, and reject
 missing, malformed, or drifted evidence
 before replacing its current content, without treating a cross-language regex
 as semantic proof.
@@ -1419,10 +1420,12 @@ site, website version, plan, source identity, source generation and hash,
 complete sorted required-locale set, content type, and commercial profile.
 The public capabilities additionally carry a separately hashed release-evidence
 contract with the exact field, digest, lineage, commercial-scope, and privacy
-rules. The runtime validates that complete contract against its canonical
-registry, so an altered but self-rehashed substitute blocks before host code.
+rules. Every signed approval and release proof binds its exact contract digest.
+The runtime validates that complete contract against its canonical registry,
+so stale evidence and altered but self-rehashed substitutes block before host
+code.
 For commercial content, the receiver also recomputes each locale's canonical
-commercial quality-profile version and digest and requires the signed v6
+commercial quality-profile version and digest and requires the signed v7
 release evidence to match it exactly. A correctly signed but partial, stale,
 cross-locale, or differently scoped publication is therefore rejected before
 any CMS write.
