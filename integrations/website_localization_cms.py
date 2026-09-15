@@ -60,6 +60,7 @@ PUBLICATION_HEALTH_HTTP_BINDING_HEADERS = (
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
+MAX_DELIVERY_POLICY_QUARANTINE = 24
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 SIGNATURE_VALUE = re.compile(r"^[A-Za-z0-9_.:/+=-]{1,4096}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -2829,27 +2830,15 @@ class WebsiteLocalizationCMSBridge:
         validated_expiries = tuple(
             _timestamp(expiry, "cms.delivery.tampered") for expiry in expiries
         )
-        try:
-            for item in localizations:
-                if not isinstance(item, dict):
-                    raise _RELEASE.LocalizationReleaseBlocked(
-                        "publication.evidence.invalid"
-                    )
-                if not _valid_release_evidence(
-                    item.get("release_evidence"),
-                    locale=item.get("locale"),
-                    target_sha256=item.get("target_sha256"),
-                    approval_id=item.get("approval_id"),
-                ):
-                    raise _RELEASE.LocalizationReleaseBlocked(
-                        "publication.evidence.invalid"
-                    )
-        except _RELEASE.LocalizationReleaseBlocked:
-            raise CMSBridgeBlocked("cms.delivery.tampered") from None
-        if require_current_approvals and any(
-            expiry <= now for expiry in validated_expiries
-        ):
-            raise CMSBridgeBlocked("cms.delivery.approval_expired")
+        for item in localizations:
+            if not isinstance(item, dict) or not _valid_release_evidence(
+                item.get("release_evidence"),
+                locale=item.get("locale"),
+                target_sha256=item.get("target_sha256"),
+                approval_id=item.get("approval_id"),
+                require_current_locale_quality=False,
+            ):
+                raise CMSBridgeBlocked("cms.delivery.tampered")
         signature = _signature(CMSMessageSignature(
             row["signature_algorithm"], row["key_id"], row["signature"],
         ))
@@ -2859,6 +2848,17 @@ class WebsiteLocalizationCMSBridge:
             signature,
             "cms.delivery.signature_invalid",
         )
+        if require_current_approvals:
+            for item in localizations:
+                if not _valid_release_evidence(
+                    item["release_evidence"],
+                    locale=item["locale"],
+                    target_sha256=item["target_sha256"],
+                    approval_id=item["approval_id"],
+                ):
+                    raise CMSBridgeBlocked("cms.delivery.policy_stale")
+            if any(expiry <= now for expiry in validated_expiries):
+                raise CMSBridgeBlocked("cms.delivery.approval_expired")
         return CMSPublicationRequest(row["delivery_id"], payload, row["payload_sha256"], signature)
 
     def _tombstone_request_from_row(
@@ -3176,44 +3176,68 @@ class WebsiteLocalizationCMSBridge:
                     last_error_code = 'lease_expired', updated_at = ?
                 WHERE status = 'leased' AND lease_expires_at <= ? AND attempts < max_attempts
             """, (now, now, now))
-            row = self.connection.execute("""
-                SELECT * FROM cms_publication_deliveries
-                WHERE status IN ('pending', 'retry_wait') AND next_attempt_at <= ?
-                  AND attempts < max_attempts
-                  AND event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
-                  AND event_id NOT IN (SELECT event_id FROM cms_event_cancellations)
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM cms_event_topics AS current
-                      JOIN cms_event_topics AS newer
-                        ON newer.site_id = current.site_id
-                       AND newer.source_id = current.source_id
-                       AND newer.generation > current.generation
-                      JOIN cms_change_events AS newer_event
-                        ON newer_event.event_id = newer.event_id
-                      WHERE current.event_id = cms_publication_deliveries.event_id
-                        AND newer_event.status = 'enqueued'
-                  )
-                ORDER BY created_at, delivery_id LIMIT 1
-            """, (now,)).fetchone()
-            if row is None:
-                return None
-            request = self._request_from_row(row, authority, now)
-            lease_token = secrets.token_urlsafe(32)
-            expires = now + lease_seconds
-            updated = self.connection.execute("""
-                UPDATE cms_publication_deliveries
-                SET status = 'leased', attempts = attempts + 1, lease_owner = ?,
-                    lease_token = ?, lease_expires_at = ?, last_error_code = NULL,
-                    last_error_detail_hash = NULL, updated_at = ?
-                WHERE delivery_id = ? AND status IN ('pending', 'retry_wait')
-            """, (worker_id, lease_token, expires, now, row["delivery_id"]))
-            if updated.rowcount != 1:
-                raise CMSBridgeBlocked("cms.delivery.claim_lost")
-            return ClaimedDelivery(
-                request, int(row["attempts"]) + 1, int(row["max_attempts"]),
-                worker_id, lease_token, expires,
-            )
+            quarantined = 0
+            while True:
+                row = self.connection.execute("""
+                    SELECT * FROM cms_publication_deliveries
+                    WHERE status IN ('pending', 'retry_wait') AND next_attempt_at <= ?
+                      AND attempts < max_attempts
+                      AND event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
+                      AND event_id NOT IN (SELECT event_id FROM cms_event_cancellations)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM cms_event_topics AS current
+                          JOIN cms_event_topics AS newer
+                            ON newer.site_id = current.site_id
+                           AND newer.source_id = current.source_id
+                           AND newer.generation > current.generation
+                          JOIN cms_change_events AS newer_event
+                            ON newer_event.event_id = newer.event_id
+                          WHERE current.event_id = cms_publication_deliveries.event_id
+                            AND newer_event.status = 'enqueued'
+                      )
+                    ORDER BY created_at, delivery_id LIMIT 1
+                """, (now,)).fetchone()
+                if row is None:
+                    return None
+                try:
+                    request = self._request_from_row(row, authority, now)
+                except CMSBridgeBlocked as error:
+                    quarantine_codes = {
+                        "cms.delivery.policy_stale": "release_evidence_stale",
+                        "cms.delivery.approval_expired": "approval_expired",
+                    }
+                    code = quarantine_codes.get(error.code)
+                    if code is None:
+                        raise
+                    self.connection.execute("""
+                        UPDATE cms_publication_deliveries
+                        SET status = 'failed', lease_owner = NULL,
+                            lease_token = NULL, lease_expires_at = NULL,
+                            last_error_code = ?, last_error_detail_hash = NULL,
+                            updated_at = ?
+                        WHERE delivery_id = ?
+                          AND status IN ('pending', 'retry_wait')
+                    """, (code, now, row["delivery_id"]))
+                    quarantined += 1
+                    if quarantined >= MAX_DELIVERY_POLICY_QUARANTINE:
+                        return None
+                    continue
+                lease_token = secrets.token_urlsafe(32)
+                expires = now + lease_seconds
+                updated = self.connection.execute("""
+                    UPDATE cms_publication_deliveries
+                    SET status = 'leased', attempts = attempts + 1, lease_owner = ?,
+                        lease_token = ?, lease_expires_at = ?, last_error_code = NULL,
+                        last_error_detail_hash = NULL, updated_at = ?
+                    WHERE delivery_id = ? AND status IN ('pending', 'retry_wait')
+                """, (worker_id, lease_token, expires, now, row["delivery_id"]))
+                if updated.rowcount != 1:
+                    raise CMSBridgeBlocked("cms.delivery.claim_lost")
+                return ClaimedDelivery(
+                    request, int(row["attempts"]) + 1, int(row["max_attempts"]),
+                    worker_id, lease_token, expires,
+                )
 
     def _live_delivery(self, claim: Any, now: float) -> sqlite3.Row:
         if not isinstance(claim, ClaimedDelivery):
@@ -3302,6 +3326,29 @@ class WebsiteLocalizationCMSBridge:
                 raise CMSBridgeBlocked(
                     "cms.delivery.operation_guard_failed",
                 ) from None
+        try:
+            validation_now = _timestamp(clock(), "cms.time.invalid")
+            row = self._live_delivery(claim, validation_now)
+            current_request = self._request_from_row(
+                row, publication_authority, validation_now,
+            )
+            if current_request != claim.request:
+                raise CMSBridgeBlocked("cms.delivery.tampered")
+        except CMSBridgeBlocked as original_error:
+            validation_codes = {
+                "cms.delivery.policy_stale": "release_evidence_stale",
+                "cms.delivery.approval_expired": "approval_expired",
+                "cms.delivery.tampered": "delivery_integrity",
+                "cms.delivery.signature_invalid": "delivery_integrity",
+            }
+            code = validation_codes.get(original_error.code)
+            if code is None:
+                raise
+            error = CMSPublishFailed(code, retryable=False)
+            status = self._finish(claim, now=validation_now, error=error)
+            return DeliveryOutcome(
+                status.status, status.delivery_id, status.attempts, code,
+            )
         publish = getattr(publisher, "publish", None)
         try:
             if not callable(publish):

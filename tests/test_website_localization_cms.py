@@ -634,6 +634,46 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         self.assertEqual(publisher.requests, [])
         self.assertEqual(self.bridge.delivery_status(request.delivery_id).status, "leased")
 
+    def test_policy_is_revalidated_after_guard_before_publisher_call(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare()
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def changed_profile(locale):
+            profile = original(locale)
+            if locale == "de-AT":
+                profile = dict(profile)
+                profile["version"] = profile["version"] + ".changed"
+                profile["sha256"] = "f" * 64
+            return profile
+
+        def change_policy(_):
+            planner.quality_profile_for = changed_profile
+
+        try:
+            outcome = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="publisher-worker",
+                clock=Clock(260),
+                lease_seconds=20,
+                operation_guard=change_policy,
+            )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(
+            (outcome.status, outcome.error_code),
+            ("failed", "release_evidence_stale"),
+        )
+        self.assertEqual(publisher.requests, [])
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual((status.status, status.attempts), ("failed", 1))
+        self.assertIsNone(status.last_error_detail_hash)
+
     def test_invalid_ack_retries_with_bound_and_opaque_error(self):
         self.ingest()
         self.release_all()
@@ -834,20 +874,117 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "cms.delivery.tampered")
         self.assertEqual(publisher.requests, [])
 
-    def test_expired_approval_blocks_before_publisher_call(self):
+    def test_expired_approval_is_quarantined_before_publisher_call(self):
         self.ingest()
         self.release_all()
-        self.prepare()
+        request = self.prepare()
         publisher = Publisher()
-        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
-            self.bridge.run_delivery(
+        outcome = self.bridge.run_delivery(
+            publisher,
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(1200),
+        )
+        self.assertEqual(outcome.status, "idle")
+        self.assertEqual(publisher.requests, [])
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual(
+            (status.status, status.attempts, status.last_error_code),
+            ("failed", 0, "approval_expired"),
+        )
+        self.assertIsNone(status.last_error_detail_hash)
+
+    def test_expired_delivery_does_not_block_valid_following_delivery(self):
+        first_event = change_event()
+        self.ingest(first_event)
+        self.release_all(first_event)
+        first = self.prepare(first_event)
+        payload = json.loads(CMS._canonical_json(first.payload))
+        for localization in payload["localizations"]:
+            localization["approval_expires_at"] = 259.0
+        payload_json = CMS._canonical_json(payload)
+        signature = self.publication_authority.sign(payload_json.encode("utf-8"))
+        self.cms_connection.execute("""
+            UPDATE cms_publication_deliveries
+            SET payload_json = ?, payload_sha256 = ?, signature = ?, created_at = 249
+            WHERE delivery_id = ?
+        """, (
+            payload_json,
+            hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+            signature.signature,
+            first.delivery_id,
+        ))
+        self.cms_connection.commit()
+
+        second_event = change_event(
+            event_id="cms-event-185",
+            site_id="second-site",
+            source_id="second-homepage.hero",
+            source_revision="cms-185",
+            source_text="Build a second business with BLUN.",
+        )
+        self.ingest(second_event, now=101)
+        self.release_all(second_event)
+        second = self.prepare(second_event)
+        publisher = Publisher()
+
+        outcome = self.bridge.run_delivery(
+            publisher,
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(260),
+        )
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(
+            [request.delivery_id for request in publisher.requests],
+            [second.delivery_id],
+        )
+        first_status = self.bridge.delivery_status(first.delivery_id)
+        self.assertEqual(
+            (
+                first_status.status,
+                first_status.attempts,
+                first_status.last_error_code,
+            ),
+            ("failed", 0, "approval_expired"),
+        )
+
+    def test_stale_policy_is_quarantined_without_consuming_attempt(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare()
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def changed_profile(locale):
+            profile = original(locale)
+            if locale == "sv-SE":
+                profile = dict(profile)
+                profile["version"] = profile["version"] + ".changed"
+                profile["sha256"] = "e" * 64
+            return profile
+
+        planner.quality_profile_for = changed_profile
+        try:
+            outcome = self.bridge.run_delivery(
                 publisher,
                 self.publication_authority,
                 worker_id="cms-worker",
-                clock=Clock(1200),
+                clock=Clock(260),
             )
-        self.assertEqual(caught.exception.code, "cms.delivery.approval_expired")
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(outcome.status, "idle")
         self.assertEqual(publisher.requests, [])
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual(
+            (status.status, status.attempts, status.last_error_code),
+            ("failed", 0, "release_evidence_stale"),
+        )
+        self.assertIsNone(status.last_error_detail_hash)
 
     def test_new_revision_supersedes_old_event_and_pending_delivery(self):
         old = change_event()
