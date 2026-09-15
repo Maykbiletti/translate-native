@@ -345,6 +345,37 @@ class WebsiteLocalizationRunnerTests(unittest.TestCase):
         self.assertIsNone(status.last_error_detail_hash)
         self.assertEqual(calls, [])
 
+    def test_stale_locale_does_not_block_next_current_locale(self):
+        current = plan(("de-AT", "sv-SE"))
+        self.queue.enqueue_plan(current, now=90)
+        original = RUNNER._WORKER._validated_job
+        calls = []
+
+        def validate(payload):
+            if payload["target"]["locale"] == "de-AT":
+                raise WORKER.LocalizationWorkerBlocked(
+                    "job.binding_mismatch", retryable=False,
+                )
+            return original(payload)
+
+        with patch.object(RUNNER._WORKER, "_validated_job", side_effect=validate):
+            outcome = RUNNER.run_next_localization_job(
+                self.queue,
+                "worker-a",
+                lambda payload: calls.append(("provider", payload["target"]["locale"]))
+                or successful_provider(),
+                lambda payload: calls.append(("assets", payload["target"]["locale"]))
+                or assets(),
+                clock=IncrementingClock(),
+                lease_seconds=10,
+            )
+
+        stale = self.queue.status(current.jobs[0].job_id)
+        self.assertEqual((stale.status, stale.attempts), ("failed", 0))
+        self.assertEqual(stale.last_error_code, "job_binding_invalid")
+        self.assertEqual((outcome.status, outcome.target_locale), ("succeeded", "sv-SE"))
+        self.assertEqual(calls, [("assets", "sv-SE"), ("provider", "sv-SE")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,23 @@
 # Version 6 premortem
 
+## Stale-job quarantine without head-of-line blocking (15 September 2026)
+
+Assume several durable locale jobs outlive the worker contract while valid
+work is already waiting behind them.
+
+- One stale head job per service tick could delay every current locale.
+- A 24-locale plan could require many ticks merely to expose known drift.
+- Quarantining stale rows must not consume attempts or resolve assets/providers.
+- A later validator outage must not leave a partially committed batch decision.
+
+One claim now quarantines a bounded batch of up to 24 consecutive stale jobs
+inside the same transaction and leases the first current job reached within
+that batch. This covers one complete EU-locale plan without an unbounded write
+transaction. Proven stale rows become terminal and content-free with zero
+attempts, while valid work proceeds in that same call. If any later validation
+raises or mutates a payload, the whole batch rolls back and all work remains
+recoverable.
+
 ## Current job bindings before lease (15 September 2026)
 
 Assume a canonical durable job outlives the planner or worker contract that

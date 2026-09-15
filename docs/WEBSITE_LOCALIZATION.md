@@ -114,9 +114,12 @@ are hashed on insertion and checked again before a worker receives them.
 Immediately before leasing, the queue also replays the exact current worker
 binding. A stale but internally consistent job becomes terminal with
 `job_binding_invalid` without consuming an attempt or reaching caches, asset
-resolvers, or providers. Expected contract mismatch is distinct from validator
-unavailability: unexpected failure or payload mutation rolls back and leaves
-the job pending.
+resolvers, or providers. A bounded batch of up to 24 consecutive stale jobs is
+quarantined in the same transaction before the first current job is leased,
+covering one complete EU-locale plan without an unbounded write transaction.
+Expected contract mismatch is distinct from validator unavailability:
+unexpected failure or payload mutation rolls back the complete
+quarantine-and-lease batch and leaves every job pending.
 The read-only health monitor additionally replays the complete current
 planner/worker validation for every stored job. Canonical but obsolete jobs,
 including commercial jobs from an earlier evidence-contract generation, block

@@ -29,6 +29,7 @@ MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
 MAX_PAYLOAD_BYTES = 2_000_000
 MAX_RESULT_BYTES = 2_000_000
+MAX_BINDING_QUARANTINE = 24
 QUALITY_PASSES = ["target_native", "source_fidelity"]
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
@@ -384,8 +385,38 @@ class LocalizationQueue:
             eligible_plan_ids = tuple(sorted({
                 _field("eligible_plan_id", value) for value in eligible_plan_ids
             }))
+        selection_sql: str | None
+        selection_parameters: tuple[Any, ...]
+        if eligible_plan_ids is not None and not eligible_plan_ids:
+            selection_sql = None
+            selection_parameters = ()
+        elif eligible_plan_ids is None:
+            selection_sql = """
+                SELECT * FROM localization_jobs
+                WHERE status IN ('pending', 'retry_wait')
+                  AND next_attempt_at <= ? AND attempts < max_attempts
+                ORDER BY created_at, target_locale, job_id
+                LIMIT 1
+            """
+            selection_parameters = (now,)
+        else:
+            placeholders = ",".join("?" for _ in eligible_plan_ids)
+            selection_sql = f"""
+                SELECT jobs.* FROM localization_jobs AS jobs
+                WHERE jobs.status IN ('pending', 'retry_wait')
+                  AND jobs.next_attempt_at <= ? AND jobs.attempts < jobs.max_attempts
+                  AND EXISTS (
+                      SELECT 1 FROM localization_plan_jobs AS mapping
+                      WHERE mapping.job_id = jobs.job_id
+                        AND mapping.plan_id IN ({placeholders})
+                  )
+                ORDER BY jobs.created_at, jobs.target_locale, jobs.job_id
+                LIMIT 1
+            """
+            selection_parameters = (now, *eligible_plan_ids)
         blocked_error: str | None = None
         claimed: ClaimedJob | None = None
+        quarantined = 0
         with _transaction(self.connection):
             self.connection.execute("""
                 UPDATE localization_jobs
@@ -403,31 +434,12 @@ class LocalizationQueue:
                 WHERE status = 'leased' AND lease_expires_at <= ?
                   AND attempts < max_attempts
             """, (now, now, now))
-            if eligible_plan_ids is not None and not eligible_plan_ids:
-                row = None
-            elif eligible_plan_ids is None:
-                row = self.connection.execute("""
-                    SELECT * FROM localization_jobs
-                    WHERE status IN ('pending', 'retry_wait')
-                      AND next_attempt_at <= ? AND attempts < max_attempts
-                    ORDER BY created_at, target_locale, job_id
-                    LIMIT 1
-                """, (now,)).fetchone()
-            else:
-                placeholders = ",".join("?" for _ in eligible_plan_ids)
-                row = self.connection.execute(f"""
-                    SELECT jobs.* FROM localization_jobs AS jobs
-                    WHERE jobs.status IN ('pending', 'retry_wait')
-                      AND jobs.next_attempt_at <= ? AND jobs.attempts < jobs.max_attempts
-                      AND EXISTS (
-                          SELECT 1 FROM localization_plan_jobs AS mapping
-                          WHERE mapping.job_id = jobs.job_id
-                            AND mapping.plan_id IN ({placeholders})
-                      )
-                    ORDER BY jobs.created_at, jobs.target_locale, jobs.job_id
-                    LIMIT 1
-                """, (now, *eligible_plan_ids)).fetchone()
-            if row is not None:
+            while selection_sql is not None:
+                row = self.connection.execute(
+                    selection_sql, selection_parameters,
+                ).fetchone()
+                if row is None:
+                    break
                 payload_hash = _hash_text(row["payload_json"])
                 if payload_hash != row["payload_sha256"]:
                     self.connection.execute("""
@@ -465,6 +477,10 @@ class LocalizationQueue:
                                 WHERE job_id = ?
                             """, (now, row["job_id"]))
                             blocked_error = "queued job binding is no longer current"
+                            quarantined += 1
+                            if quarantined >= MAX_BINDING_QUARANTINE:
+                                break
+                            continue
                         else:
                             lease_token = secrets.token_urlsafe(32)
                             lease_expires_at = now + lease_seconds
@@ -495,7 +511,9 @@ class LocalizationQueue:
                                 lease_token=lease_token,
                                 lease_expires_at=lease_expires_at,
                             )
-        if blocked_error:
+                            break
+                break
+        if blocked_error and claimed is None:
             raise LocalizationQueueBlocked(blocked_error)
         return claimed
 
