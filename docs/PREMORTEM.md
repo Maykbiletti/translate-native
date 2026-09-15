@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Offer-complete commercial benchmark verdicts (16 September 2026)
+
+Assume the blind commercial benchmark reports a publishable result even though
+one of several source offers contains a changed price or condition.
+
+- One dimension-level verdict could describe only the first offer and silently
+  omit later offers.
+- A reviewer could return the right number of rows in the wrong order or reuse
+  an offer index.
+- A harmless offer could determine the aggregate verdict while a major or
+  blocking defect in another offer remains hidden.
+- A signed stored result could lose its per-offer evidence after unblinding or
+  report aggregation.
+
+The suite will register an explicit opaque offer count for every commercial
+fixture. Source-fidelity review will require one ordered status per offer, per
+dimension, and per anonymous variant, with a severity-derived aggregate that
+cannot override any major or blocking offer defect. Signed case results and
+reports will retain and revalidate the complete matrix. Tests will cover
+missing, duplicated and reordered offers, inconsistent aggregates, unbound
+defects, tampered stored matrices, and multi-offer report blocking.
+
 ## Durable general locale-policy invalidation (15 September 2026)
 
 Assume a CMS accepts correctly signed localized content and the installed

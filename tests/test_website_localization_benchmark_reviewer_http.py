@@ -78,8 +78,9 @@ def review_request(*, phase="target_native", suffix="1", content_type="marketing
         if content_type == "commercial":
             dimensions = list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)
             review_input["benchmark_suite"]["commercial_dimensions"] = dimensions
+            review_input["benchmark_suite"]["commercial_offer_count"] = 2
             review_input["response_schema"]["commercial_evaluation"] = (
-                BENCHMARK._commercial_response_contract(dimensions)
+                BENCHMARK._commercial_response_contract(dimensions, 2)
             )
     else:
         review_input["target_terms"] = []
@@ -117,11 +118,22 @@ def review_response(request, *, preference="A", **overrides):
     if contract is not None:
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
+            "offer_count": contract["offer_count"],
             "dimensions": [
                 {
                     "dimension": item["dimension"],
                     "variants": {
-                        label: {"status": "equivalent", "defect_index": None}
+                        label: {
+                            "status": "equivalent",
+                            "offers": [
+                                {
+                                    "offer_index": offer["offer_index"],
+                                    "status": "equivalent",
+                                    "defect_index": None,
+                                }
+                                for offer in item["variants"][label]["offers"]
+                            ],
+                        }
                         for label in ("A", "B")
                     },
                 }
@@ -225,6 +237,9 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
         self.assertEqual(
             sent["input"]["benchmark_suite"]["commercial_dimensions"],
             dimensions,
+        )
+        self.assertEqual(
+            sent["input"]["benchmark_suite"]["commercial_offer_count"], 2,
         )
         self.assertEqual(
             [

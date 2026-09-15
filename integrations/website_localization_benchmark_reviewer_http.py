@@ -269,6 +269,12 @@ def _blind_input(value: dict[str, Any], *, phase: str, locale: str) -> None:
         and commercial_fidelity
         else None
     )
+    commercial_offer_count = (
+        benchmark_suite.get("commercial_offer_count")
+        if isinstance(benchmark_suite, dict)
+        and commercial_fidelity
+        else None
+    )
     if (
         not isinstance(benchmark_suite, dict)
         or not isinstance(value["target"], dict)
@@ -290,8 +296,12 @@ def _blind_input(value: dict[str, Any], *, phase: str, locale: str) -> None:
         or response_schema.get("blind_id") != value["blind_id"]
     ):
         raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False)
-    if commercial_fidelity and commercial_dimensions != list(
-        _BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS
+    if commercial_fidelity and (
+        commercial_dimensions != list(
+            _BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS
+        )
+        or type(commercial_offer_count) is not int
+        or not 1 <= commercial_offer_count <= 1000
     ):
         raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False)
     expected_response_schema = _BENCHMARK._review_response_contract(
@@ -301,10 +311,16 @@ def _blind_input(value: dict[str, Any], *, phase: str, locale: str) -> None:
         commercial_dimensions=(
             commercial_dimensions if commercial_fidelity else None
         ),
+        commercial_offer_count=(
+            commercial_offer_count if commercial_fidelity else None
+        ),
     )
     if response_schema != expected_response_schema:
         raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False)
-    if not commercial_fidelity and "commercial_dimensions" in benchmark_suite:
+    if not commercial_fidelity and (
+        "commercial_dimensions" in benchmark_suite
+        or "commercial_offer_count" in benchmark_suite
+    ):
         raise HTTPBenchmarkReviewerFailed("request_invalid", retryable=False)
 
 
@@ -488,6 +504,14 @@ class HTTPBenchmarkReviewerAdapter:
                 commercial_dimensions=(
                     payload["input"]["benchmark_suite"].get(
                         "commercial_dimensions",
+                    )
+                    if payload["phase"] == "source_fidelity"
+                    and payload["input"]["content_type"] == "commercial"
+                    else None
+                ),
+                commercial_offer_count=(
+                    payload["input"]["benchmark_suite"].get(
+                        "commercial_offer_count",
                     )
                     if payload["phase"] == "source_fidelity"
                     and payload["input"]["content_type"] == "commercial"

@@ -289,6 +289,15 @@ def _response(value: Any, request: dict[str, Any]) -> dict[str, Any]:
                 and isinstance(request["input"].get("benchmark_suite"), dict)
                 else None
             ),
+            commercial_offer_count=(
+                request["input"].get("benchmark_suite", {}).get(
+                    "commercial_offer_count",
+                )
+                if request["phase"] == "source_fidelity"
+                and request["input"].get("content_type") == "commercial"
+                and isinstance(request["input"].get("benchmark_suite"), dict)
+                else None
+            ),
         )
     except BenchmarkReviewEvidenceFailed:
         raise

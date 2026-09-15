@@ -783,12 +783,16 @@ preferences, defect counts and finding hashes—not reviewer reasons, excerpts,
 source text or either target.
 
 For a commercial `source_fidelity` response, persistence additionally requires
-the complete `translate-native.commercial-benchmark-review.v1` acknowledgement.
-It lists all ten dimensions in profile order and records a status for both
-anonymous variants. `major` and `blocking` statuses must reference the matching
-variant's zero-based defect entry; `equivalent` and `not_present` cannot carry a
-defect reference. `uncertain` blocks the case instead of becoming durable PASS
-evidence. The `target_native` response has no commercial acknowledgement and
+the complete `translate-native.commercial-benchmark-review.v2` acknowledgement.
+The versioned suite registers an opaque offer count for every fixture. The
+response lists all ten dimensions in profile order and, for both anonymous
+variants, returns exactly one ordered status for every registered offer.
+`major` and `blocking` offer statuses must reference the matching variant's
+zero-based defect entry; `equivalent` and `not_present` cannot carry a defect
+reference. The dimension status is derived by fixed severity, so an aggregate
+cannot hide a major or blocking defect in another offer. Missing, duplicated or
+reordered offer indexes, inconsistent aggregates and `uncertain` all block the
+case. The `target_native` response has no commercial acknowledgement and
 therefore remains source-blind.
 
 The review store also exposes a strictly read-only, content-free health view
@@ -812,10 +816,10 @@ owners of retry limits, backoff, leases, and reuse.
 
 Each `POST` body uses
 `blun.website-localization-benchmark-review-http-request.v1` and contains the
-exact anonymous `blun.website-localization-benchmark.v7`
+exact anonymous `blun.website-localization-benchmark.v8`
 `BenchmarkReviewRequest`, its deterministic `review_id`, and the SHA-256 digest
 of its canonical UTF-8 JSON. Its expected review object uses
-`blun.website-localization-benchmark-review.v2`. The same values are bound in
+`blun.website-localization-benchmark-review.v3`. The same values are bound in
 `Idempotency-Key`, `X-Benchmark-Review-Id`,
 `X-Benchmark-Review-Phase`, and
 `X-Benchmark-Review-Request-Sha256`. Authentication headers are obtained for

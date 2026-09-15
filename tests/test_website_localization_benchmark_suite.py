@@ -75,6 +75,13 @@ class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
             commercial_evaluation["cases_per_dimension"], len(commercial),
         )
         self.assertEqual(
+            commercial_evaluation["offer_status_scope"],
+            "all-registered-offers-per-dimension",
+        )
+        self.assertEqual(
+            commercial_evaluation["registered_offer_count"], 13,
+        )
+        self.assertEqual(
             commercial_evaluation["source_blind_native_exposure"], "none",
         )
         self.assertEqual(
@@ -86,8 +93,11 @@ class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
                 self.assertEqual(
                     case["commercial_dimensions"], list(COMMERCIAL.DIMENSIONS),
                 )
+                self.assertIs(type(case["commercial_offer_count"]), int)
+                self.assertGreaterEqual(case["commercial_offer_count"], 1)
             else:
                 self.assertNotIn("commercial_dimensions", case)
+                self.assertNotIn("commercial_offer_count", case)
         serialized = json.dumps(manifest, ensure_ascii=False).lower()
         for forbidden in ("target_text", "candidate_text", "baseline_text", "reference_translation"):
             self.assertNotIn(forbidden, serialized)

@@ -246,11 +246,12 @@ neither the source nor this semantic scope. Missing, additional, or reordered
 dimensions fail closed before a reviewer is called.
 
 The fidelity reviewer must return
-`translate-native.commercial-benchmark-review.v1`: one ordered item for every
-dimension and a decision for each anonymous variant. `equivalent` and
-`not_present` carry no defect reference. `major` and `blocking` point to the
-matching variant's zero-based defect entry, so a generic preference cannot hide
-which commercial check failed. `uncertain`, incomplete, reordered, additional,
-or contradictory acknowledgements fail closed. Only canonical response hashes,
-defect counts, and finding hashes survive in case evidence; reviewer prose does
-not.
+`translate-native.commercial-benchmark-review.v2`: one ordered item for every
+dimension and, within each anonymous variant, one ordered status for every
+opaque offer index registered by the fixture. `equivalent` and `not_present`
+carry no defect reference. `major` and `blocking` point to the matching
+variant's zero-based defect entry. The dimension aggregate is derived by fixed
+severity and cannot hide a defective offer. `uncertain`, missing, duplicated or
+reordered offers, additional rows and contradictory aggregates fail closed.
+Signed case evidence retains the complete per-offer status matrix with canonical
+response hashes and defect counts; reviewer prose does not survive.

@@ -111,6 +111,7 @@ def request(*, phase="target_native", locale="mt-MT", suffix="1", commercial=Fal
                 "commercial_dimensions": list(
                     BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS
                 ),
+                "commercial_offer_count": 2,
             },
         })
     return BENCHMARK.BenchmarkReviewRequest(
@@ -144,11 +145,22 @@ def response(review_request, preference="A"):
         ]
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
+            "offer_count": 2,
             "dimensions": [
                 {
                     "dimension": dimension,
                     "variants": {
-                        label: {"status": "equivalent", "defect_index": None}
+                        label: {
+                            "status": "equivalent",
+                            "offers": [
+                                {
+                                    "offer_index": index,
+                                    "status": "equivalent",
+                                    "defect_index": None,
+                                }
+                                for index in range(2)
+                            ],
+                        }
                         for label in ("A", "B")
                     },
                 }
@@ -242,6 +254,9 @@ class BenchmarkReviewEvidenceStoreTests(unittest.TestCase):
                 value["commercial_evaluation"]["dimensions"][0]["variants"][
                     "A"
                 ]["status"] = "uncertain"
+                value["commercial_evaluation"]["dimensions"][0]["variants"][
+                    "A"
+                ]["offers"][0]["status"] = "uncertain"
                 return value
 
         with self.assertRaises(STORE.BenchmarkReviewEvidenceFailed) as caught:

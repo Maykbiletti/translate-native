@@ -264,11 +264,22 @@ def review_response(request, preference, defects=None):
     if contract is not None:
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
+            "offer_count": contract["offer_count"],
             "dimensions": [
                 {
                     "dimension": item["dimension"],
                     "variants": {
-                        label: {"status": "equivalent", "defect_index": None}
+                        label: {
+                            "status": "equivalent",
+                            "offers": [
+                                {
+                                    "offer_index": offer["offer_index"],
+                                    "status": "equivalent",
+                                    "defect_index": None,
+                                }
+                                for offer in item["variants"][label]["offers"]
+                            ],
+                        }
                         for label in ("A", "B")
                     },
                 }
@@ -619,9 +630,22 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         )
         contract = fidelity.input["response_schema"]["commercial_evaluation"]
         self.assertEqual(contract["schema"], BENCHMARK.COMMERCIAL_REVIEW_SCHEMA)
+        self.assertEqual(contract["offer_count"], 2)
+        self.assertEqual(
+            fidelity.input["benchmark_suite"]["commercial_offer_count"], 2,
+        )
         self.assertEqual(
             [item["dimension"] for item in contract["dimensions"]],
             list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS),
+        )
+        self.assertEqual(
+            [
+                offer["offer_index"]
+                for offer in contract["dimensions"][0]["variants"]["A"][
+                    "offers"
+                ]
+            ],
+            [0, 1],
         )
         self.assertIn(
             "not digit strings", fidelity.system_instruction,
@@ -658,15 +682,24 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertEqual(len(reviewer.requests), 2)
 
     def test_commercial_uncertainty_and_unbound_defects_fail_closed(self):
+        def mutate_offer(evaluation, *, status, defect_index):
+            decision = evaluation["dimensions"][0]["variants"]["A"]
+            decision["status"] = status
+            decision["offers"][0].update(
+                status=status, defect_index=defect_index,
+            )
+
         cases = {
             "uncertain": (
-                lambda evaluation, response: evaluation["dimensions"][0]
-                ["variants"]["A"].update(status="uncertain"),
+                lambda evaluation, response: mutate_offer(
+                    evaluation, status="uncertain", defect_index=None,
+                ),
                 "benchmark.review.commercial_uncertain",
             ),
             "unbound-major": (
-                lambda evaluation, response: evaluation["dimensions"][0]
-                ["variants"]["A"].update(status="major", defect_index=0),
+                lambda evaluation, response: mutate_offer(
+                    evaluation, status="major", defect_index=0,
+                ),
                 "benchmark.review.invalid",
             ),
         }
@@ -690,6 +723,74 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.code, expected)
 
+    def test_commercial_review_requires_every_offer_once_in_registry_order(self):
+        mutations = {
+            "missing": lambda offers: offers.pop(),
+            "duplicate-index": lambda offers: offers[1].update(offer_index=0),
+            "boolean-index": lambda offers: offers[1].update(offer_index=True),
+            "reordered": lambda offers: offers.reverse(),
+            "additional": lambda offers: offers.append(copy.deepcopy(offers[0])),
+        }
+        for label, mutation in mutations.items():
+            class MutatingReviewer(PreferenceReviewer):
+                def review(self, request):
+                    value = super().review(request)
+                    if request.phase == "source_fidelity":
+                        offers = value["commercial_evaluation"]["dimensions"][0][
+                            "variants"
+                        ]["A"]["offers"]
+                        mutation(offers)
+                    return value
+
+            payload = job(suffix="commercial-7")
+            result = candidate_result(payload)
+            reviewer = MutatingReviewer(result["candidate"])
+            with self.subTest(label=label), self.assertRaises(
+                BENCHMARK.BenchmarkBlocked,
+            ) as caught:
+                self.run_benchmark(
+                    payload, result, baseline(payload), assets(), policy(),
+                    reviewer, blinding_key=self.key,
+                )
+            self.assertEqual(caught.exception.code, "benchmark.review.invalid")
+
+        class BooleanCountReviewer(PreferenceReviewer):
+            def review(self, request):
+                value = super().review(request)
+                if request.phase == "source_fidelity":
+                    value["commercial_evaluation"]["offer_count"] = True
+                return value
+
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline(payload), assets(), policy(),
+                BooleanCountReviewer(result["candidate"]),
+                blinding_key=self.key,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.review.invalid")
+
+    def test_commercial_dimension_aggregate_cannot_hide_offer_status(self):
+        class InconsistentReviewer(PreferenceReviewer):
+            def review(self, request):
+                value = super().review(request)
+                if request.phase == "source_fidelity":
+                    value["commercial_evaluation"]["dimensions"][0][
+                        "variants"
+                    ]["A"]["status"] = "not_present"
+                return value
+
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+        reviewer = InconsistentReviewer(result["candidate"])
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline(payload), assets(), policy(),
+                reviewer, blinding_key=self.key,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.review.invalid")
+
     def test_commercial_dimension_defect_references_nonpreferred_finding(self):
         payload = job(suffix="commercial-7")
         result = candidate_result(payload)
@@ -706,9 +807,13 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                     "excerpt": "offer condition",
                     "reason": "The condition is attached to the wrong offer.",
                 }]
-                value["commercial_evaluation"]["dimensions"][-1]["variants"][
-                    other
-                ] = {"status": "major", "defect_index": 0}
+                decision = value["commercial_evaluation"]["dimensions"][-1][
+                    "variants"
+                ][other]
+                decision["status"] = "major"
+                decision["offers"][1].update(
+                    status="major", defect_index=0,
+                )
                 return value
 
         reviewer = DimensionDefectReviewer(result["candidate"])
@@ -735,7 +840,9 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             {
                 "dimension": list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)[-1],
                 "candidate_status": "equivalent",
+                "candidate_offers": ["equivalent", "equivalent"],
                 "baseline_status": "major",
+                "baseline_offers": ["equivalent", "major"],
             },
         )
 
@@ -764,9 +871,13 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                         "excerpt": "cancellation condition",
                         "reason": "The cancellation condition changed.",
                     }]
-                    value["commercial_evaluation"]["dimensions"][-1][
+                    decision = value["commercial_evaluation"]["dimensions"][-1][
                         "variants"
-                    ][candidate_label] = {"status": "major", "defect_index": 0}
+                    ][candidate_label]
+                    decision["status"] = "major"
+                    decision["offers"][0].update(
+                        status="major", defect_index=0,
+                    )
                     return value
 
             reviewer = AuditedReviewer(
@@ -800,6 +911,13 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(audit["baseline"], {
             "equivalent": 8, "not_present": 0, "major": 0, "blocking": 0,
         })
+        self.assertEqual(audit["offer_count"], 13)
+        self.assertEqual(audit["candidate_offers"], {
+            "equivalent": 12, "not_present": 0, "major": 1, "blocking": 0,
+        })
+        self.assertEqual(audit["baseline_offers"], {
+            "equivalent": 13, "not_present": 0, "major": 0, "blocking": 0,
+        })
         self.assertEqual(lane["status"], "BLOCK")
         self.assertEqual(locale_report["status"], "BLOCK")
         self.assertFalse(report["superiority_claim_allowed"])
@@ -807,6 +925,18 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         unsigned = copy.deepcopy(results[-1])
         unsigned.pop("attestation")
         unsigned["commercial_evaluation"]["review_response_sha256"] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [*results[:-1], rebound])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[-1])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][0][
+            "candidate_offers"
+        ].pop()
         rebound = BENCHMARK._attest(
             unsigned, benchmark_policy, self.authority,
         )
@@ -830,6 +960,38 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             def drifted(value, mutation=mutation):
                 case = original(value)
                 mutation(case["commercial_dimensions"])
+                return case
+
+            reviewer = PreferenceReviewer(result["candidate"])
+            with self.subTest(label=label), mock.patch.object(
+                BENCHMARK._SUITE, "case_for_job", drifted,
+            ), self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+                self.run_benchmark(
+                    payload, result, baseline_artifact, assets(),
+                    benchmark_policy, reviewer, blinding_key=self.key,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.suite.commercial_scope_mismatch",
+            )
+            self.assertEqual(reviewer.requests, [])
+
+    def test_commercial_offer_registry_drift_blocks_before_benchmark_review(self):
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+        benchmark_policy = policy()
+        baseline_artifact = baseline(payload, benchmark_policy=benchmark_policy)
+        original = BENCHMARK._SUITE.case_for_job
+
+        for label, replacement in (
+            ("missing", None), ("boolean", True), ("zero", 0), ("changed", 1),
+        ):
+            def drifted(value, replacement=replacement):
+                case = original(value)
+                if replacement is None:
+                    case.pop("commercial_offer_count")
+                else:
+                    case["commercial_offer_count"] = replacement
                 return case
 
             reviewer = PreferenceReviewer(result["candidate"])
