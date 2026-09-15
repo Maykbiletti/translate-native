@@ -2500,6 +2500,17 @@ drift, malformed evidence, or invalid bindings return `409` with
 `cms.release.integrity_failed`; a simultaneous integrity defect takes
 precedence over resolver unavailability and is never retried.
 
+The general website-localization health monitor performs the same current
+locale-policy revalidation independently of lifecycle polling. It marks the
+release component and overall service health `blocked` with
+`release.policy_unavailable` for a temporary resolver outage,
+`release.policy_stale` for verified policy drift, or
+`release.integrity_failed` for malformed and otherwise unexpected release
+evidence. Verified drift or integrity failure takes precedence over a
+simultaneous outage. Per-locale evidence codes remain available in the
+content-free website-version record, and this health pass is strictly
+read-only.
+
 ```json
 {"approved_locales":["fi-FI"],"blocked_locales":[],"delivery":{"attempts":0,"delivery_id":"blun-cms-delivery-…","last_error_code":null,"last_error_detail_hash":null,"lease_expired":false,"lease_expires_at":null,"max_attempts":5,"next_attempt_at":1788955201.0,"status":"pending"},"event_id":"cms-event-184","plan_id":"blun-l10n-plan-…","queue_counts":{"failed":0,"leased":0,"pending":0,"retry_wait":0,"succeeded":1},"request_id":"lifecycle-8","required_locales":["fi-FI"],"schema":"blun.cms-localization-lifecycle.v3","site_id":"public-site","source_sequence":42,"status":"publishing","website_version":"release-42"}
 ```

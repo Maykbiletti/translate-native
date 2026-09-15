@@ -926,6 +926,7 @@ class LocalizationHealthMonitor:
                     queue_counts = self.queue.plan_counts(plan.plan_id)
                 readiness = self.release_store.readiness(
                     plan, approval_authority, now=now,
+                    current_policy_errors=True,
                 )
             except Exception:
                 reasons.add("cms.event.invalid")
@@ -970,7 +971,25 @@ class LocalizationHealthMonitor:
                 queue_counts=tuple(sorted(queue_counts.items())),
                 blocked_locales=readiness.blocked,
             ))
-            if any(code == "approval.expired" for _, code in readiness.blocked):
+            blocked_codes = {code for _, code in readiness.blocked}
+            expected_release_blocks = {"approval.missing", "approval.expired"}
+            policy_unavailable = "publication.evidence.policy_unavailable"
+            policy_stale = "publication.evidence.policy_stale"
+            unexpected_release_blocks = (
+                blocked_codes
+                - expected_release_blocks
+                - {policy_unavailable, policy_stale}
+            )
+            if unexpected_release_blocks:
+                reasons.add("release.integrity_failed")
+            elif policy_stale in blocked_codes:
+                # Verified drift has terminal precedence over a simultaneous
+                # resolver outage: no caller may treat the version as safely
+                # retryable while one locale is already known to be stale.
+                reasons.add("release.policy_stale")
+            elif policy_unavailable in blocked_codes:
+                reasons.add("release.policy_unavailable")
+            if "approval.expired" in blocked_codes:
                 reasons.add("release.approval_expired")
         return tuple(versions), reasons, providers
 
@@ -1445,6 +1464,9 @@ class LocalizationHealthMonitor:
             "queue.job_binding_invalid",
             "evidence.state_invalid",
             "release.approval_invalid",
+            "release.integrity_failed",
+            "release.policy_stale",
+            "release.policy_unavailable",
             "cms.delivery.invalid",
             "cms.tombstone.invalid",
             "cms.event.invalid",
