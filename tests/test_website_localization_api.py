@@ -541,6 +541,41 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             CMS._hash(CMS._canonical_json(unsigned_review_summary)),
         )
         self.assertEqual(
+            commercial["review_routing_schema"],
+            CMS._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+        )
+        review_routing_contract = commercial["review_routing_contract"]
+        self.assertEqual(
+            review_routing_contract["schema"],
+            CMS._COMMERCIAL.REVIEW_ROUTING_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            review_routing_contract["result_schema"],
+            CMS._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+        )
+        self.assertEqual(
+            review_routing_contract["offers"]["coverage"],
+            "exactly-one-per-registered-offer",
+        )
+        self.assertEqual(
+            review_routing_contract["offers"]["regions"]["span_format"],
+            "zero-based-unicode-code-points-exclusive-end",
+        )
+        self.assertFalse(
+            review_routing_contract["trust_boundary"]
+            ["public_release_evidence"],
+        )
+        self.assertTrue(all(
+            value is False
+            for value in review_routing_contract["content_policy"].values()
+        ))
+        unsigned_review_routing = dict(review_routing_contract)
+        review_routing_digest = unsigned_review_routing.pop("sha256")
+        self.assertEqual(
+            review_routing_digest,
+            CMS._hash(CMS._canonical_json(unsigned_review_routing)),
+        )
+        self.assertEqual(
             commercial["review_resolution_schema"],
             CMS._COMMERCIAL.REVIEW_RESOLUTION_SCHEMA,
         )
@@ -1193,6 +1228,49 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             ):
                 status, _, payload = self.capabilities_request(
                     request_id=f"capabilities-commercial-resolution-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
+            self.assertNotIn("locales", payload)
+
+    def test_capabilities_block_commercial_routing_contract_drift(self):
+        current = CMS._COMMERCIAL.public_review_routing_contract
+
+        def rehashed(profile, mutation):
+            value = current(profile)
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "byte-offsets": lambda value: value["offers"]["regions"].update(
+                span_format="zero-based-utf-8-bytes-exclusive-end",
+            ),
+            "overlap": lambda value: value["offers"]["regions"].update(
+                overlap="allowed",
+            ),
+            "partial-offers": lambda value: value["offers"].update(
+                coverage="selected-offers-only",
+            ),
+            "public-route": lambda value: value["trust_boundary"].update(
+                public_release_evidence=True,
+            ),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._COMMERCIAL,
+                "public_review_routing_contract",
+                lambda profile, mutation=mutation: rehashed(
+                    profile, mutation,
+                ),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-commercial-routing-{label}",
                 )
             self.assertEqual(
                 (status, payload["error"]),

@@ -317,6 +317,11 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         value["commercial_review_routing"] = {
             "schema": HTTP._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
             "profile": value["commercial_profile"],
+            "contract_sha256": (
+                HTTP._COMMERCIAL.public_review_routing_contract(
+                    value["commercial_profile"],
+                )["sha256"]
+            ),
             "offer_count": 1,
             "source_length": len(value["source_text"]),
             "target_length": len(value["target_text"]),
@@ -366,17 +371,23 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "binding_invalid")
         self.assertEqual(invalid_transport.calls, [])
 
-        invalid_routing = json.loads(json.dumps(valid))
-        invalid_routing["commercial_review_routing"]["offers"][0][
-            "target_spans"
-        ] = [[0, len(valid["target_text"]) + 1]]
-        invalid_transport = Transport(response_for)
-        with self.assertRaises(HTTP.HTTPReceiptVerifierFailed) as caught:
-            self.adapter(invalid_transport).verify(
-                binding=invalid_routing, receipt="signed-receipt",
-            )
-        self.assertEqual(caught.exception.code, "binding_invalid")
-        self.assertEqual(invalid_transport.calls, [])
+        for mutate in (
+            lambda routing: routing.update(contract_sha256="0" * 64),
+            lambda routing: routing["offers"][0].update(
+                target_spans=[[0, len(valid["target_text"]) + 1]],
+            ),
+        ):
+            invalid_routing = json.loads(json.dumps(valid))
+            mutate(invalid_routing["commercial_review_routing"])
+            invalid_transport = Transport(response_for)
+            with self.subTest(mutate=mutate), self.assertRaises(
+                HTTP.HTTPReceiptVerifierFailed,
+            ) as caught:
+                self.adapter(invalid_transport).verify(
+                    binding=invalid_routing, receipt="signed-receipt",
+                )
+            self.assertEqual(caught.exception.code, "binding_invalid")
+            self.assertEqual(invalid_transport.calls, [])
 
         invalid_scope = json.loads(json.dumps(valid))
         invalid_scope["commercial_review"]["review_required_offers"] = [{

@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v14"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v15"
 REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-evidence-capabilities.v2"
 )
@@ -21,7 +21,10 @@ REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-summary-capabilities.v7"
 )
 REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v6"
-REVIEW_ROUTING_SCHEMA = "translate-native.commercial-review-routing.v1"
+REVIEW_ROUTING_CAPABILITIES_SCHEMA = (
+    "translate-native.commercial-review-routing-capabilities.v1"
+)
+REVIEW_ROUTING_SCHEMA = "translate-native.commercial-review-routing.v2"
 EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v5"
 REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-resolution-capabilities.v4"
@@ -291,6 +294,72 @@ def public_review_evidence_contract(profile: str) -> dict[str, Any]:
     }
 
 
+def public_review_routing_contract(profile: str) -> dict[str, Any]:
+    """Return the exact public contract for private actionable offer routes."""
+    body = {
+        "schema": REVIEW_ROUTING_CAPABILITIES_SCHEMA,
+        "result_schema": REVIEW_ROUTING_SCHEMA,
+        "profile": profile,
+        "applies_when": {
+            "review_summary_status": "review_required",
+            "offer_count": "exact-review-summary-offer-count",
+        },
+        "required_fields": [
+            "schema", "profile", "contract_sha256", "offer_count",
+            "source_length", "target_length", "offers",
+        ],
+        "text_lengths": {
+            "fields": ["source_length", "target_length"],
+            "unit": "unicode-code-points",
+            "must_equal_complete_texts": True,
+        },
+        "offers": {
+            "coverage": "exactly-one-per-registered-offer",
+            "order": "offer-registry-order",
+            "item_required_fields": [
+                "offer_index", "source_spans", "target_spans",
+            ],
+            "offer_index": {
+                "meaning": "zero-based-opaque-offer-registry-position",
+                "minimum": 0,
+                "maximum_exclusive": 1000,
+                "order": "ascending",
+                "unique": True,
+            },
+            "regions": {
+                "fields": ["source_spans", "target_spans"],
+                "span_format": (
+                    "zero-based-unicode-code-points-exclusive-end"
+                ),
+                "non_empty_text": True,
+                "ordered": True,
+                "overlap": "forbidden-within-and-across-offers",
+                "discontiguous": True,
+                "at_least_one_side_non_empty": True,
+            },
+        },
+        "trust_boundary": {
+            "validates": "shape-offsets-order-count-and-text-lengths",
+            "semantic_truth": False,
+            "route_values": "private-evidence-and-receipt-boundary-only",
+            "public_release_evidence": False,
+            "publication_authority": False,
+        },
+        "content_policy": {
+            "configured_offer_identifiers": False,
+            "source_text": False,
+            "target_text": False,
+            "reviewer_prose": False,
+            "project_prices": False,
+            "project_brands": False,
+        },
+    }
+    return {
+        **body,
+        "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
+    }
+
+
 def public_review_resolution_contract(profile: str) -> dict[str, Any]:
     """Return the exact content-free contract for resolving uncertain checks."""
     body = {
@@ -442,6 +511,8 @@ def public_profile(profile: str) -> dict[str, Any]:
         "review_evidence_contract": public_review_evidence_contract(profile),
         "review_summary_schema": REVIEW_SUMMARY_SCHEMA,
         "review_summary_contract": public_review_summary_contract(profile),
+        "review_routing_schema": REVIEW_ROUTING_SCHEMA,
+        "review_routing_contract": public_review_routing_contract(profile),
         "review_resolution_schema": REVIEW_RESOLUTION_SCHEMA,
         "review_resolution_contract": public_review_resolution_contract(
             profile,
@@ -954,11 +1025,13 @@ def validate_review_routing_context(
         or not isinstance(target, str)
         or not isinstance(value, dict)
         or set(value) != {
-            "schema", "profile", "offer_count", "source_length",
-            "target_length", "offers",
+            "schema", "profile", "contract_sha256", "offer_count",
+            "source_length", "target_length", "offers",
         }
         or value.get("schema") != REVIEW_ROUTING_SCHEMA
         or value.get("profile") != profile
+        or value.get("contract_sha256")
+        != public_review_routing_contract(profile)["sha256"]
         or value.get("offer_count") != summary["offer_count"]
         or type(value.get("source_length")) is not int
         or value["source_length"] != len(source)
@@ -1039,6 +1112,7 @@ def review_routing_context(
     context = {
         "schema": REVIEW_ROUTING_SCHEMA,
         "profile": profile,
+        "contract_sha256": public_review_routing_contract(profile)["sha256"],
         "offer_count": len(evidence["offers"]),
         "source_length": len(source),
         "target_length": len(target),

@@ -21,12 +21,12 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v8"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v7"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v9"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v8"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v9"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v10"
 PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
-    "blun.website-localization-release-evidence-capabilities.v3"
+    "blun.website-localization-release-evidence-capabilities.v4"
 )
 PUBLICATION_EVIDENCE_FIELDS = (
     "schema", "release_evidence_contract_sha256", "job_id", "target_locale",

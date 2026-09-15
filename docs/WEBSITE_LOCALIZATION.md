@@ -871,7 +871,7 @@ byte-for-byte without signing again. A failed, omitted, duplicated, exchanged,
 or policy-stale work item therefore cannot disappear behind a partial aggregate,
 and a crash cannot silently replace the report used for a claim. Existing v1
 and v2 campaign databases migrate transactionally to the v3 report schema.
-Case-result schema v7 and report schema v11 bind the same `valid_until` value.
+Case-result schema v8 and report schema v11 bind the same `valid_until` value.
 
 After finalization, `BenchmarkCampaignStore.load_report` is the read-only
 consumer boundary. It opens a consistent snapshot, requires the exact complete
@@ -1046,7 +1046,7 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v7` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v8` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
@@ -1331,7 +1331,7 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v9` object. That content-free
+a `blun.website-localization-release-evidence.v10` object. That content-free
 object binds the exact machine-readable release-evidence-contract SHA-256,
 signed approval and worker-result hashes, quality-receipt
 hash, canonical evidence request ID and evidence revision, and either a null
@@ -1706,7 +1706,7 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v12` profile plus one exact
+versioned `translate-native.commercial.v13` profile plus one exact
 `translate-native.commercial-locale-quality-profile.v2` object to the job
 payload, job ID and plan ID; the existing seven types retain their previous
 payloads and IDs. It is available for every planner locale, including `mt-MT`
@@ -1823,13 +1823,17 @@ ordered allowed dimensions and the invariant between status and unresolved
 dimensions. Its evidence digest covers a versioned canonical binding of the
 commercial profile, exact advertised review-evidence-contract SHA-256, exact
 UTF-8 source and target hashes, and complete review evidence. Quality-evidence
-request v10 and receipt-binding v7 carry that exact summary. When review is
+request v11 and receipt-binding v8 carry that exact summary. When review is
 required, they additionally carry a private
-`translate-native.commercial-review-routing.v1` context that maps each opaque
+`translate-native.commercial-review-routing.v2` context that maps each opaque
 offer index to its exact ordered source and target regions. It contains no
 configured offer IDs, text, prices, brands, or reviewer prose, is validated
 against both complete texts before network access, and participates in request
-and receipt identity. It is deliberately absent from CMS release evidence.
+and receipt identity. Its required `contract_sha256` must match the separately
+advertised machine-readable routing contract, whose public shape fixes Unicode
+offset, exclusive-end, length, order, overlap, privacy, and trust-boundary
+semantics without exposing an actual route. The route itself is deliberately
+absent from CMS release evidence.
 Adapters can therefore route a reviewer to the affected offer without exposing
 project configuration publicly, while rejecting unknown, reordered,
 contradictory, or transplanted scope.

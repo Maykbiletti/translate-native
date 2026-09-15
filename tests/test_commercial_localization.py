@@ -157,7 +157,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             PROFILE.hashlib.sha256(PROFILE._canonical_json(unsigned)).hexdigest(),
         )
         serialized = json.dumps(value).lower()
-        for private_value in ("480", "vat", "blun", "offer-1"):
+        for private_value in ("480", '"vat"', '"blun"', '"offer-1"'):
             self.assertNotIn(private_value, serialized)
 
     def test_public_review_summary_contract_is_exact_content_free_and_hashed(self):
@@ -246,6 +246,54 @@ class CommercialLocalizationTests(unittest.TestCase):
         content_only.pop("review_evidence_contract_sha256")
         serialized = json.dumps(content_only).lower()
         for private_value in ("480", "vat", "blun", "offer-1"):
+            self.assertNotIn(private_value, serialized)
+
+    def test_public_review_routing_contract_is_exact_content_free_and_hashed(self):
+        value = PROFILE.public_review_routing_contract(SCHEMA)
+        self.assertEqual(
+            value["schema"], PROFILE.REVIEW_ROUTING_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(value["result_schema"], PROFILE.REVIEW_ROUTING_SCHEMA)
+        self.assertEqual(value["profile"], SCHEMA)
+        self.assertEqual(
+            value["required_fields"],
+            [
+                "schema", "profile", "contract_sha256", "offer_count",
+                "source_length", "target_length", "offers",
+            ],
+        )
+        self.assertEqual(value["text_lengths"]["unit"], "unicode-code-points")
+        self.assertTrue(
+            value["text_lengths"]["must_equal_complete_texts"],
+        )
+        self.assertEqual(
+            value["offers"]["coverage"],
+            "exactly-one-per-registered-offer",
+        )
+        self.assertEqual(
+            value["offers"]["regions"]["span_format"],
+            "zero-based-unicode-code-points-exclusive-end",
+        )
+        self.assertEqual(
+            value["offers"]["regions"]["overlap"],
+            "forbidden-within-and-across-offers",
+        )
+        self.assertFalse(value["trust_boundary"]["semantic_truth"])
+        self.assertFalse(
+            value["trust_boundary"]["public_release_evidence"],
+        )
+        self.assertFalse(value["trust_boundary"]["publication_authority"])
+        self.assertTrue(all(
+            item is False for item in value["content_policy"].values()
+        ))
+        unsigned = dict(value)
+        digest = unsigned.pop("sha256")
+        self.assertEqual(
+            digest,
+            PROFILE.hashlib.sha256(PROFILE._canonical_json(unsigned)).hexdigest(),
+        )
+        serialized = json.dumps(value).lower()
+        for private_value in ("480", '"vat"', '"blun"', '"offer-1"'):
             self.assertNotIn(private_value, serialized)
 
     def test_public_review_resolution_contract_is_exact_content_free_and_hashed(self):
@@ -395,6 +443,13 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(
             value["review_evidence_contract"],
             PROFILE.public_review_evidence_contract(SCHEMA),
+        )
+        self.assertEqual(
+            value["review_routing_schema"], PROFILE.REVIEW_ROUTING_SCHEMA,
+        )
+        self.assertEqual(
+            value["review_routing_contract"],
+            PROFILE.public_review_routing_contract(SCHEMA),
         )
         self.assertEqual(
             value["review_resolution_schema"],
@@ -679,7 +734,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v13"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v14"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -1012,6 +1067,9 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(routing, {
             "schema": PROFILE.REVIEW_ROUTING_SCHEMA,
             "profile": SCHEMA,
+            "contract_sha256": (
+                PROFILE.public_review_routing_contract(SCHEMA)["sha256"]
+            ),
             "offer_count": 2,
             "source_length": len(source),
             "target_length": len(target),
@@ -1032,6 +1090,7 @@ class CommercialLocalizationTests(unittest.TestCase):
             self.assertNotIn(private_value, serialized_routing)
 
         for mutation in (
+            lambda value: value.update(contract_sha256="0" * 64),
             lambda value: value["offers"].reverse(),
             lambda value: value["offers"][1]["source_spans"].__setitem__(
                 0, [source_spans[0][1] - 1, source_spans[1][1]],

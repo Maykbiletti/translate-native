@@ -516,6 +516,11 @@ class WebsiteLocalizationCMSBridge:
             review_summary_contract = _COMMERCIAL.public_review_summary_contract(
                 _PLANNER.COMMERCIAL_PROFILE,
             )
+            review_routing_contract = (
+                _COMMERCIAL.public_review_routing_contract(
+                    _PLANNER.COMMERCIAL_PROFILE,
+                )
+            )
             review_resolution_contract = (
                 _COMMERCIAL.public_review_resolution_contract(
                     _PLANNER.COMMERCIAL_PROFILE,
@@ -529,7 +534,8 @@ class WebsiteLocalizationCMSBridge:
                     "locale_quality_profile", "protected_terms",
                     "review_evidence_schema", "review_evidence_contract",
                     "review_summary_schema",
-                    "review_summary_contract", "review_resolution_schema",
+                    "review_summary_contract", "review_routing_schema",
+                    "review_routing_contract", "review_resolution_schema",
                     "review_resolution_contract", "sha256",
                 }
                 or commercial["schema"] != _COMMERCIAL.PUBLIC_PROFILE_SCHEMA
@@ -541,6 +547,10 @@ class WebsiteLocalizationCMSBridge:
                 or commercial["review_summary_schema"]
                 != _COMMERCIAL.REVIEW_SUMMARY_SCHEMA
                 or commercial["review_summary_contract"] != review_summary_contract
+                or commercial["review_routing_schema"]
+                != _COMMERCIAL.REVIEW_ROUTING_SCHEMA
+                or commercial["review_routing_contract"]
+                != review_routing_contract
                 or commercial["review_resolution_schema"]
                 != _COMMERCIAL.REVIEW_RESOLUTION_SCHEMA
                 or commercial["review_resolution_contract"]
@@ -830,6 +840,90 @@ class WebsiteLocalizationCMSBridge:
                 or SHA256.fullmatch(review_summary_digest) is None
                 or review_summary_digest
                 != _hash(_canonical_json(unsigned_review_summary_contract))
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+            unsigned_review_routing_contract = dict(
+                review_routing_contract
+            )
+            review_routing_digest = unsigned_review_routing_contract.pop(
+                "sha256", None,
+            )
+            if (
+                set(review_routing_contract) != {
+                    "schema", "result_schema", "profile", "applies_when",
+                    "required_fields", "text_lengths", "offers",
+                    "trust_boundary", "content_policy", "sha256",
+                }
+                or review_routing_contract["schema"]
+                != _COMMERCIAL.REVIEW_ROUTING_CAPABILITIES_SCHEMA
+                or review_routing_contract["result_schema"]
+                != _COMMERCIAL.REVIEW_ROUTING_SCHEMA
+                or review_routing_contract["profile"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or review_routing_contract["applies_when"] != {
+                    "review_summary_status": "review_required",
+                    "offer_count": "exact-review-summary-offer-count",
+                }
+                or review_routing_contract["required_fields"] != [
+                    "schema", "profile", "contract_sha256", "offer_count",
+                    "source_length", "target_length", "offers",
+                ]
+                or review_routing_contract["text_lengths"] != {
+                    "fields": ["source_length", "target_length"],
+                    "unit": "unicode-code-points",
+                    "must_equal_complete_texts": True,
+                }
+                or review_routing_contract["offers"] != {
+                    "coverage": "exactly-one-per-registered-offer",
+                    "order": "offer-registry-order",
+                    "item_required_fields": [
+                        "offer_index", "source_spans", "target_spans",
+                    ],
+                    "offer_index": {
+                        "meaning": (
+                            "zero-based-opaque-offer-registry-position"
+                        ),
+                        "minimum": 0,
+                        "maximum_exclusive": 1000,
+                        "order": "ascending",
+                        "unique": True,
+                    },
+                    "regions": {
+                        "fields": ["source_spans", "target_spans"],
+                        "span_format": (
+                            "zero-based-unicode-code-points-exclusive-end"
+                        ),
+                        "non_empty_text": True,
+                        "ordered": True,
+                        "overlap": "forbidden-within-and-across-offers",
+                        "discontiguous": True,
+                        "at_least_one_side_non_empty": True,
+                    },
+                }
+                or review_routing_contract["trust_boundary"] != {
+                    "validates": (
+                        "shape-offsets-order-count-and-text-lengths"
+                    ),
+                    "semantic_truth": False,
+                    "route_values": (
+                        "private-evidence-and-receipt-boundary-only"
+                    ),
+                    "public_release_evidence": False,
+                    "publication_authority": False,
+                }
+                or review_routing_contract["content_policy"] != {
+                    "configured_offer_identifiers": False,
+                    "source_text": False,
+                    "target_text": False,
+                    "reviewer_prose": False,
+                    "project_prices": False,
+                    "project_brands": False,
+                }
+                or not isinstance(review_routing_digest, str)
+                or SHA256.fullmatch(review_routing_digest) is None
+                or review_routing_digest != _hash(
+                    _canonical_json(unsigned_review_routing_contract)
+                )
             ):
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
             unsigned_review_resolution_contract = dict(

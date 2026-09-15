@@ -1,5 +1,29 @@
 # Version 6 premortem
 
+## Contract-bound private offer routing (15 September 2026)
+
+Assume a host and an independent reviewer both accept a syntactically valid
+private routing object but disagree about whether offsets are bytes, Unicode
+code points, inclusive ends, registry positions, or arbitrary labels.
+
+- A schema name alone does not expose the complete routing semantics to a
+  provider-neutral adapter.
+- A changed span, ordering, privacy, or text-length rule could reinterpret an
+  archived route without changing its apparent profile.
+- A self-reported digest could legitimize a substituted routing contract unless
+  the trusted runtime reconstructs it independently.
+- Publishing the actual private spans while advertising the contract would
+  leak project structure across the CMS boundary.
+
+The public commercial capability will advertise a separately versioned,
+content-free routing contract with deterministic SHA-256. Every private route
+will carry that exact digest, and each worker, evidence adapter, receipt
+verifier, release gate, benchmark boundary, and capability reader will
+reconstruct and compare it. The advertised contract describes shapes and
+semantics only; actual spans remain private and absent from CMS release
+evidence. Tests will cover contract tampering, self-rehashing, stale route
+digests, privacy, request invalidation, and zero provider access on failure.
+
 ## Private offer routing for targeted commercial review (15 September 2026)
 
 Assume a commercial summary correctly says that offer index 1 has an

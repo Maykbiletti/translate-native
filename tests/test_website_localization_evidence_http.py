@@ -336,6 +336,11 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
         base["commercial_review_routing"] = {
             "schema": HTTP._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
             "profile": base["commercial_profile"],
+            "contract_sha256": (
+                HTTP._COMMERCIAL.public_review_routing_contract(
+                    base["commercial_profile"],
+                )["sha256"]
+            ),
             "offer_count": 1,
             "source_length": len(base["source_text"]),
             "target_length": len(base["target_text"]),
@@ -406,6 +411,7 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             self.assertEqual(invalid_transport.calls, [])
 
         for mutate in (
+            lambda routing: routing.update(contract_sha256="0" * 64),
             lambda routing: routing["offers"][0].update(offer_index=1),
             lambda routing: routing["offers"][0].update(
                 source_spans=[[0, routing["source_length"] + 1]],

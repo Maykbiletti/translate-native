@@ -25,7 +25,7 @@ retry and its attempt limit.
 ## Request
 
 The adapter canonicalizes the complete
-`blun.localization-quality-receipt-binding.v7` object and validates its native
+`blun.localization-quality-receipt-binding.v8` object and validates its native
 Unicode text, hashes, locales, content type, glossary and policy versions,
 provider/model identities, software version, two-pass confidence, locale
 quality profile, exact locale-specific commercial profile when applicable,
@@ -50,7 +50,7 @@ The body is exactly:
   "request_id": "blun-l10n-receipt-<sha256>",
   "binding_sha256": "<canonical binding hash>",
   "receipt_sha256": "<opaque receipt hash>",
-  "binding": {"schema": "blun.localization-quality-receipt-binding.v7"},
+  "binding": {"schema": "blun.localization-quality-receipt-binding.v8"},
   "receipt": "<opaque receipt>"
 }
 ```
@@ -65,8 +65,9 @@ installed profile before authentication or transport. Verified commercial and
 non-commercial bindings require both that digest and the routing object to be
 `null`. For unresolved review, it validates span order, bounds, text lengths,
 offer count, and exact opaque index order before any credential callback or
-network access. The routing object never contains configured offer IDs, text,
-prices, brands, or reviewer prose.
+network access. It also reconstructs and requires the exact digest of the
+separately advertised machine-readable routing contract. The routing object
+never contains configured offer IDs, text, prices, brands, or reviewer prose.
 
 ## Response
 

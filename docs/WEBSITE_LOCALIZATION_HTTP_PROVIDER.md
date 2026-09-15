@@ -80,7 +80,7 @@ The JSON envelope has exactly four fields:
   "request_id": "<deterministic phase request ID>",
   "request_sha256": "<SHA-256 of canonical request JSON>",
   "request": {
-    "schema": "blun.website-localization-worker.v6",
+    "schema": "blun.website-localization-worker.v7",
     "request_id": "<same deterministic phase request ID>",
     "phase": "transcreation",
     "provider_id": "customer-llm",

@@ -269,6 +269,11 @@ def completed_result(job, target_text, *, review_confidence=None):
             {
                 "schema": WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
                 "profile": payload["commercial_profile"],
+                "contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_routing_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
                 "offer_count": 1,
                 "source_length": len(payload["source"]["text"]),
                 "target_length": len(target_text),
@@ -492,6 +497,14 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         ] = [[1, routing["source_length"]]]
         self.assertNotEqual(
             COORDINATOR._request_id_for_payload(changed_routing),
+            commercial_request.request_id,
+        )
+        changed_contract = commercial_request.as_payload()
+        changed_contract["commercial_review_routing"][
+            "contract_sha256"
+        ] = "0" * 64
+        self.assertNotEqual(
+            COORDINATOR._request_id_for_payload(changed_contract),
             commercial_request.request_id,
         )
         expected_contract_sha256 = (

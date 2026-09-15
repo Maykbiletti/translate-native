@@ -138,6 +138,11 @@ def completed_result(
             {
                 "schema": WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
                 "profile": payload["commercial_profile"],
+                "contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_routing_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
                 "offer_count": 1,
                 "source_length": len(payload["source"]["text"]),
                 "target_length": len(candidate),
@@ -812,6 +817,13 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             independent_verifier.calls[0]["binding"]
             ["commercial_review_routing"]["offers"][0]["offer_index"],
             0,
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]
+            ["commercial_review_routing"]["contract_sha256"],
+            WORKER._COMMERCIAL.public_review_routing_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"],
         )
         self.assertNotIn(
             "commercial_review_routing", approved.release_evidence,
