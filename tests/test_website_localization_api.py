@@ -837,6 +837,7 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             "approval_id", "content_type", "result_sha256",
             "approval_sha256", "quality_receipt_sha256",
             "evidence_request_id", "evidence_revision",
+            "quality_profile",
             "commercial_profile", "commercial_quality_profile",
             "commercial_review", "commercial_review_routing_contract_sha256",
             "commercial_review_resolution_contract_sha256",
@@ -855,6 +856,10 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(
             release_contract["bindings"]["lineage_fields"],
             ["evidence_request_id", "evidence_revision"],
+        )
+        self.assertEqual(
+            release_contract["bindings"]["quality_profile"],
+            "exact-current-target-locale-quality-profile",
         )
         self.assertEqual(
             release_contract["commercial_scope"]["non_commercial_fields"],

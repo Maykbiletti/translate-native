@@ -97,6 +97,15 @@ def publication_request(authority=None):
                 "quality_receipt_sha256": "3" * 64,
                 "evidence_request_id": "blun-l10n-evidence-" + "5" * 64,
                 "evidence_revision": "native-evidence-1",
+                "quality_profile": {
+                    "locale": "fi-FI",
+                    "version": CMS._PLANNER.quality_profile_for("fi-FI")[
+                        "version"
+                    ],
+                    "sha256": CMS._PLANNER.quality_profile_for("fi-FI")[
+                        "sha256"
+                    ],
+                },
                 "commercial_profile": None,
                 "commercial_quality_profile": None,
                 "commercial_review": None,

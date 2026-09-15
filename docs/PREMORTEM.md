@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Durable general locale-policy invalidation (15 September 2026)
+
+Assume a CMS accepts correctly signed localized content and the installed
+target-locale quality policy changes before a later read or replay.
+
+- Release evidence could prove the review receipt while omitting the exact
+  language-profile generation that governed it.
+- A coherently substituted locale, version, and digest could pass a shape-only
+  check after restart.
+- Reusing the commercial-only binding would leave ordinary content uncovered
+  or incorrectly couple it to the price-and-offer policy.
+- A missing or failing general profile resolver could escape as an internal
+  error or allow an old bundle to remain active.
+
+Every release proof will carry the exact current target-locale quality profile
+and will be revalidated before approval lookup, CMS commit, active read, health,
+or idempotent replay. The general binding applies to all content; the commercial
+binding remains a separate add-on. Tests will cover all 24 EU locales, ordinary
+content, profile drift and substitution, resolver failure, durable
+read/health/replay blocking, and safe tombstone deletion.
+
 ## Durable commercial locale-policy invalidation (15 September 2026)
 
 Assume a CMS accepts correctly signed commercial copy and the installed

@@ -11,6 +11,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 
@@ -69,6 +70,12 @@ def release_evidence(
     resolution_method="independent_model",
 ):
     target_sha256 = hashlib.sha256(target.encode("utf-8")).hexdigest()
+    locale_quality = CMS._PLANNER.quality_profile_for(locale)
+    release_quality_profile = {
+        "locale": locale_quality["locale"],
+        "version": locale_quality["version"],
+        "sha256": locale_quality["sha256"],
+    }
     review = None
     profile = None
     quality_profile = None
@@ -151,6 +158,7 @@ def release_evidence(
         "quality_receipt_sha256": "6" * 64,
         "evidence_request_id": "blun-l10n-evidence-" + "9" * 64,
         "evidence_revision": "native-evidence-1",
+        "quality_profile": release_quality_profile,
         "commercial_profile": profile,
         "commercial_quality_profile": quality_profile,
         "commercial_review": review,
@@ -168,9 +176,9 @@ def release_evidence(
     }
 
 
-def publication_payload(*, expires_at=2000):
+def publication_payload(*, expires_at=2000, commercial=True):
     target = "Aloita maksutta – hinta 480 € vuodessa."
-    evidence = release_evidence(target)
+    evidence = release_evidence(target, commercial=commercial)
     unsigned = {
         "schema": CMS.PUBLICATION_SCHEMA,
         "event_id": "cms-event-201",
@@ -558,6 +566,12 @@ class CMSPublicationReceiverTests(unittest.TestCase):
         committed = self.commits[0]
         self.assertEqual(committed.payload, payload)
         evidence = committed.payload["localizations"][0]["release_evidence"]
+        locale_quality = CMS._PLANNER.quality_profile_for("fi-FI")
+        self.assertEqual(evidence["quality_profile"], {
+            "locale": locale_quality["locale"],
+            "version": locale_quality["version"],
+            "sha256": locale_quality["sha256"],
+        })
         self.assertEqual(evidence["commercial_profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
         canonical = CMS._PLANNER.commercial_quality_profile_for("fi-FI")
         self.assertEqual(evidence["commercial_quality_profile"], {
@@ -841,6 +855,50 @@ class CMSPublicationReceiverTests(unittest.TestCase):
                     now=1000,
                 )
             self.assertEqual(caught.exception.code, code)
+        self.assertEqual(self.commits, [])
+
+    def test_locale_quality_profile_drift_blocks_before_commit(self):
+        mutations = (
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["quality_profile"].update(version="eu-fi-FI-old"),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["quality_profile"].update(sha256="9" * 64),
+        )
+        for mutation in mutations:
+            payload = publication_payload(commercial=False)
+            expected = expectation(
+                payload, content_type="cta", commercial_profile=None,
+            )
+            mutation(payload)
+            rebind_publication(payload)
+            body, headers, _, _ = wire(payload, self.publication_authority)
+            with self.subTest(mutation=mutation), self.assertRaises(
+                RECEIVER.CMSReceiverBlocked,
+            ) as caught:
+                RECEIVER.receive_publication(
+                    body, headers, self.publication_authority,
+                    self.acknowledgement_authority, expected, self.commit,
+                    now=1000,
+                )
+            self.assertEqual(caught.exception.code, "receiver.release_scope")
+
+        payload = publication_payload(commercial=False)
+        expected = expectation(
+            payload, content_type="cta", commercial_profile=None,
+        )
+        body, headers, _, _ = wire(payload, self.publication_authority)
+        with patch.object(
+            RECEIVER._CMS._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("resolver unavailable"),
+        ):
+            with self.assertRaises(RECEIVER.CMSReceiverBlocked) as caught:
+                RECEIVER.receive_publication(
+                    body, headers, self.publication_authority,
+                    self.acknowledgement_authority, expected, self.commit,
+                    now=1000,
+                )
+        self.assertEqual(caught.exception.code, "receiver.release_scope")
         self.assertEqual(self.commits, [])
 
     def test_invalid_host_expectation_never_reaches_commit(self):

@@ -162,7 +162,7 @@ def release_evidence_is_current(
     locale: Any,
     target_sha256: Any,
     approval_id: Any,
-    require_current_commercial_quality: bool = True,
+    require_current_locale_quality: bool = True,
 ) -> bool:
     """Apply the same current release contract at ingress and durable reads."""
 
@@ -171,8 +171,8 @@ def release_evidence_is_current(
         locale=locale,
         target_sha256=target_sha256,
         approval_id=approval_id,
-        require_current_commercial_quality=(
-            require_current_commercial_quality
+        require_current_locale_quality=(
+            require_current_locale_quality
         ),
     )
 
@@ -415,7 +415,7 @@ def _verify_publication(value: Any, payload_sha256: str, *, now: float) -> bytes
                 locale=locale,
                 target_sha256=target_sha256,
                 approval_id=approval_id,
-                require_current_commercial_quality=False,
+                require_current_locale_quality=False,
             )
         ):
             raise CMSReceiverBlocked(
@@ -512,6 +512,26 @@ def _verify_expectation(
         )
     for item in localizations:
         evidence = item["release_evidence"]
+        try:
+            profile = _CMS._PLANNER.quality_profile_for(item["locale"])
+            if (
+                not isinstance(profile, dict)
+                or profile.get("locale") != item["locale"]
+                or not isinstance(profile.get("version"), str)
+                or TOKEN.fullmatch(profile["version"]) is None
+                or not isinstance(profile.get("sha256"), str)
+                or SHA256.fullmatch(profile["sha256"]) is None
+            ):
+                raise ValueError("quality profile is invalid")
+        except Exception:
+            raise CMSReceiverBlocked(
+                "receiver.release_scope", retryable=False, http_status=409,
+            ) from None
+        expected_quality = {
+            "locale": profile["locale"],
+            "version": profile["version"],
+            "sha256": profile["sha256"],
+        }
         expected_commercial_quality = None
         if expectation.content_type == "commercial":
             try:
@@ -528,7 +548,7 @@ def _verify_expectation(
                     or SHA256.fullmatch(profile["sha256"]) is None
                 ):
                     raise ValueError("commercial quality profile is invalid")
-            except (KeyError, TypeError, ValueError):
+            except Exception:
                 raise CMSReceiverBlocked(
                     "receiver.release_scope", retryable=False, http_status=409,
                 ) from None
@@ -539,6 +559,7 @@ def _verify_expectation(
             }
         if (
             evidence["content_type"] != expectation.content_type
+            or evidence["quality_profile"] != expected_quality
             or evidence["commercial_profile"] != expectation.commercial_profile
             or evidence["commercial_quality_profile"]
             != expected_commercial_quality

@@ -382,13 +382,13 @@ def _valid_release_evidence(
     locale: Any,
     target_sha256: Any,
     approval_id: Any,
-    require_current_commercial_quality: bool = True,
+    require_current_locale_quality: bool = True,
 ) -> bool:
     try:
         evidence = _RELEASE.validate_publication_evidence(
             value,
-            require_current_commercial_quality=(
-                require_current_commercial_quality
+            require_current_locale_quality=(
+                require_current_locale_quality
             ),
         )
     except _RELEASE.LocalizationReleaseBlocked:

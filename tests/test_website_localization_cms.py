@@ -494,6 +494,12 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             )
             self.assertEqual(evidence["evidence_request_id"], EVIDENCE_REQUEST_ID)
             self.assertEqual(evidence["evidence_revision"], EVIDENCE_REVISION)
+            canonical_quality = PLANNER.quality_profile_for(item["locale"])
+            self.assertEqual(evidence["quality_profile"], {
+                "locale": canonical_quality["locale"],
+                "version": canonical_quality["version"],
+                "sha256": canonical_quality["sha256"],
+            })
             self.assertIsNone(evidence["commercial_profile"])
             self.assertIsNone(evidence["commercial_quality_profile"])
             self.assertIsNone(evidence["commercial_review"])
@@ -523,7 +529,7 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 "target_locale", "content_type",
                 "target_sha256", "result_sha256", "quality_receipt_sha256",
                 "approval_id", "approval_sha256", "evidence_request_id",
-                "evidence_revision", "commercial_profile",
+                "evidence_revision", "quality_profile", "commercial_profile",
                 "commercial_quality_profile", "commercial_review",
                 "commercial_review_routing_contract_sha256",
                 "commercial_review_resolution_contract_sha256",
@@ -532,6 +538,12 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.assertEqual(
                 evidence["commercial_profile"], PLANNER.COMMERCIAL_PROFILE,
             )
+            canonical_quality = PLANNER.quality_profile_for(item["locale"])
+            self.assertEqual(evidence["quality_profile"], {
+                "locale": canonical_quality["locale"],
+                "version": canonical_quality["version"],
+                "sha256": canonical_quality["sha256"],
+            })
             canonical = PLANNER.commercial_quality_profile_for(item["locale"])
             self.assertEqual(evidence["commercial_quality_profile"], {
                 "profile": canonical["commercial_profile"],

@@ -2110,24 +2110,25 @@ rehashed entry returns `503` without a partial registry. Consumers must still
 treat these values as display guidance and route uncertain semantic equality to
 the configured independent review path.
 
-For publication, `blun.website-localization-release-evidence.v13` carries the
+For publication, `blun.website-localization-release-evidence.v14` carries the
 canonical release-evidence-contract SHA-256, content-free
-`evidence_request_id` and `evidence_revision` plus the
-compact `commercial_quality_profile` binding `{profile, version, sha256}` for
-commercial content and the exact current routing and resolution-contract
-SHA-256 values. The resolution-contract digest is present for every commercial
-result, including `verified` results, so downstream systems can prove the
-escalation policy that governed the approval. It requires all five commercial
-fields to be null for every other
-content type. The release service and reference CMS receiver recompute the
-canonical contract digest before publication and host code; a prior signed
-approval cannot be rewrapped under a newer contract. The receiver also
-recomputes the canonical quality-profile version and digest for each exact
-target locale. A syntactically valid digest, a binding from another EU locale,
-or a prior profile generation is therefore not accepted merely because the
-generic commercial profile still matches. The durable reference store repeats
-that lookup on active reads, health checks, and idempotent replay while keeping
-stale bundles safely tombstonable. An unresolved commercial summary additionally requires
+`evidence_request_id` and `evidence_revision` plus the compact universal
+`quality_profile` binding `{locale, version, sha256}`. The receiver recomputes
+that exact current target-locale binding for every content type before host
+code, and the durable store repeats the lookup on active reads, health checks,
+and idempotent replay while keeping stale bundles safely tombstonable.
+
+Commercial content additionally carries its separate compact
+`commercial_quality_profile` binding `{profile, version, sha256}` and the exact
+current routing and resolution-contract SHA-256 values. The resolution-contract
+digest is present for every commercial result, including `verified` results,
+so downstream systems can prove the escalation policy that governed the
+approval. All commercial fields must be null for every other content type. The
+release service and reference CMS receiver recompute the canonical contract
+digest before publication and host code; a prior signed approval cannot be
+rewrapped under a newer contract. A syntactically valid digest, a binding from
+another EU locale, or a prior profile generation is not accepted. An unresolved
+commercial summary additionally requires
 `commercial_review_resolution` with the exact ordered dimensions, a
 commercial profile and resolution-contract SHA-256, a `qualified_human` or
 `independent_model` method, the verified receipt hash, the primary provider
@@ -2322,6 +2323,7 @@ is never included in the public capability or CMS release-evidence value.
       "release_evidence_contract": {
         "bindings": {
           "lineage_fields": ["evidence_request_id", "evidence_revision"],
+          "quality_profile": "exact-current-target-locale-quality-profile",
           "sha256_fields": ["release_evidence_contract_sha256", "target_sha256", "result_sha256", "approval_sha256", "quality_receipt_sha256", "commercial_review_routing_contract_sha256", "commercial_review_resolution_contract_sha256"],
           "signed_container": "blun.cms-localization-publication.v3",
           "target_identity_fields": ["job_id", "target_locale", "target_sha256", "approval_id"]
@@ -2346,13 +2348,13 @@ is never included in the public capability or CMS release-evidence value.
           "source_text": false,
           "target_text": false
         },
-        "release_evidence_schema": "blun.website-localization-release-evidence.v13",
-        "required_fields": ["schema", "release_evidence_contract_sha256", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_routing_contract_sha256", "commercial_review_resolution_contract_sha256", "commercial_review_resolution"],
-        "schema": "blun.website-localization-release-evidence-capabilities.v7",
+        "release_evidence_schema": "blun.website-localization-release-evidence.v14",
+        "required_fields": ["schema", "release_evidence_contract_sha256", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "quality_profile", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_routing_contract_sha256", "commercial_review_resolution_contract_sha256", "commercial_review_resolution"],
+        "schema": "blun.website-localization-release-evidence-capabilities.v8",
         "sha256": "<sha256>",
         "tamper_policy": "reject-complete-publication-before-host-commit"
       },
-      "release_evidence_schema": "blun.website-localization-release-evidence.v13",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v14",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v5",
       "sha256": "<sha256>"

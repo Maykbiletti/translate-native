@@ -24,15 +24,16 @@ SCHEMA_VERSION = 1
 APPROVAL_SCHEMA = "blun.website-localization-approval.v10"
 RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v9"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v13"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v14"
 PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
-    "blun.website-localization-release-evidence-capabilities.v7"
+    "blun.website-localization-release-evidence-capabilities.v8"
 )
 PUBLICATION_EVIDENCE_FIELDS = (
     "schema", "release_evidence_contract_sha256", "job_id", "target_locale",
     "target_sha256", "approval_id",
     "content_type", "result_sha256", "approval_sha256",
     "quality_receipt_sha256", "evidence_request_id", "evidence_revision",
+    "quality_profile",
     "commercial_profile", "commercial_quality_profile", "commercial_review",
     "commercial_review_routing_contract_sha256",
     "commercial_review_resolution_contract_sha256",
@@ -142,12 +143,12 @@ class WebsiteReadiness:
 def validate_publication_evidence(
     value: Any,
     *,
-    require_current_commercial_quality: bool = True,
+    require_current_locale_quality: bool = True,
 ) -> dict[str, Any]:
     """Validate the content-free release proof carried to a CMS."""
 
     if (
-        not isinstance(require_current_commercial_quality, bool)
+        not isinstance(require_current_locale_quality, bool)
         or not isinstance(value, dict)
         or set(value) != set(PUBLICATION_EVIDENCE_FIELDS)
     ):
@@ -174,8 +175,34 @@ def validate_publication_evidence(
         or TOKEN.fullmatch(value["evidence_revision"]) is None
     ):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
+    quality_profile = value.get("quality_profile")
+    if (
+        not isinstance(quality_profile, dict)
+        or set(quality_profile) != {"locale", "version", "sha256"}
+        or quality_profile.get("locale") != value["target_locale"]
+        or not isinstance(quality_profile.get("version"), str)
+        or TOKEN.fullmatch(quality_profile["version"]) is None
+        or HEX64.fullmatch(str(quality_profile.get("sha256"))) is None
+    ):
+        raise LocalizationReleaseBlocked("publication.evidence.invalid")
+    if require_current_locale_quality:
+        try:
+            current_quality = _WORKER._PLANNER.quality_profile_for(
+                value["target_locale"],
+            )
+            expected_quality_profile = {
+                "locale": current_quality["locale"],
+                "version": current_quality["version"],
+                "sha256": current_quality["sha256"],
+            }
+        except Exception:
+            raise LocalizationReleaseBlocked(
+                "publication.evidence.invalid"
+            ) from None
+        if quality_profile != expected_quality_profile:
+            raise LocalizationReleaseBlocked("publication.evidence.invalid")
     profile = value.get("commercial_profile")
-    quality_profile = value.get("commercial_quality_profile")
+    commercial_quality_profile = value.get("commercial_quality_profile")
     review = value.get("commercial_review")
     routing_contract_sha256 = value.get(
         "commercial_review_routing_contract_sha256"
@@ -185,7 +212,11 @@ def validate_publication_evidence(
     )
     resolution = value.get("commercial_review_resolution")
     if (
-        len({profile is None, quality_profile is None, review is None}) != 1
+        len({
+            profile is None,
+            commercial_quality_profile is None,
+            review is None,
+        }) != 1
         or (profile is None) != (routing_contract_sha256 is None)
         or (profile is None) != (resolution_contract_sha256 is None)
         or (value["content_type"] == "commercial") != (profile is not None)
@@ -194,18 +225,20 @@ def validate_publication_evidence(
     if profile is not None:
         if not isinstance(profile, str) or TOKEN.fullmatch(profile) is None:
             raise LocalizationReleaseBlocked("publication.evidence.invalid")
-        expected_quality = None
-        if require_current_commercial_quality:
+        expected_commercial_quality = None
+        if require_current_locale_quality:
             try:
-                current_quality = (
+                current_commercial_quality = (
                     _WORKER._PLANNER.commercial_quality_profile_for(
                         value["target_locale"],
                     )
                 )
-                expected_quality = {
-                    "profile": current_quality["commercial_profile"],
-                    "version": current_quality["version"],
-                    "sha256": current_quality["sha256"],
+                expected_commercial_quality = {
+                    "profile": current_commercial_quality[
+                        "commercial_profile"
+                    ],
+                    "version": current_commercial_quality["version"],
+                    "sha256": current_commercial_quality["sha256"],
                 }
             except Exception:
                 raise LocalizationReleaseBlocked(
@@ -214,8 +247,8 @@ def validate_publication_evidence(
         if (
             profile != _WORKER._PLANNER.COMMERCIAL_PROFILE
             or (
-                require_current_commercial_quality
-                and quality_profile != expected_quality
+                require_current_locale_quality
+                and commercial_quality_profile != expected_commercial_quality
             )
             or HEX64.fullmatch(str(routing_contract_sha256)) is None
             or routing_contract_sha256
@@ -230,12 +263,15 @@ def validate_publication_evidence(
         ):
             raise LocalizationReleaseBlocked("publication.evidence.invalid")
         if (
-            not isinstance(quality_profile, dict)
-            or set(quality_profile) != {"profile", "version", "sha256"}
-            or quality_profile.get("profile") != profile
-            or not isinstance(quality_profile.get("version"), str)
-            or TOKEN.fullmatch(quality_profile["version"]) is None
-            or HEX64.fullmatch(str(quality_profile.get("sha256"))) is None
+            not isinstance(commercial_quality_profile, dict)
+            or set(commercial_quality_profile)
+            != {"profile", "version", "sha256"}
+            or commercial_quality_profile.get("profile") != profile
+            or not isinstance(commercial_quality_profile.get("version"), str)
+            or TOKEN.fullmatch(commercial_quality_profile["version"]) is None
+            or HEX64.fullmatch(
+                str(commercial_quality_profile.get("sha256"))
+            ) is None
         ):
             raise LocalizationReleaseBlocked("publication.evidence.invalid")
         try:
@@ -358,6 +394,7 @@ def _publication_evidence_contract_body() -> dict[str, Any]:
             "target_identity_fields": [
                 "job_id", "target_locale", "target_sha256", "approval_id",
             ],
+            "quality_profile": "exact-current-target-locale-quality-profile",
             "signed_container": "blun.cms-localization-publication.v3",
         },
         "commercial_scope": {
@@ -1167,6 +1204,11 @@ class LocalizationReleaseStore:
                 "quality_receipt_sha256": payload["quality_receipt_sha256"],
                 "evidence_request_id": payload["evidence_request_id"],
                 "evidence_revision": payload["evidence_revision"],
+                "quality_profile": {
+                    "locale": result["quality_profile"]["locale"],
+                    "version": result["quality_profile"]["version"],
+                    "sha256": result["quality_profile"]["sha256"],
+                },
                 "commercial_profile": job.get("commercial_profile"),
                 "commercial_quality_profile": (
                     json.loads(_canonical_json(

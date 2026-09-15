@@ -914,6 +914,44 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 )
         self.assertEqual(caught.exception.code, "result.commercial_review.invalid")
 
+    def test_release_evidence_requires_current_locale_quality_profile(self):
+        plan = make_plan(("fi-FI",))
+        self.complete(plan, {"fi-FI": "Rakenna yrityksesi BLUNin avulla."})
+        evidence = self.approve(plan, plan.jobs[0]).release_evidence
+
+        for field, value in (
+            ("locale", "sv-SE"),
+            ("version", "eu-fi-FI-stale"),
+            ("sha256", "0" * 64),
+        ):
+            changed = json.loads(json.dumps(evidence))
+            changed["quality_profile"][field] = value
+            with self.subTest(field=field), self.assertRaises(
+                RELEASE.LocalizationReleaseBlocked,
+            ) as caught:
+                RELEASE.validate_publication_evidence(changed)
+            self.assertEqual(
+                caught.exception.code, "publication.evidence.invalid",
+            )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("resolver unavailable"),
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                RELEASE.validate_publication_evidence(evidence)
+        self.assertEqual(caught.exception.code, "publication.evidence.invalid")
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=AssertionError("commercial resolver called"),
+        ):
+            self.assertEqual(
+                RELEASE.validate_publication_evidence(evidence), evidence,
+            )
+
     def test_commercial_release_evidence_requires_current_locale_policy(self):
         plan = make_plan(
             ("fi-FI",), content_type="commercial",

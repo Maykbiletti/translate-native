@@ -535,6 +535,52 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.assertEqual(deleted["status"], "deleted")
         self.assertIsNone(self.store.read_active_bundle(expected))
 
+    def test_general_locale_policy_stale_bundle_blocks_but_can_be_deleted(self):
+        publication = HELPERS.publication_payload(commercial=False)
+        expected = HELPERS.expectation(
+            publication, content_type="cta", commercial_profile=None,
+        )
+        verified = HELPERS.request(publication, self.publication_authority)
+        self.store.register_source(expected)
+        self.store.commit(verified)
+        tombstone = tombstone_for(publication, verified.payload_sha256)
+        deletion = HELPERS.tombstone_request(
+            tombstone, self.publication_authority,
+        )
+        current = CMS._RELEASE._WORKER._PLANNER.quality_profile_for("fi-FI")
+        changed = json.loads(json.dumps(current))
+        changed["version"] = current["version"] + "-next"
+        changed["sha256"] = "0" * 64
+
+        with patch.object(
+            CMS._RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            return_value=changed,
+        ), patch.object(
+            CMS._RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=AssertionError("commercial resolver called"),
+        ):
+            operations = (
+                lambda: self.store.read_active_bundle(expected),
+                lambda: self.store.commit(verified),
+                lambda: self.store.check(SimpleNamespace(
+                    probe_id="publisher-health-probe-401",
+                    contract_sha256=self.contract_sha256,
+                )),
+            )
+            for operation in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                        operation()
+            self.store.register_tombstone(
+                HELPERS.tombstone_expectation(tombstone),
+            )
+            deleted = self.store.delete(deletion)
+
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertIsNone(self.store.read_active_bundle(expected))
+
     def test_rehashed_database_rewrite_fails_publisher_signature_check(self):
         publication = HELPERS.publication_payload()
         expected = HELPERS.expectation(publication)
