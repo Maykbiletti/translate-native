@@ -18,7 +18,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 SCHEMA_VERSION = 1
@@ -85,6 +85,59 @@ class HealthPollOutcome:
     next_poll_at: float
     report_status: str | None
     error_code: str | None
+
+
+@dataclass(frozen=True)
+class HealthPollerHealth:
+    """Content-free operational view of the durable polling scheduler."""
+
+    checked_at: float
+    status: str
+    state: str
+    due: bool
+    active_lease: bool
+    lease_expired: bool
+    poll_attempts: int
+    consecutive_failures: int
+    max_consecutive_failures: int
+    next_action_at: float
+    last_error_code: str | None
+    last_report_status: str | None
+    last_report_checked_at: float | None
+    last_report_sha256: str | None
+    last_reason_codes: tuple[str, ...]
+    last_component_count: int | None
+    last_provider_count: int | None
+    last_website_version_count: int | None
+    poller_reasons: tuple[str, ...]
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": "blun.website-localization-health-poller.v1",
+            "checked_at": self.checked_at,
+            "status": self.status,
+            "state": self.state,
+            "due": self.due,
+            "active_lease": self.active_lease,
+            "lease_expired": self.lease_expired,
+            "poll_attempts": self.poll_attempts,
+            "consecutive_failures": self.consecutive_failures,
+            "max_consecutive_failures": self.max_consecutive_failures,
+            "next_action_at": self.next_action_at,
+            "last_error_code": self.last_error_code,
+            "last_report": (
+                None if self.last_report_status is None else {
+                    "status": self.last_report_status,
+                    "checked_at": self.last_report_checked_at,
+                    "sha256": self.last_report_sha256,
+                    "reason_codes": list(self.last_reason_codes),
+                    "component_count": self.last_component_count,
+                    "provider_count": self.last_provider_count,
+                    "website_version_count": self.last_website_version_count,
+                }
+            ),
+            "poller_reasons": list(self.poller_reasons),
+        }
 
 
 def _number(value: Any, name: str, *, minimum: float, maximum: float) -> float:
@@ -400,6 +453,133 @@ class DurableWebsiteLocalizationHealthMonitor:
         row = self._row()
         self._validated_row(row)
         return self._status(row, now)
+
+    def health(self, *, now: float | int) -> HealthPollerHealth:
+        """Return a read-only, content-free scheduler health snapshot."""
+        now = _number(now, "time", minimum=0, maximum=10**12)
+        current = self.status(now=now)
+        active_lease = (
+            current.state == "leased" and not current.lease_expired
+        )
+        due = (
+            current.lease_expired
+            or (
+                current.state in {"scheduled", "retry_wait"}
+                and current.next_poll_at <= now
+            )
+        )
+        reasons: set[str] = set()
+        if current.last_report_status is None:
+            reasons.add("health_monitor.no_report")
+        if due and current.state == "scheduled":
+            reasons.add("health_monitor.poll_due")
+        if current.state == "retry_wait":
+            reasons.add("health_monitor.retry_wait")
+        elif current.state == "failed":
+            reasons.add("health_monitor.failed")
+        if current.lease_expired:
+            reasons.add("health_monitor.lease_expired")
+        if (
+            current.state == "failed"
+            or current.last_report_status == "blocked"
+        ):
+            health_status = "blocked"
+        elif (
+            reasons
+            or current.last_report_status == "degraded"
+        ):
+            health_status = "degraded"
+        else:
+            health_status = "healthy"
+        next_action_at = (
+            current.lease_expires_at
+            if current.state == "leased"
+            else current.next_poll_at
+        )
+        if next_action_at is None:
+            raise HealthMonitorBlocked("health_monitor.state_invalid")
+        return HealthPollerHealth(
+            checked_at=now,
+            status=health_status,
+            state=current.state,
+            due=due,
+            active_lease=active_lease,
+            lease_expired=current.lease_expired,
+            poll_attempts=current.poll_attempts,
+            consecutive_failures=current.consecutive_failures,
+            max_consecutive_failures=current.max_consecutive_failures,
+            next_action_at=next_action_at,
+            last_error_code=current.last_error_code,
+            last_report_status=current.last_report_status,
+            last_report_checked_at=current.last_report_checked_at,
+            last_report_sha256=current.last_report_sha256,
+            last_reason_codes=current.last_reason_codes,
+            last_component_count=current.last_component_count,
+            last_provider_count=current.last_provider_count,
+            last_website_version_count=current.last_website_version_count,
+            poller_reasons=tuple(sorted(reasons)),
+        )
+
+    def run_forever(
+        self,
+        worker_id: str,
+        *,
+        clock: Callable[[], float],
+        stop_event: Any,
+        maximum_wait_seconds: float | int = 30,
+    ) -> None:
+        """Poll until the host-owned stop event is set.
+
+        The method is deliberately synchronous. The host owns its process,
+        thread, SQLite connection, and shutdown ordering.
+        """
+        worker_id = _worker(worker_id)
+        if not callable(clock):
+            raise HealthMonitorBlocked("health_monitor.clock_invalid")
+        is_set = getattr(stop_event, "is_set", None)
+        wait = getattr(stop_event, "wait", None)
+        if not callable(is_set) or not callable(wait):
+            raise HealthMonitorBlocked("health_monitor.stop_event_invalid")
+        maximum_wait = _number(
+            maximum_wait_seconds, "delay", minimum=0.1, maximum=3600,
+        )
+        while True:
+            try:
+                stopped = is_set()
+            except Exception:
+                raise HealthMonitorBlocked(
+                    "health_monitor.stop_event_invalid"
+                ) from None
+            if type(stopped) is not bool:
+                raise HealthMonitorBlocked("health_monitor.stop_event_invalid")
+            if stopped:
+                return
+            try:
+                now = clock()
+            except Exception:
+                raise HealthMonitorBlocked("health_monitor.clock_invalid") from None
+            now = _number(now, "time", minimum=0, maximum=10**12)
+            self.run_once(worker_id, now=now)
+            current = self.status(now=now)
+            if current.state == "leased":
+                action_at = current.lease_expires_at
+            elif current.state == "failed":
+                action_at = now + maximum_wait
+            else:
+                action_at = current.next_poll_at
+            if action_at is None:
+                raise HealthMonitorBlocked("health_monitor.state_invalid")
+            delay = min(maximum_wait, max(0.1, action_at - now))
+            try:
+                awakened = wait(delay)
+            except Exception:
+                raise HealthMonitorBlocked(
+                    "health_monitor.stop_event_invalid"
+                ) from None
+            if type(awakened) is not bool:
+                raise HealthMonitorBlocked("health_monitor.stop_event_invalid")
+            if awakened:
+                return
 
     def _status(self, row: sqlite3.Row, now: float) -> HealthMonitorStatus:
         return HealthMonitorStatus(

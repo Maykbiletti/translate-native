@@ -151,6 +151,26 @@ plan, locale or provider identifiers, no credential, and no source or target
 content. Schema or row tampering blocks before a client call. `status()` is
 read-only and marks an expired lease without implicitly claiming it.
 
+`run_forever(worker_id, clock=..., stop_event=...)` supplies the corresponding
+long-running synchronous loop. It performs at most one client read per claimed
+lease, derives its next wait from the durable poll or lease deadline, clamps
+that wait to the configured host wake interval, and uses the host event's
+interruptible `wait()` rather than sleeping. A stop event that is already set
+returns before schema or row access. Invalid clocks and stop-event contracts
+fail closed. The method does not create a thread, daemonize, install a signal
+handler, close SQLite, or choose process ownership; those remain explicit host
+responsibilities.
+
+`health(now=...)` returns
+`blun.website-localization-health-poller.v1`. Initial operation without a
+validated report, overdue scheduled poll, retry wait, and an expired lease are
+`degraded`; a terminal scheduler state or last valid blocked service
+assessment is `blocked`.
+Otherwise a current scheduled or live-lease state backed by a healthy report
+is `healthy`. The snapshot contains due/lease state, bounded attempts, next
+action time, last stable client error and the same content-free report summary
+stored durably. It never returns the complete remote report.
+
 ## Response and status semantics
 
 A valid report is wrapped without changing the monitor's signed-state

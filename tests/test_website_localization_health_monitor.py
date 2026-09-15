@@ -78,6 +78,24 @@ class Client:
         return Snapshot(outcome)
 
 
+class StopEvent:
+    def __init__(self, *, stopped=False, on_wait=None):
+        self.stopped = stopped
+        self.on_wait = on_wait
+        self.waits = []
+
+    def is_set(self):
+        return self.stopped
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        if self.on_wait is not None:
+            self.on_wait(self)
+        else:
+            self.stopped = True
+        return self.stopped
+
+
 class DurableWebsiteLocalizationHealthMonitorTests(unittest.TestCase):
     def monitor(self, client, connection=None, **options):
         return MONITOR.DurableWebsiteLocalizationHealthMonitor(
@@ -235,6 +253,118 @@ class DurableWebsiteLocalizationHealthMonitorTests(unittest.TestCase):
                 "SELECT * FROM localization_health_monitor"
             ).fetchone()),
         )
+
+    def test_health_contract_tracks_due_success_degradation_and_blocking(self):
+        client = Client([
+            report(), report(status="degraded", checked_at=130),
+            report(status="blocked", checked_at=160),
+        ])
+        monitor = self.monitor(client)
+
+        initial = monitor.health(now=100).as_payload()
+        monitor.run_once("operator", now=100)
+        healthy = monitor.health(now=101).as_payload()
+        overdue = monitor.health(now=130).as_payload()
+        monitor.run_once("operator", now=130)
+        degraded = monitor.health(now=131).as_payload()
+        monitor.run_once("operator", now=160)
+        blocked = monitor.health(now=161).as_payload()
+
+        self.assertEqual((initial["status"], initial["due"]), ("degraded", True))
+        self.assertEqual(initial["poller_reasons"], [
+            "health_monitor.no_report", "health_monitor.poll_due",
+        ])
+        self.assertEqual((healthy["status"], healthy["due"]), ("healthy", False))
+        self.assertEqual(healthy["last_report"]["status"], "healthy")
+        self.assertEqual((overdue["status"], overdue["poller_reasons"]), (
+            "degraded", ["health_monitor.poll_due"],
+        ))
+        self.assertEqual(degraded["status"], "degraded")
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["last_report"]["reason_codes"], [
+            "publication.evidence.policy_unavailable",
+            "release.policy_unavailable",
+        ])
+        serialized = str(blocked)
+        for private_value in (
+            "private-site", "private-event", "private-version", "fi-FI",
+        ):
+            self.assertNotIn(private_value, serialized)
+
+    def test_health_marks_retry_terminal_and_expired_lease_states(self):
+        client = Client([
+            MONITOR._CLIENT.HealthClientFailed(
+                "health_client.network", retryable=True,
+            ),
+        ])
+        monitor = self.monitor(client)
+        monitor.run_once("operator", now=100)
+
+        retrying = monitor.health(now=101).as_payload()
+        monitor.connection.execute("""
+            UPDATE localization_health_monitor
+            SET state = 'leased', lease_owner = 'crashed',
+                lease_token = 'token', lease_expires_at = 102, updated_at = 101
+        """)
+        monitor.connection.commit()
+        expired = monitor.health(now=103).as_payload()
+        monitor.connection.execute("""
+            UPDATE localization_health_monitor
+            SET state = 'failed', lease_owner = NULL, lease_token = NULL,
+                lease_expires_at = NULL, updated_at = 104
+        """)
+        monitor.connection.commit()
+        failed = monitor.health(now=104).as_payload()
+
+        self.assertEqual((retrying["status"], retrying["poller_reasons"]), (
+            "degraded", ["health_monitor.no_report", "health_monitor.retry_wait"],
+        ))
+        self.assertEqual((expired["due"], expired["lease_expired"]), (True, True))
+        self.assertIn("health_monitor.lease_expired", expired["poller_reasons"])
+        self.assertEqual((failed["status"], failed["poller_reasons"]), (
+            "blocked", ["health_monitor.failed", "health_monitor.no_report"],
+        ))
+
+    def test_run_forever_polls_once_and_waits_interruptibly(self):
+        client = Client([report()])
+        monitor = self.monitor(client)
+        stop = StopEvent()
+
+        monitor.run_forever(
+            "operator-loop", clock=lambda: 100, stop_event=stop,
+        )
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(stop.waits, [30.0])
+        self.assertEqual(monitor.status(now=100).poll_attempts, 1)
+
+    def test_run_forever_honours_preexisting_stop_without_state_access(self):
+        client = Client([report()])
+        monitor = self.monitor(client)
+        monitor.connection.execute(
+            "UPDATE localization_health_monitor SET last_reason_codes_json = 'bad'"
+        )
+        monitor.connection.commit()
+
+        monitor.run_forever(
+            "operator-loop", clock=lambda: 100,
+            stop_event=StopEvent(stopped=True),
+        )
+
+        self.assertEqual(client.calls, 0)
+
+    def test_run_forever_rejects_ambiguous_host_controls(self):
+        monitor = self.monitor(Client([report()]))
+        invalid_controls = (
+            {"clock": None, "stop_event": StopEvent()},
+            {"clock": lambda: 100, "stop_event": object()},
+            {"clock": lambda: 100, "stop_event": StopEvent(),
+             "maximum_wait_seconds": True},
+        )
+        for options in invalid_controls:
+            with self.subTest(options=options):
+                with self.assertRaises(MONITOR.HealthMonitorBlocked):
+                    monitor.run_forever("operator-loop", **options)
 
 
 if __name__ == "__main__":
