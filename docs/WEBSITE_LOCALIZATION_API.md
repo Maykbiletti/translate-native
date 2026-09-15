@@ -2492,6 +2492,14 @@ repair, or publish anything. A published acknowledgement stays published after
 its former approval validity window ends; expiration before acknowledgement is
 reported as `publication_blocked`.
 
+If the current target-locale policy cannot temporarily be resolved, the route
+returns `503` with `cms.release.policy_unavailable`. The reference client marks
+this policy-resolution outcome as retryable, and the durable lifecycle
+monitor applies its configured attempt ceiling and backoff. Proven policy
+drift, malformed evidence, or invalid bindings return `409` with
+`cms.release.integrity_failed`; a simultaneous integrity defect takes
+precedence over resolver unavailability and is never retried.
+
 ```json
 {"approved_locales":["fi-FI"],"blocked_locales":[],"delivery":{"attempts":0,"delivery_id":"blun-cms-delivery-…","last_error_code":null,"last_error_detail_hash":null,"lease_expired":false,"lease_expires_at":null,"max_attempts":5,"next_attempt_at":1788955201.0,"status":"pending"},"event_id":"cms-event-184","plan_id":"blun-l10n-plan-…","queue_counts":{"failed":0,"leased":0,"pending":0,"retry_wait":0,"succeeded":1},"request_id":"lifecycle-8","required_locales":["fi-FI"],"schema":"blun.cms-localization-lifecycle.v3","site_id":"public-site","source_sequence":42,"status":"publishing","website_version":"release-42"}
 ```
@@ -2507,10 +2515,11 @@ prose:
 
 `401` covers invalid, expired, or wrong-scope signed requests; `409` covers
 identity, source-sequence, supersession, cancellation, in-flight publication,
-and legacy-ingress conflicts;
+legacy-ingress conflicts, and proven release-integrity failures;
 `413` and `415` cover body size and media type; `503` covers inconsistent or
-unavailable durable state, including missing lifecycle authorities and invalid
-release or delivery evidence, or an inconsistent capability registry. Other
+unavailable durable state, including missing lifecycle authorities, temporary
+policy-resolution failure, invalid delivery evidence, or an inconsistent
+capability registry. Other
 invalid input returns `400`, and unexpected failures reduce to `api.internal`
 with `500`. Clients may retry a transport failure or the exact signed change;
 they must never modify a request under the same event identity.

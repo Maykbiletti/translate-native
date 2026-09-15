@@ -1136,6 +1136,64 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         self.assertEqual((recovered.status, recovered.attempt), ("succeeded", 2))
         self.assertEqual(len(publisher.requests), 1)
 
+    def test_lifecycle_distinguishes_policy_outage_from_policy_drift(self):
+        event = change_event()
+        self.ingest(event)
+        self.release_all(event)
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+        changes_before = (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        )
+
+        planner.quality_profile_for = lambda _locale: (
+            _ for _ in ()
+        ).throw(RuntimeError("private resolver diagnostic"))
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked) as unavailable:
+                self.bridge.change_lifecycle(
+                    event["event_id"], self.event_authority,
+                    self.approval_authority, self.publication_authority,
+                    site_id=event["site_id"], requester_key_id="cms-key-1",
+                    now=250,
+                )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(
+            unavailable.exception.code, "cms.release.policy_unavailable",
+        )
+        self.assertNotIn("private", str(unavailable.exception))
+
+        def stale_or_unavailable(locale):
+            if locale == "de-AT":
+                current = dict(original(locale))
+                current["version"] += ".changed"
+                current["sha256"] = "0" * 64
+                return current
+            raise RuntimeError("private resolver diagnostic")
+
+        planner.quality_profile_for = stale_or_unavailable
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked) as stale:
+                self.bridge.change_lifecycle(
+                    event["event_id"], self.event_authority,
+                    self.approval_authority, self.publication_authority,
+                    site_id=event["site_id"], requester_key_id="cms-key-1",
+                    now=250,
+                )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(stale.exception.code, "cms.release.integrity_failed")
+        self.assertEqual(changes_before, (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        ))
+
     def test_new_revision_supersedes_old_event_and_pending_delivery(self):
         old = change_event()
         self.ingest(old)

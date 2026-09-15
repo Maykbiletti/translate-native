@@ -314,6 +314,36 @@ class CMSLocalizationHTTPClientTests(unittest.TestCase):
         self.assertTrue(caught.exception.retryable)
         self.assertNotIn("private", str(caught.exception))
 
+    def test_lifecycle_policy_outage_is_retryable_but_drift_is_terminal(self):
+        def blocked(code):
+            def fail(*_args, **_kwargs):
+                raise CMS.CMSBridgeBlocked(code)
+            return fail
+
+        original = self.bridge.change_lifecycle
+        try:
+            self.bridge.change_lifecycle = blocked(
+                "cms.release.policy_unavailable",
+            )
+            with self.assertRaises(CLIENT.CMSClientFailed) as unavailable:
+                self.client.lifecycle("event-1", "site-1")
+            self.assertEqual(
+                (unavailable.exception.code, unavailable.exception.retryable),
+                ("cms.release.policy_unavailable", True),
+            )
+
+            self.bridge.change_lifecycle = blocked(
+                "cms.release.integrity_failed",
+            )
+            with self.assertRaises(CLIENT.CMSClientFailed) as stale:
+                self.client.lifecycle("event-1", "site-1")
+            self.assertEqual(
+                (stale.exception.code, stale.exception.retryable),
+                ("cms.release.integrity_failed", False),
+            )
+        finally:
+            self.bridge.change_lifecycle = original
+
     def test_prequeue_recovery_progress_remains_observable(self):
         enqueue_plan = self.queue.enqueue_plan
 

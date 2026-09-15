@@ -1077,9 +1077,14 @@ class LocalizationReleaseStore:
         plan: Any,
         authority: ApprovalAuthority,
         now: float,
+        *,
+        current_policy_errors: bool = False,
     ) -> ApprovedLocalization:
         _, job = _plan_job(plan, row["job_id"])
-        approved, _ = self._verified_row(row, job, authority, now)
+        approved, _ = self._verified_row(
+            row, job, authority, now,
+            current_policy_errors=current_policy_errors,
+        )
         return approved
 
     def _verified_row(
@@ -1088,6 +1093,8 @@ class LocalizationReleaseStore:
         job: dict[str, Any],
         authority: ApprovalAuthority,
         now: float,
+        *,
+        current_policy_errors: bool = False,
     ) -> tuple[ApprovedLocalization, dict[str, Any]]:
         if _hash_text(row["result_json"]) != row["result_sha256"]:
             raise LocalizationReleaseBlocked("translation_memory.result_tampered")
@@ -1211,53 +1218,58 @@ class LocalizationReleaseStore:
             raise LocalizationReleaseBlocked("approval.signature.invalid")
         if row["expires_at"] <= now:
             raise LocalizationReleaseBlocked("approval.expired")
+        release_evidence = validate_publication_evidence({
+            "schema": PUBLICATION_EVIDENCE_SCHEMA,
+            "release_evidence_contract_sha256": payload[
+                "release_evidence_contract_sha256"
+            ],
+            "job_id": row["job_id"],
+            "target_locale": row["target_locale"],
+            "target_sha256": row["target_sha256"],
+            "approval_id": row["approval_id"],
+            "content_type": result["content_type"],
+            "result_sha256": row["result_sha256"],
+            "approval_sha256": row["approval_sha256"],
+            "quality_receipt_sha256": payload["quality_receipt_sha256"],
+            "evidence_request_id": payload["evidence_request_id"],
+            "evidence_revision": payload["evidence_revision"],
+            "quality_profile": {
+                "locale": result["quality_profile"]["locale"],
+                "version": result["quality_profile"]["version"],
+                "sha256": result["quality_profile"]["sha256"],
+            },
+            "commercial_profile": job.get("commercial_profile"),
+            "commercial_quality_profile": (
+                json.loads(_canonical_json(
+                    result["quality_profile"].get("commercial")
+                ))
+                if result["content_type"] == "commercial"
+                else None
+            ),
+            "commercial_review": json.loads(
+                _canonical_json(result["commercial_review"])
+            ),
+            "commercial_review_routing_contract_sha256": result[
+                "commercial_review_routing_contract_sha256"
+            ],
+            "commercial_review_resolution_contract_sha256": result[
+                "commercial_review_resolution_contract_sha256"
+            ],
+            "commercial_review_resolution": _commercial_review_resolution(
+                result, payload,
+            ),
+        }, require_current_locale_quality=not current_policy_errors)
+        if current_policy_errors:
+            release_evidence = validate_current_publication_policy(
+                release_evidence,
+            )
         return ApprovedLocalization(
             approval_id=row["approval_id"],
             job_id=row["job_id"],
             target_locale=row["target_locale"],
             target_sha256=row["target_sha256"],
             candidate=result["candidate"],
-            release_evidence=validate_publication_evidence({
-                "schema": PUBLICATION_EVIDENCE_SCHEMA,
-                "release_evidence_contract_sha256": payload[
-                    "release_evidence_contract_sha256"
-                ],
-                "job_id": row["job_id"],
-                "target_locale": row["target_locale"],
-                "target_sha256": row["target_sha256"],
-                "approval_id": row["approval_id"],
-                "content_type": result["content_type"],
-                "result_sha256": row["result_sha256"],
-                "approval_sha256": row["approval_sha256"],
-                "quality_receipt_sha256": payload["quality_receipt_sha256"],
-                "evidence_request_id": payload["evidence_request_id"],
-                "evidence_revision": payload["evidence_revision"],
-                "quality_profile": {
-                    "locale": result["quality_profile"]["locale"],
-                    "version": result["quality_profile"]["version"],
-                    "sha256": result["quality_profile"]["sha256"],
-                },
-                "commercial_profile": job.get("commercial_profile"),
-                "commercial_quality_profile": (
-                    json.loads(_canonical_json(
-                        result["quality_profile"].get("commercial")
-                    ))
-                    if result["content_type"] == "commercial"
-                    else None
-                ),
-                "commercial_review": json.loads(
-                    _canonical_json(result["commercial_review"])
-                ),
-                "commercial_review_routing_contract_sha256": result[
-                    "commercial_review_routing_contract_sha256"
-                ],
-                "commercial_review_resolution_contract_sha256": result[
-                    "commercial_review_resolution_contract_sha256"
-                ],
-                "commercial_review_resolution": _commercial_review_resolution(
-                    result, payload,
-                ),
-            }),
+            release_evidence=release_evidence,
             approved_at=float(row["approved_at"]),
             expires_at=float(row["expires_at"]),
         ), result
@@ -1300,6 +1312,7 @@ class LocalizationReleaseStore:
         authority: ApprovalAuthority,
         *,
         now: float | int,
+        current_policy_errors: bool = False,
     ) -> ApprovedLocalization:
         job_id = _text(job_id, "job.id.invalid")
         _plan_job(plan, job_id)
@@ -1310,7 +1323,10 @@ class LocalizationReleaseStore:
         """, (job_id,)).fetchone()
         if row is None:
             raise LocalizationReleaseBlocked("approval.missing")
-        return self._approved_from_row(row, plan, authority, now)
+        return self._approved_from_row(
+            row, plan, authority, now,
+            current_policy_errors=current_policy_errors,
+        )
 
     def readiness(
         self,
@@ -1318,6 +1334,7 @@ class LocalizationReleaseStore:
         authority: ApprovalAuthority,
         *,
         now: float | int,
+        current_policy_errors: bool = False,
     ) -> WebsiteReadiness:
         plan_id = _text(getattr(plan, "plan_id", None), "plan.invalid")
         jobs = getattr(plan, "jobs", None)
@@ -1330,7 +1347,10 @@ class LocalizationReleaseStore:
         for job in jobs:
             locale = job.as_payload()["target"]["locale"]
             try:
-                self.lookup(plan, job.job_id, authority, now=now)
+                self.lookup(
+                    plan, job.job_id, authority, now=now,
+                    current_policy_errors=current_policy_errors,
+                )
             except LocalizationReleaseBlocked as error:
                 blocked.append((locale, error.code))
             else:

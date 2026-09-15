@@ -2424,15 +2424,23 @@ class WebsiteLocalizationCMSBridge:
         try:
             readiness = self.release_store.readiness(
                 plan, approval_authority, now=now,
+                current_policy_errors=True,
             )
         except _RELEASE.LocalizationReleaseBlocked:
             raise CMSBridgeBlocked("cms.release.integrity_failed") from None
         expected_release_blocks = {"approval.missing", "approval.expired"}
+        unexpected_release_blocks = {
+            code for _, code in readiness.blocked
+            if code not in expected_release_blocks
+            and code != "publication.evidence.policy_unavailable"
+        }
+        if unexpected_release_blocks:
+            raise CMSBridgeBlocked("cms.release.integrity_failed")
         if any(
-            code not in expected_release_blocks
+            code == "publication.evidence.policy_unavailable"
             for _, code in readiness.blocked
         ):
-            raise CMSBridgeBlocked("cms.release.integrity_failed")
+            raise CMSBridgeBlocked("cms.release.policy_unavailable")
 
         row = self.connection.execute(
             "SELECT * FROM cms_publication_deliveries WHERE event_id = ?",
