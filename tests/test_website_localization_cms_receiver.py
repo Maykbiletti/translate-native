@@ -159,6 +159,11 @@ def release_evidence(
             .public_review_routing_contract(profile)["sha256"]
             if profile is not None else None
         ),
+        "commercial_review_resolution_contract_sha256": (
+            CMS._RELEASE._WORKER._COMMERCIAL
+            .public_review_resolution_contract(profile)["sha256"]
+            if profile is not None else None
+        ),
         "commercial_review_resolution": resolution,
     }
 
@@ -561,6 +566,13 @@ class CMSPublicationReceiverTests(unittest.TestCase):
             "sha256": canonical["sha256"],
         })
         self.assertEqual(evidence["commercial_review"]["status"], "verified")
+        self.assertEqual(
+            evidence["commercial_review_resolution_contract_sha256"],
+            CMS._RELEASE._WORKER._COMMERCIAL
+            .public_review_resolution_contract(
+                CMS._PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"],
+        )
         self.assertIsNone(evidence["commercial_review_resolution"])
         self.assertEqual(
             evidence["evidence_request_id"],
@@ -612,6 +624,9 @@ class CMSPublicationReceiverTests(unittest.TestCase):
 
     def test_invalid_targeted_commercial_resolution_never_reaches_commit(self):
         mutations = (
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                commercial_review_resolution_contract_sha256="8" * 64,
+            ),
             lambda value: value["localizations"][0]["release_evidence"].update(
                 commercial_review_resolution=None,
             ),

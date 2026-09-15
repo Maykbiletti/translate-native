@@ -1634,6 +1634,12 @@ class CommercialLocalizationTests(unittest.TestCase):
                 expected_routing_contract_sha256,
             )
             self.assertEqual(
+                publication_evidence[
+                    "commercial_review_resolution_contract_sha256"
+                ],
+                PROFILE.public_review_resolution_contract(SCHEMA)["sha256"],
+            )
+            self.assertEqual(
                 publication_evidence["commercial_review_resolution"]["schema"],
                 PROFILE.REVIEW_RESOLUTION_SCHEMA,
             )

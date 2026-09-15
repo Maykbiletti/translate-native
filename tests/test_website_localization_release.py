@@ -319,6 +319,11 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertIsNone(
             payload["commercial_review_resolution_contract_sha256"],
         )
+        self.assertIsNone(
+            approved.release_evidence[
+                "commercial_review_resolution_contract_sha256"
+            ],
+        )
         self.assertEqual(payload["quality_profile"], {
             "locale": "sv-SE",
             "version": plan.jobs[0].target.quality_profile_version,
@@ -856,6 +861,12 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             WORKER._COMMERCIAL.public_review_resolution_contract(
                 PLANNER.COMMERCIAL_PROFILE,
             )["sha256"]
+        )
+        self.assertEqual(
+            approved.release_evidence[
+                "commercial_review_resolution_contract_sha256"
+            ],
+            expected_contract_sha256,
         )
         self.assertEqual(
             independent_verifier.calls[0]["binding"]

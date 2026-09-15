@@ -526,6 +526,7 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 "evidence_revision", "commercial_profile",
                 "commercial_quality_profile", "commercial_review",
                 "commercial_review_routing_contract_sha256",
+                "commercial_review_resolution_contract_sha256",
                 "commercial_review_resolution",
             })
             self.assertEqual(
@@ -546,6 +547,12 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.assertEqual(
                 evidence["commercial_review_routing_contract_sha256"],
                 WORKER._COMMERCIAL.public_review_routing_contract(
+                    PLANNER.COMMERCIAL_PROFILE,
+                )["sha256"],
+            )
+            self.assertEqual(
+                evidence["commercial_review_resolution_contract_sha256"],
+                WORKER._COMMERCIAL.public_review_resolution_contract(
                     PLANNER.COMMERCIAL_PROFILE,
                 )["sha256"],
             )

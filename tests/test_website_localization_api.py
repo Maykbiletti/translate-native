@@ -839,6 +839,7 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             "evidence_request_id", "evidence_revision",
             "commercial_profile", "commercial_quality_profile",
             "commercial_review", "commercial_review_routing_contract_sha256",
+            "commercial_review_resolution_contract_sha256",
             "commercial_review_resolution",
         ])
         self.assertEqual(
@@ -848,6 +849,7 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
                 "result_sha256", "approval_sha256",
                 "quality_receipt_sha256",
                 "commercial_review_routing_contract_sha256",
+                "commercial_review_resolution_contract_sha256",
             ],
         )
         self.assertEqual(
@@ -857,6 +859,10 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(
             release_contract["commercial_scope"]["non_commercial_fields"],
             "all-null",
+        )
+        self.assertIn(
+            "commercial_review_resolution_contract_sha256",
+            release_contract["commercial_scope"]["required_non_null"],
         )
         self.assertTrue(all(
             value is False

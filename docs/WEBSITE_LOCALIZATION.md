@@ -1332,14 +1332,16 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v11` object. That content-free
+a `blun.website-localization-release-evidence.v12` object. That content-free
 object binds the exact machine-readable release-evidence-contract SHA-256,
 signed approval and worker-result hashes, quality-receipt
 hash, canonical evidence request ID and evidence revision, and either a null
 commercial scope or the exact commercial-profile ID,
 locale-specific commercial quality-profile version and digest, and validated
 review summary including its exact review-evidence-contract digest, plus the
-exact current content-free offer-routing-contract digest. If that
+exact current content-free offer-routing- and resolution-contract digests. The
+resolution-policy digest is present even when the summary is already verified,
+while the separate resolution result remains absent. If that
 summary requires targeted review, the object also binds
 the exact ordered dimensions, commercial profile, resolution-contract digest,
 resolution method, receipt hash, primary provider identity, and independent

@@ -24,9 +24,9 @@ SCHEMA_VERSION = 1
 APPROVAL_SCHEMA = "blun.website-localization-approval.v10"
 RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v9"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v11"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v12"
 PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
-    "blun.website-localization-release-evidence-capabilities.v5"
+    "blun.website-localization-release-evidence-capabilities.v6"
 )
 PUBLICATION_EVIDENCE_FIELDS = (
     "schema", "release_evidence_contract_sha256", "job_id", "target_locale",
@@ -35,6 +35,7 @@ PUBLICATION_EVIDENCE_FIELDS = (
     "quality_receipt_sha256", "evidence_request_id", "evidence_revision",
     "commercial_profile", "commercial_quality_profile", "commercial_review",
     "commercial_review_routing_contract_sha256",
+    "commercial_review_resolution_contract_sha256",
     "commercial_review_resolution",
 )
 MAX_TEXT_BYTES = 2_000_000
@@ -171,10 +172,14 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
     routing_contract_sha256 = value.get(
         "commercial_review_routing_contract_sha256"
     )
+    resolution_contract_sha256 = value.get(
+        "commercial_review_resolution_contract_sha256"
+    )
     resolution = value.get("commercial_review_resolution")
     if (
         len({profile is None, quality_profile is None, review is None}) != 1
         or (profile is None) != (routing_contract_sha256 is None)
+        or (profile is None) != (resolution_contract_sha256 is None)
         or (value["content_type"] == "commercial") != (profile is not None)
     ):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
@@ -185,6 +190,11 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
             HEX64.fullmatch(str(routing_contract_sha256)) is None
             or routing_contract_sha256
             != _WORKER._COMMERCIAL.public_review_routing_contract(profile)[
+                "sha256"
+            ]
+            or HEX64.fullmatch(str(resolution_contract_sha256)) is None
+            or resolution_contract_sha256
+            != _WORKER._COMMERCIAL.public_review_resolution_contract(profile)[
                 "sha256"
             ]
         ):
@@ -312,6 +322,7 @@ def _publication_evidence_contract_body() -> dict[str, Any]:
                 "release_evidence_contract_sha256", "target_sha256",
                 "result_sha256", "approval_sha256", "quality_receipt_sha256",
                 "commercial_review_routing_contract_sha256",
+                "commercial_review_resolution_contract_sha256",
             ],
             "lineage_fields": ["evidence_request_id", "evidence_revision"],
             "target_identity_fields": [
@@ -324,9 +335,13 @@ def _publication_evidence_contract_body() -> dict[str, Any]:
             "required_non_null": [
                 "commercial_profile", "commercial_quality_profile",
                 "commercial_review", "commercial_review_routing_contract_sha256",
+                "commercial_review_resolution_contract_sha256",
             ],
             "review_evidence_contract_sha256": (
                 "exact-current-public-commercial-evidence-contract"
+            ),
+            "review_resolution_contract_sha256": (
+                "exact-current-public-commercial-resolution-contract"
             ),
             "resolution": "required-only-when-review-required",
             "non_commercial_fields": "all-null",
@@ -1132,6 +1147,9 @@ class LocalizationReleaseStore:
                 ),
                 "commercial_review_routing_contract_sha256": result[
                     "commercial_review_routing_contract_sha256"
+                ],
+                "commercial_review_resolution_contract_sha256": result[
+                    "commercial_review_resolution_contract_sha256"
                 ],
                 "commercial_review_resolution": _commercial_review_resolution(
                     result, payload,
