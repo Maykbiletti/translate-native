@@ -107,6 +107,20 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.161.0: durable operator health polling
+
+Version 6.161.0 adds a crash-resumable SQLite scheduler around the strict
+operator health client. Multiple operator processes now share an atomic lease,
+an abandoned poll becomes eligible only after its lease expires, and each
+attempt still performs at most one authenticated network request.
+
+Retryable failures use capped exponential backoff and stop at an explicit
+ceiling; terminal failures require an explicit operator rearm. A valid blocked
+assessment is preserved as a successful observation. Durable state contains
+only the canonical report digest, aggregate status, stable reason codes and
+cardinalities—never report payloads, site/version IDs, locale names, provider
+identities, credentials or website content.
+
 ### Version 6.160.0: provider-neutral operator health client
 
 Version 6.160.0 adds a bounded HTTPS client for the authenticated, read-only
@@ -2464,7 +2478,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.160.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.161.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

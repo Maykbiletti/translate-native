@@ -109,6 +109,48 @@ failures are normalized without exception text. The client never retries,
 repairs state, publishes content, or logs credentials; those responsibilities
 remain with the host.
 
+## Durable polling scheduler
+
+`integrations/website_localization_health_monitor.py` provides the optional
+host-side retry and crash-resume layer. It wraps the same one-request client;
+each durable lease therefore authorizes at most one authenticated health read.
+The SQLite row records a poll attempt before network access, so a process crash
+cannot lose or duplicate ownership. Another process waits for the live lease
+and may recover it only after the configured expiry.
+
+```python
+import sqlite3
+import time
+
+from integrations.website_localization_health_monitor import (
+    DurableWebsiteLocalizationHealthMonitor,
+)
+
+monitor = DurableWebsiteLocalizationHealthMonitor(
+    sqlite3.connect("operator-health.sqlite3"),
+    client,
+    poll_interval_seconds=30,
+    lease_seconds=30,
+    max_consecutive_failures=5,
+)
+outcome = monitor.run_once("operator-worker-1", now=time.time())
+```
+
+Explicitly retryable client failures use capped exponential backoff. A
+non-retryable failure, or exhaustion of the configured consecutive-failure
+ceiling, moves the scheduler to `failed`; it makes no further request until an
+operator calls `rearm()` after remediation. A valid `blocked` report is not a
+transport failure: its status and reasons are recorded and the next ordinary
+poll remains scheduled.
+
+The durable database never stores the report payload. It retains only the
+canonical SHA-256, aggregate report status and timestamp, sorted stable reason
+codes, component/provider/website-version counts, scheduling state and the
+last stable client error. In particular, it stores no site, event, version,
+plan, locale or provider identifiers, no credential, and no source or target
+content. Schema or row tampering blocks before a client call. `status()` is
+read-only and marks an expired lease without implicitly claiming it.
+
 ## Response and status semantics
 
 A valid report is wrapped without changing the monitor's signed-state
