@@ -701,6 +701,12 @@ class CMSPublicationReceiverTests(unittest.TestCase):
                     json.loads(response.body)["acknowledgement"]["status"],
                     "accepted",
                 )
+                self.assertTrue(RECEIVER.release_evidence_is_current(
+                    item["release_evidence"],
+                    locale=locale,
+                    target_sha256=item["target_sha256"],
+                    approval_id=item["approval_id"],
+                ))
 
     def test_exact_replay_uses_the_same_host_idempotency_binding(self):
         payload = publication_payload()

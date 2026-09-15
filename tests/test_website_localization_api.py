@@ -860,6 +860,10 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             release_contract["commercial_scope"]["non_commercial_fields"],
             "all-null",
         )
+        self.assertEqual(
+            release_contract["commercial_scope"]["quality_profile"],
+            "exact-current-target-locale-commercial-quality-profile",
+        )
         self.assertIn(
             "commercial_review_resolution_contract_sha256",
             release_contract["commercial_scope"]["required_non_null"],

@@ -162,6 +162,7 @@ def release_evidence_is_current(
     locale: Any,
     target_sha256: Any,
     approval_id: Any,
+    require_current_commercial_quality: bool = True,
 ) -> bool:
     """Apply the same current release contract at ingress and durable reads."""
 
@@ -170,6 +171,9 @@ def release_evidence_is_current(
         locale=locale,
         target_sha256=target_sha256,
         approval_id=approval_id,
+        require_current_commercial_quality=(
+            require_current_commercial_quality
+        ),
     )
 
 
@@ -411,6 +415,7 @@ def _verify_publication(value: Any, payload_sha256: str, *, now: float) -> bytes
                 locale=locale,
                 target_sha256=target_sha256,
                 approval_id=approval_id,
+                require_current_commercial_quality=False,
             )
         ):
             raise CMSReceiverBlocked(

@@ -873,6 +873,7 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             ["commercial_review_resolution_contract_sha256"],
             expected_contract_sha256,
         )
+
         approval_payload = json.loads(self.release_connection.execute(
             "SELECT approval_json FROM localization_approvals",
         ).fetchone()[0])
@@ -912,6 +913,57 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                     plan, plan.jobs[0].job_id, self.authority, now=201,
                 )
         self.assertEqual(caught.exception.code, "result.commercial_review.invalid")
+
+    def test_commercial_release_evidence_requires_current_locale_policy(self):
+        plan = make_plan(
+            ("fi-FI",), content_type="commercial",
+            source_text="From €40 per month, billed yearly. Tax excluded.",
+        )
+        self.complete(plan, {
+            "fi-FI": (
+                "Alkaen 40 € kuukaudessa, laskutus vuosittain. "
+                "Ei sisällä veroa."
+            ),
+        })
+        approved = self.approve(plan, plan.jobs[0])
+        evidence = approved.release_evidence
+
+        for field, value in (
+            ("version", "commercial-eu-fi-FI-stale"),
+            ("sha256", "0" * 64),
+            ("profile", "translate-native.commercial.stale"),
+        ):
+            changed = json.loads(json.dumps(evidence))
+            changed["commercial_quality_profile"][field] = value
+            with self.subTest(field=field), self.assertRaises(
+                RELEASE.LocalizationReleaseBlocked,
+            ) as caught:
+                RELEASE.validate_publication_evidence(changed)
+            self.assertEqual(caught.exception.code, "publication.evidence.invalid")
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=RuntimeError("resolver unavailable"),
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                RELEASE.validate_publication_evidence(evidence)
+        self.assertEqual(caught.exception.code, "publication.evidence.invalid")
+
+        ordinary = make_plan(("sv-SE",))
+        self.complete(ordinary, {"sv-SE": "Bygg ditt företag med BLUN."})
+        ordinary_evidence = self.approve(
+            ordinary, ordinary.jobs[0], now=210,
+        ).release_evidence
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=AssertionError("commercial resolver called"),
+        ):
+            self.assertEqual(
+                RELEASE.validate_publication_evidence(ordinary_evidence),
+                ordinary_evidence,
+            )
 
     def test_commercial_human_resolution_is_bound_without_identity_leak(self):
         plan = make_plan(

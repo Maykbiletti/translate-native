@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Durable commercial locale-policy invalidation (15 September 2026)
+
+Assume a CMS accepts correctly signed commercial copy and the installed
+locale-specific quality policy changes before a later read or replay.
+
+- The stored three-field quality binding could remain structurally valid while
+  its CLDR, morphology, terminology, or evaluation generation is obsolete.
+- A coherently substituted version and digest could pass a shape-only release-
+  evidence check after restart.
+- Applying the commercial lookup to ordinary content could incorrectly block
+  unrelated active localizations.
+- A missing or failing profile resolver could escape as an internal exception
+  instead of a stable fail-closed validation result.
+
+Every commercial release proof will be compared with the exact current target-
+locale commercial quality profile before approval lookup, CMS commit, active
+read, health, or idempotent replay. Non-commercial evidence retains strict null
+bindings without invoking the commercial resolver. Tests will cover all 24 EU
+locales, profile generation drift, resolver failure, durable read/health/replay
+blocking, and safe tombstone deletion of obsolete content.
+
 ## Exact routing contract at the reviewer transport (15 September 2026)
 
 Assume an independent review adapter accepts the digest on a private offer

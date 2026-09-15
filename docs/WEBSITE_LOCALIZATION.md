@@ -1332,7 +1332,7 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v12` object. That content-free
+a `blun.website-localization-release-evidence.v13` object. That content-free
 object binds the exact machine-readable release-evidence-contract SHA-256,
 signed approval and worker-result hashes, quality-receipt
 hash, canonical evidence request ID and evidence revision, and either a null
@@ -1354,6 +1354,10 @@ identify the exact evidence and contract generation, pin the advertised profile,
 missing, malformed, or drifted evidence
 before replacing its current content, without treating a cross-language regex
 as semantic proof.
+The reference receiver repeats the exact locale-quality lookup for every active
+read, health check, and idempotent replay. A later CLDR, morphology,
+terminology, or evaluation-profile generation therefore blocks the old bundle
+without overwriting it; the structural tombstone path remains available.
 Its deterministic `delivery_id` is an idempotency key over those immutable
 bytes. The host-owned publication authority signs and immediately verifies the
 payload before the durable outbox accepts it. A partial, changed, expired, or

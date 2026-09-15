@@ -2110,7 +2110,7 @@ rehashed entry returns `503` without a partial registry. Consumers must still
 treat these values as display guidance and route uncertain semantic equality to
 the configured independent review path.
 
-For publication, `blun.website-localization-release-evidence.v12` carries the
+For publication, `blun.website-localization-release-evidence.v13` carries the
 canonical release-evidence-contract SHA-256, content-free
 `evidence_request_id` and `evidence_revision` plus the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
@@ -2125,7 +2125,9 @@ approval cannot be rewrapped under a newer contract. The receiver also
 recomputes the canonical quality-profile version and digest for each exact
 target locale. A syntactically valid digest, a binding from another EU locale,
 or a prior profile generation is therefore not accepted merely because the
-generic commercial profile still matches. An unresolved commercial summary additionally requires
+generic commercial profile still matches. The durable reference store repeats
+that lookup on active reads, health checks, and idempotent replay while keeping
+stale bundles safely tombstonable. An unresolved commercial summary additionally requires
 `commercial_review_resolution` with the exact ordered dimensions, a
 commercial profile and resolution-contract SHA-256, a `qualified_human` or
 `independent_model` method, the verified receipt hash, the primary provider
@@ -2327,6 +2329,7 @@ is never included in the public capability or CMS release-evidence value.
         "commercial_scope": {
           "content_type": "commercial",
           "non_commercial_fields": "all-null",
+          "quality_profile": "exact-current-target-locale-commercial-quality-profile",
           "required_non_null": ["commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_routing_contract_sha256", "commercial_review_resolution_contract_sha256"],
           "review_evidence_contract_sha256": "exact-current-public-commercial-evidence-contract",
           "review_resolution_contract_sha256": "exact-current-public-commercial-resolution-contract",
@@ -2343,13 +2346,13 @@ is never included in the public capability or CMS release-evidence value.
           "source_text": false,
           "target_text": false
         },
-        "release_evidence_schema": "blun.website-localization-release-evidence.v12",
+        "release_evidence_schema": "blun.website-localization-release-evidence.v13",
         "required_fields": ["schema", "release_evidence_contract_sha256", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_routing_contract_sha256", "commercial_review_resolution_contract_sha256", "commercial_review_resolution"],
-        "schema": "blun.website-localization-release-evidence-capabilities.v6",
+        "schema": "blun.website-localization-release-evidence-capabilities.v7",
         "sha256": "<sha256>",
         "tamper_policy": "reject-complete-publication-before-host-commit"
       },
-      "release_evidence_schema": "blun.website-localization-release-evidence.v12",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v13",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v5",
       "sha256": "<sha256>"
