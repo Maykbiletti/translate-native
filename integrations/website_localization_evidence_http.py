@@ -32,7 +32,7 @@ REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v5"
+COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v6"
 COMMERCIAL_DIMENSIONS = (
     "amount_currency", "discount_basis", "qualifiers", "tax_status",
     "billing_interval", "commitment", "renewal", "cancellation",
@@ -67,6 +67,40 @@ RESERVED_HEADERS = {
     "x-localization-evidence-request-id",
     "x-localization-evidence-request-sha256",
 }
+
+
+def _commercial_offer_scope(
+    value: Any,
+    dimensions: list[str],
+    offer_count: Any,
+) -> bool:
+    if type(offer_count) is not int or not 0 <= offer_count <= 1000:
+        return False
+    if not isinstance(value, list) or len(value) > len(COMMERCIAL_DIMENSIONS):
+        return False
+    previous = -1
+    seen: set[str] = set()
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"dimension", "offer_indexes"}
+            or item.get("dimension") not in dimensions
+            or item["dimension"] in seen
+            or not isinstance(item.get("offer_indexes"), list)
+            or not item["offer_indexes"]
+            or any(
+                type(index) is not int or not 0 <= index < offer_count
+                for index in item["offer_indexes"]
+            )
+            or item["offer_indexes"] != sorted(set(item["offer_indexes"]))
+        ):
+            return False
+        position = COMMERCIAL_DIMENSIONS.index(item["dimension"])
+        if position <= previous:
+            return False
+        previous = position
+        seen.add(item["dimension"])
+    return True
 
 
 class HTTPEvidenceProviderFailed(RuntimeError):
@@ -407,6 +441,7 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
                 or set(commercial_review) != {
                     "schema", "profile", "status",
                     "review_required_dimensions",
+                    "offer_count", "review_required_offers",
                     "review_evidence_contract_sha256", "evidence_sha256",
                 }
                 or commercial_review["schema"] != COMMERCIAL_REVIEW_SUMMARY_SCHEMA
@@ -427,9 +462,17 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
                 ]
                 or len(commercial_review["review_required_dimensions"])
                 != len(set(commercial_review["review_required_dimensions"]))
+                or not _commercial_offer_scope(
+                    commercial_review["review_required_offers"],
+                    commercial_review["review_required_dimensions"],
+                    commercial_review["offer_count"],
+                )
                 or (
                     commercial_review["status"] == "verified"
-                    and commercial_review["review_required_dimensions"]
+                    and (
+                        commercial_review["review_required_dimensions"]
+                        or commercial_review["review_required_offers"]
+                    )
                 )
                 or (
                     commercial_review["status"] == "review_required"

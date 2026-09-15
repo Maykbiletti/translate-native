@@ -1,4 +1,4 @@
-# Commercial localization — profile v3
+# Commercial localization — profile v4
 
 Use for pricing pages, offer cards, checkout copy, subscription CTAs, discounts,
 trials and associated conditions in **any language or script**. The skill is
@@ -57,6 +57,12 @@ a translation to fill a gap. A grammatical target and model confidence alone
 are not publication evidence. Neither average scores nor unrelated successful
 checks override a blocking or major defect.
 
+For offer-local uncertainty, route the affected review dimension together with
+the offer's zero-based registry position. Keep configured offer identifiers out
+of the content-free summary. The independent model or qualified reviewer must
+resolve that exact ordered scope; never widen, narrow, reorder, or relabel it
+after the source-aware review.
+
 ## Skill-only evidence check
 
 The executable checker and its shared validator ship in this skill's `scripts/`
@@ -108,7 +114,7 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v10` and the exact target-locale
+The planner binds `translate-native.commercial.v11` and the exact target-locale
 commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten

@@ -249,6 +249,13 @@ def completed_result(job, target_text, *, review_confidence=None):
                     and review_confidence["source_fidelity"] == "low"
                     else []
                 ),
+                "offer_count": 1,
+                "review_required_offers": (
+                    [{"dimension": "amount_currency", "offer_indexes": [0]}]
+                    if payload["content_type"] == "commercial"
+                    and review_confidence["source_fidelity"] == "low"
+                    else []
+                ),
                 "review_evidence_contract_sha256": (
                     WORKER._COMMERCIAL.public_review_evidence_contract(
                         payload["commercial_profile"],

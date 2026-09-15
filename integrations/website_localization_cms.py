@@ -727,7 +727,8 @@ class WebsiteLocalizationCMSBridge:
             if (
                 set(review_summary_contract) != {
                     "schema", "result_schema", "profile", "required_fields",
-                    "statuses", "review_required_dimensions", "evidence_sha256",
+                    "statuses", "review_required_dimensions",
+                    "offer_count", "review_required_offers", "evidence_sha256",
                     "review_evidence_contract_sha256", "content_policy",
                     "sha256",
                 }
@@ -739,12 +740,17 @@ class WebsiteLocalizationCMSBridge:
                 != _PLANNER.COMMERCIAL_PROFILE
                 or review_summary_contract["required_fields"] != [
                     "schema", "profile", "status", "review_required_dimensions",
+                    "offer_count", "review_required_offers",
                     "review_evidence_contract_sha256", "evidence_sha256",
                 ]
                 or review_summary_contract["statuses"] != {
-                    "verified": {"review_required_dimensions": "empty"},
+                    "verified": {
+                        "review_required_dimensions": "empty",
+                        "review_required_offers": "empty",
+                    },
                     "review_required": {
                         "review_required_dimensions": "one-or-more",
+                        "review_required_offers": "zero-or-more",
                         "requires_independent_review": True,
                     },
                 }
@@ -752,6 +758,30 @@ class WebsiteLocalizationCMSBridge:
                     "allowed": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
                     "order": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
                     "unique": True,
+                }
+                or review_summary_contract["review_required_offers"] != {
+                    "item_required_fields": [
+                        "dimension", "offer_indexes",
+                    ],
+                    "dimension_order": list(
+                        _EXPECTED_COMMERCIAL_DIMENSIONS
+                    ),
+                    "dimension_must_be_review_required": True,
+                    "offer_indexes": {
+                        "meaning": (
+                            "zero-based-opaque-offer-registry-position"
+                        ),
+                        "minimum": 0,
+                        "maximum_exclusive": 1000,
+                        "order": "ascending",
+                        "unique": True,
+                    },
+                    "configured_offer_identifiers_published": False,
+                }
+                or review_summary_contract["offer_count"] != {
+                    "meaning": "opaque-offer-registry-size",
+                    "minimum": 0,
+                    "maximum": 1000,
                 }
                 or review_summary_contract["evidence_sha256"] != {
                     "algorithm": "sha-256",
@@ -812,7 +842,9 @@ class WebsiteLocalizationCMSBridge:
                 set(review_resolution_contract) != {
                     "schema", "result_schema", "profile", "applies_when",
                     "required_fields", "status", "methods",
-                    "provider_identity", "reviewed_dimensions", "receipt_sha256",
+                    "provider_identity", "reviewed_dimensions",
+                    "reviewed_offer_count", "reviewed_offers",
+                    "receipt_sha256",
                     "content_policy", "sha256",
                 }
                 or review_resolution_contract["schema"]
@@ -826,10 +858,18 @@ class WebsiteLocalizationCMSBridge:
                     "reviewed_dimensions": (
                         "exact-ordered-review-summary-dimensions"
                     ),
+                    "reviewed_offer_count": (
+                        "exact-review-summary-offer-count"
+                    ),
+                    "reviewed_offers": (
+                        "exact-ordered-review-summary-offer-scope"
+                    ),
                 }
                 or review_resolution_contract["required_fields"] != [
                     "schema", "profile", "contract_sha256", "status",
-                    "reviewed_dimensions", "method", "receipt_sha256",
+                    "reviewed_dimensions", "reviewed_offer_count",
+                    "reviewed_offers", "method",
+                    "receipt_sha256",
                     "primary_provider", "provider",
                 ]
                 or review_resolution_contract["status"] != "resolved"
@@ -855,6 +895,13 @@ class WebsiteLocalizationCMSBridge:
                     "allowed": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
                     "order": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
                     "unique": True,
+                    "must_equal_review_summary": True,
+                }
+                or review_resolution_contract["reviewed_offers"] != {
+                    "must_equal_review_summary": True,
+                    "configured_offer_identifiers_published": False,
+                }
+                or review_resolution_contract["reviewed_offer_count"] != {
                     "must_equal_review_summary": True,
                 }
                 or review_resolution_contract["receipt_sha256"] != {

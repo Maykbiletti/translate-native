@@ -493,6 +493,8 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             [
                 "schema", "profile", "status",
                 "review_required_dimensions",
+                "offer_count",
+                "review_required_offers",
                 "review_evidence_contract_sha256", "evidence_sha256",
             ],
         )
@@ -511,6 +513,13 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         )
         self.assertTrue(
             review_summary_contract["review_required_dimensions"]["unique"],
+        )
+        self.assertFalse(
+            review_summary_contract["review_required_offers"]
+            ["configured_offer_identifiers_published"],
+        )
+        self.assertEqual(
+            review_summary_contract["offer_count"]["maximum"], 1000,
         )
         self.assertEqual(
             review_summary_contract["statuses"]["verified"]
@@ -552,6 +561,14 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         )
         self.assertTrue(
             review_resolution_contract["reviewed_dimensions"]
+            ["must_equal_review_summary"],
+        )
+        self.assertTrue(
+            review_resolution_contract["reviewed_offers"]
+            ["must_equal_review_summary"],
+        )
+        self.assertTrue(
+            review_resolution_contract["reviewed_offer_count"]
             ["must_equal_review_summary"],
         )
         self.assertEqual(
@@ -1149,6 +1166,9 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         mutations = {
             "partial-dimensions": lambda value: value[
                 "reviewed_dimensions"
+            ].update(must_equal_review_summary=False),
+            "partial-offers": lambda value: value[
+                "reviewed_offers"
             ].update(must_equal_review_summary=False),
             "human-provider": lambda value: value["methods"]
             ["qualified_human"].update(provider="required"),

@@ -179,6 +179,8 @@ def candidate_result(payload, text=None):
                 "profile": payload["commercial_profile"],
                 "status": "verified",
                 "review_required_dimensions": [],
+                "offer_count": 1,
+                "review_required_offers": [],
                 "review_evidence_contract_sha256": (
                     WORKER._COMMERCIAL.public_review_evidence_contract(
                         payload["commercial_profile"],

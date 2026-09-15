@@ -1704,7 +1704,7 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v10` profile plus one exact
+versioned `translate-native.commercial.v11` profile plus one exact
 `translate-native.commercial-locale-quality-profile.v2` object to the job
 payload, job ID and plan ID; the existing seven types retain their previous
 payloads and IDs. It is available for every planner locale, including `mt-MT`
@@ -1716,6 +1716,14 @@ for each registered offer in registry order. The worker derives the global
 verdict from that matrix and requires offer-bound items for every equivalent,
 changed, or uncertain entry; evidence for one tier therefore cannot silently
 stand in for another tier.
+
+When any offer-local verdict remains uncertain, the content-free review
+summary retains the affected dimension and zero-based position in the private
+offer registry. It never publishes configured offer identifiers. A qualified
+human or independent model resolution must acknowledge the exact same ordered
+scope; missing, duplicated, reordered, cross-dimension, or out-of-range entries
+block before publication. Global uncertainty remains representable with no
+offer positions when the evidence cannot safely identify an offer.
 
 The 24 locale objects are not aliases for one universal prompt. Each has a
 distinct version and canonical SHA-256, binds the corresponding general locale
@@ -1807,7 +1815,7 @@ and plan ID, and the worker joins it to the complete fidelity-request contract
 before provider access. A contract-only policy change therefore creates new
 work identity and cannot reuse a stale queue or translation-memory entry.
 The content-free result summary uses
-`translate-native.commercial-review-summary.v5`; the authenticated capability
+`translate-native.commercial-review-summary.v6`; the authenticated capability
 response publishes its exact separately hashed machine contract, including the
 ordered allowed dimensions and the invariant between status and unresolved
 dimensions. Its evidence digest covers a versioned canonical binding of the

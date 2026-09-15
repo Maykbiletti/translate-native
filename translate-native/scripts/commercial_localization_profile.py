@@ -13,19 +13,19 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v12"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v13"
 REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-evidence-capabilities.v2"
 )
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-summary-capabilities.v6"
+    "translate-native.commercial-review-summary-capabilities.v7"
 )
-REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v5"
+REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v6"
 EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v5"
 REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-resolution-capabilities.v3"
+    "translate-native.commercial-review-resolution-capabilities.v4"
 )
-REVIEW_RESOLUTION_SCHEMA = "translate-native.commercial-review-resolution.v3"
+REVIEW_RESOLUTION_SCHEMA = "translate-native.commercial-review-resolution.v4"
 COMMERCIAL_LOCALE_PROFILE_SCHEMA = (
     "translate-native.commercial-locale-quality-profile.v2"
 )
@@ -103,12 +103,17 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
         "profile": profile,
         "required_fields": [
             "schema", "profile", "status", "review_required_dimensions",
+            "offer_count", "review_required_offers",
             "review_evidence_contract_sha256", "evidence_sha256",
         ],
         "statuses": {
-            "verified": {"review_required_dimensions": "empty"},
+            "verified": {
+                "review_required_dimensions": "empty",
+                "review_required_offers": "empty",
+            },
             "review_required": {
                 "review_required_dimensions": "one-or-more",
+                "review_required_offers": "zero-or-more",
                 "requires_independent_review": True,
             },
         },
@@ -116,6 +121,24 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
             "allowed": list(DIMENSIONS),
             "order": list(DIMENSIONS),
             "unique": True,
+        },
+        "review_required_offers": {
+            "item_required_fields": ["dimension", "offer_indexes"],
+            "dimension_order": list(DIMENSIONS),
+            "dimension_must_be_review_required": True,
+            "offer_indexes": {
+                "meaning": "zero-based-opaque-offer-registry-position",
+                "minimum": 0,
+                "maximum_exclusive": 1000,
+                "order": "ascending",
+                "unique": True,
+            },
+            "configured_offer_identifiers_published": False,
+        },
+        "offer_count": {
+            "meaning": "opaque-offer-registry-size",
+            "minimum": 0,
+            "maximum": 1000,
         },
         "evidence_sha256": {
             "algorithm": "sha-256",
@@ -276,10 +299,13 @@ def public_review_resolution_contract(profile: str) -> dict[str, Any]:
         "applies_when": {
             "review_summary_status": "review_required",
             "reviewed_dimensions": "exact-ordered-review-summary-dimensions",
+            "reviewed_offer_count": "exact-review-summary-offer-count",
+            "reviewed_offers": "exact-ordered-review-summary-offer-scope",
         },
         "required_fields": [
             "schema", "profile", "contract_sha256", "status",
-            "reviewed_dimensions", "method", "receipt_sha256",
+            "reviewed_dimensions", "reviewed_offer_count", "reviewed_offers",
+            "method", "receipt_sha256",
             "primary_provider", "provider",
         ],
         "status": "resolved",
@@ -305,6 +331,13 @@ def public_review_resolution_contract(profile: str) -> dict[str, Any]:
             "allowed": list(DIMENSIONS),
             "order": list(DIMENSIONS),
             "unique": True,
+            "must_equal_review_summary": True,
+        },
+        "reviewed_offers": {
+            "must_equal_review_summary": True,
+            "configured_offer_identifiers_published": False,
+        },
+        "reviewed_offer_count": {
             "must_equal_review_summary": True,
         },
         "receipt_sha256": {
@@ -356,7 +389,8 @@ def validate_review_resolution(
         not isinstance(value, dict)
         or set(value) != {
             "schema", "profile", "contract_sha256", "status",
-            "reviewed_dimensions", "method", "receipt_sha256",
+            "reviewed_dimensions", "reviewed_offer_count", "reviewed_offers",
+            "method", "receipt_sha256",
             "primary_provider", "provider",
         }
         or value.get("schema") != REVIEW_RESOLUTION_SCHEMA
@@ -365,6 +399,9 @@ def validate_review_resolution(
         or value.get("status") != "resolved"
         or value.get("reviewed_dimensions")
         != summary["review_required_dimensions"]
+        or value.get("reviewed_offer_count") != summary["offer_count"]
+        or value.get("reviewed_offers")
+        != summary["review_required_offers"]
         or value.get("method") not in {
             "qualified_human", "independent_model",
         }
@@ -646,6 +683,9 @@ def validate_review(
     if not isinstance(checks, dict) or set(checks) != set(DIMENSIONS):
         invalid()
     uncertain_dimensions: set[str] = set()
+    uncertain_offers: dict[str, set[int]] = {
+        name: set() for name in DIMENSIONS
+    }
     coverage_uncertain = value["coverage"] == "uncertain"
     changed = False
     evidenced = False
@@ -761,6 +801,10 @@ def validate_review(
                 invalid()
         if any(value == "uncertain" for value in parsed_offer_statuses.values()):
             uncertain_dimensions.add(name)
+            uncertain_offers[name].update(
+                index for index, offer_id in enumerate(offer_ids)
+                if parsed_offer_statuses[offer_id] == "uncertain"
+            )
         changed |= any(
             value == "changed" for value in parsed_offer_statuses.values()
         )
@@ -775,6 +819,10 @@ def validate_review(
         check["status"] == "equivalent" for name, check in checks.items() if name != "offer_assignment"
     ):
         uncertain_dimensions.add("offer_assignment")
+        if not uncertain_offers["offer_assignment"]:
+            uncertain_offers["offer_assignment"].update(
+                range(len(offer_ids))
+            )
     else:
         assigned = [item["offer"] for item in assignment["items"]]
         if (
@@ -785,12 +833,22 @@ def validate_review(
             invalid()
     if coverage_uncertain or not evidenced:
         uncertain_dimensions.update(DIMENSIONS)
+        for name in DIMENSIONS:
+            uncertain_offers[name].update(range(len(offer_ids)))
     summary = {
         "schema": REVIEW_SUMMARY_SCHEMA,
         "profile": schema,
         "status": "review_required" if uncertain_dimensions else "verified",
         "review_required_dimensions": [
             name for name in DIMENSIONS if name in uncertain_dimensions
+        ],
+        "offer_count": len(offer_ids),
+        "review_required_offers": [
+            {
+                "dimension": name,
+                "offer_indexes": sorted(uncertain_offers[name]),
+            }
+            for name in DIMENSIONS if uncertain_offers[name]
         ],
         "review_evidence_contract_sha256": (
             public_review_evidence_contract(schema)["sha256"]
@@ -825,6 +883,7 @@ def validate_summary(
         not isinstance(value, dict)
         or set(value) != {
             "schema", "profile", "status", "review_required_dimensions",
+            "offer_count", "review_required_offers",
             "review_evidence_contract_sha256", "evidence_sha256",
         }
         or value["schema"] != REVIEW_SUMMARY_SCHEMA
@@ -836,15 +895,41 @@ def validate_summary(
         or len(value["evidence_sha256"]) != 64
         or any(character not in "0123456789abcdef" for character in value["evidence_sha256"])
         or not isinstance(value["review_required_dimensions"], list)
+        or type(value["offer_count"]) is not int
+        or not 0 <= value["offer_count"] <= 1000
+        or not isinstance(value["review_required_offers"], list)
     ):
         raise CommercialReviewBlocked("review.commercial.summary_invalid")
     dimensions = value["review_required_dimensions"]
+    offer_scope = value["review_required_offers"]
     if (
-        len(dimensions) != len(set(dimensions))
+        len(offer_scope) > len(DIMENSIONS)
+        or len(dimensions) != len(set(dimensions))
         or any(name not in DIMENSIONS for name in dimensions)
         or dimensions != [name for name in DIMENSIONS if name in dimensions]
         or (value["status"] == "verified") != (not dimensions)
+        or (value["status"] == "verified" and offer_scope)
         or (value["status"] == "review_required" and not review_required)
     ):
         raise CommercialReviewBlocked("review.commercial.summary_invalid")
+    previous_dimension_index = -1
+    seen_scope_dimensions: set[str] = set()
+    for item in offer_scope:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"dimension", "offer_indexes"}
+            or item.get("dimension") not in dimensions
+            or item["dimension"] in seen_scope_dimensions
+            or not isinstance(item.get("offer_indexes"), list)
+            or not item["offer_indexes"]
+            or any(type(index) is not int or not 0 <= index < value["offer_count"]
+                   for index in item["offer_indexes"])
+            or item["offer_indexes"] != sorted(set(item["offer_indexes"]))
+        ):
+            raise CommercialReviewBlocked("review.commercial.summary_invalid")
+        dimension_index = list(DIMENSIONS).index(item["dimension"])
+        if dimension_index <= previous_dimension_index:
+            raise CommercialReviewBlocked("review.commercial.summary_invalid")
+        previous_dimension_index = dimension_index
+        seen_scope_dimensions.add(item["dimension"])
     return json.loads(_canonical_json(value))

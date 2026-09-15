@@ -321,6 +321,10 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             "profile": base["commercial_profile"],
             "status": "review_required",
             "review_required_dimensions": ["tax_status"],
+            "offer_count": 1,
+            "review_required_offers": [
+                {"dimension": "tax_status", "offer_indexes": [0]},
+            ],
             "review_evidence_contract_sha256": (
                 HTTP._COMMERCIAL.public_review_evidence_contract(
                     base["commercial_profile"],
@@ -366,6 +370,9 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
 
         for mutation in (
             {"review_required_dimensions": ["private VAT 480"]},
+            {"review_required_offers": [
+                {"dimension": "tax_status", "offer_indexes": [1, 0]},
+            ]},
             {"status": "verified"},
             {"schema": "wrong.schema"},
             {"review_evidence_contract_sha256": "0" * 64},

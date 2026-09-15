@@ -245,6 +245,10 @@ def _commercial_review_resolution(
         "reviewed_dimensions": json.loads(_canonical_json(
             review["review_required_dimensions"]
         )),
+        "reviewed_offer_count": review["offer_count"],
+        "reviewed_offers": json.loads(_canonical_json(
+            review["review_required_offers"]
+        )),
         "method": method,
         "receipt_sha256": receipt_sha256,
         "primary_provider": json.loads(_canonical_json(result["provider"])),

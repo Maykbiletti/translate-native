@@ -175,6 +175,27 @@ class CommercialLocalizationTests(unittest.TestCase):
             value["review_required_dimensions"]["order"],
             list(PROFILE.DIMENSIONS),
         )
+        self.assertEqual(
+            value["review_required_offers"],
+            {
+                "item_required_fields": ["dimension", "offer_indexes"],
+                "dimension_order": list(PROFILE.DIMENSIONS),
+                "dimension_must_be_review_required": True,
+                "offer_indexes": {
+                    "meaning": "zero-based-opaque-offer-registry-position",
+                    "minimum": 0,
+                    "maximum_exclusive": 1000,
+                    "order": "ascending",
+                    "unique": True,
+                },
+                "configured_offer_identifiers_published": False,
+            },
+        )
+        self.assertEqual(value["offer_count"], {
+            "meaning": "opaque-offer-registry-size",
+            "minimum": 0,
+            "maximum": 1000,
+        })
         evidence_contract_sha256 = PROFILE.public_review_evidence_contract(
             SCHEMA,
         )["sha256"]
@@ -242,6 +263,12 @@ class CommercialLocalizationTests(unittest.TestCase):
                 "reviewed_dimensions": (
                     "exact-ordered-review-summary-dimensions"
                 ),
+                "reviewed_offer_count": (
+                    "exact-review-summary-offer-count"
+                ),
+                "reviewed_offers": (
+                    "exact-ordered-review-summary-offer-scope"
+                ),
             },
         )
         self.assertEqual(
@@ -253,6 +280,16 @@ class CommercialLocalizationTests(unittest.TestCase):
                 "must_equal_review_summary": True,
             },
         )
+        self.assertEqual(
+            value["reviewed_offers"],
+            {
+                "must_equal_review_summary": True,
+                "configured_offer_identifiers_published": False,
+            },
+        )
+        self.assertEqual(value["reviewed_offer_count"], {
+            "must_equal_review_summary": True,
+        })
         self.assertEqual(
             value["methods"]["qualified_human"]["provider"], "null",
         )
@@ -285,6 +322,11 @@ class CommercialLocalizationTests(unittest.TestCase):
             "profile": SCHEMA,
             "status": "review_required",
             "review_required_dimensions": ["tax_status", "cancellation"],
+            "offer_count": 1,
+            "review_required_offers": [
+                {"dimension": "tax_status", "offer_indexes": [0]},
+                {"dimension": "cancellation", "offer_indexes": [0]},
+            ],
             "review_evidence_contract_sha256": (
                 PROFILE.public_review_evidence_contract(SCHEMA)["sha256"]
             ),
@@ -304,6 +346,11 @@ class CommercialLocalizationTests(unittest.TestCase):
             "contract_sha256": contract_sha256,
             "status": "resolved",
             "reviewed_dimensions": ["tax_status", "cancellation"],
+            "reviewed_offer_count": 1,
+            "reviewed_offers": [
+                {"dimension": "tax_status", "offer_indexes": [0]},
+                {"dimension": "cancellation", "offer_indexes": [0]},
+            ],
             "method": "independent_model",
             "receipt_sha256": "7" * 64,
             "primary_provider": primary_provider,
@@ -328,6 +375,8 @@ class CommercialLocalizationTests(unittest.TestCase):
             lambda value: value.update(primary_provider=None),
             lambda value: value["primary_provider"].update(model_id=""),
             lambda value: value["provider"].update(id="customer-llm"),
+            lambda value: value["reviewed_offers"][0]
+            ["offer_indexes"].append(1),
         )
         for mutation in mutations:
             changed = copy.deepcopy(resolution)
@@ -630,7 +679,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v11"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v12"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -943,6 +992,28 @@ class CommercialLocalizationTests(unittest.TestCase):
             if check["status"] == "equivalent":
                 check["items"] = copy.deepcopy(items)
         validate_commercial(report, source, target, SCHEMA)
+
+        targeted = copy.deepcopy(report)
+        targeted["checks"]["tax_status"]["status"] = "uncertain"
+        targeted["checks"]["tax_status"]["offer_statuses"][1][
+            "status"
+        ] = "uncertain"
+        summary = validate_commercial(
+            targeted, source, target, SCHEMA, allow_uncertain=True,
+        )
+        self.assertEqual(summary["review_required_dimensions"], ["tax_status"])
+        self.assertEqual(summary["offer_count"], 2)
+        self.assertEqual(summary["review_required_offers"], [{
+            "dimension": "tax_status", "offer_indexes": [1],
+        }])
+
+        malformed_scope = copy.deepcopy(summary)
+        malformed_scope["review_required_offers"][0]["offer_indexes"] = [1, 0]
+        with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
+            PROFILE.validate_summary(
+                malformed_scope, SCHEMA, review_required=True,
+            )
+        self.assertEqual(error.exception.code, "review.commercial.summary_invalid")
 
         missing_proposition = copy.deepcopy(report)
         missing_proposition["checks"]["amount_currency"]["items"].pop()

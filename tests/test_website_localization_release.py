@@ -120,6 +120,11 @@ def completed_result(
                 "review_required_dimensions": (
                     commercial_review_required_dimensions or []
                 ),
+                "offer_count": 1,
+                "review_required_offers": [
+                    {"dimension": name, "offer_indexes": [0]}
+                    for name in (commercial_review_required_dimensions or [])
+                ],
                 "review_evidence_contract_sha256": (
                     WORKER._COMMERCIAL.public_review_evidence_contract(
                         payload["commercial_profile"],
@@ -751,6 +756,11 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             ),
             "status": "resolved",
             "reviewed_dimensions": dimensions,
+            "reviewed_offer_count": 1,
+            "reviewed_offers": [
+                {"dimension": name, "offer_indexes": [0]}
+                for name in dimensions
+            ],
             "method": "independent_model",
             "receipt_sha256": hashlib.sha256(
                 b"commercial-independent-receipt"
@@ -854,6 +864,9 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         resolution = approved.release_evidence["commercial_review_resolution"]
         self.assertEqual(resolution["method"], "qualified_human")
         self.assertEqual(resolution["reviewed_dimensions"], ["cancellation"])
+        self.assertEqual(resolution["reviewed_offers"], [{
+            "dimension": "cancellation", "offer_indexes": [0],
+        }])
         self.assertEqual(resolution["profile"], PLANNER.COMMERCIAL_PROFILE)
         self.assertEqual(
             resolution["contract_sha256"],

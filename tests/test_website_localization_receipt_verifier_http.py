@@ -302,6 +302,10 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
             "profile": value["commercial_profile"],
             "status": "review_required",
             "review_required_dimensions": ["cancellation"],
+            "offer_count": 1,
+            "review_required_offers": [
+                {"dimension": "cancellation", "offer_indexes": [0]},
+            ],
             "review_evidence_contract_sha256": (
                 HTTP._COMMERCIAL.public_review_evidence_contract(
                     value["commercial_profile"],
@@ -333,6 +337,7 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
             )["sha256"],
         )
 
+        valid = json.loads(json.dumps(value))
         value["commercial_review"]["review_required_dimensions"] = [
             "private cancellation text",
         ]
@@ -340,6 +345,18 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         with self.assertRaises(HTTP.HTTPReceiptVerifierFailed) as caught:
             self.adapter(invalid_transport).verify(
                 binding=value, receipt="signed-receipt",
+            )
+        self.assertEqual(caught.exception.code, "binding_invalid")
+        self.assertEqual(invalid_transport.calls, [])
+
+        invalid_scope = json.loads(json.dumps(valid))
+        invalid_scope["commercial_review"]["review_required_offers"] = [{
+            "dimension": "cancellation", "offer_indexes": [1],
+        }]
+        invalid_transport = Transport(response_for)
+        with self.assertRaises(HTTP.HTTPReceiptVerifierFailed) as caught:
+            self.adapter(invalid_transport).verify(
+                binding=invalid_scope, receipt="signed-receipt",
             )
         self.assertEqual(caught.exception.code, "binding_invalid")
         self.assertEqual(invalid_transport.calls, [])

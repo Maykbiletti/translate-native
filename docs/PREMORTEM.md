@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Targeted per-offer commercial review scope (15 September 2026)
+
+Assume one offer has an unresolved tax or cancellation claim while a second
+offer in the same page is already fully verified.
+
+- A dimension-only summary cannot tell the independent reviewer which offer
+  remains uncertain and can cause either incomplete review or needless replay.
+- Publishing configured offer identifiers would disclose project product or
+  brand labels through otherwise content-free operational evidence.
+- A resolution could echo the right dimensions while silently covering a
+  different subset of offers.
+- Global evidence uncertainty and an empty offer registry still need a safe
+  route without inventing an offer identity.
+
+The content-free summary now carries ordered zero-based offer indexes for every
+dimension with offer-local uncertainty. The resolution must echo that exact
+scope, while dimension-level uncertainty remains valid with an empty index list
+when no private offer can be named. Validators reject duplicates, reordering,
+out-of-range indexes, non-required dimensions, and scope changes at every HTTP
+and CMS boundary; no price, brand, offer identifier, or reviewer prose leaves
+the private evidence.
+
 ## Stale-job quarantine without head-of-line blocking (15 September 2026)
 
 Assume several durable locale jobs outlive the worker contract while valid

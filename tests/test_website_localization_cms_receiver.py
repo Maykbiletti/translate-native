@@ -90,6 +90,14 @@ def release_evidence(
             "review_required_dimensions": (
                 ["tax_status", "cancellation"] if review_required else []
             ),
+            "offer_count": 1,
+            "review_required_offers": (
+                [
+                    {"dimension": "tax_status", "offer_indexes": [0]},
+                    {"dimension": "cancellation", "offer_indexes": [0]},
+                ]
+                if review_required else []
+            ),
             "review_evidence_contract_sha256": (
                 CMS._RELEASE._WORKER._COMMERCIAL
                 .public_review_evidence_contract(profile)["sha256"]
@@ -111,6 +119,11 @@ def release_evidence(
                 ),
                 "status": "resolved",
                 "reviewed_dimensions": ["tax_status", "cancellation"],
+                "reviewed_offer_count": 1,
+                "reviewed_offers": [
+                    {"dimension": "tax_status", "offer_indexes": [0]},
+                    {"dimension": "cancellation", "offer_indexes": [0]},
+                ],
                 "method": resolution_method,
                 "receipt_sha256": "7" * 64,
                 "primary_provider": primary_provider,
@@ -582,6 +595,10 @@ class CMSPublicationReceiverTests(unittest.TestCase):
                     resolution["reviewed_dimensions"],
                     ["tax_status", "cancellation"],
                 )
+                self.assertEqual(resolution["reviewed_offers"], [
+                    {"dimension": "tax_status", "offer_indexes": [0]},
+                    {"dimension": "cancellation", "offer_indexes": [0]},
+                ])
                 self.assertNotIn("receipt", resolution)
                 self.assertEqual(resolution["profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
                 self.assertEqual(
@@ -597,6 +614,9 @@ class CMSPublicationReceiverTests(unittest.TestCase):
             ["commercial_review_resolution"].update(
                 reviewed_dimensions=["cancellation"],
             ),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"]["reviewed_offers"][0]
+            .update(offer_indexes=[1]),
             lambda value: value["localizations"][0]["release_evidence"]
             ["commercial_review_resolution"].update(
                 method="qualified_human",
