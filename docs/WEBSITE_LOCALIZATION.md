@@ -1825,7 +1825,12 @@ ordered allowed dimensions and the invariant between status and unresolved
 dimensions. Its evidence digest covers a versioned canonical binding of the
 commercial profile, exact advertised review-evidence-contract SHA-256, exact
 UTF-8 source and target hashes, and complete review evidence. Quality-evidence
-request v12 and receipt-binding v8 carry that exact summary. When review is
+request v13 and receipt-binding v9 carry that exact summary. Every commercial
+evidence request now also carries the exact public routing-contract SHA-256,
+including verified results without a private route, so the evidence provider
+can issue a receipt for the same binding later enforced by the verifier and
+signed release. The digest participates in the deterministic request identity;
+non-commercial requests require `null`. When review is
 required, they additionally carry a private
 `translate-native.commercial-review-routing.v2` context that maps each opaque
 offer index to its exact ordered source and target regions. It contains no

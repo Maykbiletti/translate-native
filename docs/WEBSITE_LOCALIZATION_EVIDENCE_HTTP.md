@@ -29,7 +29,7 @@ Neither credentials nor remote response prose appears in adapter errors.
 ## Request
 
 The adapter accepts only the coordinator's exact immutable
-`blun.localization-quality-evidence-request.v12` object. It validates the
+`blun.localization-quality-evidence-request.v13` object. It validates the
 complete field set, derives the request ID, and checks SHA-256 values, locale
 profile, model identity,
 confidence decisions, and, for commercial content, the exact locale-specific
@@ -45,7 +45,7 @@ It sends one canonical UTF-8 JSON document:
   "request_id": "blun-l10n-evidence-<64 lowercase hexadecimal characters>",
   "request_sha256": "<SHA-256 of the canonical inner request>",
   "request": {
-    "schema": "blun.localization-quality-evidence-request.v12",
+    "schema": "blun.localization-quality-evidence-request.v13",
     "request_id": "<same request ID>",
     "source_locale": "en-IE",
     "target_locale": "fi-FI",
@@ -56,6 +56,7 @@ It sends one canonical UTF-8 JSON document:
     "target_sha256": "<target-text hash>",
     "content_type": "headline",
     "commercial_review_routing": null,
+    "commercial_review_routing_contract_sha256": null,
     "commercial_review_routing_contract": null,
     "commercial_review_resolution_contract_sha256": null,
     "quality_profile": {
@@ -68,7 +69,7 @@ It sends one canonical UTF-8 JSON document:
 ```
 
 The abbreviated example omits other required inner fields for readability.
-Production requests always contain exactly the full v12 field set. Commercial
+Production requests always contain exactly the full v13 field set. Commercial
 requests include `commercial_profile`, the matching `commercial_review`
 summary, and `quality_profile.commercial` with the same profile identifier plus
 its exact locale-specific version and SHA-256 digest. The summary binds the
@@ -77,6 +78,12 @@ structurally valid report cannot be reinterpreted under a changed contract. An u
 summary additionally carries the canonical advertised resolution-contract
 SHA-256; this field is part of the deterministic request ID. Verified
 commercial results and non-commercial requests require it to be `null`.
+Every commercial request also carries
+`commercial_review_routing_contract_sha256`, even when the commercial review
+is already verified and no private offer route is needed. This lets the
+evidence provider issue the receipt against the same exact public contract
+digest that the receipt verifier, signed approval, and CMS evidence later
+require. Non-commercial requests require this field to be `null`.
 An unresolved commercial request also carries a private
 `commercial_review_routing` object. It maps every zero-based opaque offer index
 to its ordered, non-overlapping source and target Unicode code-point spans and
@@ -102,8 +109,8 @@ exactly `schema`, `evidence_revision`, `event_id`, `plan_id`, `job_id`,
 `result_sha256`, both text hashes, both locales, `content_type`, glossary and
 policy versions, provider/model identity, software version, both confidence
 decisions, the complete locale quality profile, commercial profile and review,
-the conditional commercial review-routing object, its complete routing
-contract, the resolution-contract hash, and both escalation
+the routing-contract digest, the conditional commercial review-routing object,
+its complete routing contract, the resolution-contract hash, and both escalation
 flags. The full texts and `request_id` itself are excluded from that identity;
 their exact bytes are already bound by `source_sha256` and `target_sha256`.
 The durable store and HTTP adapter independently recompute this same identity.
