@@ -159,6 +159,10 @@ def completed_result(
             payload["commercial_review_routing_contract_sha256"]
             if payload["content_type"] == "commercial" else None
         ),
+        "commercial_review_resolution_contract_sha256": (
+            payload["commercial_review_resolution_contract_sha256"]
+            if payload["content_type"] == "commercial" else None
+        ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": (
             payload["content_type"] != "legal" and "low" in review_confidence.values()

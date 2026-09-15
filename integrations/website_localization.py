@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA = "blun.website-localization-plan.v4"
-JOB_SCHEMA = "blun.website-localization-job.v4"
+SCHEMA = "blun.website-localization-plan.v5"
+JOB_SCHEMA = "blun.website-localization-job.v5"
 EU_LANGUAGE_SOURCE = (
     "https://european-union.europa.eu/principles-countries-history/languages_en"
 )
@@ -225,6 +225,43 @@ def commercial_review_routing_contract_sha256() -> str:
     return digest
 
 
+def commercial_review_resolution_contract_sha256() -> str:
+    """Return the exact current review-resolution contract or fail closed."""
+    try:
+        contract = _COMMERCIAL.public_review_resolution_contract(
+            COMMERCIAL_PROFILE,
+        )
+        public_contract = _COMMERCIAL.public_profile(COMMERCIAL_PROFILE)[
+            "review_resolution_contract"
+        ]
+        if not isinstance(contract, dict) or not isinstance(
+            public_contract, dict
+        ):
+            raise TypeError
+        unsigned = dict(contract)
+        digest = unsigned.pop("sha256")
+        computed_digest = _digest(unsigned)
+    except (KeyError, TypeError, ValueError) as error:
+        raise LocalizationPlanBlocked(
+            "commercial review-resolution contract is invalid"
+        ) from error
+    if (
+        contract != public_contract
+        or contract.get("schema")
+        != _COMMERCIAL.REVIEW_RESOLUTION_CAPABILITIES_SCHEMA
+        or contract.get("result_schema")
+        != _COMMERCIAL.REVIEW_RESOLUTION_SCHEMA
+        or contract.get("profile") != COMMERCIAL_PROFILE
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or digest != computed_digest
+    ):
+        raise LocalizationPlanBlocked(
+            "commercial review-resolution contract is invalid"
+        )
+    return digest
+
+
 @dataclass(frozen=True)
 class LocalizationJob:
     job_id: str
@@ -243,6 +280,7 @@ class LocalizationJob:
     software_version: str
     commercial_review_evidence_contract_sha256: str | None = None
     commercial_review_routing_contract_sha256: str | None = None
+    commercial_review_resolution_contract_sha256: str | None = None
 
     def as_payload(self) -> dict[str, Any]:
         """Return the provider-neutral queue payload for one target locale."""
@@ -261,11 +299,18 @@ class LocalizationJob:
             if commercial is not None
             else None
         )
+        commercial_resolution_sha256 = (
+            commercial_review_resolution_contract_sha256()
+            if commercial is not None
+            else None
+        )
         if (
             self.commercial_review_evidence_contract_sha256
             != commercial_evidence_sha256
             or self.commercial_review_routing_contract_sha256
             != commercial_routing_sha256
+            or self.commercial_review_resolution_contract_sha256
+            != commercial_resolution_sha256
         ):
             raise LocalizationPlanBlocked(
                 "commercial review contract binding is stale"
@@ -302,6 +347,9 @@ class LocalizationJob:
                     ),
                     "commercial_review_routing_contract_sha256": (
                         commercial_routing_sha256
+                    ),
+                    "commercial_review_resolution_contract_sha256": (
+                        commercial_resolution_sha256
                     ),
                 }
                 if commercial is not None
@@ -462,6 +510,7 @@ def plan_website_localization(
     }
     commercial_evidence_sha256 = None
     commercial_routing_sha256 = None
+    commercial_resolution_sha256 = None
     if content_type == "commercial":
         common["commercial_profile"] = COMMERCIAL_PROFILE
         commercial_evidence_sha256 = (
@@ -475,6 +524,12 @@ def plan_website_localization(
         )
         common["commercial_review_routing_contract_sha256"] = (
             commercial_routing_sha256
+        )
+        commercial_resolution_sha256 = (
+            commercial_review_resolution_contract_sha256()
+        )
+        common["commercial_review_resolution_contract_sha256"] = (
+            commercial_resolution_sha256
         )
     jobs_list = []
     for profile in profiles:
@@ -503,6 +558,9 @@ def plan_website_localization(
             ),
             commercial_review_routing_contract_sha256=(
                 commercial_routing_sha256
+            ),
+            commercial_review_resolution_contract_sha256=(
+                commercial_resolution_sha256
             ),
         ))
     jobs = tuple(jobs_list)

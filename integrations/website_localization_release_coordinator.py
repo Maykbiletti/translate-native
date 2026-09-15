@@ -822,8 +822,9 @@ def _request(
         ],
         "commercial_review_routing_contract": routing_contract,
         "commercial_review_resolution_contract_sha256": (
-            resolution_contract["sha256"]
-            if resolution_contract is not None
+            result["commercial_review_resolution_contract_sha256"]
+            if commercial_review is not None
+            and commercial_review["status"] == "review_required"
             else None
         ),
         "commercial_review_resolution_contract": resolution_contract,

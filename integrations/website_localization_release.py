@@ -405,14 +405,21 @@ def _commercial_resolution_contract_sha256(
 ) -> str | None:
     commercial_profile = job.get("commercial_profile")
     commercial_review = result["commercial_review"]
-    return (
-        _WORKER._COMMERCIAL.public_review_resolution_contract(
+    if commercial_profile is None or commercial_review["status"] != "review_required":
+        return None
+    try:
+        expected = _WORKER._COMMERCIAL.public_review_resolution_contract(
             commercial_profile,
         )["sha256"]
-        if commercial_profile is not None
-        and commercial_review["status"] == "review_required"
-        else None
-    )
+    except (KeyError, TypeError, ValueError):
+        raise LocalizationReleaseBlocked("approval.binding_mismatch") from None
+    if (
+        job.get("commercial_review_resolution_contract_sha256") != expected
+        or result.get("commercial_review_resolution_contract_sha256")
+        != expected
+    ):
+        raise LocalizationReleaseBlocked("approval.binding_mismatch")
+    return expected
 
 
 def _receipt_binding(
@@ -549,6 +556,7 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "quality_passes", "integrity", "review_confidence",
         "quality_profile", "commercial_review", "commercial_review_routing",
         "commercial_review_routing_contract_sha256",
+        "commercial_review_resolution_contract_sha256",
         "human_review_required",
         "independent_review_required", "release_required",
     }
@@ -628,11 +636,18 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     commercial_routing_contract_sha256 = result.get(
         "commercial_review_routing_contract_sha256"
     )
+    commercial_resolution_contract_sha256 = result.get(
+        "commercial_review_resolution_contract_sha256"
+    )
     if job["content_type"] == "commercial":
         expected_routing_contract_sha256 = job[
             "commercial_review_routing_contract_sha256"
         ]
         if commercial_routing_contract_sha256 != expected_routing_contract_sha256:
+            raise LocalizationReleaseBlocked("result.commercial_review.invalid")
+        if commercial_resolution_contract_sha256 != job[
+            "commercial_review_resolution_contract_sha256"
+        ]:
             raise LocalizationReleaseBlocked("result.commercial_review.invalid")
         try:
             commercial_review = _WORKER._COMMERCIAL.validate_summary(
@@ -657,6 +672,7 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     elif any(value is not None for value in (
         commercial_review, commercial_review_routing,
         commercial_routing_contract_sha256,
+        commercial_resolution_contract_sha256,
     )):
         raise LocalizationReleaseBlocked("result.commercial_review.invalid")
     return result

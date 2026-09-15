@@ -289,6 +289,9 @@ def completed_result(job, target_text, *, review_confidence=None):
         "commercial_review_routing_contract_sha256": (
             payload.get("commercial_review_routing_contract_sha256")
         ),
+        "commercial_review_resolution_contract_sha256": (
+            payload.get("commercial_review_resolution_contract_sha256")
+        ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": (
             payload["content_type"] != "legal" and "low" in review_confidence.values()

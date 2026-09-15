@@ -2044,12 +2044,12 @@ uncertain semantic boundaries still route to independent review. Any registry
 or digest drift blocks the whole discovery
 response rather than advertising a partial contract.
 
-Commercial plan v4 and job v4 identities bind both the exact review-evidence
-contract SHA-256 and the exact content-free review-routing-contract SHA-256.
-Changing either contract produces new job, idempotency, and plan identities;
+Commercial plan v5 and job v5 identities bind the exact review-evidence,
+content-free review-routing, and content-free review-resolution contract
+SHA-256 values. Changing any contract produces new job, idempotency, and plan identities;
 the worker, queue health monitor, and pre-lease validator reconstruct the
 current contracts and reject stale jobs before provider access. Non-commercial
-jobs carry neither commercial digest.
+jobs carry none of the commercial digests.
 
 The sibling `review_routing_contract` defines the private actionable route as
 a separately hashed machine contract. It fixes exact Unicode code-point
@@ -2076,6 +2076,11 @@ primary provider identity so the CMS can verify that distinction itself. Only
 the verified receipt SHA-256 crosses the publication boundary. Raw receipts,
 credentials, qualified-human identity, reviewer prose, project prices, brands,
 source text and target text are excluded.
+Its digest is already fixed by the commercial plan and per-locale job, then
+carried unchanged through the worker result and evidence request. A later
+resolution-policy revision cannot reinterpret queued or completed work: stale
+bindings block before lease, provider access, receipt verification, or signed
+approval.
 
 The commercial capability additionally requires schema
 `translate-native.commercial-locale-quality-profile.v2` in every commercial
@@ -2274,7 +2279,7 @@ is never included in the public capability or CMS release-evidence value.
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
     "default_target_policy": "all-eu-official-locales-except-source-language",
     "eu_language_source": "https://european-union.europa.eu/principles-countries-history/languages_en",
-    "job_schema": "blun.website-localization-job.v4",
+    "job_schema": "blun.website-localization-job.v5",
     "locales": [{
       "direction": "ltr",
       "eu_code": "MT",
@@ -2287,7 +2292,7 @@ is never included in the public capability or CMS release-evidence value.
       "commercial_quality_profile_version": "commercial-eu-mt-MT-2026-09-2",
       "script": "Latn"
     }],
-    "plan_schema": "blun.website-localization-plan.v4",
+    "plan_schema": "blun.website-localization-plan.v5",
     "publication_http": {
       "binding_headers": [
         {"binding": "delivery_id", "name": "Idempotency-Key"},

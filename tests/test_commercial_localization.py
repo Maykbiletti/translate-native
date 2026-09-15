@@ -764,6 +764,10 @@ class CommercialLocalizationTests(unittest.TestCase):
             "commercial_review_routing_contract_sha256",
             job(SOURCE, "marketing"),
         )
+        self.assertNotIn(
+            "commercial_review_resolution_contract_sha256",
+            job(SOURCE, "marketing"),
+        )
 
     def test_evidence_contract_only_change_invalidates_plan_and_job_ids(self):
         before_plan = PLANNER.plan_website_localization(
@@ -885,6 +889,73 @@ class CommercialLocalizationTests(unittest.TestCase):
     def test_commercial_routing_contract_job_tamper_blocks_before_provider(self):
         payload = job(SOURCE, "commercial")
         payload["commercial_review_routing_contract_sha256"] = "0" * 64
+        adapter = provider()
+        with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
+            WORKER.run_localization_job(payload, assets(), adapter)
+        self.assertEqual(error.exception.code, "job.binding_mismatch")
+        self.assertEqual(adapter.requests, [])
+
+    def test_resolution_contract_only_change_invalidates_plan_and_job_ids(self):
+        before_plan = PLANNER.plan_website_localization(
+            source_id="pricing", source_revision="1", source_text=SOURCE,
+            source_locale="en-IE", content_type="commercial",
+            glossary_version="g1", policy_version="p1",
+            provider_id="own-model", model_id="model", model_version="1",
+            software_version="1", target_locales=["sv-SE"],
+        )
+        before = before_plan.jobs[0].as_payload()
+        altered = copy.deepcopy(
+            PLANNER._COMMERCIAL.public_review_resolution_contract(SCHEMA)
+        )
+        altered["status"] = "verified"
+        unsigned = dict(altered)
+        unsigned.pop("sha256")
+        altered["sha256"] = PLANNER._digest(unsigned)
+        public_profile = copy.deepcopy(
+            PLANNER._COMMERCIAL.public_profile(SCHEMA)
+        )
+        public_profile["review_resolution_contract"] = altered
+        with patch.object(
+            PLANNER._COMMERCIAL,
+            "public_review_resolution_contract",
+            return_value=altered,
+        ), patch.object(
+            PLANNER._COMMERCIAL,
+            "public_profile",
+            return_value=public_profile,
+        ):
+            after_plan = PLANNER.plan_website_localization(
+                source_id="pricing", source_revision="1", source_text=SOURCE,
+                source_locale="en-IE", content_type="commercial",
+                glossary_version="g1", policy_version="p1",
+                provider_id="own-model", model_id="model", model_version="1",
+                software_version="1", target_locales=["sv-SE"],
+            )
+            after = after_plan.jobs[0].as_payload()
+        self.assertEqual(before["commercial_profile"], after["commercial_profile"])
+        self.assertEqual(
+            before["commercial_review_evidence_contract_sha256"],
+            after["commercial_review_evidence_contract_sha256"],
+        )
+        self.assertEqual(
+            before["commercial_review_routing_contract_sha256"],
+            after["commercial_review_routing_contract_sha256"],
+        )
+        self.assertNotEqual(
+            before["commercial_review_resolution_contract_sha256"],
+            after["commercial_review_resolution_contract_sha256"],
+        )
+        self.assertNotEqual(before["job_id"], after["job_id"])
+        self.assertNotEqual(before_plan.plan_id, after_plan.plan_id)
+        adapter = provider()
+        with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
+            WORKER.run_localization_job(after, assets(), adapter)
+        self.assertEqual(error.exception.code, "job.binding_mismatch")
+        self.assertEqual(adapter.requests, [])
+
+    def test_commercial_resolution_contract_job_tamper_blocks_before_provider(self):
+        payload = job(SOURCE, "commercial")
+        payload["commercial_review_resolution_contract_sha256"] = "0" * 64
         adapter = provider()
         with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
             WORKER.run_localization_job(payload, assets(), adapter)
@@ -1405,6 +1476,53 @@ class CommercialLocalizationTests(unittest.TestCase):
             with patch.object(
                 commercial,
                 "public_review_routing_contract",
+                return_value=altered,
+            ), patch.object(
+                commercial,
+                "public_profile",
+                return_value=public_profile,
+            ), self.assertRaises(RUNNER._QUEUE.LocalizationQueueBlocked):
+                RUNNER.run_next_localization_job(
+                    queue,
+                    "commercial-worker",
+                    lambda payload: calls.append("provider"),
+                    lambda payload: calls.append("assets"),
+                    clock=lambda: 110,
+                )
+            status = queue.status(plan.jobs[0].job_id)
+            self.assertEqual(status.status, "failed")
+            self.assertEqual(status.attempts, 0)
+            self.assertEqual(status.last_error_code, "job_binding_invalid")
+            self.assertEqual(calls, [])
+
+    def test_stale_resolution_contract_is_terminal_before_queue_lease(self):
+        plan = make_plan(
+            targets=("sv-SE",),
+            source_text=SOURCE,
+            content_type="commercial",
+            software_version="6.152.0",
+        )
+        with sqlite3.connect(":memory:") as connection:
+            queue = RUNNER._QUEUE.LocalizationQueue(connection)
+            queue.enqueue_plan(plan, now=100)
+            planner = RUNNER._WORKER._PLANNER
+            commercial = planner._COMMERCIAL
+            contract = commercial.public_review_resolution_contract(
+                planner.COMMERCIAL_PROFILE,
+            )
+            altered = copy.deepcopy(contract)
+            altered["status"] = "verified"
+            unsigned = dict(altered)
+            unsigned.pop("sha256")
+            altered["sha256"] = planner._digest(unsigned)
+            public_profile = copy.deepcopy(commercial.public_profile(
+                planner.COMMERCIAL_PROFILE,
+            ))
+            public_profile["review_resolution_contract"] = altered
+            calls = []
+            with patch.object(
+                commercial,
+                "public_review_resolution_contract",
                 return_value=altered,
             ), patch.object(
                 commercial,

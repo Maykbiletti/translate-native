@@ -736,6 +736,7 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "quality_passes", "integrity", "review_confidence",
         "quality_profile", "commercial_review", "commercial_review_routing",
         "commercial_review_routing_contract_sha256",
+        "commercial_review_resolution_contract_sha256",
         "human_review_required",
         "independent_review_required", "release_required",
     }
@@ -777,10 +778,15 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     commercial_routing_contract_sha256 = result[
         "commercial_review_routing_contract_sha256"
     ]
+    commercial_resolution_contract_sha256 = result[
+        "commercial_review_resolution_contract_sha256"
+    ]
     if job["content_type"] == "commercial":
         if (
             commercial_routing_contract_sha256
             != job["commercial_review_routing_contract_sha256"]
+            or commercial_resolution_contract_sha256
+            != job["commercial_review_resolution_contract_sha256"]
         ):
             raise BenchmarkBlocked(
                 "benchmark.candidate.commercial_review_invalid"
@@ -809,6 +815,7 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         commercial_review,
         commercial_review_routing,
         commercial_routing_contract_sha256,
+        commercial_resolution_contract_sha256,
     )):
         raise BenchmarkBlocked("benchmark.candidate.commercial_review_invalid")
     expected_quality_profile = {
