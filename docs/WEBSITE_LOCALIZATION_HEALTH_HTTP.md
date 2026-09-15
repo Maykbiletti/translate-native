@@ -71,6 +71,44 @@ scope. It does not include principal or credential values in the response.
 Invalid principals return `401`; an authenticator outage returns a retryable
 `503`, with no exception text.
 
+## Provider-neutral reference client
+
+`integrations/website_localization_health_client.py` consumes this endpoint
+without choosing an identity provider or retry scheduler. The host supplies a
+credential-header callback; the client calls it once per read and performs one
+bounded request:
+
+```python
+import time
+
+from integrations.website_localization_health_client import (
+    WebsiteLocalizationHealthClient,
+)
+
+client = WebsiteLocalizationHealthClient(
+    "https://localization.example",
+    lambda: {"Authorization": operator_token()},
+    clock=time.time,
+)
+snapshot = client.read()
+```
+
+`snapshot.http_status` is `200` for a valid healthy or degraded assessment and
+`503` for a valid blocked assessment. In both cases `snapshot.as_payload()` is
+the complete validated content-free report, so callers retain per-component
+and per-locale reasons such as `release.policy_unavailable`,
+`release.policy_stale`, and `release.integrity_failed`.
+
+The client requires HTTPS except for an explicitly enabled loopback test
+origin, refuses redirects, caps one response at four megabytes, checks the
+declared byte length and security headers, rejects duplicate JSON keys, and
+requires the report timestamp to fall within a configurable age and future
+skew. Remote contract errors retain their exact stable code and retry flag;
+local credential-provider, network, stale-report, and response-validation
+failures are normalized without exception text. The client never retries,
+repairs state, publishes content, or logs credentials; those responsibilities
+remain with the host.
+
 ## Response and status semantics
 
 A valid report is wrapped without changing the monitor's signed-state
