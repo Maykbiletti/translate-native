@@ -630,6 +630,49 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             ],
             expected_contract_sha256,
         )
+        self.assertEqual(
+            commercial_request.as_payload()[
+                "commercial_review_resolution_contract"
+            ],
+            COORDINATOR._CMS._COMMERCIAL.public_review_resolution_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            ),
+        )
+        substituted_resolution = commercial_request.as_payload()
+        substituted_resolution["commercial_review_resolution_contract"][
+            "status"
+        ] = "substituted"
+        substituted_resolution["commercial_review_resolution_contract"][
+            "sha256"
+        ] = hashlib.sha256(json.dumps(
+            {
+                key: value for key, value in substituted_resolution[
+                    "commercial_review_resolution_contract"
+                ].items() if key != "sha256"
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        substituted_resolution[
+            "commercial_review_resolution_contract_sha256"
+        ] = substituted_resolution[
+            "commercial_review_resolution_contract"
+        ]["sha256"]
+        substituted_resolution["request_id"] = (
+            COORDINATOR._request_id_for_payload(substituted_resolution)
+        )
+        substituted_resolution_request = COORDINATOR.QualityEvidenceRequest(
+            **substituted_resolution,
+        )
+        with self.assertRaises(
+            COORDINATOR.LocalizationReleaseCoordinatorBlocked,
+        ) as caught:
+            COORDINATOR._validated_request_payload(
+                substituted_resolution_request,
+            )
+        self.assertEqual(caught.exception.code, "evidence.request.invalid")
         with patch.object(
             COORDINATOR._CMS._COMMERCIAL,
             "public_review_resolution_contract",
@@ -689,6 +732,11 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertIsNone(
             verified_commercial_request.as_payload()[
                 "commercial_review_resolution_contract_sha256"
+            ],
+        )
+        self.assertIsNone(
+            verified_commercial_request.as_payload()[
+                "commercial_review_resolution_contract"
             ],
         )
 

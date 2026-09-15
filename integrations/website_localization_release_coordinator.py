@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 SCHEMA = "blun.website-localization-release-coordinator.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v13"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v14"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 EVIDENCE_STATE_SCHEMA = "blun.localization-quality-evidence-state.v1"
@@ -45,7 +45,8 @@ EVIDENCE_REQUEST_IDENTITY_FIELDS = (
     "commercial_profile", "commercial_review", "commercial_review_routing",
     "commercial_review_routing_contract_sha256",
     "commercial_review_routing_contract",
-    "commercial_review_resolution_contract_sha256", "human_review_required",
+    "commercial_review_resolution_contract_sha256",
+    "commercial_review_resolution_contract", "human_review_required",
     "independent_review_required",
 )
 
@@ -156,6 +157,7 @@ class QualityEvidenceRequest:
     commercial_review_routing_contract_sha256: str | None
     commercial_review_routing_contract: dict[str, Any] | None
     commercial_review_resolution_contract_sha256: str | None
+    commercial_review_resolution_contract: dict[str, Any] | None
     human_review_required: bool
     independent_review_required: bool
 
@@ -301,6 +303,30 @@ def _validated_request_payload(request: Any) -> dict[str, Any]:
         or (
             payload["commercial_review_routing"] is None
         ) != (expected_routing_contract is None)
+    ):
+        raise LocalizationReleaseCoordinatorBlocked("evidence.request.invalid")
+    try:
+        expected_resolution_contract = (
+            _CMS._COMMERCIAL.public_review_resolution_contract(
+                commercial_profile,
+            )
+            if isinstance(commercial_review, dict)
+            and commercial_review.get("status") == "review_required"
+            else None
+        )
+    except (KeyError, TypeError, ValueError):
+        raise LocalizationReleaseCoordinatorBlocked(
+            "evidence.request.invalid",
+        ) from None
+    if (
+        payload["commercial_review_resolution_contract"]
+        != expected_resolution_contract
+        or payload["commercial_review_resolution_contract_sha256"]
+        != (
+            expected_resolution_contract["sha256"]
+            if expected_resolution_contract is not None
+            else None
+        )
     ):
         raise LocalizationReleaseCoordinatorBlocked("evidence.request.invalid")
     return payload
@@ -762,10 +788,10 @@ def _request(
         and commercial_review["status"] == "review_required"
         else None
     )
-    resolution_contract_sha256 = (
+    resolution_contract = (
         _CMS._COMMERCIAL.public_review_resolution_contract(
             commercial_profile,
-        )["sha256"]
+        )
         if commercial_profile is not None
         and commercial_review["status"] == "review_required"
         else None
@@ -796,8 +822,11 @@ def _request(
         ],
         "commercial_review_routing_contract": routing_contract,
         "commercial_review_resolution_contract_sha256": (
-            resolution_contract_sha256
+            resolution_contract["sha256"]
+            if resolution_contract is not None
+            else None
         ),
+        "commercial_review_resolution_contract": resolution_contract,
         "human_review_required": result["human_review_required"],
         "independent_review_required": result["independent_review_required"],
     }

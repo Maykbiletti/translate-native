@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-quality-evidence-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-quality-evidence-http-response.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v13"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v14"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
@@ -49,6 +49,7 @@ REQUEST_FIELDS = {
     "commercial_review_routing_contract",
     "human_review_required",
     "commercial_review_resolution_contract_sha256",
+    "commercial_review_resolution_contract",
     "independent_review_required",
 }
 EVIDENCE_REQUEST_IDENTITY_FIELDS = (
@@ -59,7 +60,8 @@ EVIDENCE_REQUEST_IDENTITY_FIELDS = (
     "commercial_profile", "commercial_review", "commercial_review_routing",
     "commercial_review_routing_contract_sha256",
     "commercial_review_routing_contract",
-    "commercial_review_resolution_contract_sha256", "human_review_required",
+    "commercial_review_resolution_contract_sha256",
+    "commercial_review_resolution_contract", "human_review_required",
     "independent_review_required",
 )
 EVIDENCE_FIELDS = {
@@ -549,17 +551,23 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
         raise HTTPEvidenceProviderFailed(
             "request_invalid", retryable=False,
         ) from None
-    expected_resolution_contract_sha256 = (
+    expected_resolution_contract = (
         _COMMERCIAL.public_review_resolution_contract(
             payload["commercial_profile"],
-        )["sha256"]
+        )
         if commercial_review is not None
         and commercial_review["status"] == "review_required"
         else None
     )
     if (
         payload["commercial_review_resolution_contract_sha256"]
-        != expected_resolution_contract_sha256
+        != (
+            expected_resolution_contract["sha256"]
+            if expected_resolution_contract is not None
+            else None
+        )
+        or payload["commercial_review_resolution_contract"]
+        != expected_resolution_contract
     ):
         raise HTTPEvidenceProviderFailed("request_invalid", retryable=False)
     if request_id != _request_id_for_payload(payload):
