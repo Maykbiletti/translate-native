@@ -228,7 +228,7 @@ remain mandatory. No live provider or native-editor quality is established by
 scripted adapter tests. Profile changes require a new profile version, and
 project condition/glossary/prompt changes require new bound policy versions.
 
-The website benchmark suite v4 treats commercial localization as one of eight
+The website benchmark suite v6 treats commercial localization as one of eight
 separately gated content-type lanes. Each locale needs all eight brand-neutral
 commercial cases and must pass the predeclared joint, target-native, and
 source-fidelity statistics inside that lane. Wins on headlines, UI, or other
@@ -245,13 +245,23 @@ provides it only to source-fidelity review. Source-blind native review receives
 neither the source nor this semantic scope. Missing, additional, or reordered
 dimensions fail closed before a reviewer is called.
 
+Each commercial case also carries a manually versioned
+`translate-native.commercial-benchmark-offer-registry.v1`. It partitions the
+complete source into ordered Unicode-code-point spans assigned to opaque offer
+indexes and explicitly shared spans. Exact source length, registry content and
+SHA-256 travel only with source-fidelity review. Gaps, overlaps, reordered
+indexes, byte-offset substitutions or a stale digest fail before external
+review. Shared conditions must be considered for every relevant offer; the
+reviewer may not infer a different source partition.
+
 The fidelity reviewer must return
-`translate-native.commercial-benchmark-review.v2`: one ordered item for every
+`translate-native.commercial-benchmark-review.v3`: one ordered item for every
 dimension and, within each anonymous variant, one ordered status for every
 opaque offer index registered by the fixture. `equivalent` and `not_present`
 carry no defect reference. `major` and `blocking` point to the matching
 variant's zero-based defect entry. The dimension aggregate is derived by fixed
 severity and cannot hide a defective offer. `uncertain`, missing, duplicated or
 reordered offers, additional rows and contradictory aggregates fail closed.
-Signed case evidence retains the complete per-offer status matrix with canonical
-response hashes and defect counts; reviewer prose does not survive.
+Signed case evidence retains the complete per-offer status matrix and exact
+registry digest with canonical response hashes and defect counts; reviewer
+prose and source spans do not survive.

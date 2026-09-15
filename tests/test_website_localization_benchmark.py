@@ -622,6 +622,9 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         native, fidelity = reviewer.requests
         self.assertNotIn("commercial_dimensions", native.input["benchmark_suite"])
         self.assertNotIn(
+            "commercial_offer_registry", native.input["benchmark_suite"],
+        )
+        self.assertNotIn(
             "commercial_evaluation", native.input["response_schema"],
         )
         self.assertEqual(
@@ -634,6 +637,16 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(
             fidelity.input["benchmark_suite"]["commercial_offer_count"], 2,
         )
+        registry = fidelity.input["benchmark_suite"]["commercial_offer_registry"]
+        self.assertEqual(
+            registry,
+            next(
+                case["commercial_offer_registry"]
+                for case in SUITE_MANIFEST["cases"]
+                if case["key"] == "offer-commercial-long"
+            ),
+        )
+        self.assertEqual(registry["offset_unit"], "unicode-code-point")
         self.assertEqual(
             [item["dimension"] for item in contract["dimensions"]],
             list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS),
@@ -836,6 +849,14 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
+            evaluation["offer_registry_sha256"],
+            next(
+                case["commercial_offer_registry"]["sha256"]
+                for case in SUITE_MANIFEST["cases"]
+                if case["key"] == "offer-commercial-long"
+            ),
+        )
+        self.assertEqual(
             evaluation["dimensions"][-1],
             {
                 "dimension": list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)[-1],
@@ -934,6 +955,16 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
 
         unsigned = copy.deepcopy(results[-1])
         unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["offer_registry_sha256"] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [*results[:-1], rebound])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[-1])
+        unsigned.pop("attestation")
         unsigned["commercial_evaluation"]["dimensions"][0][
             "candidate_offers"
         ].pop()
@@ -1007,6 +1038,27 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 "benchmark.suite.commercial_scope_mismatch",
             )
             self.assertEqual(reviewer.requests, [])
+
+        def drifted_registry(value):
+            case = original(value)
+            case["commercial_offer_registry"]["offers"][0][
+                "source_spans"
+            ][0]["end"] -= 1
+            return case
+
+        reviewer = PreferenceReviewer(result["candidate"])
+        with mock.patch.object(
+            BENCHMARK._SUITE, "case_for_job", drifted_registry,
+        ), self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline_artifact, assets(),
+                benchmark_policy, reviewer, blinding_key=self.key,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "benchmark.suite.commercial_scope_mismatch",
+        )
+        self.assertEqual(reviewer.requests, [])
 
     def test_qualified_native_reference_is_verified_bound_and_text_free(self):
         payload = job()

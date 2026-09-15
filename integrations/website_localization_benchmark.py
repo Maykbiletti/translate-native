@@ -24,19 +24,19 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v8"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v9"
 BASELINE_SCHEMA = "blun.website-localization-baseline.v2"
 BASELINE_PROVENANCE_SCHEMA = "blun.website-localization-baseline-provenance.v1"
 NATIVE_REFERENCE_SCHEMA = "blun.website-localization-native-reference.v1"
 NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-request.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v3"
-COMMERCIAL_REVIEW_SCHEMA = "translate-native.commercial-benchmark-review.v2"
+COMMERCIAL_REVIEW_SCHEMA = "translate-native.commercial-benchmark-review.v3"
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v9"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v10"
 COMMERCIAL_CASE_EVALUATION_SCHEMA = (
-    "translate-native.commercial-benchmark-case-evaluation.v2"
+    "translate-native.commercial-benchmark-case-evaluation.v3"
 )
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v13"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v14"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -79,7 +79,10 @@ be faithful. Never guess an ambiguous amount, basis, tax status, billing interva
 term or condition; record the affected variant as having a blocking or major defect. Return one ordered commercial
 evaluation item for every listed dimension and both anonymous variants. Within every variant return exactly one
 ordered status for each opaque source offer index. Derive the dimension aggregate from those offer statuses; no
-aggregate may hide a major or blocking offer defect. Use uncertain rather than guessing."""
+aggregate may hide a major or blocking offer defect. Use the supplied Unicode-code-point registry to associate each
+opaque offer index with its exact source spans; apply every explicitly shared source span to each relevant offer.
+Never infer a different partition or expose this registry to the source-blind pass.
+Use uncertain rather than guessing."""
 
 _COMMERCIAL_STATUSES = frozenset((
     "equivalent", "not_present", "major", "blocking", "uncertain",
@@ -1057,6 +1060,9 @@ def _review_request(
             common["benchmark_suite"]["commercial_offer_count"] = (
                 benchmark_case["commercial_offer_count"]
             )
+            common["benchmark_suite"]["commercial_offer_registry"] = (
+                benchmark_case["commercial_offer_registry"]
+            )
         common["source"] = job["source"]
         common["glossary"] = [asdict(term) for term in assets.glossary]
         common["protected_terms"] = list(assets.protected_terms)
@@ -1270,6 +1276,7 @@ def _unblind_commercial_evaluation(
     origins: Mapping[str, str],
     response_sha256: str,
     offer_count: int,
+    offer_registry_sha256: str,
 ) -> dict[str, Any]:
     def decision(item: Mapping[str, Any], origin: str) -> Mapping[str, Any]:
         return next(
@@ -1281,6 +1288,7 @@ def _unblind_commercial_evaluation(
     return {
         "schema": COMMERCIAL_CASE_EVALUATION_SCHEMA,
         "review_response_sha256": response_sha256,
+        "offer_registry_sha256": offer_registry_sha256,
         "offer_count": offer_count,
         "dimensions": [
             {
@@ -1304,6 +1312,7 @@ def _validate_commercial_benchmark_scope(
 ) -> None:
     dimensions = benchmark_case.get("commercial_dimensions")
     offer_count = benchmark_case.get("commercial_offer_count")
+    offer_registry = benchmark_case.get("commercial_offer_registry")
     if job["content_type"] == "commercial":
         registered = next(
             (
@@ -1312,15 +1321,26 @@ def _validate_commercial_benchmark_scope(
             ),
             None,
         )
+        try:
+            validated_registry = _SUITE.validate_commercial_offer_registry(
+                offer_registry, source_text=benchmark_case.get("source_text"),
+            )
+        except RuntimeError:
+            validated_registry = None
         if (
             dimensions != list(_WORKER._COMMERCIAL.DIMENSIONS)
             or type(offer_count) is not int
             or not 1 <= offer_count <= 1000
             or registered is None
             or offer_count != registered.get("commercial_offer_count")
+            or validated_registry is None
+            or offer_registry != registered.get("commercial_offer_registry")
         ):
             raise BenchmarkBlocked("benchmark.suite.commercial_scope_mismatch")
-    elif dimensions is not None or offer_count is not None:
+    elif (
+        dimensions is not None or offer_count is not None
+        or offer_registry is not None
+    ):
         raise BenchmarkBlocked("benchmark.suite.commercial_scope_mismatch")
 
 
@@ -1414,6 +1434,7 @@ def run_blind_benchmark_case(
             commercial_evaluation = _unblind_commercial_evaluation(
                 parsed["commercial_evaluation"], origins, response_hash,
                 benchmark_case["commercial_offer_count"],
+                benchmark_case["commercial_offer_registry"]["sha256"],
             )
         passes.append({
             "phase": phase,
@@ -1788,12 +1809,15 @@ def _validated_case_result(
         if (
             not isinstance(commercial_evaluation, dict)
             or set(commercial_evaluation) != {
-                "schema", "review_response_sha256", "offer_count", "dimensions",
+                "schema", "review_response_sha256", "offer_registry_sha256",
+                "offer_count", "dimensions",
             }
             or commercial_evaluation["schema"]
             != COMMERCIAL_CASE_EVALUATION_SCHEMA
             or commercial_evaluation["offer_count"]
             != benchmark_case["commercial_offer_count"]
+            or commercial_evaluation["offer_registry_sha256"]
+            != benchmark_case["commercial_offer_registry"]["sha256"]
         ):
             raise BenchmarkBlocked("benchmark.results.invalid")
         fidelity_response_sha256 = next(

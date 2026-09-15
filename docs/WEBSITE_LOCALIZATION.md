@@ -783,17 +783,22 @@ preferences, defect counts and finding hashes—not reviewer reasons, excerpts,
 source text or either target.
 
 For a commercial `source_fidelity` response, persistence additionally requires
-the complete `translate-native.commercial-benchmark-review.v2` acknowledgement.
-The versioned suite registers an opaque offer count for every fixture. The
+the complete `translate-native.commercial-benchmark-review.v3` acknowledgement.
+The versioned suite registers an opaque offer count and a SHA-256-bound
+`translate-native.commercial-benchmark-offer-registry.v1` for every fixture.
+That manually maintained registry partitions the exact source into ordered
+Unicode-code-point spans owned by each offer plus explicit shared spans. The
 response lists all ten dimensions in profile order and, for both anonymous
 variants, returns exactly one ordered status for every registered offer.
 `major` and `blocking` offer statuses must reference the matching variant's
 zero-based defect entry; `equivalent` and `not_present` cannot carry a defect
 reference. The dimension status is derived by fixed severity, so an aggregate
 cannot hide a major or blocking defect in another offer. Missing, duplicated or
-reordered offer indexes, inconsistent aggregates and `uncertain` all block the
-case. The `target_native` response has no commercial acknowledgement and
-therefore remains source-blind.
+reordered offer indexes, gaps, overlaps, stale source lengths or digests,
+inconsistent aggregates and `uncertain` all block the case. The registry and
+its digest cross the HTTPS and durable-review boundaries, and the signed case
+result retains the digest. The `target_native` request receives neither the
+registry nor the commercial acknowledgement and therefore remains source-blind.
 
 The review store also exposes a strictly read-only, content-free health view
 for one exact reviewer route and benchmark policy. It rechecks canonical rows,
@@ -816,7 +821,7 @@ owners of retry limits, backoff, leases, and reuse.
 
 Each `POST` body uses
 `blun.website-localization-benchmark-review-http-request.v1` and contains the
-exact anonymous `blun.website-localization-benchmark.v8`
+exact anonymous `blun.website-localization-benchmark.v9`
 `BenchmarkReviewRequest`, its deterministic `review_id`, and the SHA-256 digest
 of its canonical UTF-8 JSON. Its expected review object uses
 `blun.website-localization-benchmark-review.v3`. The same values are bound in
@@ -831,8 +836,9 @@ The source-blind request is accepted only with the exact `target_native`
 instruction and input field set; `source`, `glossary`, and `protected_terms`
 are forbidden. The later `source_fidelity` request has a different exact field
 set and instruction and carries the source. Commercial fidelity requests also
-carry the ten ordered dimensions and exact acknowledgement schema; other
-content types do not. Both retain only anonymous `A` and `B` variants.
+carry the ten ordered dimensions, the complete source-bound offer registry and
+the exact acknowledgement schema; other content types do not. Both retain only
+anonymous `A` and `B` variants.
 Candidate provider, baseline identity, acquisition provenance, and unblinding
 data are absent from the transport contract.
 

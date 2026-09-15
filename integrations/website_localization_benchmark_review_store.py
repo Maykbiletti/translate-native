@@ -196,6 +196,28 @@ def _request_payload(value: Any) -> dict[str, Any]:
         and isinstance(input_value.get("benchmark_suite"), dict)
         else None
     )
+    benchmark_suite = (
+        input_value.get("benchmark_suite")
+        if isinstance(input_value, dict) else None
+    )
+    commercial_offer_count = (
+        benchmark_suite.get("commercial_offer_count")
+        if isinstance(benchmark_suite, dict) else None
+    )
+    try:
+        source_text = input_value.get("source", {}).get("text")
+        offer_registry = input_value.get("benchmark_suite", {}).get(
+            "commercial_offer_registry",
+        )
+        validated_offer_registry = (
+            _BENCHMARK._SUITE.validate_commercial_offer_registry(
+                offer_registry, source_text=source_text,
+            )
+            if commercial_fidelity and isinstance(source_text, str)
+            else None
+        )
+    except (AttributeError, RuntimeError, TypeError):
+        validated_offer_registry = None
     if (
         payload.get("schema") != _BENCHMARK.BENCHMARK_SCHEMA
         or REVIEW_ID.fullmatch(payload.get("review_id", "")) is None
@@ -206,8 +228,24 @@ def _request_payload(value: Any) -> dict[str, Any]:
         or input_value.get("blind_id") is None
         or (
             commercial_fidelity
-            and commercial_dimensions
-            != list(_BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)
+            and (
+                commercial_dimensions
+                != list(_BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)
+                or validated_offer_registry is None
+                or type(commercial_offer_count) is not int
+                or len(validated_offer_registry["offers"])
+                != commercial_offer_count
+            )
+        )
+        or (
+            not commercial_fidelity
+            and isinstance(benchmark_suite, dict)
+            and any(
+                key in benchmark_suite for key in (
+                    "commercial_dimensions", "commercial_offer_count",
+                    "commercial_offer_registry",
+                )
+            )
         )
     ):
         raise BenchmarkReviewEvidenceFailed(

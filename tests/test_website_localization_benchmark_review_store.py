@@ -105,13 +105,23 @@ def request(*, phase="target_native", locale="mt-MT", suffix="1", commercial=Fal
     ).hexdigest()
     review_input = {"blind_id": "blind-" + digest, "variants": []}
     if commercial:
+        source_text = "Commercial source text."
+        midpoint = len(source_text) // 2
         review_input.update({
             "content_type": "commercial",
+            "source": {"locale": "en-IE", "text": source_text},
             "benchmark_suite": {
                 "commercial_dimensions": list(
                     BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS
                 ),
                 "commercial_offer_count": 2,
+                "commercial_offer_registry": (
+                    BENCHMARK._SUITE._commercial_offer_registry(
+                        source_text,
+                        (((0, midpoint),), ((midpoint, len(source_text)),)),
+                        (),
+                    )
+                ),
             },
         })
     return BENCHMARK.BenchmarkReviewRequest(

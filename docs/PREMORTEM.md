@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Source-bound commercial benchmark offer registry (16 September 2026)
+
+Assume two independent reviewers receive the same opaque offer count but attach
+offer index 0 to different parts of a commercial source.
+
+- Byte offsets could split native Unicode even when the documented ranges look
+  valid as character positions.
+- Overlapping, reordered, or uncovered regions could silently assign one price
+  or condition to the wrong offer.
+- Shared tax, discount, renewal, or cancellation conditions could be treated as
+  belonging to only the nearest offer.
+- Publishing the registry to the source-blind pass would reveal source layout
+  and weaken the independent native-quality decision.
+
+Every commercial fixture will carry a manually versioned, complete partition
+of its exact source into ordered Unicode-code-point spans for each opaque offer
+and explicitly shared spans. The suite, reviewer boundary, durable evidence,
+and signed case result will bind the canonical registry digest. Validation will
+reject gaps, overlaps, stale lengths, bad indexes, and non-commercial exposure;
+the target-native pass will receive none of the registry.
+
 ## Offer-complete commercial benchmark verdicts (16 September 2026)
 
 Assume the blind commercial benchmark reports a publishable result even though

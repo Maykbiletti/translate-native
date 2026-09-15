@@ -79,6 +79,14 @@ def review_request(*, phase="target_native", suffix="1", content_type="marketing
             dimensions = list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)
             review_input["benchmark_suite"]["commercial_dimensions"] = dimensions
             review_input["benchmark_suite"]["commercial_offer_count"] = 2
+            source_text = review_input["source"]["text"]
+            midpoint = len(source_text) // 2
+            review_input["benchmark_suite"]["commercial_offer_registry"] = (
+                BENCHMARK._SUITE._commercial_offer_registry(
+                    source_text, (((0, midpoint),), ((midpoint, len(source_text)),)),
+                    (),
+                )
+            )
             review_input["response_schema"]["commercial_evaluation"] = (
                 BENCHMARK._commercial_response_contract(dimensions, 2)
             )
@@ -241,6 +249,13 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
         self.assertEqual(
             sent["input"]["benchmark_suite"]["commercial_offer_count"], 2,
         )
+        registry = sent["input"]["benchmark_suite"][
+            "commercial_offer_registry"
+        ]
+        self.assertEqual(registry["offset_unit"], "unicode-code-point")
+        self.assertEqual(
+            [offer["offer_index"] for offer in registry["offers"]], [0, 1],
+        )
         self.assertEqual(
             [
                 item["dimension"]
@@ -266,6 +281,17 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
         )
         drifted.input["benchmark_suite"]["commercial_dimensions"].pop()
         error = self.failure(lambda: adapter.review(drifted))
+        self.assertEqual((error.code, error.retryable), ("request_invalid", False))
+        self.assertEqual(authentication_calls, [])
+
+        invalid_registry = review_request(
+            phase="source_fidelity", content_type="commercial",
+            suffix="registry-drift",
+        )
+        invalid_registry.input["benchmark_suite"][
+            "commercial_offer_registry"
+        ]["offers"][0]["source_spans"][0]["end"] -= 1
+        error = self.failure(lambda: adapter.review(invalid_registry))
         self.assertEqual((error.code, error.retryable), ("request_invalid", False))
         self.assertEqual(authentication_calls, [])
 
