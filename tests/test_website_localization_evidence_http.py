@@ -88,6 +88,7 @@ def evidence_request():
         commercial_profile=None,
         commercial_review=None,
         commercial_review_routing=None,
+        commercial_review_routing_contract=None,
         commercial_review_resolution_contract_sha256=None,
         human_review_required=False,
         independent_review_required=False,
@@ -350,6 +351,11 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
                 "target_spans": [[0, len(base["target_text"])]],
             }],
         }
+        base["commercial_review_routing_contract"] = (
+            HTTP._COMMERCIAL.public_review_routing_contract(
+                base["commercial_profile"],
+            )
+        )
         base["commercial_review_resolution_contract_sha256"] = (
             HTTP._COMMERCIAL.public_review_resolution_contract(
                 base["commercial_profile"],
@@ -389,6 +395,16 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             sent["commercial_review_routing"],
             base["commercial_review_routing"],
         )
+        self.assertEqual(
+            sent["commercial_review_routing_contract"],
+            HTTP._COMMERCIAL.public_review_routing_contract(
+                base["commercial_profile"],
+            ),
+        )
+        self.assertFalse(
+            sent["commercial_review_routing_contract"]["trust_boundary"]
+            ["semantic_truth"],
+        )
 
         for mutation in (
             {"review_required_dimensions": ["private VAT 480"]},
@@ -404,6 +420,38 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             payload["commercial_review"].update(mutation)
             invalid_transport = FakeTransport(response_for)
             with self.subTest(mutation=mutation), self.assertRaises(
+                HTTP.HTTPEvidenceProviderFailed,
+            ) as caught:
+                adapter(invalid_transport).obtain(CommercialRequest(payload))
+            self.assertEqual(caught.exception.code, "request_invalid")
+            self.assertEqual(invalid_transport.calls, [])
+
+        routing_contract_mutations = (
+            lambda contract: contract.update(sha256="0" * 64),
+            lambda contract: contract["offers"]["regions"].update(
+                span_format="zero-based-utf-8-bytes-exclusive-end",
+            ),
+        )
+        for mutate in routing_contract_mutations:
+            payload = json.loads(json.dumps(base))
+            mutate(payload["commercial_review_routing_contract"])
+            if payload["commercial_review_routing_contract"]["sha256"] != "0" * 64:
+                unsigned = dict(payload["commercial_review_routing_contract"])
+                unsigned.pop("sha256")
+                payload["commercial_review_routing_contract"]["sha256"] = (
+                    hashlib.sha256(
+                        json.dumps(
+                            unsigned,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
+            payload["request_id"] = HTTP._request_id_for_payload(payload)
+            invalid_transport = FakeTransport(response_for)
+            with self.subTest(routing_contract_mutation=mutate), self.assertRaises(
                 HTTP.HTTPEvidenceProviderFailed,
             ) as caught:
                 adapter(invalid_transport).obtain(CommercialRequest(payload))
@@ -471,6 +519,20 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
 
         noncommercial = evidence_request().as_payload()
         noncommercial["commercial_review_resolution_contract_sha256"] = "0" * 64
+        invalid_transport = FakeTransport(response_for)
+        with self.assertRaises(HTTP.HTTPEvidenceProviderFailed):
+            adapter(invalid_transport).obtain(CommercialRequest(noncommercial))
+        self.assertEqual(invalid_transport.calls, [])
+
+        noncommercial = evidence_request().as_payload()
+        noncommercial["commercial_review_routing_contract"] = (
+            HTTP._COMMERCIAL.public_review_routing_contract(
+                "translate-native.commercial.v3",
+            )
+        )
+        noncommercial["request_id"] = HTTP._request_id_for_payload(
+            noncommercial,
+        )
         invalid_transport = FakeTransport(response_for)
         with self.assertRaises(HTTP.HTTPEvidenceProviderFailed):
             adapter(invalid_transport).obtain(CommercialRequest(noncommercial))

@@ -29,7 +29,7 @@ Neither credentials nor remote response prose appears in adapter errors.
 ## Request
 
 The adapter accepts only the coordinator's exact immutable
-`blun.localization-quality-evidence-request.v11` object. It validates the
+`blun.localization-quality-evidence-request.v12` object. It validates the
 complete field set, derives the request ID, and checks SHA-256 values, locale
 profile, model identity,
 confidence decisions, and, for commercial content, the exact locale-specific
@@ -45,7 +45,7 @@ It sends one canonical UTF-8 JSON document:
   "request_id": "blun-l10n-evidence-<64 lowercase hexadecimal characters>",
   "request_sha256": "<SHA-256 of the canonical inner request>",
   "request": {
-    "schema": "blun.localization-quality-evidence-request.v11",
+    "schema": "blun.localization-quality-evidence-request.v12",
     "request_id": "<same request ID>",
     "source_locale": "en-IE",
     "target_locale": "fi-FI",
@@ -55,6 +55,8 @@ It sends one canonical UTF-8 JSON document:
     "source_sha256": "<source-text hash>",
     "target_sha256": "<target-text hash>",
     "content_type": "headline",
+    "commercial_review_routing": null,
+    "commercial_review_routing_contract": null,
     "commercial_review_resolution_contract_sha256": null,
     "quality_profile": {
       "locale": "fi-FI",
@@ -66,7 +68,7 @@ It sends one canonical UTF-8 JSON document:
 ```
 
 The abbreviated example omits other required inner fields for readability.
-Production requests always contain exactly the full v11 field set. Commercial
+Production requests always contain exactly the full v12 field set. Commercial
 requests include `commercial_profile`, the matching `commercial_review`
 summary, and `quality_profile.commercial` with the same profile identifier plus
 its exact locale-specific version and SHA-256 digest. The summary binds the
@@ -80,13 +82,16 @@ An unresolved commercial request also carries a private
 to its ordered, non-overlapping source and target Unicode code-point spans and
 binds both complete text lengths. The object contains no configured offer ID,
 text, price, brand, or reviewer prose. It also carries the exact SHA-256 of the
-separately advertised machine-readable routing contract. The adapter
-reconstructs that contract and validates the route against the exact source,
-target, summary, and profile before authentication or transport. Both route and
-contract digest are part of the deterministic request ID. Verified commercial
-results and non-commercial requests require the route to be `null`.
-Non-commercial requests also require both commercial fields to be `null` and
-forbid that nested profile.
+separately advertised machine-readable routing contract. The sibling
+`commercial_review_routing_contract` field contains that complete content-free
+contract, so a remote reviewer does not depend on separate capability
+discovery. The adapter reconstructs the canonical object and validates the
+route against the exact source, target, summary, and profile before
+authentication or transport. Route, digest, and full contract are part of the
+deterministic request ID. Verified commercial results and non-commercial
+requests require both route and routing contract to be `null`.
+Non-commercial requests require every commercial field to be `null` and forbid
+the nested commercial quality profile.
 Source and
 target text are intentionally present because this external step verifies the
 existing source-blind native review and the separate source-aware fidelity
@@ -97,8 +102,8 @@ exactly `schema`, `evidence_revision`, `event_id`, `plan_id`, `job_id`,
 `result_sha256`, both text hashes, both locales, `content_type`, glossary and
 policy versions, provider/model identity, software version, both confidence
 decisions, the complete locale quality profile, commercial profile and review,
-the conditional commercial review-routing object and resolution-contract hash,
-and both escalation
+the conditional commercial review-routing object, its complete routing
+contract, the resolution-contract hash, and both escalation
 flags. The full texts and `request_id` itself are excluded from that identity;
 their exact bytes are already bound by `source_sha256` and `target_sha256`.
 The durable store and HTTP adapter independently recompute this same identity.

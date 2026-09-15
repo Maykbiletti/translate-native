@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Exact routing contract at the reviewer transport (15 September 2026)
+
+Assume an independent review adapter accepts the digest on a private offer
+route but the remote reviewer never receives the contract that defines it.
+
+- Separate capability discovery could be unavailable, stale, or associated
+  with a different commercial generation when the review attempt runs.
+- A reviewer could interpret indexes or span ends differently while still
+  returning a structurally valid receipt for the supplied route.
+- A self-rehashed substitute could appear internally consistent unless the
+  trusted adapter compares the complete contract with its local canonical one.
+- Sending the contract for verified commercial or non-commercial work could
+  create an unintended review surface and weaken strict request nullability.
+
+The quality-evidence request will carry the complete, content-free routing
+contract alongside its private route only when commercial review is required.
+The coordinator and HTTPS adapter will independently reconstruct and compare
+the canonical object before authentication or transport, and request identity
+will cover the full contract. Verified commercial and non-commercial requests
+will require both route and contract to be `null`. Tests will cover exact
+transport, stale and self-rehashed substitutions, request-ID invalidation,
+strict nullability, and zero network access on rejection.
+
 ## Contract-bound private offer routing (15 September 2026)
 
 Assume a host and an independent reviewer both accept a syntactically valid

@@ -197,7 +197,7 @@ SHA-256, ordered unresolved dimension names
 and a hash binding the profile, exact source and target hashes, and complete
 commercial evidence. Prices, text spans, interpretations and reviewer prose do
 not survive in the summary. The same
-summary is bound into quality-evidence request schema v11 and receipt-binding
+summary is bound into quality-evidence request schema v12 and receipt-binding
 schema v8, so an independent adapter receives the exact targeted scope and
 cannot replace it with a generic approval. Tampered, unknown, reordered or
 contradictory dimensions block before network access or signing.
@@ -214,6 +214,11 @@ private-only trust boundary. Evidence-request identity and every receipt
 binding cover the route and contract digest;
 span, order, count, or length drift blocks before network access. It never
 appears in public CMS release evidence.
+For unresolved work, the evidence request also includes the complete
+content-free routing contract. The coordinator and HTTPS adapter independently
+reconstruct it, and request identity covers the exact object. Verified
+commercial and non-commercial requests require both route and contract to be
+`null`.
 
 The validator checks evidence shape and offsets, **not semantic truth**. A model
 can misinterpret text or omit a fact while claiming completeness. The host's

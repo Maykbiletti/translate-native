@@ -1823,7 +1823,7 @@ ordered allowed dimensions and the invariant between status and unresolved
 dimensions. Its evidence digest covers a versioned canonical binding of the
 commercial profile, exact advertised review-evidence-contract SHA-256, exact
 UTF-8 source and target hashes, and complete review evidence. Quality-evidence
-request v11 and receipt-binding v8 carry that exact summary. When review is
+request v12 and receipt-binding v8 carry that exact summary. When review is
 required, they additionally carry a private
 `translate-native.commercial-review-routing.v2` context that maps each opaque
 offer index to its exact ordered source and target regions. It contains no
@@ -1834,6 +1834,10 @@ advertised machine-readable routing contract, whose public shape fixes Unicode
 offset, exclusive-end, length, order, overlap, privacy, and trust-boundary
 semantics without exposing an actual route. The route itself is deliberately
 absent from CMS release evidence.
+The unresolved quality-evidence request carries the complete content-free
+routing contract beside the route. Its deterministic identity covers both, and
+the HTTPS adapter reconstructs the canonical contract before authentication or
+transport so an external reviewer need not rely on separate discovery.
 Adapters can therefore route a reviewer to the affected offer without exposing
 project configuration publicly, while rejecting unknown, reordered,
 contradictory, or transplanted scope.

@@ -425,6 +425,7 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             "sha256": self.plan.jobs[0].target.quality_profile_sha256,
         })
         self.assertIsNone(payload["commercial_profile"])
+        self.assertIsNone(payload["commercial_review_routing_contract"])
         self.assertIsNone(
             payload["commercial_review_resolution_contract_sha256"],
         )
@@ -485,12 +486,24 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             ["amount_currency"],
         )
         routing = commercial_request.as_payload()["commercial_review_routing"]
+        routing_contract = commercial_request.as_payload()[
+            "commercial_review_routing_contract"
+        ]
         self.assertEqual(
             routing["schema"], WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
         )
         self.assertEqual(routing["offer_count"], 1)
         self.assertEqual(routing["offers"][0]["offer_index"], 0)
         self.assertNotIn("offer-1", json.dumps(routing))
+        self.assertEqual(
+            routing_contract,
+            COORDINATOR._CMS._COMMERCIAL.public_review_routing_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            ),
+        )
+        self.assertFalse(
+            routing_contract["trust_boundary"]["publication_authority"],
+        )
         changed_routing = commercial_request.as_payload()
         changed_routing["commercial_review_routing"]["offers"][0][
             "source_spans"
@@ -505,6 +518,61 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         ] = "0" * 64
         self.assertNotEqual(
             COORDINATOR._request_id_for_payload(changed_contract),
+            commercial_request.request_id,
+        )
+        changed_full_contract = commercial_request.as_payload()
+        changed_full_contract["commercial_review_routing_contract"][
+            "sha256"
+        ] = "0" * 64
+        self.assertNotEqual(
+            COORDINATOR._request_id_for_payload(changed_full_contract),
+            commercial_request.request_id,
+        )
+        substituted_contract = json.loads(json.dumps(routing_contract))
+        substituted_contract["offers"]["regions"]["span_format"] = (
+            "zero-based-utf-8-bytes-exclusive-end"
+        )
+        unsigned_substitute = dict(substituted_contract)
+        unsigned_substitute.pop("sha256")
+        substituted_contract["sha256"] = hashlib.sha256(
+            json.dumps(
+                unsigned_substitute,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        substituted_request = replace(
+            commercial_request,
+            commercial_review_routing_contract=substituted_contract,
+        )
+        substituted_request = replace(
+            substituted_request,
+            request_id=COORDINATOR._request_id_for_payload(
+                substituted_request.as_payload(),
+            ),
+        )
+        with self.assertRaises(
+            COORDINATOR.LocalizationReleaseCoordinatorBlocked,
+        ) as caught:
+            COORDINATOR._validated_request_payload(substituted_request)
+        self.assertEqual(caught.exception.code, "evidence.request.invalid")
+        with patch.object(
+            COORDINATOR._CMS._COMMERCIAL,
+            "public_review_routing_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            changed_routing_contract_request = COORDINATOR._request(
+                commercial_event,
+                commercial_plan,
+                commercial_job,
+                commercial_result,
+                commercial_result_hash,
+                "commercial-evidence-1",
+            )
+        self.assertNotEqual(
+            changed_routing_contract_request.request_id,
             commercial_request.request_id,
         )
         expected_contract_sha256 = (
@@ -563,6 +631,9 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         )
         self.assertIsNone(
             verified_commercial_request.commercial_review_routing,
+        )
+        self.assertIsNone(
+            verified_commercial_request.commercial_review_routing_contract,
         )
         self.assertIsNone(
             verified_commercial_request.as_payload()[
