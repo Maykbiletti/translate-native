@@ -80,7 +80,7 @@ The JSON envelope has exactly four fields:
   "request_id": "<deterministic phase request ID>",
   "request_sha256": "<SHA-256 of canonical request JSON>",
   "request": {
-    "schema": "blun.website-localization-worker.v7",
+    "schema": "blun.website-localization-worker.v8",
     "request_id": "<same deterministic phase request ID>",
     "phase": "transcreation",
     "provider_id": "customer-llm",
@@ -108,6 +108,13 @@ first provider call. Transcreation and source-blind native review do not receive
 this contract. The provider still returns the private evidence only under
 `response_schema.commercial_review`; the public contract itself contains no
 project price, brand, source, target, span, or reviewer prose.
+
+Commercial plan v4 and job v4 payloads also bind the exact public
+offer-routing-contract SHA-256. Worker v8 reconstructs that contract together
+with the review-evidence contract before any provider request, so queue health,
+lease validation, retries, and provider invocation reject obsolete routing
+semantics under the same deterministic job identity. Non-commercial jobs omit
+both commercial contract digests.
 
 `request_sha256` is the lowercase hexadecimal SHA-256 of `request` encoded as
 UTF-8 JSON with keys sorted, no insignificant whitespace, native Unicode

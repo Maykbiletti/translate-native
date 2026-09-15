@@ -2044,6 +2044,13 @@ uncertain semantic boundaries still route to independent review. Any registry
 or digest drift blocks the whole discovery
 response rather than advertising a partial contract.
 
+Commercial plan v4 and job v4 identities bind both the exact review-evidence
+contract SHA-256 and the exact content-free review-routing-contract SHA-256.
+Changing either contract produces new job, idempotency, and plan identities;
+the worker, queue health monitor, and pre-lease validator reconstruct the
+current contracts and reject stale jobs before provider access. Non-commercial
+jobs carry neither commercial digest.
+
 The sibling `review_routing_contract` defines the private actionable route as
 a separately hashed machine contract. It fixes exact Unicode code-point
 offsets with exclusive ends, complete source and target lengths, one ordered
@@ -2265,7 +2272,7 @@ is never included in the public capability or CMS release-evidence value.
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
     "default_target_policy": "all-eu-official-locales-except-source-language",
     "eu_language_source": "https://european-union.europa.eu/principles-countries-history/languages_en",
-    "job_schema": "blun.website-localization-job.v3",
+    "job_schema": "blun.website-localization-job.v4",
     "locales": [{
       "direction": "ltr",
       "eu_code": "MT",
@@ -2278,7 +2285,7 @@ is never included in the public capability or CMS release-evidence value.
       "commercial_quality_profile_version": "commercial-eu-mt-MT-2026-09-2",
       "script": "Latn"
     }],
-    "plan_schema": "blun.website-localization-plan.v3",
+    "plan_schema": "blun.website-localization-plan.v4",
     "publication_http": {
       "binding_headers": [
         {"binding": "delivery_id", "name": "Idempotency-Key"},
