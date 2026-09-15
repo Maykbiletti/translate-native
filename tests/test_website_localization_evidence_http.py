@@ -87,6 +87,7 @@ def evidence_request():
         quality_profile={"locale": "fi-FI", "version": "fi-native-1", "sha256": "c" * 64},
         commercial_profile=None,
         commercial_review=None,
+        commercial_review_routing=None,
         commercial_review_resolution_contract_sha256=None,
         human_review_required=False,
         independent_review_required=False,
@@ -332,6 +333,18 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             ),
             "evidence_sha256": "d" * 64,
         }
+        base["commercial_review_routing"] = {
+            "schema": HTTP._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+            "profile": base["commercial_profile"],
+            "offer_count": 1,
+            "source_length": len(base["source_text"]),
+            "target_length": len(base["target_text"]),
+            "offers": [{
+                "offer_index": 0,
+                "source_spans": [[0, len(base["source_text"])]],
+                "target_spans": [[0, len(base["target_text"])]],
+            }],
+        }
         base["commercial_review_resolution_contract_sha256"] = (
             HTTP._COMMERCIAL.public_review_resolution_contract(
                 base["commercial_profile"],
@@ -367,6 +380,10 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             )["sha256"],
         )
         self.assertNotIn("VAT", json.dumps(sent["commercial_review"]))
+        self.assertEqual(
+            sent["commercial_review_routing"],
+            base["commercial_review_routing"],
+        )
 
         for mutation in (
             {"review_required_dimensions": ["private VAT 480"]},
@@ -382,6 +399,26 @@ class WebsiteLocalizationEvidenceHTTPTests(unittest.TestCase):
             payload["commercial_review"].update(mutation)
             invalid_transport = FakeTransport(response_for)
             with self.subTest(mutation=mutation), self.assertRaises(
+                HTTP.HTTPEvidenceProviderFailed,
+            ) as caught:
+                adapter(invalid_transport).obtain(CommercialRequest(payload))
+            self.assertEqual(caught.exception.code, "request_invalid")
+            self.assertEqual(invalid_transport.calls, [])
+
+        for mutate in (
+            lambda routing: routing["offers"][0].update(offer_index=1),
+            lambda routing: routing["offers"][0].update(
+                source_spans=[[0, routing["source_length"] + 1]],
+            ),
+            lambda routing: routing["offers"][0].update(
+                configured_offer_id="private-tier",
+            ),
+        ):
+            payload = json.loads(json.dumps(base))
+            mutate(payload["commercial_review_routing"])
+            payload["request_id"] = HTTP._request_id_for_payload(payload)
+            invalid_transport = FakeTransport(response_for)
+            with self.subTest(routing_mutation=mutate), self.assertRaises(
                 HTTP.HTTPEvidenceProviderFailed,
             ) as caught:
                 adapter(invalid_transport).obtain(CommercialRequest(payload))

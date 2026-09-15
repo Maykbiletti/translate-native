@@ -190,6 +190,7 @@ def candidate_result(payload, text=None):
             }
             if payload["content_type"] == "commercial" else None
         ),
+        "commercial_review_routing": None,
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": False,
         "release_required": True,

@@ -734,7 +734,8 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "quality_profile", "commercial_review", "human_review_required",
+        "quality_profile", "commercial_review", "commercial_review_routing",
+        "human_review_required",
         "independent_review_required", "release_required",
     }
     if not isinstance(result, dict) or set(result) != expected_keys:
@@ -771,16 +772,29 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         job["content_type"] != "legal" and "low" in review_confidence.values()
     )
     commercial_review = result["commercial_review"]
+    commercial_review_routing = result["commercial_review_routing"]
     if job["content_type"] == "commercial":
         try:
-            _WORKER._COMMERCIAL.validate_summary(
+            commercial_review = _WORKER._COMMERCIAL.validate_summary(
                 commercial_review,
                 job["commercial_profile"],
                 review_required=expected_independent_review,
             )
+            if commercial_review["status"] == "review_required":
+                _WORKER._COMMERCIAL.validate_review_routing_context(
+                    commercial_review_routing,
+                    job["source"]["text"],
+                    candidate,
+                    commercial_review,
+                    job["commercial_profile"],
+                )
+            elif commercial_review_routing is not None:
+                raise _WORKER._COMMERCIAL.CommercialReviewBlocked(
+                    "review.commercial.routing_invalid",
+                )
         except _WORKER._COMMERCIAL.CommercialReviewBlocked:
             raise BenchmarkBlocked("benchmark.candidate.commercial_review_invalid") from None
-    elif commercial_review is not None:
+    elif commercial_review is not None or commercial_review_routing is not None:
         raise BenchmarkBlocked("benchmark.candidate.commercial_review_invalid")
     expected_quality_profile = {
         "locale": job["target"]["locale"],

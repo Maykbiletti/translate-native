@@ -32,6 +32,7 @@ REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
 )
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = _IMPL.REVIEW_SUMMARY_CAPABILITIES_SCHEMA
 REVIEW_SUMMARY_SCHEMA = _IMPL.REVIEW_SUMMARY_SCHEMA
+REVIEW_ROUTING_SCHEMA = _IMPL.REVIEW_ROUTING_SCHEMA
 EVIDENCE_BINDING_SCHEMA = _IMPL.EVIDENCE_BINDING_SCHEMA
 REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
     _IMPL.REVIEW_RESOLUTION_CAPABILITIES_SCHEMA
@@ -56,3 +57,5 @@ CommercialReviewBlocked = _IMPL.CommercialReviewBlocked
 review_contract = _IMPL.review_contract
 validate_review = _IMPL.validate_review
 validate_summary = _IMPL.validate_summary
+validate_review_routing_context = _IMPL.validate_review_routing_context
+review_routing_context = _IMPL.review_routing_context

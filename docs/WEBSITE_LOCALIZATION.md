@@ -1046,7 +1046,7 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v6` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v7` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
@@ -1054,7 +1054,9 @@ confidence, locale quality profile, and, for commercial content, the exact
 nested locale-specific commercial profile plus its content-free targeted-review
 summary and exact advertised review-evidence-contract SHA-256, the canonical
 advertised resolution-contract SHA-256 when targeted
-review is unresolved, and the human/independent-review
+review is unresolved, the private text-free mapping from each opaque offer
+index to its ordered source and target Unicode code-point spans, and the
+human/independent-review
 requirements. It also carries the canonical quality-evidence request ID and
 evidence revision that produced the opaque receipt. The verifier must cryptographically
 bind every field. It must reject a receipt issued for another result, policy,
@@ -1329,7 +1331,7 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v8` object. That content-free
+a `blun.website-localization-release-evidence.v9` object. That content-free
 object binds the exact machine-readable release-evidence-contract SHA-256,
 signed approval and worker-result hashes, quality-receipt
 hash, canonical evidence request ID and evidence revision, and either a null
@@ -1342,7 +1344,7 @@ resolution method, receipt hash, primary provider identity, and independent
 provider identity when a second model was used. The receiver proves the two
 provider IDs differ and rejects a missing, stale, unexpected, cross-scope, or
 method-inconsistent resolution before the host commit. It contains no source
-text, target text, amount,
+text, target text, amount, private offer-routing map,
 currency, tax wording, brand, or reviewer explanation. A CMS can therefore
 identify the exact evidence and contract generation, pin the advertised profile, and reject
 missing, malformed, or drifted evidence
@@ -1704,7 +1706,7 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v11` profile plus one exact
+versioned `translate-native.commercial.v12` profile plus one exact
 `translate-native.commercial-locale-quality-profile.v2` object to the job
 payload, job ID and plan ID; the existing seven types retain their previous
 payloads and IDs. It is available for every planner locale, including `mt-MT`
@@ -1821,9 +1823,16 @@ ordered allowed dimensions and the invariant between status and unresolved
 dimensions. Its evidence digest covers a versioned canonical binding of the
 commercial profile, exact advertised review-evidence-contract SHA-256, exact
 UTF-8 source and target hashes, and complete review evidence. Quality-evidence
-request v9 and receipt-binding v6 carry that exact
-summary, so adapters can reject unknown, reordered, contradictory, or
-transplanted review scope without reconstructing it from prose.
+request v10 and receipt-binding v7 carry that exact summary. When review is
+required, they additionally carry a private
+`translate-native.commercial-review-routing.v1` context that maps each opaque
+offer index to its exact ordered source and target regions. It contains no
+configured offer IDs, text, prices, brands, or reviewer prose, is validated
+against both complete texts before network access, and participates in request
+and receipt identity. It is deliberately absent from CMS release evidence.
+Adapters can therefore route a reviewer to the affected offer without exposing
+project configuration publicly, while rejecting unknown, reordered,
+contradictory, or transplanted scope.
 As before, the host must verify an independent quality receipt before signing.
 Schema validation does not prove that a model's semantic findings are true or
 complete. The receipt verifier must validate evidence held by the trusted host;

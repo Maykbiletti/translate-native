@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-quality-evidence-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-quality-evidence-http-response.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v9"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v10"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
@@ -44,7 +44,8 @@ REQUEST_FIELDS = {
     "source_locale", "target_locale", "content_type", "glossary_version",
     "policy_version", "provider", "software_version", "source_text",
     "target_text", "review_confidence", "quality_profile",
-    "commercial_profile", "commercial_review", "human_review_required",
+    "commercial_profile", "commercial_review", "commercial_review_routing",
+    "human_review_required",
     "commercial_review_resolution_contract_sha256",
     "independent_review_required",
 }
@@ -53,7 +54,7 @@ EVIDENCE_REQUEST_IDENTITY_FIELDS = (
     "result_sha256", "source_sha256", "target_sha256", "source_locale",
     "target_locale", "content_type", "glossary_version", "policy_version",
     "provider", "software_version", "review_confidence", "quality_profile",
-    "commercial_profile", "commercial_review",
+    "commercial_profile", "commercial_review", "commercial_review_routing",
     "commercial_review_resolution_contract_sha256", "human_review_required",
     "independent_review_required",
 )
@@ -414,6 +415,7 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
     confidence = payload["review_confidence"]
     profile = payload["quality_profile"]
     commercial_review = payload["commercial_review"]
+    commercial_review_routing = payload["commercial_review_routing"]
     if (
         not isinstance(provider, dict)
         or set(provider) != {"id", "model_id", "model_version"}
@@ -487,6 +489,26 @@ def _request_payload(request: Any) -> tuple[dict[str, Any], bytes]:
         )
     ):
         raise HTTPEvidenceProviderFailed("request_invalid", retryable=False)
+    try:
+        if (
+            commercial_review is not None
+            and commercial_review["status"] == "review_required"
+        ):
+            _COMMERCIAL.validate_review_routing_context(
+                commercial_review_routing,
+                source_text,
+                target_text,
+                commercial_review,
+                payload["commercial_profile"],
+            )
+        elif commercial_review_routing is not None:
+            raise _COMMERCIAL.CommercialReviewBlocked(
+                "review.commercial.routing_invalid",
+            )
+    except _COMMERCIAL.CommercialReviewBlocked:
+        raise HTTPEvidenceProviderFailed(
+            "request_invalid", retryable=False,
+        ) from None
     expected_resolution_contract_sha256 = (
         _COMMERCIAL.public_review_resolution_contract(
             payload["commercial_profile"],

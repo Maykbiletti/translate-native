@@ -114,7 +114,7 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v11` and the exact target-locale
+The planner binds `translate-native.commercial.v12` and the exact target-locale
 commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
@@ -192,15 +192,24 @@ model receipt bound to the commercial profile and policy. The worker does not
 secretly call an alternative provider.
 
 The worker retains a content-free `commercial_review` summary in result schema
-v6. It contains only the profile, verdict, exact review-evidence-contract
+v7. It contains only the profile, verdict, exact review-evidence-contract
 SHA-256, ordered unresolved dimension names
 and a hash binding the profile, exact source and target hashes, and complete
 commercial evidence. Prices, text spans, interpretations and reviewer prose do
 not survive in the summary. The same
-summary is bound into quality-evidence request schema v9 and receipt-binding
-schema v6, so an independent adapter receives the exact targeted scope and
+summary is bound into quality-evidence request schema v10 and receipt-binding
+schema v7, so an independent adapter receives the exact targeted scope and
 cannot replace it with a generic approval. Tampered, unknown, reordered or
 contradictory dimensions block before network access or signing.
+
+For a review-required result, the worker also derives the private
+`translate-native.commercial-review-routing.v1` context from the already
+validated offer registry. It maps each zero-based opaque offer index to ordered
+source and target Unicode code-point spans and binds both text lengths. The
+context deliberately strips configured IDs, text, prices, brands, and reviewer
+explanations. Evidence-request identity and every receipt binding cover it;
+span, order, count, or length drift blocks before network access. It never
+appears in public CMS release evidence.
 
 The validator checks evidence shape and offsets, **not semantic truth**. A model
 can misinterpret text or omit a fact while claiming completeness. The host's

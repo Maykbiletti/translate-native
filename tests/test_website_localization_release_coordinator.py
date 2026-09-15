@@ -265,6 +265,22 @@ def completed_result(job, target_text, *, review_confidence=None):
             }
             if payload["content_type"] == "commercial" else None
         ),
+        "commercial_review_routing": (
+            {
+                "schema": WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+                "profile": payload["commercial_profile"],
+                "offer_count": 1,
+                "source_length": len(payload["source"]["text"]),
+                "target_length": len(target_text),
+                "offers": [{
+                    "offer_index": 0,
+                    "source_spans": [[0, len(payload["source"]["text"])]],
+                    "target_spans": [[0, len(target_text)]],
+                }],
+            }
+            if payload["content_type"] == "commercial"
+            and review_confidence["source_fidelity"] == "low" else None
+        ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": (
             payload["content_type"] != "legal" and "low" in review_confidence.values()
@@ -463,6 +479,21 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             ],
             ["amount_currency"],
         )
+        routing = commercial_request.as_payload()["commercial_review_routing"]
+        self.assertEqual(
+            routing["schema"], WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+        )
+        self.assertEqual(routing["offer_count"], 1)
+        self.assertEqual(routing["offers"][0]["offer_index"], 0)
+        self.assertNotIn("offer-1", json.dumps(routing))
+        changed_routing = commercial_request.as_payload()
+        changed_routing["commercial_review_routing"]["offers"][0][
+            "source_spans"
+        ] = [[1, routing["source_length"]]]
+        self.assertNotEqual(
+            COORDINATOR._request_id_for_payload(changed_routing),
+            commercial_request.request_id,
+        )
         expected_contract_sha256 = (
             COORDINATOR._CMS._COMMERCIAL.public_review_resolution_contract(
                 PLANNER.COMMERCIAL_PROFILE,
@@ -516,6 +547,9 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertEqual(
             verified_commercial_request.commercial_review["status"],
             "verified",
+        )
+        self.assertIsNone(
+            verified_commercial_request.commercial_review_routing,
         )
         self.assertIsNone(
             verified_commercial_request.as_payload()[

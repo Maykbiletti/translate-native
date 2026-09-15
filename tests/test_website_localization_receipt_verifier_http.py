@@ -74,6 +74,7 @@ def binding(*, kind="quality"):
         },
         "commercial_profile": None,
         "commercial_review": None,
+        "commercial_review_routing": None,
         "commercial_review_resolution_contract_sha256": None,
         "human_review_required": False,
         "independent_review_required": False,
@@ -313,6 +314,18 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
             ),
             "evidence_sha256": "d" * 64,
         }
+        value["commercial_review_routing"] = {
+            "schema": HTTP._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+            "profile": value["commercial_profile"],
+            "offer_count": 1,
+            "source_length": len(value["source_text"]),
+            "target_length": len(value["target_text"]),
+            "offers": [{
+                "offer_index": 0,
+                "source_spans": [[0, len(value["source_text"])]],
+                "target_spans": [[0, len(value["target_text"])]],
+            }],
+        }
         value["commercial_review_resolution_contract_sha256"] = (
             HTTP._COMMERCIAL.public_review_resolution_contract(
                 value["commercial_profile"],
@@ -336,6 +349,10 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
                 value["commercial_profile"],
             )["sha256"],
         )
+        self.assertEqual(
+            sent["commercial_review_routing"],
+            value["commercial_review_routing"],
+        )
 
         valid = json.loads(json.dumps(value))
         value["commercial_review"]["review_required_dimensions"] = [
@@ -345,6 +362,18 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         with self.assertRaises(HTTP.HTTPReceiptVerifierFailed) as caught:
             self.adapter(invalid_transport).verify(
                 binding=value, receipt="signed-receipt",
+            )
+        self.assertEqual(caught.exception.code, "binding_invalid")
+        self.assertEqual(invalid_transport.calls, [])
+
+        invalid_routing = json.loads(json.dumps(valid))
+        invalid_routing["commercial_review_routing"]["offers"][0][
+            "target_spans"
+        ] = [[0, len(valid["target_text"]) + 1]]
+        invalid_transport = Transport(response_for)
+        with self.assertRaises(HTTP.HTTPReceiptVerifierFailed) as caught:
+            self.adapter(invalid_transport).verify(
+                binding=invalid_routing, receipt="signed-receipt",
             )
         self.assertEqual(caught.exception.code, "binding_invalid")
         self.assertEqual(invalid_transport.calls, [])

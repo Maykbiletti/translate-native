@@ -21,12 +21,12 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v7"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v6"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v8"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v7"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v8"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v9"
 PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
-    "blun.website-localization-release-evidence-capabilities.v2"
+    "blun.website-localization-release-evidence-capabilities.v3"
 )
 PUBLICATION_EVIDENCE_FIELDS = (
     "schema", "release_evidence_contract_sha256", "job_id", "target_locale",
@@ -323,6 +323,7 @@ def _publication_evidence_contract_body() -> dict[str, Any]:
             "raw_receipt": False,
             "reviewer_identity": False,
             "reviewer_prose": False,
+            "commercial_review_routing": False,
             "project_prices": False,
             "project_brands": False,
             "authentication_material": False,
@@ -452,6 +453,7 @@ def _receipt_binding(
         "quality_profile": result["quality_profile"],
         "commercial_profile": commercial_profile,
         "commercial_review": commercial_review,
+        "commercial_review_routing": result["commercial_review_routing"],
         "commercial_review_resolution_contract_sha256": (
             resolution_contract_sha256
         ),
@@ -528,7 +530,8 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "quality_profile", "commercial_review", "human_review_required",
+        "quality_profile", "commercial_review", "commercial_review_routing",
+        "human_review_required",
         "independent_review_required", "release_required",
     }
     if set(result) != expected:
@@ -603,16 +606,29 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     ):
         raise LocalizationReleaseBlocked("result.independent_review.invalid")
     commercial_review = result.get("commercial_review")
+    commercial_review_routing = result.get("commercial_review_routing")
     if job["content_type"] == "commercial":
         try:
-            _WORKER._COMMERCIAL.validate_summary(
+            commercial_review = _WORKER._COMMERCIAL.validate_summary(
                 commercial_review,
                 job["commercial_profile"],
                 review_required=independent_review_required,
             )
+            if commercial_review["status"] == "review_required":
+                _WORKER._COMMERCIAL.validate_review_routing_context(
+                    commercial_review_routing,
+                    job["source"]["text"],
+                    candidate,
+                    commercial_review,
+                    job["commercial_profile"],
+                )
+            elif commercial_review_routing is not None:
+                raise _WORKER._COMMERCIAL.CommercialReviewBlocked(
+                    "review.commercial.routing_invalid",
+                )
         except _WORKER._COMMERCIAL.CommercialReviewBlocked:
             raise LocalizationReleaseBlocked("result.commercial_review.invalid") from None
-    elif commercial_review is not None:
+    elif commercial_review is not None or commercial_review_routing is not None:
         raise LocalizationReleaseBlocked("result.commercial_review.invalid")
     return result
 

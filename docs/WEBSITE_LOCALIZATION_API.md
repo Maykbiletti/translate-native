@@ -1366,7 +1366,7 @@ an unresolved generation mismatch cannot be reported as accepted.
 The v11 capability generation and v10 OpenAPI document add
 `GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
 separate body-free operator scope. It returns the exact public
-`translate-native.commercial.v11` profile, its ten ordered preservation and
+`translate-native.commercial.v12` profile, its ten ordered preservation and
 review dimensions, and the complete 24-locale rendering registry. The payload
 contains only policy, version, authority, locale, Unicode rendering, and hash
 data; project prices, brands, products, credentials, source text, and target
@@ -2016,7 +2016,7 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v13` object. Its nested and separately
+`translate-native.commercial-capabilities.v14` object. Its nested and separately
 hashed `review_evidence_contract` defines the exact private report fields,
 coverage values, offer registry, Unicode code-point spans, item relations,
 ten-dimension order, limits, per-offer verdict matrix, aggregate-status
@@ -2090,7 +2090,7 @@ rehashed entry returns `503` without a partial registry. Consumers must still
 treat these values as display guidance and route uncertain semantic equality to
 the configured independent review path.
 
-For publication, `blun.website-localization-release-evidence.v8` carries the
+For publication, `blun.website-localization-release-evidence.v9` carries the
 canonical release-evidence-contract SHA-256, content-free
 `evidence_request_id` and `evidence_revision` plus the
 compact `commercial_quality_profile` binding `{profile, version, sha256}` for
@@ -2116,6 +2116,10 @@ publish configured offer identifiers. The resolution must echo the exact
 ordered position scope; malformed, stale, or substituted scope blocks before
 CMS persistence. A dimension may remain review-required with no position when
 global uncertainty or an empty registry prevents safe offer identification.
+The quality-evidence request and receipt verifier privately receive a separate
+text-free routing object that maps those positions to exact source and target
+Unicode code-point spans. It is bound into request and receipt identities but
+is never included in the public capability or CMS release-evidence value.
 
 ```json
 {
@@ -2123,7 +2127,7 @@ global uncertainty or an empty registry prevents safe offer identification.
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": {
-      "profile": "translate-native.commercial.v11",
+      "profile": "translate-native.commercial.v12",
       "locale_quality_profile": {
         "schema": "translate-native.commercial-locale-quality-profile.v2",
         "required": true,
@@ -2174,18 +2178,18 @@ global uncertainty or an empty registry prevents safe offer identification.
           "max_items": 1000,
           "regions": {"at_least_one_side_non_empty": true, "discontiguous": true, "fields": ["source_spans", "target_spans"], "non_empty_text": true, "ordered": true, "overlap": "forbidden-within-and-across-offers", "span_format": "zero-based-unicode-code-points-exclusive-end"}
         },
-        "profile": "translate-native.commercial.v11",
+        "profile": "translate-native.commercial.v12",
         "required_fields": ["schema", "coverage", "offers", "checks"],
-        "result_schema": "translate-native.commercial.v11",
+        "result_schema": "translate-native.commercial.v12",
         "schema": "translate-native.commercial-review-evidence-capabilities.v2",
         "sha256": "<sha256>",
         "trust_boundary": {"numeric_regex_semantic_proof": false, "publication_authority": false, "semantic_truth": false, "unresolved_route": "independent-model-or-qualified-native-domain-review", "validates": "structure-offsets-and-verdict-consistency"}
       },
-      "review_evidence_schema": "translate-native.commercial.v11",
+      "review_evidence_schema": "translate-native.commercial.v12",
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
         "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "review_evidence_contract_sha256", "target_locale", "commercial_quality_profile_version", "commercial_quality_profile_sha256", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v5", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-review-evidence-contract", "exact-target-locale", "commercial-quality-profile-generation", "exact-source-sha256", "exact-target-sha256", "offer-registry-and-proposition-assignment", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
-        "profile": "translate-native.commercial.v11",
+        "profile": "translate-native.commercial.v12",
         "required_fields": ["schema", "profile", "status", "review_required_dimensions", "offer_count", "review_required_offers", "review_evidence_contract_sha256", "evidence_sha256"],
         "result_schema": "translate-native.commercial-review-summary.v6",
         "review_evidence_contract_sha256": {"algorithm": "sha-256", "equals": "<review-evidence-contract-sha256>", "purpose": "reject-stale-or-reinterpreted-private-evidence"},
@@ -2200,7 +2204,7 @@ global uncertainty or an empty registry prevents safe offer identification.
         "applies_when": {"review_summary_status": "review_required", "reviewed_dimensions": "exact-ordered-review-summary-dimensions", "reviewed_offer_count": "exact-review-summary-offer-count", "reviewed_offers": "exact-ordered-review-summary-offer-scope"},
         "content_policy": {"project_brands": false, "project_prices": false, "qualified_human_identity": false, "raw_receipt": false, "reviewer_prose": false, "source_text": false, "target_text": false},
         "methods": {"independent_model": {"primary_provider": "required", "provider": "required", "provider_id_must_differ_from_primary_provider": true, "receipt": "verified-independent-model-review"}, "qualified_human": {"primary_provider": "required", "provider": "null", "receipt": "verified-qualified-human-review"}},
-        "profile": "translate-native.commercial.v11",
+        "profile": "translate-native.commercial.v12",
         "provider_identity": {"credentials_published": false, "fields": ["id", "model_id", "model_version"], "primary_provider": "required"},
         "receipt_sha256": {"algorithm": "sha-256", "covers": "exact-verified-review-receipt", "raw_receipt_published": false},
         "required_fields": ["schema", "profile", "contract_sha256", "status", "reviewed_dimensions", "reviewed_offer_count", "reviewed_offers", "method", "receipt_sha256", "primary_provider", "provider"],
@@ -2213,11 +2217,11 @@ global uncertainty or an empty registry prevents safe offer identification.
         "status": "resolved"
       },
       "review_resolution_schema": "translate-native.commercial-review-resolution.v4",
-      "schema": "translate-native.commercial-capabilities.v13",
+      "schema": "translate-native.commercial-capabilities.v14",
       "sha256": "<sha256>"
     },
     "commercial_rendering_registry": {
-      "commercial_profile": "translate-native.commercial.v11",
+      "commercial_profile": "translate-native.commercial.v12",
       "content_policy": {"credentials": false, "project_brands": false, "project_prices": false, "source_text": false, "target_text": false},
       "locales": [{
         "commercial_quality_profile": {"sha256": "<sha256>", "version": "commercial-eu-mt-MT-2026-09-2"},
@@ -2295,18 +2299,19 @@ global uncertainty or an empty registry prevents safe offer identification.
           "project_brands": false,
           "project_prices": false,
           "raw_receipt": false,
+          "commercial_review_routing": false,
           "reviewer_identity": false,
           "reviewer_prose": false,
           "source_text": false,
           "target_text": false
         },
-        "release_evidence_schema": "blun.website-localization-release-evidence.v8",
+        "release_evidence_schema": "blun.website-localization-release-evidence.v9",
         "required_fields": ["schema", "release_evidence_contract_sha256", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_resolution"],
-        "schema": "blun.website-localization-release-evidence-capabilities.v2",
+        "schema": "blun.website-localization-release-evidence-capabilities.v3",
         "sha256": "<sha256>",
         "tamper_policy": "reject-complete-publication-before-host-commit"
       },
-      "release_evidence_schema": "blun.website-localization-release-evidence.v8",
+      "release_evidence_schema": "blun.website-localization-release-evidence.v9",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
       "schema": "blun.cms-localization-publication-http-capabilities.v5",
       "sha256": "<sha256>"

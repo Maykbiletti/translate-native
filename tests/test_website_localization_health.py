@@ -226,6 +226,7 @@ def completed_result(job, candidate):
             "sha256": payload["target"]["quality_profile_sha256"],
         },
         "commercial_review": None,
+        "commercial_review_routing": None,
         "human_review_required": False,
         "independent_review_required": False,
         "release_required": True,

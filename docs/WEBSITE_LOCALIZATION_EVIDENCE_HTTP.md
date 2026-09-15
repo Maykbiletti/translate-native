@@ -29,7 +29,7 @@ Neither credentials nor remote response prose appears in adapter errors.
 ## Request
 
 The adapter accepts only the coordinator's exact immutable
-`blun.localization-quality-evidence-request.v9` object. It validates the
+`blun.localization-quality-evidence-request.v10` object. It validates the
 complete field set, derives the request ID, and checks SHA-256 values, locale
 profile, model identity,
 confidence decisions, and, for commercial content, the exact locale-specific
@@ -45,7 +45,7 @@ It sends one canonical UTF-8 JSON document:
   "request_id": "blun-l10n-evidence-<64 lowercase hexadecimal characters>",
   "request_sha256": "<SHA-256 of the canonical inner request>",
   "request": {
-    "schema": "blun.localization-quality-evidence-request.v9",
+    "schema": "blun.localization-quality-evidence-request.v10",
     "request_id": "<same request ID>",
     "source_locale": "en-IE",
     "target_locale": "fi-FI",
@@ -66,7 +66,7 @@ It sends one canonical UTF-8 JSON document:
 ```
 
 The abbreviated example omits other required inner fields for readability.
-Production requests always contain exactly the full v9 field set. Commercial
+Production requests always contain exactly the full v10 field set. Commercial
 requests include `commercial_profile`, the matching `commercial_review`
 summary, and `quality_profile.commercial` with the same profile identifier plus
 its exact locale-specific version and SHA-256 digest. The summary binds the
@@ -75,6 +75,14 @@ structurally valid report cannot be reinterpreted under a changed contract. An u
 summary additionally carries the canonical advertised resolution-contract
 SHA-256; this field is part of the deterministic request ID. Verified
 commercial results and non-commercial requests require it to be `null`.
+An unresolved commercial request also carries a private
+`commercial_review_routing` object. It maps every zero-based opaque offer index
+to its ordered, non-overlapping source and target Unicode code-point spans and
+binds both complete text lengths. The object contains no configured offer ID,
+text, price, brand, or reviewer prose. It is validated against the exact source,
+target, summary, and profile before authentication or transport and is part of
+the deterministic request ID. Verified commercial results and non-commercial
+requests require it to be `null`.
 Non-commercial requests also require both commercial fields to be `null` and
 forbid that nested profile.
 Source and
@@ -87,7 +95,8 @@ exactly `schema`, `evidence_revision`, `event_id`, `plan_id`, `job_id`,
 `result_sha256`, both text hashes, both locales, `content_type`, glossary and
 policy versions, provider/model identity, software version, both confidence
 decisions, the complete locale quality profile, commercial profile and review,
-the conditional commercial resolution-contract hash, and both escalation
+the conditional commercial review-routing object and resolution-contract hash,
+and both escalation
 flags. The full texts and `request_id` itself are excluded from that identity;
 their exact bytes are already bound by `source_sha256` and `target_sha256`.
 The durable store and HTTP adapter independently recompute this same identity.
@@ -131,12 +140,13 @@ numbers, a UTF-8 byte-order mark, wrong bindings, ambiguous content types,
 incorrect lengths, and oversized bodies. The release coordinator then applies
 its existing independent receipt checks. Each opaque receipt must verify
 against the complete canonical
-`blun.localization-quality-receipt-binding.v6` object supplied by the release
+`blun.localization-quality-receipt-binding.v7` object supplied by the release
 coordinator, including the review purpose, job and result hashes, both texts
 and locales, content type, glossary and policy versions, provider/model and
 software identities, locale quality and commercial profiles, the exact
 commercial review scope, canonical resolution-contract SHA-256, confidence,
-escalation requirements, and the exact evidence request ID and revision from
+the exact private offer-routing context, escalation requirements, and the exact
+evidence request ID and revision from
 this response. Reuse across
 a changed field or between quality,
 qualified-human, and independent-model review purposes must fail closed.

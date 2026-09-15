@@ -1,5 +1,29 @@
 # Version 6 premortem
 
+## Private offer routing for targeted commercial review (15 September 2026)
+
+Assume a commercial summary correctly says that offer index 1 has an
+unresolved tax claim, but the independent reviewer receives only the complete
+source, target, and opaque index.
+
+- An opaque index without its source and target regions is not an actionable
+  review route and can make the reviewer inspect the wrong offer.
+- Reordered, overlapping, empty, or off-by-one Unicode spans could silently
+  relabel an offer while leaving the public summary unchanged.
+- A routing context changed after evidence acquisition could be verified under
+  the original request or receipt identity.
+- Publishing configured offer IDs, extracted text, or reviewer explanations
+  would break the content-free CMS boundary.
+
+The worker now derives a private routing context from the already validated
+offer registry: ordered numeric indexes, exact source/target lengths, and
+non-overlapping Unicode code-point regions only. The context is required only
+for unresolved commercial summaries, enters the evidence request identity and
+every receipt-verification binding, and is revalidated before network access
+and approval. Public release evidence explicitly excludes it. Tests cover
+index and span drift, out-of-range regions, request-ID invalidation, receipt
+binding, and the absence of IDs, text, and explanations.
+
 ## Targeted per-offer commercial review scope (15 September 2026)
 
 Assume one offer has an unresolved tax or cancellation claim while a second

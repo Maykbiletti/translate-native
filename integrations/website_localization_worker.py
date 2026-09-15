@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
-WORKER_SCHEMA = "blun.website-localization-worker.v5"
+WORKER_SCHEMA = "blun.website-localization-worker.v6"
 CANDIDATE_SCHEMA = "blun.website-localization-candidate.v1"
 REVIEW_SCHEMA = "blun.website-localization-review.v2"
-RESULT_SCHEMA = "blun.website-localization-result.v6"
+RESULT_SCHEMA = "blun.website-localization-result.v7"
 MAX_TEXT_BYTES = 2_000_000
 MAX_FIELD_LENGTH = 2_000
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -643,6 +643,7 @@ def run_localization_job(
     })
     fidelity_response, request_hash, response_hash = _invoke(provider, fidelity_request)
     commercial_summary = None
+    commercial_review_routing = None
     commercial_escalation_required = False
     if commercial:
         # Hash above binds the complete evidence, even though the ordinary
@@ -667,6 +668,21 @@ def run_localization_job(
         commercial_escalation_required = (
             commercial_summary["status"] == "review_required"
         )
+        if commercial_escalation_required:
+            try:
+                commercial_review_routing = (
+                    _COMMERCIAL.review_routing_context(
+                        commercial_review,
+                        job["source"]["text"],
+                        candidate,
+                        commercial_summary,
+                        job["commercial_profile"],
+                    )
+                )
+            except _COMMERCIAL.CommercialReviewBlocked as error:
+                raise LocalizationWorkerBlocked(
+                    error.code, retryable=False,
+                ) from None
     findings, fidelity_confidence = _review(
         fidelity_response,
         "source_fidelity",
@@ -737,6 +753,7 @@ def run_localization_job(
         },
         "quality_profile": quality_result,
         "commercial_review": commercial_summary,
+        "commercial_review_routing": commercial_review_routing,
         "human_review_required": job["content_type"] == "legal",
         "independent_review_required": (
             job["content_type"] != "legal"

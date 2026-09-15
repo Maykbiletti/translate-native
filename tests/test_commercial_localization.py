@@ -679,7 +679,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v12"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v13"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -1006,6 +1006,47 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(summary["review_required_offers"], [{
             "dimension": "tax_status", "offer_indexes": [1],
         }])
+        routing = PROFILE.review_routing_context(
+            targeted, source, target, summary, SCHEMA,
+        )
+        self.assertEqual(routing, {
+            "schema": PROFILE.REVIEW_ROUTING_SCHEMA,
+            "profile": SCHEMA,
+            "offer_count": 2,
+            "source_length": len(source),
+            "target_length": len(target),
+            "offers": [
+                {
+                    "offer_index": index,
+                    "source_spans": targeted["offers"][index]["source_spans"],
+                    "target_spans": targeted["offers"][index]["target_spans"],
+                }
+                for index in range(2)
+            ],
+        })
+        serialized_routing = json.dumps(routing, ensure_ascii=False)
+        for private_value in (
+            '"basic"', '"pro"',
+            "Scripted offer-bound proposition fixture.",
+        ):
+            self.assertNotIn(private_value, serialized_routing)
+
+        for mutation in (
+            lambda value: value["offers"].reverse(),
+            lambda value: value["offers"][1]["source_spans"].__setitem__(
+                0, [source_spans[0][1] - 1, source_spans[1][1]],
+            ),
+            lambda value: value["offers"][0].update(id="basic"),
+        ):
+            malformed_routing = copy.deepcopy(routing)
+            mutation(malformed_routing)
+            with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
+                PROFILE.validate_review_routing_context(
+                    malformed_routing, source, target, summary, SCHEMA,
+                )
+            self.assertEqual(
+                error.exception.code, "review.commercial.routing_invalid",
+            )
 
         malformed_scope = copy.deepcopy(summary)
         malformed_scope["review_required_offers"][0]["offer_indexes"] = [1, 0]

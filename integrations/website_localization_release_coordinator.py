@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 SCHEMA = "blun.website-localization-release-coordinator.v1"
-EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v9"
+EVIDENCE_REQUEST_SCHEMA = "blun.localization-quality-evidence-request.v10"
 EVIDENCE_RESPONSE_SCHEMA = "blun.localization-quality-evidence-response.v2"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
 EVIDENCE_STATE_SCHEMA = "blun.localization-quality-evidence-state.v1"
@@ -42,7 +42,7 @@ EVIDENCE_REQUEST_IDENTITY_FIELDS = (
     "result_sha256", "source_sha256", "target_sha256", "source_locale",
     "target_locale", "content_type", "glossary_version", "policy_version",
     "provider", "software_version", "review_confidence", "quality_profile",
-    "commercial_profile", "commercial_review",
+    "commercial_profile", "commercial_review", "commercial_review_routing",
     "commercial_review_resolution_contract_sha256", "human_review_required",
     "independent_review_required",
 )
@@ -150,6 +150,7 @@ class QualityEvidenceRequest:
     quality_profile: dict[str, Any]
     commercial_profile: str | None
     commercial_review: dict[str, Any] | None
+    commercial_review_routing: dict[str, Any] | None
     commercial_review_resolution_contract_sha256: str | None
     human_review_required: bool
     independent_review_required: bool
@@ -712,6 +713,9 @@ def _request(
 ) -> QualityEvidenceRequest:
     commercial_profile = job.as_payload().get("commercial_profile")
     commercial_review = json.loads(_canonical_json(result["commercial_review"]))
+    commercial_review_routing = json.loads(_canonical_json(
+        result["commercial_review_routing"],
+    ))
     resolution_contract_sha256 = (
         _CMS._COMMERCIAL.public_review_resolution_contract(
             commercial_profile,
@@ -740,6 +744,7 @@ def _request(
         "quality_profile": json.loads(_canonical_json(result["quality_profile"])),
         "commercial_profile": commercial_profile,
         "commercial_review": commercial_review,
+        "commercial_review_routing": commercial_review_routing,
         "commercial_review_resolution_contract_sha256": (
             resolution_contract_sha256
         ),

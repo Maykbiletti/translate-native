@@ -134,6 +134,22 @@ def completed_result(
             }
             if payload["content_type"] == "commercial" else None
         ),
+        "commercial_review_routing": (
+            {
+                "schema": WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+                "profile": payload["commercial_profile"],
+                "offer_count": 1,
+                "source_length": len(payload["source"]["text"]),
+                "target_length": len(candidate),
+                "offers": [{
+                    "offer_index": 0,
+                    "source_spans": [[0, len(payload["source"]["text"])]],
+                    "target_spans": [[0, len(candidate)]],
+                }],
+            }
+            if payload["content_type"] == "commercial"
+            and commercial_review_required_dimensions else None
+        ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": (
             payload["content_type"] != "legal" and "low" in review_confidence.values()
@@ -791,6 +807,14 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             independent_verifier.calls[0]["binding"]["commercial_review"]
             ["review_evidence_contract_sha256"],
             expected_evidence_contract_sha256,
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]
+            ["commercial_review_routing"]["offers"][0]["offer_index"],
+            0,
+        )
+        self.assertNotIn(
+            "commercial_review_routing", approved.release_evidence,
         )
         expected_contract_sha256 = (
             WORKER._COMMERCIAL.public_review_resolution_contract(

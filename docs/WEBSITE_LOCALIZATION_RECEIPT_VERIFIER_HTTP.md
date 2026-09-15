@@ -25,13 +25,15 @@ retry and its attempt limit.
 ## Request
 
 The adapter canonicalizes the complete
-`blun.localization-quality-receipt-binding.v6` object and validates its native
+`blun.localization-quality-receipt-binding.v7` object and validates its native
 Unicode text, hashes, locales, content type, glossary and policy versions,
 provider/model identities, software version, two-pass confidence, locale
 quality profile, exact locale-specific commercial profile when applicable,
 matching targeted-review summary and its exact review-evidence-contract
 SHA-256, the canonical resolution-contract SHA-256
-for unresolved commercial review, escalation requirements, review purpose,
+and the private, text-free mapping from opaque offer indexes to exact source
+and target Unicode code-point spans for unresolved commercial review,
+escalation requirements, review purpose,
 canonical quality-evidence request ID, and evidence revision.
 It then sends HTTP POST with JSON content type and these
 protected headers:
@@ -48,7 +50,7 @@ The body is exactly:
   "request_id": "blun-l10n-receipt-<sha256>",
   "binding_sha256": "<canonical binding hash>",
   "receipt_sha256": "<opaque receipt hash>",
-  "binding": {"schema": "blun.localization-quality-receipt-binding.v6"},
+  "binding": {"schema": "blun.localization-quality-receipt-binding.v7"},
   "receipt": "<opaque receipt>"
 }
 ```
@@ -60,7 +62,11 @@ different identity. The remote service must
 treat an idempotency-key collision with different bytes as a terminal error.
 The adapter recomputes the commercial resolution-contract digest from the
 installed profile before authentication or transport. Verified commercial and
-non-commercial bindings require this field to be `null`.
+non-commercial bindings require both that digest and the routing object to be
+`null`. For unresolved review, it validates span order, bounds, text lengths,
+offer count, and exact opaque index order before any credential callback or
+network access. The routing object never contains configured offer IDs, text,
+prices, brands, or reviewer prose.
 
 ## Response
 

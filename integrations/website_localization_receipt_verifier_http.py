@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-receipt-verification-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-receipt-verification-http-response.v1"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v6"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v7"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_TEXT_BYTES = 2_000_000
@@ -45,7 +45,8 @@ BINDING_FIELDS = {
     "target_locale", "content_type", "glossary_version", "policy_version",
     "primary_provider", "review_provider", "software_version",
     "review_confidence", "quality_profile", "commercial_profile",
-    "commercial_review", "commercial_review_resolution_contract_sha256",
+    "commercial_review", "commercial_review_routing",
+    "commercial_review_resolution_contract_sha256",
     "human_review_required", "independent_review_required",
 }
 RESERVED_HEADERS = {
@@ -396,6 +397,7 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
     confidence = binding["review_confidence"]
     profile = binding["quality_profile"]
     commercial_review = binding["commercial_review"]
+    commercial_review_routing = binding["commercial_review_routing"]
     if (
         not isinstance(confidence, dict)
         or set(confidence) != {"target_native", "source_fidelity"}
@@ -465,6 +467,24 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         or type(binding["human_review_required"]) is not bool
         or type(binding["independent_review_required"]) is not bool
     ):
+        _fail("binding_invalid")
+    try:
+        if (
+            commercial_review is not None
+            and commercial_review["status"] == "review_required"
+        ):
+            _COMMERCIAL.validate_review_routing_context(
+                commercial_review_routing,
+                binding["source_text"],
+                binding["target_text"],
+                commercial_review,
+                binding["commercial_profile"],
+            )
+        elif commercial_review_routing is not None:
+            raise _COMMERCIAL.CommercialReviewBlocked(
+                "review.commercial.routing_invalid",
+            )
+    except _COMMERCIAL.CommercialReviewBlocked:
         _fail("binding_invalid")
     expected_resolution_contract_sha256 = (
         _COMMERCIAL.public_review_resolution_contract(

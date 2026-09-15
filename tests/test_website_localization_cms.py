@@ -234,6 +234,7 @@ def completed_result(job, candidate):
             ),
         },
         "commercial_review": commercial_review,
+        "commercial_review_routing": None,
         "human_review_required": False,
         "independent_review_required": False,
         "release_required": True,

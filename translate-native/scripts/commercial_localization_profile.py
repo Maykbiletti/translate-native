@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v13"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v14"
 REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-evidence-capabilities.v2"
 )
@@ -21,6 +21,7 @@ REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-summary-capabilities.v7"
 )
 REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v6"
+REVIEW_ROUTING_SCHEMA = "translate-native.commercial-review-routing.v1"
 EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v5"
 REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-resolution-capabilities.v4"
@@ -933,3 +934,124 @@ def validate_summary(
         previous_dimension_index = dimension_index
         seen_scope_dimensions.add(item["dimension"])
     return json.loads(_canonical_json(value))
+
+
+def validate_review_routing_context(
+    value: Any,
+    source: str,
+    target: str,
+    summary: Any,
+    profile: str,
+) -> dict[str, Any]:
+    """Validate private offer regions used only by an independent reviewer."""
+    try:
+        summary = validate_summary(summary, profile, review_required=True)
+    except CommercialReviewBlocked:
+        raise CommercialReviewBlocked("review.commercial.routing_invalid") from None
+    if (
+        summary["status"] != "review_required"
+        or not isinstance(source, str)
+        or not isinstance(target, str)
+        or not isinstance(value, dict)
+        or set(value) != {
+            "schema", "profile", "offer_count", "source_length",
+            "target_length", "offers",
+        }
+        or value.get("schema") != REVIEW_ROUTING_SCHEMA
+        or value.get("profile") != profile
+        or value.get("offer_count") != summary["offer_count"]
+        or type(value.get("source_length")) is not int
+        or value["source_length"] != len(source)
+        or type(value.get("target_length")) is not int
+        or value["target_length"] != len(target)
+        or not isinstance(value.get("offers"), list)
+        or len(value["offers"]) != value["offer_count"]
+    ):
+        raise CommercialReviewBlocked("review.commercial.routing_invalid")
+
+    occupied = {"source_spans": [], "target_spans": []}
+    for expected_index, offer in enumerate(value["offers"]):
+        if (
+            not isinstance(offer, dict)
+            or set(offer) != {
+                "offer_index", "source_spans", "target_spans",
+            }
+            or offer.get("offer_index") != expected_index
+        ):
+            raise CommercialReviewBlocked("review.commercial.routing_invalid")
+        for field, text in (
+            ("source_spans", source), ("target_spans", target),
+        ):
+            spans = offer.get(field)
+            if not isinstance(spans, list) or len(spans) > 1000:
+                raise CommercialReviewBlocked(
+                    "review.commercial.routing_invalid",
+                )
+            parsed = []
+            for span in spans:
+                if (
+                    not isinstance(span, list)
+                    or len(span) != 2
+                    or any(type(offset) is not int for offset in span)
+                    or not 0 <= span[0] < span[1] <= len(text)
+                    or not text[span[0]:span[1]].strip()
+                ):
+                    raise CommercialReviewBlocked(
+                        "review.commercial.routing_invalid",
+                    )
+                parsed.append(tuple(span))
+            if parsed != sorted(parsed) or any(
+                previous[1] > current[0]
+                for previous, current in zip(parsed, parsed[1:])
+            ):
+                raise CommercialReviewBlocked(
+                    "review.commercial.routing_invalid",
+                )
+            occupied[field].extend(
+                (start, end, expected_index) for start, end in parsed
+            )
+        if not offer["source_spans"] and not offer["target_spans"]:
+            raise CommercialReviewBlocked("review.commercial.routing_invalid")
+    for spans in occupied.values():
+        ordered = sorted(spans)
+        if any(
+            previous[1] > current[0]
+            for previous, current in zip(ordered, ordered[1:])
+        ):
+            raise CommercialReviewBlocked("review.commercial.routing_invalid")
+    return json.loads(_canonical_json(value))
+
+
+def review_routing_context(
+    evidence: Any,
+    source: str,
+    target: str,
+    summary: Any,
+    profile: str,
+) -> dict[str, Any]:
+    """Remove offer IDs and prose while retaining actionable private regions."""
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("schema") != profile
+        or not isinstance(evidence.get("offers"), list)
+    ):
+        raise CommercialReviewBlocked("review.commercial.routing_invalid")
+    context = {
+        "schema": REVIEW_ROUTING_SCHEMA,
+        "profile": profile,
+        "offer_count": len(evidence["offers"]),
+        "source_length": len(source),
+        "target_length": len(target),
+        "offers": [
+            {
+                "offer_index": index,
+                "source_spans": offer.get("source_spans"),
+                "target_spans": offer.get("target_spans"),
+            }
+            if isinstance(offer, dict) else offer
+            for index, offer in enumerate(evidence["offers"])
+        ],
+    }
+    return validate_review_routing_context(
+        context, source, target, summary, profile,
+    )
