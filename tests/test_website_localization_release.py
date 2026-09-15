@@ -952,6 +952,34 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 RELEASE.validate_publication_evidence(evidence), evidence,
             )
 
+    def test_current_publication_policy_distinguishes_drift_from_outage(self):
+        plan = make_plan(("fi-FI",))
+        self.complete(plan, {"fi-FI": "Rakenna yrityksesi BLUNin avulla."})
+        evidence = self.approve(plan, plan.jobs[0]).release_evidence
+
+        stale = json.loads(json.dumps(evidence))
+        stale["quality_profile"]["version"] += ".changed"
+        stale["quality_profile"]["sha256"] = "0" * 64
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            RELEASE.validate_current_publication_policy(stale)
+        self.assertEqual(
+            (caught.exception.code, caught.exception.retryable),
+            ("publication.evidence.policy_stale", False),
+        )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                RELEASE.validate_current_publication_policy(evidence)
+        self.assertEqual(
+            (caught.exception.code, caught.exception.retryable),
+            ("publication.evidence.policy_unavailable", True),
+        )
+        self.assertNotIn("private", str(caught.exception))
+
     def test_commercial_release_evidence_requires_current_locale_policy(self):
         plan = make_plan(
             ("fi-FI",), content_type="commercial",
@@ -987,6 +1015,18 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
                 RELEASE.validate_publication_evidence(evidence)
         self.assertEqual(caught.exception.code, "publication.evidence.invalid")
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                RELEASE.validate_current_publication_policy(evidence)
+        self.assertEqual(
+            (caught.exception.code, caught.exception.retryable),
+            ("publication.evidence.policy_unavailable", True),
+        )
 
         ordinary = make_plan(("sv-SE",))
         self.complete(ordinary, {"sv-SE": "Bygg ditt företag med BLUN."})

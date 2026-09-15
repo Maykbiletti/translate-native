@@ -644,13 +644,18 @@ class LocalizationHealthMonitor:
                         raise ValueError
                     if _hash(item["target_text"]) != item["target_sha256"]:
                         raise ValueError
-                    if not _CMS._valid_release_evidence(
+                    policy_state = _CMS._release_evidence_policy_state(
                         item["release_evidence"],
                         locale=item["locale"],
                         target_sha256=item["target_sha256"],
                         approval_id=item["approval_id"],
-                    ):
+                    )
+                    if policy_state == "invalid":
                         raise ValueError
+                    if policy_state == "stale":
+                        reasons.add("cms.delivery.policy_stale")
+                    elif policy_state == "unavailable":
+                        reasons.add("cms.delivery.policy_unavailable")
                     locales.append(item["locale"])
                 if locales != sorted(set(locales)):
                     raise ValueError

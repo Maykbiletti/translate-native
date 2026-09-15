@@ -934,6 +934,30 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         self.assertEqual(published.website_versions[0].status, "published")
         self.assertEqual(dict(self.component(published, "cms").counts)["succeeded"], 1)
 
+    def test_policy_resolver_outage_has_a_stable_cms_health_reason(self):
+        plan = self.ingest()
+        self.complete(plan)
+        self.bridge.prepare_delivery(
+            event()["event_id"],
+            self.event_authority,
+            self.approval_authority,
+            self.publication_authority,
+            now=250,
+        )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            report = self.report(now=251)
+
+        cms = self.component(report, "cms")
+        self.assertIn("cms.delivery.policy_unavailable", cms.reasons)
+        self.assertNotIn("cms.delivery.invalid", cms.reasons)
+        encoded = json.dumps(report.as_payload(), ensure_ascii=False)
+        self.assertNotIn("private resolver diagnostic", encoded)
+
     def test_tombstone_state_is_verified_visible_and_needs_no_model_probe(self):
         plan = self.ingest()
         self.complete(plan)

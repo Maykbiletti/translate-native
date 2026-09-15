@@ -185,22 +185,6 @@ def validate_publication_evidence(
         or HEX64.fullmatch(str(quality_profile.get("sha256"))) is None
     ):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
-    if require_current_locale_quality:
-        try:
-            current_quality = _WORKER._PLANNER.quality_profile_for(
-                value["target_locale"],
-            )
-            expected_quality_profile = {
-                "locale": current_quality["locale"],
-                "version": current_quality["version"],
-                "sha256": current_quality["sha256"],
-            }
-        except Exception:
-            raise LocalizationReleaseBlocked(
-                "publication.evidence.invalid"
-            ) from None
-        if quality_profile != expected_quality_profile:
-            raise LocalizationReleaseBlocked("publication.evidence.invalid")
     profile = value.get("commercial_profile")
     commercial_quality_profile = value.get("commercial_quality_profile")
     review = value.get("commercial_review")
@@ -225,31 +209,8 @@ def validate_publication_evidence(
     if profile is not None:
         if not isinstance(profile, str) or TOKEN.fullmatch(profile) is None:
             raise LocalizationReleaseBlocked("publication.evidence.invalid")
-        expected_commercial_quality = None
-        if require_current_locale_quality:
-            try:
-                current_commercial_quality = (
-                    _WORKER._PLANNER.commercial_quality_profile_for(
-                        value["target_locale"],
-                    )
-                )
-                expected_commercial_quality = {
-                    "profile": current_commercial_quality[
-                        "commercial_profile"
-                    ],
-                    "version": current_commercial_quality["version"],
-                    "sha256": current_commercial_quality["sha256"],
-                }
-            except Exception:
-                raise LocalizationReleaseBlocked(
-                    "publication.evidence.invalid"
-                ) from None
         if (
             profile != _WORKER._PLANNER.COMMERCIAL_PROFILE
-            or (
-                require_current_locale_quality
-                and commercial_quality_profile != expected_commercial_quality
-            )
             or HEX64.fullmatch(str(routing_contract_sha256)) is None
             or routing_contract_sha256
             != _WORKER._COMMERCIAL.public_review_routing_contract(profile)[
@@ -297,11 +258,78 @@ def validate_publication_evidence(
                 raise LocalizationReleaseBlocked("publication.evidence.invalid")
     elif resolution is not None:
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
-    return json.loads(_canonical_json({
+    evidence = json.loads(_canonical_json({
         **value,
         "commercial_review": review,
         "commercial_review_resolution": resolution,
     }))
+    if require_current_locale_quality:
+        _validate_current_publication_policy(
+            evidence,
+            unavailable_code="publication.evidence.invalid",
+            stale_code="publication.evidence.invalid",
+            unavailable_retryable=False,
+        )
+    return evidence
+
+
+def _validate_current_publication_policy(
+    evidence: dict[str, Any],
+    *,
+    unavailable_code: str,
+    stale_code: str,
+    unavailable_retryable: bool,
+) -> None:
+    try:
+        current_quality = _WORKER._PLANNER.quality_profile_for(
+            evidence["target_locale"],
+        )
+        expected_quality_profile = {
+            "locale": current_quality["locale"],
+            "version": current_quality["version"],
+            "sha256": current_quality["sha256"],
+        }
+    except Exception:
+        raise LocalizationReleaseBlocked(
+            unavailable_code, retryable=unavailable_retryable,
+        ) from None
+    if evidence["quality_profile"] != expected_quality_profile:
+        raise LocalizationReleaseBlocked(stale_code)
+
+    if evidence["commercial_profile"] is None:
+        return
+    try:
+        current_commercial_quality = (
+            _WORKER._PLANNER.commercial_quality_profile_for(
+                evidence["target_locale"],
+            )
+        )
+        expected_commercial_quality = {
+            "profile": current_commercial_quality["commercial_profile"],
+            "version": current_commercial_quality["version"],
+            "sha256": current_commercial_quality["sha256"],
+        }
+    except Exception:
+        raise LocalizationReleaseBlocked(
+            unavailable_code, retryable=unavailable_retryable,
+        ) from None
+    if evidence["commercial_quality_profile"] != expected_commercial_quality:
+        raise LocalizationReleaseBlocked(stale_code)
+
+
+def validate_current_publication_policy(value: Any) -> dict[str, Any]:
+    """Distinguish current policy drift from a transient resolver outage."""
+
+    evidence = validate_publication_evidence(
+        value, require_current_locale_quality=False,
+    )
+    _validate_current_publication_policy(
+        evidence,
+        unavailable_code="publication.evidence.policy_unavailable",
+        stale_code="publication.evidence.policy_stale",
+        unavailable_retryable=True,
+    )
+    return evidence
 
 
 def _commercial_review_resolution(

@@ -60,7 +60,7 @@ PUBLICATION_HEALTH_HTTP_BINDING_HEADERS = (
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
-MAX_DELIVERY_POLICY_QUARANTINE = 24
+MAX_DELIVERY_POLICY_SCREEN = 24
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 SIGNATURE_VALUE = re.compile(r"^[A-Za-z0-9_.:/+=-]{1,4096}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -399,6 +399,38 @@ def _valid_release_evidence(
         and evidence["target_sha256"] == target_sha256
         and evidence["approval_id"] == approval_id
     )
+
+
+def _release_evidence_policy_state(
+    value: Any,
+    *,
+    locale: Any,
+    target_sha256: Any,
+    approval_id: Any,
+) -> str:
+    """Return current, stale, unavailable, or invalid without exposing content."""
+
+    try:
+        evidence = _RELEASE.validate_publication_evidence(
+            value, require_current_locale_quality=False,
+        )
+    except _RELEASE.LocalizationReleaseBlocked:
+        return "invalid"
+    if (
+        evidence["target_locale"] != locale
+        or evidence["target_sha256"] != target_sha256
+        or evidence["approval_id"] != approval_id
+    ):
+        return "invalid"
+    try:
+        _RELEASE.validate_current_publication_policy(evidence)
+    except _RELEASE.LocalizationReleaseBlocked as error:
+        if error.code == "publication.evidence.policy_stale":
+            return "stale"
+        if error.code == "publication.evidence.policy_unavailable":
+            return "unavailable"
+        return "invalid"
+    return "current"
 
 
 def _positive_integer(value: Any, code: str) -> int:
@@ -2850,13 +2882,18 @@ class WebsiteLocalizationCMSBridge:
         )
         if require_current_approvals:
             for item in localizations:
-                if not _valid_release_evidence(
+                policy_state = _release_evidence_policy_state(
                     item["release_evidence"],
                     locale=item["locale"],
                     target_sha256=item["target_sha256"],
                     approval_id=item["approval_id"],
-                ):
+                )
+                if policy_state == "unavailable":
+                    raise CMSBridgeBlocked("cms.delivery.policy_unavailable")
+                if policy_state == "stale":
                     raise CMSBridgeBlocked("cms.delivery.policy_stale")
+                if policy_state != "current":
+                    raise CMSBridgeBlocked("cms.delivery.tampered")
             if any(expiry <= now for expiry in validated_expiries):
                 raise CMSBridgeBlocked("cms.delivery.approval_expired")
         return CMSPublicationRequest(row["delivery_id"], payload, row["payload_sha256"], signature)
@@ -3176,7 +3213,7 @@ class WebsiteLocalizationCMSBridge:
                     last_error_code = 'lease_expired', updated_at = ?
                 WHERE status = 'leased' AND lease_expires_at <= ? AND attempts < max_attempts
             """, (now, now, now))
-            quarantined = 0
+            screened = 0
             while True:
                 row = self.connection.execute("""
                     SELECT * FROM cms_publication_deliveries
@@ -3203,6 +3240,32 @@ class WebsiteLocalizationCMSBridge:
                 try:
                     request = self._request_from_row(row, authority, now)
                 except CMSBridgeBlocked as error:
+                    if error.code == "cms.delivery.policy_unavailable":
+                        attempts = int(row["attempts"]) + 1
+                        terminal = attempts >= int(row["max_attempts"])
+                        status = "failed" if terminal else "retry_wait"
+                        next_attempt = now if terminal else now + min(
+                            3600.0, 5.0 * (2 ** (attempts - 1)),
+                        )
+                        updated = self.connection.execute("""
+                            UPDATE cms_publication_deliveries
+                            SET status = ?, attempts = ?, next_attempt_at = ?,
+                                lease_owner = NULL, lease_token = NULL,
+                                lease_expires_at = NULL,
+                                last_error_code = 'policy_unavailable',
+                                last_error_detail_hash = NULL, updated_at = ?
+                            WHERE delivery_id = ?
+                              AND status IN ('pending', 'retry_wait')
+                        """, (
+                            status, attempts, next_attempt, now,
+                            row["delivery_id"],
+                        ))
+                        if updated.rowcount != 1:
+                            raise CMSBridgeBlocked("cms.delivery.claim_lost")
+                        screened += 1
+                        if screened >= MAX_DELIVERY_POLICY_SCREEN:
+                            return None
+                        continue
                     quarantine_codes = {
                         "cms.delivery.policy_stale": "release_evidence_stale",
                         "cms.delivery.approval_expired": "approval_expired",
@@ -3219,8 +3282,8 @@ class WebsiteLocalizationCMSBridge:
                         WHERE delivery_id = ?
                           AND status IN ('pending', 'retry_wait')
                     """, (code, now, row["delivery_id"]))
-                    quarantined += 1
-                    if quarantined >= MAX_DELIVERY_POLICY_QUARANTINE:
+                    screened += 1
+                    if screened >= MAX_DELIVERY_POLICY_SCREEN:
                         return None
                     continue
                 lease_token = secrets.token_urlsafe(32)
@@ -3335,16 +3398,26 @@ class WebsiteLocalizationCMSBridge:
             if current_request != claim.request:
                 raise CMSBridgeBlocked("cms.delivery.tampered")
         except CMSBridgeBlocked as original_error:
-            validation_codes = {
-                "cms.delivery.policy_stale": "release_evidence_stale",
-                "cms.delivery.approval_expired": "approval_expired",
-                "cms.delivery.tampered": "delivery_integrity",
-                "cms.delivery.signature_invalid": "delivery_integrity",
+            validation_failures = {
+                "cms.delivery.policy_unavailable": (
+                    "policy_unavailable", True,
+                ),
+                "cms.delivery.policy_stale": (
+                    "release_evidence_stale", False,
+                ),
+                "cms.delivery.approval_expired": (
+                    "approval_expired", False,
+                ),
+                "cms.delivery.tampered": ("delivery_integrity", False),
+                "cms.delivery.signature_invalid": (
+                    "delivery_integrity", False,
+                ),
             }
-            code = validation_codes.get(original_error.code)
-            if code is None:
+            failure = validation_failures.get(original_error.code)
+            if failure is None:
                 raise
-            error = CMSPublishFailed(code, retryable=False)
+            code, retryable = failure
+            error = CMSPublishFailed(code, retryable=retryable)
             status = self._finish(claim, now=validation_now, error=error)
             return DeliveryOutcome(
                 status.status, status.delivery_id, status.attempts, code,

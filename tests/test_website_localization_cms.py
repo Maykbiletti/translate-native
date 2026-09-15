@@ -986,6 +986,156 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         )
         self.assertIsNone(status.last_error_detail_hash)
 
+    def test_policy_resolver_outage_retries_with_a_bound(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare(max_attempts=2)
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+        planner.quality_profile_for = lambda _locale: (_ for _ in ()).throw(
+            RuntimeError("private resolver diagnostic")
+        )
+        try:
+            first = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(260),
+            )
+            first_status = self.bridge.delivery_status(request.delivery_id)
+            second = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(265),
+            )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(first.status, "idle")
+        self.assertEqual(
+            (
+                first_status.status,
+                first_status.attempts,
+                first_status.next_attempt_at,
+                first_status.last_error_code,
+            ),
+            ("retry_wait", 1, 265.0, "policy_unavailable"),
+        )
+        self.assertEqual(second.status, "idle")
+        final = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual(
+            (final.status, final.attempts, final.last_error_code),
+            ("failed", 2, "policy_unavailable"),
+        )
+        self.assertIsNone(final.last_error_detail_hash)
+        self.assertEqual(publisher.requests, [])
+
+    def test_policy_resolver_outage_does_not_block_a_following_delivery(self):
+        first_event = change_event()
+        self.ingest(first_event)
+        self.release_all(first_event)
+        first = self.prepare(first_event)
+        self.cms_connection.execute(
+            "UPDATE cms_publication_deliveries SET created_at = 249 "
+            "WHERE delivery_id = ?",
+            (first.delivery_id,),
+        )
+        self.cms_connection.commit()
+
+        second_event = change_event(
+            event_id="cms-event-185",
+            site_id="second-site",
+            source_id="second-homepage.hero",
+            source_revision="cms-185",
+            source_text="Build a second business with BLUN.",
+        )
+        self.ingest(second_event, now=101)
+        self.release_all(second_event)
+        second = self.prepare(second_event)
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+        calls = 0
+
+        def transient(locale):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("private resolver diagnostic")
+            return original(locale)
+
+        planner.quality_profile_for = transient
+        try:
+            outcome = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(260),
+            )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(
+            [item.delivery_id for item in publisher.requests],
+            [second.delivery_id],
+        )
+        first_status = self.bridge.delivery_status(first.delivery_id)
+        self.assertEqual(
+            (
+                first_status.status,
+                first_status.attempts,
+                first_status.last_error_code,
+            ),
+            ("retry_wait", 1, "policy_unavailable"),
+        )
+
+    def test_policy_resolver_outage_after_guard_retries_before_network(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare(max_attempts=2)
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def lose_resolver(_):
+            planner.quality_profile_for = lambda _locale: (
+                _ for _ in ()
+            ).throw(RuntimeError("private resolver diagnostic"))
+
+        try:
+            first = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(260),
+                operation_guard=lose_resolver,
+            )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(
+            (first.status, first.attempt, first.error_code),
+            ("retry_wait", 1, "policy_unavailable"),
+        )
+        self.assertEqual(publisher.requests, [])
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual(
+            (status.status, status.attempts, status.last_error_code),
+            ("retry_wait", 1, "policy_unavailable"),
+        )
+
+        recovered = self.bridge.run_delivery(
+            publisher,
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(265),
+        )
+        self.assertEqual((recovered.status, recovered.attempt), ("succeeded", 2))
+        self.assertEqual(len(publisher.requests), 1)
+
     def test_new_revision_supersedes_old_event_and_pending_delivery(self):
         old = change_event()
         self.ingest(old)
