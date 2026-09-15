@@ -649,6 +649,21 @@ class WebsiteLocalizationCMSBridge:
                         "changed": "one-or-more-specific",
                         "uncertain": "one-or-more-specific",
                     },
+                    "offer_statuses": {
+                        "field": "offer_statuses",
+                        "item_required_fields": ["offer", "status"],
+                        "coverage": "exactly-one-per-registered-offer",
+                        "order": "offer-registry-order",
+                        "statuses": [
+                            "equivalent", "not_present", "changed",
+                            "uncertain",
+                        ],
+                        "global_status": (
+                            "changed-then-uncertain-then-equivalent-then-"
+                            "not_present"
+                        ),
+                        "items_must_match_offer_status": True,
+                    },
                     "item": {
                         "required_fields": [
                             "offer", "relation", "source_span", "target_span",

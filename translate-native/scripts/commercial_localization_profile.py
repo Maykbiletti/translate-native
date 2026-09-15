@@ -13,15 +13,15 @@ import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v11"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v12"
 REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-evidence-capabilities.v1"
+    "translate-native.commercial-review-evidence-capabilities.v2"
 )
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-summary-capabilities.v5"
+    "translate-native.commercial-review-summary-capabilities.v6"
 )
-REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v4"
-EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v4"
+REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v5"
+EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v5"
 REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
     "translate-native.commercial-review-resolution-capabilities.v3"
 )
@@ -207,6 +207,19 @@ def public_review_evidence_contract(profile: str) -> dict[str, Any]:
                 "not_present": "empty",
                 "changed": "one-or-more-specific",
                 "uncertain": "one-or-more-specific",
+            },
+            "offer_statuses": {
+                "field": "offer_statuses",
+                "item_required_fields": ["offer", "status"],
+                "coverage": "exactly-one-per-registered-offer",
+                "order": "offer-registry-order",
+                "statuses": [
+                    "equivalent", "not_present", "changed", "uncertain",
+                ],
+                "global_status": (
+                    "changed-then-uncertain-then-equivalent-then-not_present"
+                ),
+                "items_must_match_offer_status": True,
             },
             "item": {
                 "required_fields": [
@@ -437,6 +450,7 @@ def public_profile(profile: str) -> dict[str, Any]:
                 "discontiguous_regions_allowed": True,
                 "every_proposition_contained_in_declared_offer": True,
                 "every_offer_has_exactly_one_assignment_item": True,
+                "every_dimension_has_exactly_one_status_per_offer": True,
             },
             "directions": ["matched", "source_only", "target_only"],
             "ambiguous_values": "unresolved",
@@ -491,8 +505,10 @@ all offers, headings, footnotes, links and conditions. Record every applicable p
 offer label, semantic explanation and relation: 'matched', 'source_only' for an omission, or 'target_only' for an
 addition. Give exact zero-based Python Unicode code-point spans with an exclusive end; the absent side of a one-sided
 item MUST be null. Repeated amounts must stay attached to their own offer; number multisets do not prove fidelity.
+'offer_statuses' MUST contain exactly one verdict for every registered offer, in registry order, for every dimension.
+Derive the dimension status from those offer verdicts with precedence changed, uncertain, equivalent, not_present.
 'not_present' is valid only if a dimension is absent from BOTH texts. 'equivalent' requires nonempty matched items
-covering every applicable proposition. A dimension-level 'changed' or 'uncertain' verdict requires at least one
+for that offer covering every applicable proposition. A per-offer 'changed' or 'uncertain' verdict requires at least one
 specific item; use coverage='uncertain' for unresolved overall completeness without inventing a span.
 Use 'changed' for a known defect and 'uncertain' for unresolved interpretation, coverage or insufficient language/domain
 evidence. Use coverage='uncertain' unless every proposition and offer association was checked. Never resolve numeric
@@ -519,6 +535,10 @@ def review_contract(schema: str) -> dict[str, Any]:
         "checks": {
             name: {
                 "status": "equivalent, not_present, changed or uncertain",
+                "offer_statuses": [{
+                    "offer": "stable offer label",
+                    "status": "equivalent, not_present, changed or uncertain",
+                }],
                 "items": [{
                     "offer": "stable offer label",
                     "relation": "matched, source_only, or target_only",
@@ -629,20 +649,51 @@ def validate_review(
     coverage_uncertain = value["coverage"] == "uncertain"
     changed = False
     evidenced = False
+    offer_ids = list(offer_regions)
+    status_priority = {
+        "not_present": 0,
+        "equivalent": 1,
+        "uncertain": 2,
+        "changed": 3,
+    }
     for name, check in checks.items():
-        if not isinstance(check, dict) or set(check) != {"status", "items"}:
+        if not isinstance(check, dict) or set(check) != {
+            "status", "offer_statuses", "items",
+        }:
             invalid()
-        status, items = check["status"], check["items"]
+        status = check["status"]
+        offer_statuses = check["offer_statuses"]
+        items = check["items"]
         if status not in ("equivalent", "not_present", "changed", "uncertain"):
+            invalid()
+        if (
+            not isinstance(offer_statuses, list)
+            or len(offer_statuses) != len(offer_ids)
+        ):
+            invalid()
+        parsed_offer_statuses: dict[str, str] = {}
+        for index, offer_status in enumerate(offer_statuses):
+            if (
+                not isinstance(offer_status, dict)
+                or set(offer_status) != {"offer", "status"}
+                or offer_status.get("offer") != offer_ids[index]
+                or offer_status.get("status") not in status_priority
+                or offer_status["offer"] in parsed_offer_statuses
+            ):
+                invalid()
+            parsed_offer_statuses[offer_status["offer"]] = (
+                offer_status["status"]
+            )
+        derived_status = (
+            max(parsed_offer_statuses.values(), key=status_priority.__getitem__)
+            if parsed_offer_statuses else "not_present"
+        )
+        if status != derived_status:
             invalid()
         if not isinstance(items, list) or len(items) > 1000:
             invalid()
-        if (
-            (status == "not_present" and items)
-            or (status in ("equivalent", "changed", "uncertain") and not items)
-        ):
-            invalid()
         seen = set()
+        items_by_offer = {offer_id: [] for offer_id in offer_ids}
         for item in items:
             if not isinstance(item, dict) or set(item) != {
                 "offer", "relation", "source_span", "target_span", "explanation",
@@ -685,8 +736,6 @@ def validate_review(
                 for region in declared["target_spans"]
             ):
                 invalid()
-            if status == "equivalent" and relation != "matched":
-                invalid()
             identity = (
                 item["offer"], relation,
                 tuple(item["source_span"]) if item["source_span"] is not None else None,
@@ -695,10 +744,29 @@ def validate_review(
             if identity in seen:
                 invalid()
             seen.add(identity)
-        if status == "uncertain":
+            items_by_offer[item["offer"]].append(item)
+        for offer_id, offer_status in parsed_offer_statuses.items():
+            offer_items = items_by_offer[offer_id]
+            if (
+                (offer_status == "not_present" and offer_items)
+                or (
+                    offer_status in ("equivalent", "changed", "uncertain")
+                    and not offer_items
+                )
+                or (
+                    offer_status == "equivalent"
+                    and any(item["relation"] != "matched" for item in offer_items)
+                )
+            ):
+                invalid()
+        if any(value == "uncertain" for value in parsed_offer_statuses.values()):
             uncertain_dimensions.add(name)
-        changed |= status == "changed"
-        evidenced |= status == "equivalent"
+        changed |= any(
+            value == "changed" for value in parsed_offer_statuses.values()
+        )
+        evidenced |= any(
+            value == "equivalent" for value in parsed_offer_statuses.values()
+        )
     if changed:
         raise CommercialReviewBlocked("review.commercial.changed")
     # Every evidenced condition must resolve to an explicitly reviewed offer.

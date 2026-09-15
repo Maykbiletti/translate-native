@@ -108,7 +108,7 @@ existing `legal` path with required human review; this profile is not a legal
 approval. For mixed pages, supply complete contextual commercial units rather
 than isolated price fragments.
 
-The planner binds `translate-native.commercial.v9` and the exact target-locale
+The planner binds `translate-native.commercial.v10` and the exact target-locale
 commercial quality profile into the job and plan IDs.
 The authenticated capabilities response publishes the same profile as a
 separately hashed, brand-neutral machine-readable contract. It lists all ten
@@ -127,6 +127,14 @@ text, spans, reviewer prose, project prices and project brands.
 Adapters therefore do not need to infer the targeted-review envelope from a
 schema name or prose. A changed, missing, reordered or unknown dimension makes
 the complete capability response unavailable.
+
+Within every dimension, `offer_statuses` must contain exactly one entry for
+every registered offer, in registry order. The dimension-level status is not
+free-form: it is derived with `changed`, `uncertain`, `equivalent`, then
+`not_present` precedence. Each equivalent, changed, or uncertain offer verdict
+must carry evidence located inside that offer's declared regions. This proves
+structural completeness of the review, not semantic truth; uncertain values
+still require an independent model or qualified native-domain reviewer.
 
 The separately hashed `review_evidence_contract` is the machine-readable
 source of truth for the private source-fidelity report. It closes the exact

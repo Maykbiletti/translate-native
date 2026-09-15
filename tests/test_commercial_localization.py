@@ -57,13 +57,25 @@ def evidence_item(source, target, *, offer="offer-1", relation="matched"):
     }
 
 
+def dimension_evidence(status, items=None, *, offers=("offer-1",)):
+    return {
+        "status": status,
+        "offer_statuses": [
+            {"offer": offer, "status": status} for offer in offers
+        ],
+        "items": [] if items is None else items,
+    }
+
+
 def evidence(source=SOURCE, target=TARGET):
-    checks = {name: {"status": "not_present", "items": []} for name in PROFILE.DIMENSIONS}
+    checks = {
+        name: dimension_evidence("not_present")
+        for name in PROFILE.DIMENSIONS
+    }
     for name in ("amount_currency", "discount_basis", "qualifiers", "tax_status", "offer_assignment"):
-        checks[name] = {
-            "status": "equivalent",
-            "items": [evidence_item(source, target)],
-        }
+        checks[name] = dimension_evidence(
+            "equivalent", [evidence_item(source, target)],
+        )
     return {
         "schema": SCHEMA,
         "coverage": "complete",
@@ -117,6 +129,14 @@ class CommercialLocalizationTests(unittest.TestCase):
         self.assertEqual(
             value["checks"]["item"]["span_containment"],
             "inside-named-offer-region",
+        )
+        self.assertEqual(
+            value["checks"]["offer_statuses"]["coverage"],
+            "exactly-one-per-registered-offer",
+        )
+        self.assertEqual(
+            value["checks"]["offer_statuses"]["order"],
+            "offer-registry-order",
         )
         self.assertEqual(
             value["checks"]["offer_assignment"]["equivalent"],
@@ -375,6 +395,7 @@ class CommercialLocalizationTests(unittest.TestCase):
                 "discontiguous_regions_allowed": True,
                 "every_proposition_contained_in_declared_offer": True,
                 "every_offer_has_exactly_one_assignment_item": True,
+                "every_dimension_has_exactly_one_status_per_offer": True,
             },
         )
         unsigned = dict(value)
@@ -609,7 +630,7 @@ class CommercialLocalizationTests(unittest.TestCase):
 
     def test_profile_changes_invalidate_plan_and_job_ids(self):
         before = job(SOURCE, "commercial")
-        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v10"):
+        with patch.object(PLANNER, "COMMERCIAL_PROFILE", "translate-native.commercial.v11"):
             after = job(SOURCE, "commercial")
         self.assertNotEqual(before["job_id"], after["job_id"])
         self.assertNotEqual(before["commercial_profile"], after["commercial_profile"])
@@ -712,10 +733,9 @@ class CommercialLocalizationTests(unittest.TestCase):
     def test_each_dimension_blocks_known_changes_and_routes_uncertainty(self):
         for dimension in PROFILE.DIMENSIONS:
             report = evidence()
-            report["checks"][dimension] = {
-                "status": "changed",
-                "items": [evidence_item(SOURCE, TARGET)],
-            }
+            report["checks"][dimension] = dimension_evidence(
+                "changed", [evidence_item(SOURCE, TARGET)],
+            )
             with self.subTest(dimension=dimension, verdict="changed"):
                 with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
                     self.run_worker(report)
@@ -723,10 +743,9 @@ class CommercialLocalizationTests(unittest.TestCase):
                 self.assertFalse(error.exception.retryable)
 
             report = evidence()
-            report["checks"][dimension] = {
-                "status": "uncertain",
-                "items": [evidence_item(SOURCE, TARGET)],
-            }
+            report["checks"][dimension] = dimension_evidence(
+                "uncertain", [evidence_item(SOURCE, TARGET)],
+            )
             with self.subTest(dimension=dimension, verdict="uncertain"):
                 result, _ = self.run_worker(report)
                 self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
@@ -751,7 +770,7 @@ class CommercialLocalizationTests(unittest.TestCase):
                 "coverage": "complete",
                 "offers": [],
                 "checks": {
-                    name: {"status": "not_present", "items": []}
+                    name: dimension_evidence("not_present", offers=())
                     for name in PROFILE.DIMENSIONS
                 },
             },
@@ -783,32 +802,30 @@ class CommercialLocalizationTests(unittest.TestCase):
 
         addition = evidence(source, target)
         added_start = target.index("Priority")
-        addition["checks"]["amount_currency"] = {
-            "status": "changed",
-            "items": [{
+        addition["checks"]["amount_currency"] = dimension_evidence(
+            "changed", [{
                 "offer": "offer-1",
                 "relation": "target_only",
                 "source_span": None,
                 "target_span": [added_start, len(target)],
                 "explanation": "The target adds a price absent from the source.",
             }],
-        }
+        )
         with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
             validate_commercial(addition, source, target, SCHEMA)
         self.assertEqual(error.exception.code, "review.commercial.changed")
 
         omission = evidence(source, target)
         omitted_start = source.index("Cancel")
-        omission["checks"]["cancellation"] = {
-            "status": "uncertain",
-            "items": [{
+        omission["checks"]["cancellation"] = dimension_evidence(
+            "uncertain", [{
                 "offer": "offer-1",
                 "relation": "source_only",
                 "source_span": [omitted_start, len(source)],
                 "target_span": None,
                 "explanation": "The source condition has no identified target counterpart.",
             }],
-        }
+        )
         with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
             validate_commercial(omission, source, target, SCHEMA)
         self.assertEqual(
@@ -857,7 +874,9 @@ class CommercialLocalizationTests(unittest.TestCase):
         with self.assertRaises(WORKER.LocalizationWorkerBlocked):
             self.run_worker(report)
         report = evidence()
-        report["checks"]["offer_assignment"] = {"status": "not_present", "items": []}
+        report["checks"]["offer_assignment"] = dimension_evidence(
+            "not_present",
+        )
         result, _ = self.run_worker(report)
         self.assertTrue(result["independent_review_required"])
         self.assertEqual(result["review_confidence"]["source_fidelity"], "low")
@@ -917,9 +936,21 @@ class CommercialLocalizationTests(unittest.TestCase):
             )
         ]
         for check in report["checks"].values():
+            check["offer_statuses"] = [
+                {"offer": offer, "status": check["status"]}
+                for offer in ("basic", "pro")
+            ]
             if check["status"] == "equivalent":
                 check["items"] = copy.deepcopy(items)
         validate_commercial(report, source, target, SCHEMA)
+
+        missing_proposition = copy.deepcopy(report)
+        missing_proposition["checks"]["amount_currency"]["items"].pop()
+        with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
+            validate_commercial(
+                missing_proposition, source, target, SCHEMA,
+            )
+        self.assertEqual(error.exception.code, "review.commercial.invalid")
 
         mutations = (
             lambda value: value["checks"]["amount_currency"]["items"][0]
@@ -928,6 +959,15 @@ class CommercialLocalizationTests(unittest.TestCase):
             .__setitem__(0, [source_spans[0][1] - 1, source_spans[1][1]]),
             lambda value: value["checks"]["offer_assignment"]["items"].pop(),
             lambda value: value["offers"][1].update(id="basic"),
+            lambda value: value["checks"]["amount_currency"]
+            ["offer_statuses"].reverse(),
+            lambda value: value["checks"]["amount_currency"]
+            ["offer_statuses"].pop(),
+            lambda value: value["checks"]["amount_currency"].update(
+                status="not_present",
+            ),
+            lambda value: value["checks"]["amount_currency"]
+            ["offer_statuses"][1].update(status="not_present"),
         )
         for mutation in mutations:
             changed = copy.deepcopy(report)
@@ -955,6 +995,9 @@ class CommercialLocalizationTests(unittest.TestCase):
         ):
             report = evidence(source, target)
             report["checks"][dimension]["status"] = "uncertain"
+            report["checks"][dimension]["offer_statuses"][0]["status"] = (
+                "uncertain"
+            )
             with self.assertRaises(PROFILE.CommercialReviewBlocked) as error:
                 validate_commercial(report, source, target, SCHEMA)
             self.assertEqual(error.exception.code, "review.commercial.independent_review_required")
@@ -1065,6 +1108,9 @@ class CommercialLocalizationTests(unittest.TestCase):
         plan = make_plan(targets=("sv-SE",), source_text=SOURCE, content_type="commercial")
         report = evidence()
         report["checks"]["tax_status"]["status"] = "uncertain"
+        report["checks"]["tax_status"]["offer_statuses"][0]["status"] = (
+            "uncertain"
+        )
         with sqlite3.connect(":memory:") as connection, sqlite3.connect(":memory:") as release_db:
             queue = RUNNER._QUEUE.LocalizationQueue(connection)
             queue.enqueue_plan(plan, now=100)
@@ -1195,6 +1241,10 @@ class CommercialLocalizationTests(unittest.TestCase):
             for item in items
         ]
         for check in report["checks"].values():
+            check["offer_statuses"] = [
+                {"offer": item["offer"], "status": check["status"]}
+                for item in items
+            ]
             if check["status"] == "equivalent":
                 check["items"] = copy.deepcopy(items)
         validate_commercial(report, source, target, SCHEMA)

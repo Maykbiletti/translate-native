@@ -101,7 +101,8 @@ invalidate the independent, source-blind review.
 For commercial content, only `source_fidelity` receives
 `commercial_review_evidence_contract`. This is the complete content-free,
 SHA-256-bound public contract for the required offer registry, Unicode spans,
-ten checks, verdict invariants, limits, and fail-closed trust boundary. The
+ten checks, exact per-offer verdict coverage, deterministic aggregate-status
+derivation, limits, and fail-closed trust boundary. The
 worker verifies it against the installed public commercial profile before the
 first provider call. Transcreation and source-blind native review do not receive
 this contract. The provider still returns the private evidence only under

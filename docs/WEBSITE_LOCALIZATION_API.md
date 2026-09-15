@@ -1366,7 +1366,7 @@ an unresolved generation mismatch cannot be reported as accepted.
 The v11 capability generation and v10 OpenAPI document add
 `GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
 separate body-free operator scope. It returns the exact public
-`translate-native.commercial.v9` profile, its ten ordered preservation and
+`translate-native.commercial.v10` profile, its ten ordered preservation and
 review dimensions, and the complete 24-locale rendering registry. The payload
 contains only policy, version, authority, locale, Unicode rendering, and hash
 data; project prices, brands, products, credentials, source text, and target
@@ -2016,10 +2016,11 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v11` object. Its nested and separately
+`translate-native.commercial-capabilities.v12` object. Its nested and separately
 hashed `review_evidence_contract` defines the exact private report fields,
 coverage values, offer registry, Unicode code-point spans, item relations,
-ten-dimension order, limits, verdict invariants and structural-only trust
+ten-dimension order, limits, per-offer verdict matrix, aggregate-status
+derivation, and structural-only trust
 boundary without publishing any project content. Source-fidelity providers,
 CMS backends and the portable checker can therefore consume one canonical
 shape rather than inferring it from examples or prompt prose. The sibling
@@ -2033,6 +2034,11 @@ or reviewer prose. The evidence contract now requires a canonical registry of
 unique offer IDs with ordered, non-overlapping source and target regions.
 Every proposition span must remain inside its named offer, and equivalent
 offer-assignment evidence must cover every registry entry exactly once.
+Every dimension must also acknowledge every registered offer exactly once in
+registry order. Equivalent, changed, and uncertain offer verdicts require
+their own offer-bound evidence; the validator derives and checks the global
+dimension status so a report cannot hide an omitted second offer behind a
+first offer's global pass.
 Discontiguous regions remain available for linked conditions and footnotes;
 uncertain semantic boundaries still route to independent review. Any registry
 or digest drift blocks the whole discovery
@@ -2110,7 +2116,7 @@ receipts, qualified-human identities and reviewer prose are never published.
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": {
-      "profile": "translate-native.commercial.v9",
+      "profile": "translate-native.commercial.v10",
       "locale_quality_profile": {
         "schema": "translate-native.commercial-locale-quality-profile.v2",
         "required": true,
@@ -2139,6 +2145,15 @@ receipts, qualified-human identities and reviewer prose are never published.
             "equivalent": "exactly-one-matched-item-per-registered-offer",
             "other_equivalent_checks_require_equivalent_assignment": true
           },
+          "offer_statuses": {
+            "coverage": "exactly-one-per-registered-offer",
+            "field": "offer_statuses",
+            "global_status": "changed-then-uncertain-then-equivalent-then-not_present",
+            "item_required_fields": ["offer", "status"],
+            "items_must_match_offer_status": true,
+            "order": "offer-registry-order",
+            "statuses": ["equivalent", "not_present", "changed", "uncertain"]
+          },
           "required_dimensions": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"],
           "status_items": {"changed": "one-or-more-specific", "equivalent": "one-or-more-matched", "not_present": "empty", "uncertain": "one-or-more-specific"},
           "statuses": ["equivalent", "not_present", "changed", "uncertain"]
@@ -2152,23 +2167,23 @@ receipts, qualified-human identities and reviewer prose are never published.
           "max_items": 1000,
           "regions": {"at_least_one_side_non_empty": true, "discontiguous": true, "fields": ["source_spans", "target_spans"], "non_empty_text": true, "ordered": true, "overlap": "forbidden-within-and-across-offers", "span_format": "zero-based-unicode-code-points-exclusive-end"}
         },
-        "profile": "translate-native.commercial.v9",
+        "profile": "translate-native.commercial.v10",
         "required_fields": ["schema", "coverage", "offers", "checks"],
-        "result_schema": "translate-native.commercial.v9",
-        "schema": "translate-native.commercial-review-evidence-capabilities.v1",
+        "result_schema": "translate-native.commercial.v10",
+        "schema": "translate-native.commercial-review-evidence-capabilities.v2",
         "sha256": "<sha256>",
         "trust_boundary": {"numeric_regex_semantic_proof": false, "publication_authority": false, "semantic_truth": false, "unresolved_route": "independent-model-or-qualified-native-domain-review", "validates": "structure-offsets-and-verdict-consistency"}
       },
-      "review_evidence_schema": "translate-native.commercial.v9",
+      "review_evidence_schema": "translate-native.commercial.v10",
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
-        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "review_evidence_contract_sha256", "target_locale", "commercial_quality_profile_version", "commercial_quality_profile_sha256", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v4", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-review-evidence-contract", "exact-target-locale", "commercial-quality-profile-generation", "exact-source-sha256", "exact-target-sha256", "offer-registry-and-proposition-assignment", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
-        "profile": "translate-native.commercial.v9",
+        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "review_evidence_contract_sha256", "target_locale", "commercial_quality_profile_version", "commercial_quality_profile_sha256", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v5", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-review-evidence-contract", "exact-target-locale", "commercial-quality-profile-generation", "exact-source-sha256", "exact-target-sha256", "offer-registry-and-proposition-assignment", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
+        "profile": "translate-native.commercial.v10",
         "required_fields": ["schema", "profile", "status", "review_required_dimensions", "review_evidence_contract_sha256", "evidence_sha256"],
-        "result_schema": "translate-native.commercial-review-summary.v4",
+        "result_schema": "translate-native.commercial-review-summary.v5",
         "review_evidence_contract_sha256": {"algorithm": "sha-256", "equals": "<review-evidence-contract-sha256>", "purpose": "reject-stale-or-reinterpreted-private-evidence"},
         "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
-        "schema": "translate-native.commercial-review-summary-capabilities.v5",
+        "schema": "translate-native.commercial-review-summary-capabilities.v6",
         "sha256": "<sha256>",
         "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
       },
@@ -2176,7 +2191,7 @@ receipts, qualified-human identities and reviewer prose are never published.
         "applies_when": {"review_summary_status": "review_required", "reviewed_dimensions": "exact-ordered-review-summary-dimensions"},
         "content_policy": {"project_brands": false, "project_prices": false, "qualified_human_identity": false, "raw_receipt": false, "reviewer_prose": false, "source_text": false, "target_text": false},
         "methods": {"independent_model": {"primary_provider": "required", "provider": "required", "provider_id_must_differ_from_primary_provider": true, "receipt": "verified-independent-model-review"}, "qualified_human": {"primary_provider": "required", "provider": "null", "receipt": "verified-qualified-human-review"}},
-        "profile": "translate-native.commercial.v9",
+        "profile": "translate-native.commercial.v10",
         "provider_identity": {"credentials_published": false, "fields": ["id", "model_id", "model_version"], "primary_provider": "required"},
         "receipt_sha256": {"algorithm": "sha-256", "covers": "exact-verified-review-receipt", "raw_receipt_published": false},
         "required_fields": ["schema", "profile", "contract_sha256", "status", "reviewed_dimensions", "method", "receipt_sha256", "primary_provider", "provider"],
@@ -2187,11 +2202,11 @@ receipts, qualified-human identities and reviewer prose are never published.
         "status": "resolved"
       },
       "review_resolution_schema": "translate-native.commercial-review-resolution.v3",
-      "schema": "translate-native.commercial-capabilities.v11",
+      "schema": "translate-native.commercial-capabilities.v12",
       "sha256": "<sha256>"
     },
     "commercial_rendering_registry": {
-      "commercial_profile": "translate-native.commercial.v9",
+      "commercial_profile": "translate-native.commercial.v10",
       "content_policy": {"credentials": false, "project_brands": false, "project_prices": false, "source_text": false, "target_text": false},
       "locales": [{
         "commercial_quality_profile": {"sha256": "<sha256>", "version": "commercial-eu-mt-MT-2026-09-2"},

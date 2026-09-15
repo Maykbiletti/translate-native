@@ -37,6 +37,26 @@ attempt counter; unexpected validator failure or mutation rolls the complete
 transaction back. The runner supplies its exact worker validator, and the queue
 loads the same current contract by default for direct trusted-host claims.
 
+## Per-offer commercial dimension coverage (15 September 2026)
+
+Assume a commercial page contains two offers but the source-fidelity provider
+records one global equivalent verdict and evidence only for the first.
+
+- A global pass can hide the omitted price, discount, tax statement, renewal,
+  cancellation term, or footnote of the second offer.
+- Free-form offer lists can be incomplete, duplicated, or reordered while the
+  dimension result still looks internally plausible.
+- A caller can label the aggregate status independently of its offer-level
+  findings and weaken a known defect into a pass.
+- Regex comparison cannot safely repair the gap across number words, native
+  digits, locale separators, or equivalent time expressions.
+
+The v2 evidence contract requires one ordered verdict per registered offer for
+every dimension. The validator derives the aggregate status, requires local
+evidence for every non-absent offer verdict, and rejects missing, duplicate,
+reordered, or inconsistent matrices. Contract/profile/hash generation changes
+invalidate old jobs and summaries without treating numeric spelling as proof.
+
 ## Current job bindings in read-only health (15 September 2026)
 
 Assume a durable commercial job remains queued across an evidence-contract
@@ -1229,5 +1249,6 @@ Assume the Version 6 response-and-translation gateway and automatic updater ship
 | CMS and provider adapters infer the commercial evidence shape from a prompt example or prose | An integration can silently omit the offer registry, accept overlapping regions, or reinterpret one-sided evidence while still pinning the summary contract and commercial profile digest | Publish a separately versioned and hashed evidence contract with the exact closed fields, limits, span semantics, verdict invariants, offer-assignment coverage and structural-only trust boundary; bind it into the public commercial profile | Capability, OpenAPI, discovery-client and portable-checker tests consume the same canonical contract; missing, altered or self-rehashed evidence contracts block the complete capability response before content or provider access |
 | A commercial review summary outlives the evidence contract under which its private report was accepted | The summary retains the evidence hash but not the exact evidence-contract digest, so a cached result, evidence request, receipt or approval could be replayed after structural rules change while the commercial profile identifier stays constant | Bind the canonical review-evidence-contract SHA-256 into the private evidence hash and content-free summary, then carry that closed summary through worker result, evidence request, receipt verification, signed approval and CMS release evidence | Stale or self-selected contract digests fail at summary validation and every outer boundary; contract changes derive new evidence, request, receipt, approval and release hashes without exposing private report content |
 | A commercial source-fidelity provider receives only an illustrative evidence example | The provider guesses offer limits, Unicode span semantics, verdict invariants or trust boundaries differently from the validator, so a formally plausible report fails late or silently omits required reasoning | Resolve and verify the complete separately hashed public evidence contract before provider access, then bind it only into the source-aware fidelity request and its deterministic request hash | Exact-contract tests prove the fidelity provider sees the current canonical contract and resulting summary digest; a self-rehashed substitute blocks before any provider call, while transcreation and source-blind native review remain contract-free |
+| A global commercial dimension verdict covers only one of several registered offers | A reviewer supplies correct evidence for one tier while silently omitting another tier's price or condition; a global equivalent result still appears complete | Require exactly one ordered per-offer verdict for every dimension, derive the aggregate status by fixed severity, and require evidence within each non-absent offer region | Missing, duplicate, reordered, cross-offer, or aggregate-inconsistent matrices fail deterministically; uncertain semantics still route to independent review without numeric regex proof |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
