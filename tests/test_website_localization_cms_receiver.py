@@ -154,6 +154,11 @@ def release_evidence(
         "commercial_profile": profile,
         "commercial_quality_profile": quality_profile,
         "commercial_review": review,
+        "commercial_review_routing_contract_sha256": (
+            CMS._RELEASE._WORKER._COMMERCIAL
+            .public_review_routing_contract(profile)["sha256"]
+            if profile is not None else None
+        ),
         "commercial_review_resolution": resolution,
     }
 

@@ -155,6 +155,10 @@ def completed_result(
             if payload["content_type"] == "commercial"
             and commercial_review_required_dimensions else None
         ),
+        "commercial_review_routing_contract_sha256": (
+            payload["commercial_review_routing_contract_sha256"]
+            if payload["content_type"] == "commercial" else None
+        ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": (
             payload["content_type"] != "legal" and "low" in review_confidence.values()
@@ -825,6 +829,22 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 PLANNER.COMMERCIAL_PROFILE,
             )["sha256"],
         )
+        expected_routing_contract_sha256 = (
+            WORKER._COMMERCIAL.public_review_routing_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"]
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]
+            ["commercial_review_routing_contract_sha256"],
+            expected_routing_contract_sha256,
+        )
+        self.assertEqual(
+            approved.release_evidence[
+                "commercial_review_routing_contract_sha256"
+            ],
+            expected_routing_contract_sha256,
+        )
         self.assertNotIn(
             "commercial_review_routing", approved.release_evidence,
         )
@@ -846,6 +866,12 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 "commercial_review_resolution_contract_sha256"
             ],
             expected_contract_sha256,
+        )
+        self.assertEqual(
+            approval_payload[
+                "commercial_review_routing_contract_sha256"
+            ],
+            expected_routing_contract_sha256,
         )
         with patch.object(
             WORKER._COMMERCIAL,

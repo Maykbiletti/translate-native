@@ -25,12 +25,13 @@ retry and its attempt limit.
 ## Request
 
 The adapter canonicalizes the complete
-`blun.localization-quality-receipt-binding.v8` object and validates its native
+`blun.localization-quality-receipt-binding.v9` object and validates its native
 Unicode text, hashes, locales, content type, glossary and policy versions,
 provider/model identities, software version, two-pass confidence, locale
 quality profile, exact locale-specific commercial profile when applicable,
 matching targeted-review summary and its exact review-evidence-contract
-SHA-256, the canonical resolution-contract SHA-256
+SHA-256, the exact current offer-routing-contract SHA-256, the canonical
+resolution-contract SHA-256
 and the private, text-free mapping from opaque offer indexes to exact source
 and target Unicode code-point spans for unresolved commercial review,
 escalation requirements, review purpose,
@@ -50,7 +51,7 @@ The body is exactly:
   "request_id": "blun-l10n-receipt-<sha256>",
   "binding_sha256": "<canonical binding hash>",
   "receipt_sha256": "<opaque receipt hash>",
-  "binding": {"schema": "blun.localization-quality-receipt-binding.v8"},
+  "binding": {"schema": "blun.localization-quality-receipt-binding.v9"},
   "receipt": "<opaque receipt>"
 }
 ```

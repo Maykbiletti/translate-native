@@ -100,6 +100,7 @@ def publication_request(authority=None):
                 "commercial_profile": None,
                 "commercial_quality_profile": None,
                 "commercial_review": None,
+                "commercial_review_routing_contract_sha256": None,
                 "commercial_review_resolution": None,
             },
         }],

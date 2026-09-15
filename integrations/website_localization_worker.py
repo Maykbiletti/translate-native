@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Protocol
 WORKER_SCHEMA = "blun.website-localization-worker.v8"
 CANDIDATE_SCHEMA = "blun.website-localization-candidate.v1"
 REVIEW_SCHEMA = "blun.website-localization-review.v2"
-RESULT_SCHEMA = "blun.website-localization-result.v8"
+RESULT_SCHEMA = "blun.website-localization-result.v9"
 MAX_TEXT_BYTES = 2_000_000
 MAX_FIELD_LENGTH = 2_000
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -572,6 +572,7 @@ def run_localization_job(
     base = _base_context(job, assets)
     commercial = job["content_type"] == "commercial"
     commercial_evidence_contract = None
+    commercial_routing_contract = None
     if commercial:
         base["commercial_profile"] = job["commercial_profile"]
         commercial_evidence_contract = _commercial_review_evidence_contract(
@@ -800,6 +801,11 @@ def run_localization_job(
         "quality_profile": quality_result,
         "commercial_review": commercial_summary,
         "commercial_review_routing": commercial_review_routing,
+        "commercial_review_routing_contract_sha256": (
+            commercial_routing_contract["sha256"]
+            if commercial_routing_contract is not None
+            else None
+        ),
         "human_review_required": job["content_type"] == "legal",
         "independent_review_required": (
             job["content_type"] != "legal"

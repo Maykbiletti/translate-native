@@ -735,6 +735,7 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
         "quality_profile", "commercial_review", "commercial_review_routing",
+        "commercial_review_routing_contract_sha256",
         "human_review_required",
         "independent_review_required", "release_required",
     }
@@ -773,7 +774,17 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     )
     commercial_review = result["commercial_review"]
     commercial_review_routing = result["commercial_review_routing"]
+    commercial_routing_contract_sha256 = result[
+        "commercial_review_routing_contract_sha256"
+    ]
     if job["content_type"] == "commercial":
+        if (
+            commercial_routing_contract_sha256
+            != job["commercial_review_routing_contract_sha256"]
+        ):
+            raise BenchmarkBlocked(
+                "benchmark.candidate.commercial_review_invalid"
+            )
         try:
             commercial_review = _WORKER._COMMERCIAL.validate_summary(
                 commercial_review,
@@ -794,7 +805,11 @@ def _validate_worker_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
                 )
         except _WORKER._COMMERCIAL.CommercialReviewBlocked:
             raise BenchmarkBlocked("benchmark.candidate.commercial_review_invalid") from None
-    elif commercial_review is not None or commercial_review_routing is not None:
+    elif any(value is not None for value in (
+        commercial_review,
+        commercial_review_routing,
+        commercial_routing_contract_sha256,
+    )):
         raise BenchmarkBlocked("benchmark.candidate.commercial_review_invalid")
     expected_quality_profile = {
         "locale": job["target"]["locale"],

@@ -75,6 +75,7 @@ def binding(*, kind="quality"):
         "commercial_profile": None,
         "commercial_review": None,
         "commercial_review_routing": None,
+        "commercial_review_routing_contract_sha256": None,
         "commercial_review_resolution_contract_sha256": None,
         "human_review_required": False,
         "independent_review_required": False,
@@ -331,6 +332,11 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
                 "target_spans": [[0, len(value["target_text"])]],
             }],
         }
+        value["commercial_review_routing_contract_sha256"] = (
+            HTTP._COMMERCIAL.public_review_routing_contract(
+                value["commercial_profile"],
+            )["sha256"]
+        )
         value["commercial_review_resolution_contract_sha256"] = (
             HTTP._COMMERCIAL.public_review_resolution_contract(
                 value["commercial_profile"],
@@ -347,6 +353,12 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         self.assertEqual(
             sent["quality_profile"]["commercial"],
             value["quality_profile"]["commercial"],
+        )
+        self.assertEqual(
+            sent["commercial_review_routing_contract_sha256"],
+            HTTP._COMMERCIAL.public_review_routing_contract(
+                value["commercial_profile"],
+            )["sha256"],
         )
         self.assertEqual(
             sent["commercial_review_resolution_contract_sha256"],
@@ -407,6 +419,12 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
                 profile="another-commercial-profile"
             ),
             lambda payload: payload.update(content_type="marketing"),
+            lambda payload: payload.update(
+                commercial_review_routing_contract_sha256="0" * 64,
+            ),
+            lambda payload: payload.update(
+                commercial_review_routing_contract_sha256=None,
+            ),
             lambda payload: payload.update(
                 commercial_review_resolution_contract_sha256="0" * 64,
             ),

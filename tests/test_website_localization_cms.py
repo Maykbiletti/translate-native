@@ -235,6 +235,9 @@ def completed_result(job, candidate):
         },
         "commercial_review": commercial_review,
         "commercial_review_routing": None,
+        "commercial_review_routing_contract_sha256": (
+            payload.get("commercial_review_routing_contract_sha256")
+        ),
         "human_review_required": False,
         "independent_review_required": False,
         "release_required": True,
@@ -519,6 +522,7 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 "approval_id", "approval_sha256", "evidence_request_id",
                 "evidence_revision", "commercial_profile",
                 "commercial_quality_profile", "commercial_review",
+                "commercial_review_routing_contract_sha256",
                 "commercial_review_resolution",
             })
             self.assertEqual(
@@ -536,6 +540,12 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 "review_required_offers",
                 "review_evidence_contract_sha256", "evidence_sha256",
             })
+            self.assertEqual(
+                evidence["commercial_review_routing_contract_sha256"],
+                WORKER._COMMERCIAL.public_review_routing_contract(
+                    PLANNER.COMMERCIAL_PROFILE,
+                )["sha256"],
+            )
             self.assertEqual(
                 evidence["commercial_review"]
                 ["review_evidence_contract_sha256"],

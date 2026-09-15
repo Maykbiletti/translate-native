@@ -21,12 +21,12 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v9"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v8"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v10"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v9"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v10"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v11"
 PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
-    "blun.website-localization-release-evidence-capabilities.v4"
+    "blun.website-localization-release-evidence-capabilities.v5"
 )
 PUBLICATION_EVIDENCE_FIELDS = (
     "schema", "release_evidence_contract_sha256", "job_id", "target_locale",
@@ -34,6 +34,7 @@ PUBLICATION_EVIDENCE_FIELDS = (
     "content_type", "result_sha256", "approval_sha256",
     "quality_receipt_sha256", "evidence_request_id", "evidence_revision",
     "commercial_profile", "commercial_quality_profile", "commercial_review",
+    "commercial_review_routing_contract_sha256",
     "commercial_review_resolution",
 )
 MAX_TEXT_BYTES = 2_000_000
@@ -167,14 +168,26 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
     profile = value.get("commercial_profile")
     quality_profile = value.get("commercial_quality_profile")
     review = value.get("commercial_review")
+    routing_contract_sha256 = value.get(
+        "commercial_review_routing_contract_sha256"
+    )
     resolution = value.get("commercial_review_resolution")
     if (
         len({profile is None, quality_profile is None, review is None}) != 1
+        or (profile is None) != (routing_contract_sha256 is None)
         or (value["content_type"] == "commercial") != (profile is not None)
     ):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
     if profile is not None:
         if not isinstance(profile, str) or TOKEN.fullmatch(profile) is None:
+            raise LocalizationReleaseBlocked("publication.evidence.invalid")
+        if (
+            HEX64.fullmatch(str(routing_contract_sha256)) is None
+            or routing_contract_sha256
+            != _WORKER._COMMERCIAL.public_review_routing_contract(profile)[
+                "sha256"
+            ]
+        ):
             raise LocalizationReleaseBlocked("publication.evidence.invalid")
         if (
             not isinstance(quality_profile, dict)
@@ -298,6 +311,7 @@ def _publication_evidence_contract_body() -> dict[str, Any]:
             "sha256_fields": [
                 "release_evidence_contract_sha256", "target_sha256",
                 "result_sha256", "approval_sha256", "quality_receipt_sha256",
+                "commercial_review_routing_contract_sha256",
             ],
             "lineage_fields": ["evidence_request_id", "evidence_revision"],
             "target_identity_fields": [
@@ -309,7 +323,7 @@ def _publication_evidence_contract_body() -> dict[str, Any]:
             "content_type": "commercial",
             "required_non_null": [
                 "commercial_profile", "commercial_quality_profile",
-                "commercial_review",
+                "commercial_review", "commercial_review_routing_contract_sha256",
             ],
             "review_evidence_contract_sha256": (
                 "exact-current-public-commercial-evidence-contract"
@@ -454,6 +468,9 @@ def _receipt_binding(
         "commercial_profile": commercial_profile,
         "commercial_review": commercial_review,
         "commercial_review_routing": result["commercial_review_routing"],
+        "commercial_review_routing_contract_sha256": result[
+            "commercial_review_routing_contract_sha256"
+        ],
         "commercial_review_resolution_contract_sha256": (
             resolution_contract_sha256
         ),
@@ -531,6 +548,7 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
         "quality_profile", "commercial_review", "commercial_review_routing",
+        "commercial_review_routing_contract_sha256",
         "human_review_required",
         "independent_review_required", "release_required",
     }
@@ -607,7 +625,15 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         raise LocalizationReleaseBlocked("result.independent_review.invalid")
     commercial_review = result.get("commercial_review")
     commercial_review_routing = result.get("commercial_review_routing")
+    commercial_routing_contract_sha256 = result.get(
+        "commercial_review_routing_contract_sha256"
+    )
     if job["content_type"] == "commercial":
+        expected_routing_contract_sha256 = job[
+            "commercial_review_routing_contract_sha256"
+        ]
+        if commercial_routing_contract_sha256 != expected_routing_contract_sha256:
+            raise LocalizationReleaseBlocked("result.commercial_review.invalid")
         try:
             commercial_review = _WORKER._COMMERCIAL.validate_summary(
                 commercial_review,
@@ -628,7 +654,10 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
                 )
         except _WORKER._COMMERCIAL.CommercialReviewBlocked:
             raise LocalizationReleaseBlocked("result.commercial_review.invalid") from None
-    elif commercial_review is not None or commercial_review_routing is not None:
+    elif any(value is not None for value in (
+        commercial_review, commercial_review_routing,
+        commercial_routing_contract_sha256,
+    )):
         raise LocalizationReleaseBlocked("result.commercial_review.invalid")
     return result
 
@@ -850,6 +879,9 @@ class LocalizationReleaseStore:
             "worker_schema": result["worker_schema"],
             "review_confidence": result["review_confidence"],
             "quality_profile": result["quality_profile"],
+            "commercial_review_routing_contract_sha256": result[
+                "commercial_review_routing_contract_sha256"
+            ],
             "result_sha256": result_hash,
             "quality_receipt_sha256": _hash_text(quality_receipt),
             "human_review_receipt_sha256": human_hash,
@@ -946,6 +978,7 @@ class LocalizationReleaseStore:
             "provider", "software_version", "worker_schema", "result_sha256",
             "review_confidence",
             "quality_profile",
+            "commercial_review_routing_contract_sha256",
             "quality_receipt_sha256", "human_review_receipt_sha256",
             "independent_model_review", "approval_id",
             "commercial_review_resolution_contract_sha256",
@@ -973,6 +1006,9 @@ class LocalizationReleaseStore:
             "worker_schema": result["worker_schema"],
             "review_confidence": result["review_confidence"],
             "quality_profile": result["quality_profile"],
+            "commercial_review_routing_contract_sha256": result[
+                "commercial_review_routing_contract_sha256"
+            ],
             "result_sha256": row["result_sha256"],
             "commercial_review_resolution_contract_sha256": (
                 _commercial_resolution_contract_sha256(job, result)
@@ -1078,6 +1114,9 @@ class LocalizationReleaseStore:
                 "commercial_review": json.loads(
                     _canonical_json(result["commercial_review"])
                 ),
+                "commercial_review_routing_contract_sha256": result[
+                    "commercial_review_routing_contract_sha256"
+                ],
                 "commercial_review_resolution": _commercial_review_resolution(
                     result, payload,
                 ),

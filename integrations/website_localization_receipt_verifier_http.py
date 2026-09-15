@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 REQUEST_SCHEMA = "blun.localization-receipt-verification-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-receipt-verification-http-response.v1"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v8"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v9"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_TEXT_BYTES = 2_000_000
@@ -46,6 +46,7 @@ BINDING_FIELDS = {
     "primary_provider", "review_provider", "software_version",
     "review_confidence", "quality_profile", "commercial_profile",
     "commercial_review", "commercial_review_routing",
+    "commercial_review_routing_contract_sha256",
     "commercial_review_resolution_contract_sha256",
     "human_review_required", "independent_review_required",
 }
@@ -495,7 +496,15 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         else None
     )
     if (
-        binding["commercial_review_resolution_contract_sha256"]
+        binding["commercial_review_routing_contract_sha256"]
+        != (
+            _COMMERCIAL.public_review_routing_contract(
+                binding["commercial_profile"]
+            )["sha256"]
+            if commercial_review is not None
+            else None
+        )
+        or binding["commercial_review_resolution_contract_sha256"]
         != expected_resolution_contract_sha256
     ):
         _fail("binding_invalid")

@@ -1046,13 +1046,14 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v8` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v9` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
 confidence, locale quality profile, and, for commercial content, the exact
 nested locale-specific commercial profile plus its content-free targeted-review
 summary and exact advertised review-evidence-contract SHA-256, the canonical
+advertised routing-contract SHA-256 for every commercial result, the canonical
 advertised resolution-contract SHA-256 when targeted
 review is unresolved, the private text-free mapping from each opaque offer
 index to its ordered source and target Unicode code-point spans, and the
@@ -1331,13 +1332,14 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v10` object. That content-free
+a `blun.website-localization-release-evidence.v11` object. That content-free
 object binds the exact machine-readable release-evidence-contract SHA-256,
 signed approval and worker-result hashes, quality-receipt
 hash, canonical evidence request ID and evidence revision, and either a null
 commercial scope or the exact commercial-profile ID,
 locale-specific commercial quality-profile version and digest, and validated
-review summary including its exact review-evidence-contract digest. If that
+review summary including its exact review-evidence-contract digest, plus the
+exact current content-free offer-routing-contract digest. If that
 summary requires targeted review, the object also binds
 the exact ordered dimensions, commercial profile, resolution-contract digest,
 resolution method, receipt hash, primary provider identity, and independent

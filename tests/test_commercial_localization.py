@@ -590,6 +590,10 @@ class CommercialLocalizationTests(unittest.TestCase):
             "version": expected_commercial_quality["version"],
             "sha256": expected_commercial_quality["sha256"],
         })
+        self.assertEqual(
+            result["commercial_review_routing_contract_sha256"],
+            PROFILE.public_review_routing_contract(SCHEMA)["sha256"],
+        )
 
     def test_commercial_evidence_contract_drift_blocks_before_provider(self):
         canonical = PROFILE.public_review_evidence_contract(SCHEMA)
@@ -1475,6 +1479,13 @@ class CommercialLocalizationTests(unittest.TestCase):
             binding = verifier.calls[0]["binding"]
             self.assertEqual(binding["content_type"], "commercial")
             self.assertEqual(binding["commercial_profile"], SCHEMA)
+            expected_routing_contract_sha256 = (
+                PROFILE.public_review_routing_contract(SCHEMA)["sha256"]
+            )
+            self.assertEqual(
+                binding["commercial_review_routing_contract_sha256"],
+                expected_routing_contract_sha256,
+            )
             self.assertEqual(
                 binding["commercial_review"]["review_required_dimensions"],
                 ["tax_status"],
@@ -1497,6 +1508,12 @@ class CommercialLocalizationTests(unittest.TestCase):
             )
             self.assertEqual(
                 publication_evidence["evidence_revision"], EVIDENCE_REVISION,
+            )
+            self.assertEqual(
+                publication_evidence[
+                    "commercial_review_routing_contract_sha256"
+                ],
+                expected_routing_contract_sha256,
             )
             self.assertEqual(
                 publication_evidence["commercial_review_resolution"]["schema"],
@@ -1525,6 +1542,12 @@ class CommercialLocalizationTests(unittest.TestCase):
                 evidence_sha256="not-a-digest",
             ),
             lambda value: value.update(commercial_review=None),
+            lambda value: value.update(
+                commercial_review_routing_contract_sha256="0" * 64,
+            ),
+            lambda value: value.update(
+                commercial_review_routing_contract_sha256=None,
+            ),
         ):
             changed = copy.deepcopy(result)
             mutation(changed)
