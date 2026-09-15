@@ -1,9 +1,11 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const net = require("node:net");
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const EXACT_LANGUAGE = /^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/;
+const SESSION_EPOCH = /^[0-9a-f]{64}$/;
 const TRANSLATION_OPERATIONS = new Set([
   "translate", "translation", "localize", "localization", "transcreate",
   "translation-review", "translation-proofread", "i18n", "l10n",
@@ -12,6 +14,7 @@ const RESPONSE_OPERATIONS = new Set(["respond", "response", "chat", "answer", "c
 const HOST_FIELDS = new Set([
   "task_kind", "language", "source_text", "content_type",
   "short_text_reviewed", "key_path", "delivery_channel",
+  "session_id", "session_epoch", "agent_id",
 ]);
 
 class LanguageGuardBlocked extends Error {
@@ -23,7 +26,10 @@ class LanguageGuardBlocked extends Error {
 }
 
 function strictString(value, field, required = false) {
-  if (value === undefined || value === null) return "";
+  if (value === undefined || value === null) {
+    if (required) throw new LanguageGuardBlocked(`${field} is required`, "invalid_host_context");
+    return "";
+  }
   if (typeof value !== "string") throw new LanguageGuardBlocked(`${field} must be a string`, "invalid_host_context");
   if (required && !value.trim()) throw new LanguageGuardBlocked(`${field} is required`, "invalid_host_context");
   return value;
@@ -163,14 +169,36 @@ function callGuardService(endpoint, request, { serviceToken = "", timeoutMs = 10
   });
 }
 
+function exactUtf8Hash(value) {
+  return crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
+}
+
+function canonicalHash(value) {
+  const text = String(value).replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").normalize("NFC");
+  return exactUtf8Hash(text);
+}
+
+function bindCandidate(text) {
+  const sha256 = exactUtf8Hash(text);
+  return Object.freeze({ id: `sha256:${sha256}`, sha256, text });
+}
+
+function rejectionDetail(result) {
+  const failedChecks = result?.checks && typeof result.checks === "object"
+    ? Object.entries(result.checks).filter(([, passed]) => passed !== true).map(([name]) => name)
+    : [];
+  return failedChecks.length ? ` (failed checks: ${failedChecks.join(", ")})` : "";
+}
+
 async function verifyForDelivery({ rawEnvelope, hostContext, endpoint, serviceToken = "", agentId = "", channel = "" }) {
   const envelope = parseAgentEnvelope(rawEnvelope);
   const route = routeHostContext(hostContext);
+  const candidate = bindCandidate(envelope.target_text);
   const result = await callGuardService(endpoint, {
     operation: "verify",
     task_kind: route.taskKind,
     source_text: route.sourceText,
-    target_text: envelope.target_text,
+    target_text: candidate.text,
     language: route.language,
     release_token: envelope.release_token,
     content_type: route.contentType,
@@ -179,36 +207,119 @@ async function verifyForDelivery({ rawEnvelope, hostContext, endpoint, serviceTo
     channel: String(channel || ""),
   }, { serviceToken });
   if (result?.valid !== true) {
-    const failedChecks = result?.checks && typeof result.checks === "object"
-      ? Object.entries(result.checks).filter(([, passed]) => passed !== true).map(([name]) => name)
-      : [];
-    const detail = failedChecks.length ? ` (failed checks: ${failedChecks.join(", ")})` : "";
-    throw new LanguageGuardBlocked(`isolated guard rejected the exact output${detail}`, "receipt_rejected");
+    throw new LanguageGuardBlocked(`isolated guard rejected the exact output${rejectionDetail(result)}`, "receipt_rejected");
   }
-  return { text: envelope.target_text, route, verification: result };
+  return { text: candidate.text, candidate, route, verification: result };
+}
+
+async function authorizeForDelivery(options) {
+  const envelope = parseAgentEnvelope(options.rawEnvelope);
+  const route = routeHostContext(options.hostContext);
+  const candidate = bindCandidate(envelope.target_text);
+  const delivery = Object.freeze({
+    sessionId: strictString(options.sessionId, "session_id", true),
+    sessionEpoch: strictString(options.sessionEpoch, "session_epoch", true),
+    agentId: strictString(options.agentId, "agent_id", true),
+    channel: strictString(options.channel, "delivery_channel", true),
+    shortTextReviewed: options.hostContext.short_text_reviewed === true,
+  });
+  if (!SESSION_EPOCH.test(delivery.sessionEpoch)) {
+    throw new LanguageGuardBlocked("session_epoch must be 64 lowercase hexadecimal characters", "invalid_host_context");
+  }
+  const result = await callGuardService(options.endpoint, {
+    operation: "authorize_delivery",
+    task_kind: route.taskKind,
+    source_text: route.sourceText,
+    target_text: candidate.text,
+    language: route.language,
+    release_token: envelope.release_token,
+    content_type: route.contentType,
+    short_text_reviewed: delivery.shortTextReviewed,
+    session_id: delivery.sessionId,
+    session_epoch: delivery.sessionEpoch,
+    agent_id: delivery.agentId,
+    channel: delivery.channel,
+  }, { serviceToken: options.serviceToken || "" });
+  if (result?.valid !== true || typeof result.delivery_grant !== "string" || !result.delivery_grant) {
+    throw new LanguageGuardBlocked(`isolated guard rejected delivery authorization${rejectionDetail(result)}`, "receipt_rejected");
+  }
+  return Object.freeze({ candidate, route, delivery, grant: result.delivery_grant, verification: result });
+}
+
+async function consumeAuthorizedDelivery(options) {
+  const authorization = options.authorization;
+  const candidate = options.candidate || authorization?.candidate;
+  if (!authorization || !candidate || candidate !== authorization.candidate
+      || candidate.id !== `sha256:${exactUtf8Hash(candidate.text)}`) {
+    throw new LanguageGuardBlocked("approved candidate changed before delivery", "candidate_changed");
+  }
+  const { route, delivery } = authorization;
+  const result = await callGuardService(options.endpoint, {
+    operation: "consume_delivery",
+    delivery_grant: authorization.grant,
+    source_sha256: canonicalHash(route.sourceText),
+    target_text: candidate.text,
+    language: route.language,
+    task_kind: route.taskKind,
+    content_type: route.contentType,
+    short_text_reviewed: delivery.shortTextReviewed,
+    session_id: delivery.sessionId,
+    session_epoch: delivery.sessionEpoch,
+    agent_id: delivery.agentId,
+    channel: delivery.channel,
+  }, { serviceToken: options.serviceToken || "" });
+  if (result?.valid !== true) {
+    throw new LanguageGuardBlocked(`isolated guard rejected final delivery${rejectionDetail(result)}`, "delivery_rejected");
+  }
+  return result;
+}
+
+function safeCodeUnitLimit(value, limit) {
+  let cut = Math.min(limit, value.length);
+  if (cut > 0 && cut < value.length) {
+    const before = value.charCodeAt(cut - 1);
+    const after = value.charCodeAt(cut);
+    if (before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) cut -= 1;
+  }
+  return cut || Math.min(value.length, 2);
 }
 
 function splitTelegramMessage(value, limit = 3900) {
+  if (!Number.isInteger(limit) || limit < 2) {
+    throw new LanguageGuardBlocked("Telegram chunk limit must be an integer of at least 2", "delivery_unavailable");
+  }
   const chunks = [];
-  let remaining = String(value || "").trim();
+  let remaining = String(value || "");
   while (remaining.length > limit) {
-    let splitAt = remaining.lastIndexOf("\n", limit);
-    if (splitAt < Math.floor(limit * 0.55)) splitAt = remaining.lastIndexOf(" ", limit);
-    if (splitAt < Math.floor(limit * 0.55)) splitAt = limit;
-    chunks.push(remaining.slice(0, splitAt).trimEnd());
-    remaining = remaining.slice(splitAt).trimStart();
+    const hardLimit = safeCodeUnitLimit(remaining, limit);
+    const threshold = Math.floor(limit * 0.55);
+    let boundary = remaining.lastIndexOf("\n", hardLimit - 1);
+    if (boundary < threshold) boundary = remaining.lastIndexOf(" ", hardLimit - 1);
+    const cut = boundary >= threshold ? boundary + 1 : hardLimit;
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut);
   }
   if (remaining) chunks.push(remaining);
   return chunks;
 }
 
 async function guardedTelegramSend(options) {
-  const verified = await verifyForDelivery({ ...options, channel: options.channel || "telegram" });
   if (typeof options.telegramRequest !== "function") {
     throw new LanguageGuardBlocked("Telegram transport is unavailable", "delivery_unavailable");
   }
+  const authorization = await authorizeForDelivery({ ...options, channel: options.channel || "telegram" });
+  const chunks = splitTelegramMessage(authorization.candidate.text, options.chunkLimit || 3900);
+  if (chunks.join("") !== authorization.candidate.text
+      || exactUtf8Hash(chunks.join("")) !== authorization.candidate.sha256) {
+    throw new LanguageGuardBlocked("Telegram framing changed the approved candidate", "candidate_changed");
+  }
+  const delivery = await consumeAuthorizedDelivery({
+    authorization,
+    endpoint: options.endpoint,
+    serviceToken: options.serviceToken || "",
+  });
   let lastResult = null;
-  for (const text of splitTelegramMessage(verified.text)) {
+  for (const text of chunks) {
     lastResult = await options.telegramRequest(options.botToken, "sendMessage", {
       chat_id: options.chatId,
       text,
@@ -216,7 +327,14 @@ async function guardedTelegramSend(options) {
       ...(options.replyParameters ? { reply_parameters: options.replyParameters } : {}),
     });
   }
-  return { sent: true, chunks: splitTelegramMessage(verified.text).length, lastResult, verification: verified.verification };
+  return {
+    sent: true,
+    chunks: chunks.length,
+    lastResult,
+    candidateId: authorization.candidate.id,
+    candidateSha256: authorization.candidate.sha256,
+    delivery,
+  };
 }
 
 module.exports = {
@@ -224,7 +342,11 @@ module.exports = {
   routeHostContext,
   parseAgentEnvelope,
   callGuardService,
+  exactUtf8Hash,
+  bindCandidate,
   verifyForDelivery,
+  authorizeForDelivery,
+  consumeAuthorizedDelivery,
   splitTelegramMessage,
   guardedTelegramSend,
 };
