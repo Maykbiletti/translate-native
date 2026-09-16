@@ -1152,6 +1152,16 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             "major"
         ]
         self.assertEqual(len(candidate_major_hashes), 1)
+        pass_findings = {
+            item["phase"]: item["finding_hashes"] for item in results[0]["passes"]
+        }
+        self.assertEqual(pass_findings["target_native"]["candidate"], {
+            "blocking": [], "major": [],
+        })
+        self.assertEqual(
+            pass_findings["source_fidelity"]["candidate"]["major"],
+            candidate_major_hashes,
+        )
         self.assertEqual(
             finding_bound["dimensions"][-1]["candidate_offers"][0],
             {
@@ -1176,6 +1186,31 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         unsigned["commercial_evaluation"]["dimensions"][-1][
             "candidate_offers"
         ][0]["finding_sha256"] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["passes"][0]["finding_hashes"], unsigned["passes"][1][
+            "finding_hashes"
+        ] = (
+            unsigned["passes"][1]["finding_hashes"],
+            unsigned["passes"][0]["finding_hashes"],
+        )
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["defect_counts"]["candidate"]["major"] = 0
         rebound = BENCHMARK._attest(
             unsigned, benchmark_policy, self.authority,
         )
@@ -1242,6 +1277,34 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
             self.summarize(benchmark_policy, [*results[:-1], rebound])
         self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+    def test_duplicate_phase_findings_fail_before_signed_evidence(self):
+        finding = {
+            "class": "commercial_fidelity",
+            "excerpt": "renewal condition",
+            "reason": "The renewal condition changed.",
+        }
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+
+        class DuplicateFindingReviewer(PreferenceReviewer):
+            def review(self, request):
+                value = super().review(request)
+                if request.phase == "source_fidelity":
+                    preferred = value["preference"]
+                    other = "B" if preferred == "A" else "A"
+                    value["variants"][other]["major_defects"] = [
+                        finding, copy.deepcopy(finding),
+                    ]
+                return value
+
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline(payload), assets(), policy(),
+                DuplicateFindingReviewer(result["candidate"]),
+                blinding_key=self.key,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.review.invalid")
 
     def test_commercial_scope_drift_blocks_before_benchmark_review(self):
         payload = job(suffix="commercial-7")

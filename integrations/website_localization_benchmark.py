@@ -35,11 +35,11 @@ COMMERCIAL_TARGET_OFFER_REGISTRY_SCHEMA = (
     "translate-native.commercial-benchmark-target-offer-registry.v1"
 )
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v13"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v14"
 COMMERCIAL_CASE_EVALUATION_SCHEMA = (
-    "translate-native.commercial-benchmark-case-evaluation.v6"
+    "translate-native.commercial-benchmark-case-evaluation.v7"
 )
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v17"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v18"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -1271,6 +1271,8 @@ def _defect_hashes(items: Any, *, phase: str, label: str, severity: str) -> tupl
         hashes.append(_hash_json({
             "phase": phase, "variant": label, "severity": severity, "finding": item,
         }))
+    if len(set(hashes)) != len(hashes):
+        raise BenchmarkBlocked("benchmark.review.invalid")
     return tuple(hashes)
 
 
@@ -1654,6 +1656,13 @@ def run_blind_benchmark_case(
         )
         preference = _unblind(parsed["preference"], origins)
         preferences.append(preference)
+        phase_finding_hashes = {
+            origin: {
+                severity: list(parsed["variants"][label][severity])
+                for severity in ("blocking", "major")
+            }
+            for label, origin in origins.items()
+        }
         for label, origin in origins.items():
             defect_counts[origin]["blocking"] += len(parsed["variants"][label]["blocking"])
             defect_counts[origin]["major"] += len(parsed["variants"][label]["major"])
@@ -1668,6 +1677,7 @@ def run_blind_benchmark_case(
             "preference": preference,
             "request_sha256": request_hash,
             "response_sha256": response_hash,
+            "finding_hashes": phase_finding_hashes,
         })
     winner = "inconclusive"
     if candidate_text != baseline_text and preferences == ["candidate", "candidate"]:
@@ -1991,9 +2001,11 @@ def _validated_case_result(
     if not isinstance(passes, list) or len(passes) != len(PHASES):
         raise BenchmarkBlocked("benchmark.results.invalid")
     preferences: list[str] = []
+    pass_findings: dict[str, dict[str, dict[str, list[str]]]] = {}
     for expected_phase, item in zip(PHASES, passes):
         if not isinstance(item, dict) or set(item) != {
             "phase", "preference", "request_sha256", "response_sha256",
+            "finding_hashes",
         }:
             raise BenchmarkBlocked("benchmark.results.invalid")
         if item["phase"] != expected_phase or item["preference"] not in {
@@ -2003,6 +2015,32 @@ def _validated_case_result(
         _sha256(item["request_sha256"])
         _sha256(item["response_sha256"])
         preferences.append(item["preference"])
+        phase_findings = item["finding_hashes"]
+        if (
+            not isinstance(phase_findings, dict)
+            or set(phase_findings) != {"candidate", "baseline"}
+        ):
+            raise BenchmarkBlocked("benchmark.results.invalid")
+        pass_findings[expected_phase] = {}
+        for origin in ("candidate", "baseline"):
+            origin_findings = phase_findings[origin]
+            if (
+                not isinstance(origin_findings, dict)
+                or set(origin_findings) != {"blocking", "major"}
+            ):
+                raise BenchmarkBlocked("benchmark.results.invalid")
+            pass_findings[expected_phase][origin] = {}
+            for severity in ("blocking", "major"):
+                hashes = origin_findings[severity]
+                if (
+                    not isinstance(hashes, list)
+                    or any(not isinstance(item, str) for item in hashes)
+                    or len(set(hashes)) != len(hashes)
+                ):
+                    raise BenchmarkBlocked("benchmark.results.invalid")
+                for finding_sha256 in hashes:
+                    _sha256(finding_sha256)
+                pass_findings[expected_phase][origin][severity] = hashes
     integrity = result["integrity"]
     defects = result["defect_counts"]
     if (
@@ -2030,6 +2068,12 @@ def _validated_case_result(
             raise BenchmarkBlocked("benchmark.results.invalid")
         for count in defect_item.values():
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise BenchmarkBlocked("benchmark.results.invalid")
+        for severity in ("blocking", "major"):
+            expected_count = sum(
+                len(pass_findings[phase][origin][severity]) for phase in PHASES
+            )
+            if defect_item[severity] != expected_count:
                 raise BenchmarkBlocked("benchmark.results.invalid")
     commercial_evaluation = result["commercial_evaluation"]
     if result["content_type"] == "commercial":
@@ -2071,11 +2115,10 @@ def _validated_case_result(
                 hashes = registry[severity]
                 if (
                     not isinstance(hashes, list)
-                    or len(hashes) > defects[origin][severity]
+                    or hashes
+                    != pass_findings["source_fidelity"][origin][severity]
                 ):
                     raise BenchmarkBlocked("benchmark.results.invalid")
-                for finding_sha256 in hashes:
-                    _sha256(finding_sha256)
                 finding_registries[origin][severity] = set(hashes)
         dimensions = commercial_evaluation["dimensions"]
         if (

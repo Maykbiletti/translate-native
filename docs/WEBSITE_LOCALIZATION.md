@@ -767,6 +767,12 @@ defect-schema checks, the runtime binds it to the canonical request hash,
 benchmark policy, configured reviewer route and reviewer identity, then signs
 and verifies that artifact before continuing. The source-blind
 `target_native` response is therefore durable before `source_fidelity` begins.
+Each signed pass also retains separate, content-free candidate and baseline
+finding-hash lists for `blocking` and `major` severity. The final defect totals
+must be exactly reconstructable from these two ordered phase registries;
+missing, duplicated, malformed, or phase-swapped hashes block report
+validation. This preserves the independence of native-only and source-aware
+judgment without retaining reviewer prose.
 If the second review or final campaign commit fails, a retry reverifies and
 reuses the first response; after both are stored, neither review is called
 again. The deterministic `review_id` remains the external adapter's
@@ -807,6 +813,9 @@ the content-free source-fidelity finding registries by severity, while each
 ordered offer record carries its index, status and matching hash. Passing and
 absent offers require `null`; missing, invented, foreign or wrong-severity
 hashes block report validation. No finding excerpt or reason survives.
+The commercial registries must equal the corresponding signed
+`source_fidelity` pass registries exactly; a finding from `target_native` can
+never be reused as commercial fidelity evidence.
 
 The dimension status is derived by fixed severity, so an aggregate cannot hide
 a major or blocking defect in another offer. Missing, duplicated or reordered

@@ -1,5 +1,24 @@
 # Version 6 premortem
 
+## Phase-bound benchmark findings (16 September 2026)
+
+Assume both benchmark reviews run in the correct order, but the signed case
+keeps only their combined defect totals.
+
+- A target-native finding could later be relabelled as source-fidelity evidence
+  without changing the aggregate.
+- A commercial verdict could reference a valid case finding from the wrong
+  review phase.
+- Missing or duplicated finding hashes could still agree with a separately
+  edited total.
+- Persisting the original finding object would leak excerpts or reviewer prose.
+
+Each ordered pass will therefore retain only its exact candidate and baseline
+finding hashes by severity. Result validation will reconstruct aggregate counts
+from those phase registries, reject duplicate or malformed hashes, and require
+commercial finding registries to equal the source-fidelity pass exactly. No
+finding text, excerpt, reason, source, or target is added to signed evidence.
+
 ## Finding-bound commercial offer verdicts (16 September 2026)
 
 Assume a reviewer correctly references a source-fidelity defect while reviewing
