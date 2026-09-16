@@ -1,0 +1,8 @@
+{
+  "schema": "translate-native.subagent-review-launcher-config.v1",
+  "launcher_id": "deployment-review-launcher",
+  "launcher_version": "immutable-launcher-revision",
+  "settings": {
+    "deployment_owned_configuration": "replace-with-provider-neutral-launcher-settings"
+  }
+}

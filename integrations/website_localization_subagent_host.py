@@ -338,14 +338,18 @@ class SQLiteReviewLedger:
     """Small durable journal; no transaction remains open during model work."""
 
     def __init__(self, path: str | Path, *, clock: Callable[[], float] = time.time,
-                 lease_seconds: int = 65):
+                 lease_seconds: int = 65, initialize_schema: bool = True):
         self.path = str(path)
         if not self.path or not callable(clock) or type(lease_seconds) is not int \
-                or not 5 <= lease_seconds <= 300:
+                or not 5 <= lease_seconds <= 300 \
+                or type(initialize_schema) is not bool:
             raise ValueError("review ledger configuration is invalid")
         self.clock, self.lease_seconds = clock, lease_seconds
         self._schema_lock = threading.Lock()
-        self._ensure_schema()
+        if initialize_schema:
+            self._ensure_schema()
+        else:
+            self._verify_schema()
 
     def _connect(self):
         connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
@@ -383,6 +387,31 @@ class SQLiteReviewLedger:
                 CREATE INDEX IF NOT EXISTS review_host_receipts
                     ON review_host_executions(receipt_sha256);
             """)
+
+    def _verify_schema(self):
+        expected = (
+            "execution_key", "principal_sha256", "host_id", "request_sha256",
+            "schema_name", "phase", "status", "generation", "lease_expires",
+            "attempts", "response_body", "receipt_sha256", "candidate_sha256",
+            "sequence_sha256", "target_locale", "provider_id",
+            "host_policy_version", "reviewer_agent_id", "reviewer_session_id",
+            "updated_at",
+        )
+        try:
+            with self._schema_lock, self._connect() as connection:
+                actual = tuple(
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(review_host_executions)"
+                    )
+                )
+                index = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='index' "
+                    "AND name='review_host_receipts'"
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise ValueError("review ledger schema is unavailable") from error
+        if actual != expected or index is None:
+            raise ValueError("review ledger schema is unavailable")
 
     def reserve(self, *, execution_key: str, principal_sha256: str,
                 host_id: str, request_sha256: str, schema: str, phase: str,

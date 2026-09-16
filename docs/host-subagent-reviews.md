@@ -180,6 +180,70 @@ The endpoint is provider-neutral and deliberately does not contain a real
 model-specific launcher. Finnish and Maltese fixtures exercise the protocol,
 not native-language quality, model independence or superiority over DeepL.
 
+### Protected host runtime
+
+`integrations/website_localization_subagent_host_runtime.py` composes that
+endpoint into a deployable, process-bound WSGI runtime without selecting a
+model provider. Copy `integrations/subagent-review-host.example.json` and
+`integrations/subagent-review-launcher.example.json` to an operator-owned
+absolute directory. The directory must not be writable outside its owner; the
+configuration, bearer token, HMAC secret, launcher configuration and launcher
+factory source must be owner-only regular files with one hard link. Replace
+every example digest and identifier with the exact deployment values.
+
+The closed host configuration pins the host and attestation identities,
+SQLite journal, lease, complete review routes, reviewer identities, model and
+policy versions, launcher factory, source-file digest, launcher identity and
+launcher configuration. The factory is a trusted deployment source file plus
+an exact callable name. The runtime hashes its exact bytes before compiling
+those same bytes directly, so package initializers and stale Python bytecode
+cannot run in place of the reviewed source. The callable receives only a copy
+of the launcher's `settings` object and must return an object exposing the configured
+`launcher_id`, `launcher_version`, atomic `execute_idempotent(...)` and
+`reconcile(...)`. It receives no HTTP credential, HMAC signer, host journal,
+route table or publication capability. Absolute imports made by that source
+remain trusted deployment dependencies and must be protected and version-pinned
+separately; one source digest cannot prove an entire dependency graph.
+
+Ledger creation is explicit and happens only after the protected configuration,
+launcher code, launcher result and secrets have passed preflight:
+
+```console
+python integrations/website_localization_subagent_host_runtime.py \
+  --config /absolute/protected/path/review-host.json \
+  --initialize-ledger --check
+```
+
+Normal starts omit `--initialize-ledger`; a missing ledger then blocks instead
+of silently erasing recovery history. The journal stores one durable digest of
+the exact host, authentication and attestation identities, routes, reviewer
+assignments, launcher code/configuration and lease. A later configuration or
+key change against that journal blocks startup rather than replaying historical
+evidence under a new deployment identity. Deliberate rotation therefore needs
+a separately reviewed journal migration or a new explicitly initialized
+journal; this runtime does not rewrite the binding.
+
+The bundled server listens only on loopback and is intended to sit behind a
+trusted HTTPS terminator:
+
+```console
+python integrations/website_localization_subagent_host_runtime.py \
+  --config /absolute/protected/path/review-host.json \
+  --listen-host 127.0.0.1 --listen-port 47641
+```
+
+The host configuration must explicitly permit loopback HTTP for that internal
+hop. Do not expose this listener directly. A forked or closed runtime rejects
+requests before journal replay or launcher access. Startup never invents a
+launcher, reviewer result, credential or signing key.
+
+This composition makes the server deployable but does not supply or endorse a
+model-specific launcher. Operators must implement and independently test real
+host isolation, atomic execution-key deduplication, cancellation, billing and
+provider credentials. Synthetic Finnish and Maltese runtime tests prove the
+configuration, source isolation, restart replay and fail-closed bindings only;
+they are not native-language evidence and make no DeepL superiority claim.
+
 ## Authenticated HTTPS host bridge
 
 `integrations/website_localization_subagent_http.py` implements the `ReviewHost`
