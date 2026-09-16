@@ -329,7 +329,12 @@ class DurableBenchmarkReportWatcher:
 
     def run_once(
         self, worker_id: str, *, now: float | int,
+        operation_guard: Callable[[float], Any] | None = None,
     ) -> BenchmarkWatchOutcome:
+        if operation_guard is not None and not callable(operation_guard):
+            raise BenchmarkWatcherBlocked(
+                "benchmark_watcher.operation_guard_invalid"
+            )
         self._validate_schema()
         worker_id = _worker(worker_id)
         now = _number(now, "time", minimum=0, maximum=10**12)
@@ -371,6 +376,16 @@ class DurableBenchmarkReportWatcher:
                     last_error_code = NULL, updated_at = ?
                 WHERE singleton = 1
             """, (attempt, worker_id, token, now + self.lease_seconds, now))
+        try:
+            if operation_guard is not None:
+                operation_guard(self.lease_seconds)
+        except Exception:
+            # Never call the remote client or complete work after outer
+            # authority is lost. The inner lease remains recoverable after
+            # its bounded expiry, exactly as it would after a process crash.
+            raise BenchmarkWatcherBlocked(
+                "benchmark_watcher.operation_guard_failed"
+            ) from None
         try:
             snapshot = self.client.report()
             summary = self._report_summary(snapshot, now)
@@ -591,9 +606,14 @@ class DurableBenchmarkReportWatcher:
         clock: Callable[[], float],
         stop_event: Any,
         maximum_wait_seconds: float | int = 30,
+        operation_guard: Callable[[float], Any] | None = None,
     ) -> BenchmarkWatchStatus:
         """Run until the report is final, the watcher fails, or the host stops."""
         worker_id = _worker(worker_id)
+        if operation_guard is not None and not callable(operation_guard):
+            raise BenchmarkWatcherBlocked(
+                "benchmark_watcher.operation_guard_invalid"
+            )
         if not callable(clock):
             raise BenchmarkWatcherBlocked("benchmark_watcher.clock_invalid")
         is_set = getattr(stop_event, "is_set", None)
@@ -624,7 +644,9 @@ class DurableBenchmarkReportWatcher:
                 ) from None
             if stopped:
                 return self.status(now=now)
-            self.run_once(worker_id, now=now)
+            self.run_once(
+                worker_id, now=now, operation_guard=operation_guard,
+            )
             current = self.status(now=now)
             if current.state in {"succeeded", "failed"}:
                 return current

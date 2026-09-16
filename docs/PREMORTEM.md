@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Benchmark watcher outer-lease fencing (16 September 2026)
+
+Assume the durable watcher lease is correct, but the production supervisor's
+outer lease expires immediately before a remote report request.
+
+- A replacement supervisor could start while the old process is still using
+  network credentials, duplicating an otherwise single-attempt read.
+- Checking the outer lease before the watcher claim could leave a race between
+  that check and the actual network call.
+- Treating a failed guard as an ordinary client failure could let a stale
+  process write retry or terminal state after it lost authority.
+- Calling the guard for live leases or future retry deadlines could create
+  unnecessary durable writes without any external work.
+- An invalid guard could claim work before its configuration error is known.
+
+The watcher will validate the optional guard before state access, atomically
+claim only due work, invoke the guard with the exact inner lease duration
+immediately before `client.report()`, and perform no client call or completion
+write when the guard fails. The claimed inner lease remains recoverable after
+expiry. The central runtime supplies its supervisor renewal method, while
+standalone hosts may omit the guard when no enclosing lease exists.
+
 ## Benchmark watcher in authenticated service health (16 September 2026)
 
 Assume durable benchmark retrieval is correct, but only the watcher process can

@@ -1020,6 +1020,58 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertNotIn("mt-MT", repr(report))
         self.assertNotIn(WATCH_CAMPAIGN_ID, repr(report))
 
+    def test_runtime_renews_outer_lease_immediately_before_watch_client(self):
+        events = []
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(),
+        ])
+        client = watch["client"]
+        original_report = client.report
+
+        def report():
+            events.append("client")
+            return original_report()
+
+        client.report = report
+        runtime = self.runtime(benchmark_watch=watch)
+        original_guard = runtime.supervisor.renew_active_lease
+
+        def guard(lease_seconds):
+            events.append(("guard", lease_seconds))
+            return original_guard(lease_seconds)
+
+        runtime.supervisor.renew_active_lease = guard
+
+        outcome = runtime.run_once(now=100)
+
+        self.assertEqual(outcome.tick["status"], "succeeded")
+        self.assertEqual(events, [("guard", 30.0), "client"])
+
+    def test_runtime_outer_lease_failure_blocks_without_watch_client(self):
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(),
+        ])
+        client = watch["client"]
+        runtime = self.runtime(benchmark_watch=watch)
+
+        def reject(_lease_seconds):
+            raise RuntimeError("private supervisor state")
+
+        runtime.supervisor.renew_active_lease = reject
+
+        outcome = runtime.run_once(now=100)
+        status = runtime.benchmark_report_watcher.status(now=100)
+
+        self.assertEqual((outcome.tick["phase"], outcome.tick["status"]), (
+            "benchmark", "blocked",
+        ))
+        self.assertEqual(
+            outcome.tick["error_code"],
+            "benchmark_watcher.operation_guard_failed",
+        )
+        self.assertEqual((status.state, status.attempts), ("leased", 1))
+        self.assertEqual(client.calls, 0)
+
     def test_runtime_keeps_valid_benchmark_block_fail_closed(self):
         watch = self.benchmark_watch_configuration([
             BenchmarkWatchSnapshot(status="BLOCK"),

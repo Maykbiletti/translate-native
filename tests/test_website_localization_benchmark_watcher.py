@@ -304,6 +304,94 @@ class DurableBenchmarkReportWatcherTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "benchmark_watcher.lease_lost")
         self.assertIsNone(watcher.status(now=100).report_sha256)
 
+    def test_operation_guard_runs_after_claim_and_before_remote_read(self):
+        events = []
+        watcher = None
+
+        def guarded_snapshot():
+            events.append("client")
+            return Snapshot()
+
+        def guard(lease_seconds):
+            row = watcher.connection.execute(
+                "SELECT state, lease_owner FROM benchmark_report_watcher"
+            ).fetchone()
+            events.append(("guard", lease_seconds, tuple(row)))
+
+        watcher = self.watcher(Client([guarded_snapshot]))
+
+        outcome = watcher.run_once(
+            "consumer", now=100, operation_guard=guard,
+        )
+
+        self.assertEqual(outcome.state, "succeeded")
+        self.assertEqual(events, [
+            ("guard", 10.0, ("leased", "consumer")), "client",
+        ])
+
+    def test_operation_guard_failure_skips_client_and_leaves_crash_lease(self):
+        client = Client([Snapshot()])
+        watcher = self.watcher(client)
+
+        with self.assertRaises(WATCHER.BenchmarkWatcherBlocked) as caught:
+            watcher.run_once(
+                "consumer", now=100,
+                operation_guard=lambda _lease: (_ for _ in ()).throw(
+                    RuntimeError("private outer lease detail")
+                ),
+            )
+
+        status = watcher.status(now=100)
+        self.assertEqual(
+            str(caught.exception),
+            "benchmark_watcher.operation_guard_failed",
+        )
+        self.assertEqual((status.state, status.attempts), ("leased", 1))
+        self.assertEqual(status.lease_expires_at, 110.0)
+        self.assertEqual(client.calls, 0)
+
+        recovered = watcher.run_once(
+            "replacement", now=111, operation_guard=lambda _lease: None,
+        )
+        self.assertEqual((recovered.state, recovered.attempt), (
+            "succeeded", 2,
+        ))
+        self.assertEqual(client.calls, 1)
+
+    def test_invalid_operation_guard_does_not_claim_or_call_client(self):
+        client = Client([Snapshot()])
+        watcher = self.watcher(client)
+
+        with self.assertRaises(WATCHER.BenchmarkWatcherBlocked) as caught:
+            watcher.run_once("consumer", now=100, operation_guard=object())
+
+        self.assertEqual(
+            str(caught.exception),
+            "benchmark_watcher.operation_guard_invalid",
+        )
+        self.assertEqual(watcher.status(now=100).state, "pending")
+        self.assertEqual(client.calls, 0)
+
+    def test_not_due_attempt_does_not_invoke_operation_guard(self):
+        client = Client([
+            ForeignClientFailure("benchmark_client.network", True),
+        ])
+        watcher = self.watcher(client)
+        guarded = []
+
+        watcher.run_once(
+            "consumer", now=100,
+            operation_guard=lambda lease: guarded.append(lease),
+        )
+        early = watcher.run_once(
+            "consumer", now=101,
+            operation_guard=lambda lease: guarded.append(lease),
+        )
+
+        self.assertFalse(early.attempted)
+        self.assertEqual(guarded, [10.0])
+        self.assertEqual(client.calls, 1)
+
     def test_binding_or_configuration_drift_blocks_restart_before_client_call(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "benchmark-watcher.sqlite3"

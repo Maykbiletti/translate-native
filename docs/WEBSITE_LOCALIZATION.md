@@ -1006,6 +1006,15 @@ failed watcher and cannot replace a verified final result. `run_forever`
 provides an interruptible synchronous host loop and returns when retrieval
 succeeds, fails terminally, or the host stop event is set.
 
+Both `run_once` and `run_forever` accept an optional host-owned
+`operation_guard`. A due attempt claims its durable inner lease first and then
+calls the guard with that exact lease duration immediately before
+`client.report()`. If the guard fails, no network request occurs and the
+watcher deliberately leaves the inner lease untouched for bounded crash
+recovery; it does not persist a result or manufacture a retry decision after
+outer authority has been lost. A malformed guard blocks before claiming work,
+and an attempt that is not due never invokes it.
+
 For the production composition root, pass one exact `benchmark_watch` mapping
 to `WebsiteLocalizationRuntime`. It contains a distinct SQLite connection, the
 already configured strict benchmark client, worker ID, lease duration, retry
@@ -1015,6 +1024,13 @@ connections, and requires the outer supervisor lease to outlive the watcher
 lease. It then constructs the durable watcher and supplies that same instance
 to `LocalizationHealthMonitor`; execution and authenticated observation cannot
 silently use different state.
+
+The production runtime passes the supervisor's real
+`renew_active_lease` method as the watcher operation guard. Therefore a
+report request cannot begin under an outer lease that is about to expire, and
+a stale supervisor cannot continue to network access merely because its inner
+watcher claim remains structurally valid. The supervisor lease must still
+strictly outlive the configured watcher lease, as enforced during construction.
 
 One supervised tick always prioritizes customer translation, release, and
 delivery work. If those are idle, configured local benchmark case execution

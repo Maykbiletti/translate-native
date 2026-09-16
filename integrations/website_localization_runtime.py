@@ -714,6 +714,7 @@ class WebsiteLocalizationRuntime:
                 watch = self.benchmark_report_watcher.run_once(
                     self._benchmark_watch["worker_id"],
                     now=self._clock(),
+                    operation_guard=self.supervisor.renew_active_lease,
                 )
             except _BENCHMARK_WATCHER.BenchmarkWatcherBlocked as error:
                 code = str(error)
