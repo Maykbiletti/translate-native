@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Finding-bound commercial offer verdicts (16 September 2026)
+
+Assume a reviewer correctly references a source-fidelity defect while reviewing
+an offer, but unblinding keeps only the offer status and discards which exact
+finding justified it.
+
+- A major or blocking status could later be reassigned to another offer or
+  dimension without changing aggregate counts.
+- Storing an arbitrary SHA-256-shaped value would not prove that the finding
+  occurred in the matching variant and severity list.
+- Parallel status and hash arrays could drift in length or order after restart
+  or report reconstruction.
+- Retaining excerpts or reasons would leak reviewer prose into durable,
+  otherwise content-free evidence.
+
+The source-fidelity boundary will therefore resolve every non-passing offer's
+defect index to the exact validated finding hash. Unblinding will preserve
+content-free candidate and baseline finding registries by severity and store
+each offer as one indivisible status/hash record. Signed-result and report
+validation will reject missing, foreign, wrong-severity, malformed, or
+unexpected hashes. Passing and absent offers require `null`; reviewer prose is
+discarded, and the target-native pass remains unchanged.
+
 ## Decision-bound commercial target registries (16 September 2026)
 
 Assume both anonymous target registries are complete and valid, but an

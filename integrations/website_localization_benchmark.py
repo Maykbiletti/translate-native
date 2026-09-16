@@ -35,11 +35,11 @@ COMMERCIAL_TARGET_OFFER_REGISTRY_SCHEMA = (
     "translate-native.commercial-benchmark-target-offer-registry.v1"
 )
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v12"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v13"
 COMMERCIAL_CASE_EVALUATION_SCHEMA = (
-    "translate-native.commercial-benchmark-case-evaluation.v5"
+    "translate-native.commercial-benchmark-case-evaluation.v6"
 )
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v16"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v17"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -1342,7 +1342,7 @@ def _validate_commercial_evaluation(
                 or len(decision["offers"]) != offer_count
             ):
                 raise BenchmarkBlocked("benchmark.review.invalid")
-            offer_statuses = []
+            offer_results = []
             for expected_index, offer in enumerate(decision["offers"]):
                 if (
                     not isinstance(offer, dict)
@@ -1355,6 +1355,7 @@ def _validate_commercial_evaluation(
                     raise BenchmarkBlocked("benchmark.review.invalid")
                 status = offer["status"]
                 index = offer["defect_index"]
+                finding_sha256 = None
                 if status == "uncertain":
                     if index is not None:
                         raise BenchmarkBlocked("benchmark.review.invalid")
@@ -1372,8 +1373,15 @@ def _validate_commercial_evaluation(
                         or preferred == label
                     ):
                         raise BenchmarkBlocked("benchmark.review.invalid")
-                offer_statuses.append(status)
-            aggregate = _commercial_aggregate_status(offer_statuses)
+                    finding_sha256 = variants[label][severity][index]
+                offer_results.append({
+                    "offer_index": expected_index,
+                    "status": status,
+                    "finding_sha256": finding_sha256,
+                })
+            aggregate = _commercial_aggregate_status([
+                offer["status"] for offer in offer_results
+            ])
             if decision["status"] != aggregate:
                 raise BenchmarkBlocked("benchmark.review.invalid")
             parsed_item["variants"][label] = {
@@ -1381,12 +1389,19 @@ def _validate_commercial_evaluation(
                     "sha256"
                 ],
                 "status": aggregate,
-                "offers": offer_statuses,
+                "offers": offer_results,
             }
         parsed.append(parsed_item)
     return {
         "dimensions": parsed,
         "target_offer_registries": parsed_registries,
+        "finding_hashes": {
+            label: {
+                severity: list(variants[label][severity])
+                for severity in ("blocking", "major")
+            }
+            for label in VARIANTS
+        },
     }
 
 
@@ -1468,6 +1483,13 @@ def _unblind_commercial_evaluation(
             if resolved == origin
         )
 
+    def finding_hashes(origin: str) -> Mapping[str, Any]:
+        return next(
+            evaluation["finding_hashes"][label]
+            for label, resolved in origins.items()
+            if resolved == origin
+        )
+
     return {
         "schema": COMMERCIAL_CASE_EVALUATION_SCHEMA,
         "review_response_sha256": response_sha256,
@@ -1480,6 +1502,8 @@ def _unblind_commercial_evaluation(
             evaluation["target_offer_registries"][label]["sha256"]
             for label, resolved in origins.items() if resolved == "baseline"
         ),
+        "candidate_finding_hashes": finding_hashes("candidate"),
+        "baseline_finding_hashes": finding_hashes("baseline"),
         "offer_count": offer_count,
         "dimensions": [
             {
@@ -1819,16 +1843,16 @@ def _commercial_dimension_reports(
             for item in commercial_cases
         ]
         candidate_offer_statuses = [
-            status
+            offer["status"]
             for item in commercial_cases
-            for status in item["commercial_evaluation"]["dimensions"][index][
+            for offer in item["commercial_evaluation"]["dimensions"][index][
                 "candidate_offers"
             ]
         ]
         baseline_offer_statuses = [
-            status
+            offer["status"]
             for item in commercial_cases
-            for status in item["commercial_evaluation"]["dimensions"][index][
+            for offer in item["commercial_evaluation"]["dimensions"][index][
                 "baseline_offers"
             ]
         ]
@@ -2015,6 +2039,7 @@ def _validated_case_result(
                 "schema", "review_response_sha256", "offer_registry_sha256",
                 "candidate_target_offer_registry_sha256",
                 "baseline_target_offer_registry_sha256",
+                "candidate_finding_hashes", "baseline_finding_hashes",
                 "offer_count", "dimensions",
             }
             or commercial_evaluation["schema"]
@@ -2033,6 +2058,25 @@ def _validated_case_result(
             raise BenchmarkBlocked("benchmark.results.invalid")
         _sha256(commercial_evaluation["candidate_target_offer_registry_sha256"])
         _sha256(commercial_evaluation["baseline_target_offer_registry_sha256"])
+        finding_registries = {}
+        for origin in ("candidate", "baseline"):
+            registry = commercial_evaluation[origin + "_finding_hashes"]
+            if (
+                not isinstance(registry, dict)
+                or set(registry) != {"blocking", "major"}
+            ):
+                raise BenchmarkBlocked("benchmark.results.invalid")
+            finding_registries[origin] = {}
+            for severity in ("blocking", "major"):
+                hashes = registry[severity]
+                if (
+                    not isinstance(hashes, list)
+                    or len(hashes) > defects[origin][severity]
+                ):
+                    raise BenchmarkBlocked("benchmark.results.invalid")
+                for finding_sha256 in hashes:
+                    _sha256(finding_sha256)
+                finding_registries[origin][severity] = set(hashes)
         dimensions = commercial_evaluation["dimensions"]
         if (
             not isinstance(dimensions, list)
@@ -2064,21 +2108,40 @@ def _validated_case_result(
                     != commercial_evaluation[
                         origin + "_target_offer_registry_sha256"
                     ]
+                    or not isinstance(status, str)
                     or status not in {
                         "equivalent", "not_present", "major", "blocking",
                     }
                     or not isinstance(offers, list)
                     or len(offers) != benchmark_case["commercial_offer_count"]
-                    or any(
-                        offer_status not in {
-                            "equivalent", "not_present", "major", "blocking",
-                        }
-                        for offer_status in offers
-                    )
-                    or status != _commercial_aggregate_status(offers)
                 ):
                     raise BenchmarkBlocked("benchmark.results.invalid")
-                if status in {"major", "blocking"} and defects[origin][status] == 0:
+                offer_statuses = []
+                for expected_index, offer in enumerate(offers):
+                    if (
+                        not isinstance(offer, dict)
+                        or set(offer) != {
+                            "offer_index", "status", "finding_sha256",
+                        }
+                        or type(offer["offer_index"]) is not int
+                        or offer["offer_index"] != expected_index
+                        or not isinstance(offer["status"], str)
+                        or offer["status"] not in {
+                            "equivalent", "not_present", "major", "blocking",
+                        }
+                    ):
+                        raise BenchmarkBlocked("benchmark.results.invalid")
+                    offer_status = offer["status"]
+                    finding_sha256 = offer["finding_sha256"]
+                    if offer_status in {"equivalent", "not_present"}:
+                        if finding_sha256 is not None:
+                            raise BenchmarkBlocked("benchmark.results.invalid")
+                    elif finding_sha256 not in finding_registries[origin][
+                        offer_status
+                    ]:
+                        raise BenchmarkBlocked("benchmark.results.invalid")
+                    offer_statuses.append(offer_status)
+                if status != _commercial_aggregate_status(offer_statuses):
                     raise BenchmarkBlocked("benchmark.results.invalid")
     elif commercial_evaluation is not None:
         raise BenchmarkBlocked("benchmark.results.invalid")

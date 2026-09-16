@@ -801,15 +801,22 @@ anonymous target registry. Missing, stale, foreign, or swapped decision
 bindings fail closed even when both target registries are independently valid.
 `major` and `blocking` offer statuses must reference the matching variant's
 zero-based defect entry; `equivalent` and `not_present` cannot carry a defect
-reference. The dimension status is derived by fixed severity, so an aggregate
-cannot hide a major or blocking defect in another offer. Missing, duplicated or
-reordered offer indexes, source or target gaps and overlaps, swapped variants,
-stale source or target lengths or digests,
-inconsistent aggregates and `uncertain` all block the case. The registry and
-its digest cross the HTTPS and durable-review boundaries, and the signed case
-result retains both the top-level digest and the matching digest on every
-candidate and baseline dimension row. Report validation requires those values
-to remain identical. The `target_native` request receives neither the
+reference. Before unblinding, every non-passing reference is resolved to the
+exact validated finding hash. Signed candidate and baseline evidence preserves
+the content-free source-fidelity finding registries by severity, while each
+ordered offer record carries its index, status and matching hash. Passing and
+absent offers require `null`; missing, invented, foreign or wrong-severity
+hashes block report validation. No finding excerpt or reason survives.
+
+The dimension status is derived by fixed severity, so an aggregate cannot hide
+a major or blocking defect in another offer. Missing, duplicated or reordered
+offer indexes, source or target gaps and overlaps, swapped variants, stale
+source or target lengths or digests, inconsistent aggregates and `uncertain`
+all block the case. The registry and its digest cross the HTTPS and
+durable-review boundaries, and the signed case result retains both the
+top-level digest and the matching digest on every candidate and baseline
+dimension row. Report validation requires those values to remain identical.
+The `target_native` request receives neither the
 registry nor the commercial acknowledgement and therefore remains source-blind.
 
 The review store also exposes a strictly read-only, content-free health view

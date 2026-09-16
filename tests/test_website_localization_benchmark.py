@@ -1025,17 +1025,46 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 if case["key"] == "offer-commercial-long"
             ),
         )
+        baseline_finding_sha256 = evaluation["baseline_finding_hashes"][
+            "major"
+        ][0]
+        self.assertEqual(
+            evaluation["candidate_finding_hashes"],
+            {"blocking": [], "major": []},
+        )
         self.assertEqual(
             evaluation["dimensions"][-1],
             {
                 "dimension": list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)[-1],
                 "candidate_status": "equivalent",
-                "candidate_offers": ["equivalent", "equivalent"],
+                "candidate_offers": [
+                    {
+                        "offer_index": 0,
+                        "status": "equivalent",
+                        "finding_sha256": None,
+                    },
+                    {
+                        "offer_index": 1,
+                        "status": "equivalent",
+                        "finding_sha256": None,
+                    },
+                ],
                 "candidate_target_offer_registry_sha256": evaluation[
                     "candidate_target_offer_registry_sha256"
                 ],
                 "baseline_status": "major",
-                "baseline_offers": ["equivalent", "major"],
+                "baseline_offers": [
+                    {
+                        "offer_index": 0,
+                        "status": "equivalent",
+                        "finding_sha256": None,
+                    },
+                    {
+                        "offer_index": 1,
+                        "status": "major",
+                        "finding_sha256": baseline_finding_sha256,
+                    },
+                ],
                 "baseline_target_offer_registry_sha256": evaluation[
                     "baseline_target_offer_registry_sha256"
                 ],
@@ -1118,6 +1147,20 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(locale_report["status"], "BLOCK")
         self.assertFalse(report["superiority_claim_allowed"])
 
+        finding_bound = results[0]["commercial_evaluation"]
+        candidate_major_hashes = finding_bound["candidate_finding_hashes"][
+            "major"
+        ]
+        self.assertEqual(len(candidate_major_hashes), 1)
+        self.assertEqual(
+            finding_bound["dimensions"][-1]["candidate_offers"][0],
+            {
+                "offer_index": 0,
+                "status": "major",
+                "finding_sha256": candidate_major_hashes[0],
+            },
+        )
+
         unsigned = copy.deepcopy(results[-1])
         unsigned.pop("attestation")
         unsigned["commercial_evaluation"]["review_response_sha256"] = "0" * 64
@@ -1126,6 +1169,44 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         )
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
             self.summarize(benchmark_policy, [*results[:-1], rebound])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][-1][
+            "candidate_offers"
+        ][0]["finding_sha256"] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][-1][
+            "candidate_offers"
+        ][1]["finding_sha256"] = unsigned["commercial_evaluation"][
+            "candidate_finding_hashes"
+        ]["major"][0]
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][-1][
+            "candidate_offers"
+        ][0]["status"] = []
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
         self.assertEqual(caught.exception.code, "benchmark.results.invalid")
 
         unsigned = copy.deepcopy(results[-1])
