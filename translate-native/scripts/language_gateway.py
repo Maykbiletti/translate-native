@@ -18,7 +18,8 @@ sys.modules[SPEC.name] = GUARD
 SPEC.loader.exec_module(GUARD)
 
 
-def gate(request: dict) -> dict:
+def gate(request: dict, *, response_review_sha256: str | None = None,
+         response_context_binding: dict | None = None) -> dict:
     required = ("task_kind", "target_text", "language")
     missing = [
         key for key in required
@@ -37,7 +38,12 @@ def gate(request: dict) -> dict:
     elif task_kind == "response":
         if source.strip():
             return {"status": "BLOCK", "release_allowed": False, "reason": "response-cannot-carry-source"}
-        result = GUARD.release_response(request)
+        result = (
+            GUARD.release_response_verified(
+                request, response_review_sha256, response_context_binding,
+            )
+            if response_review_sha256 is not None else GUARD.release_response(request)
+        )
     else:
         return {"status": "BLOCK", "release_allowed": False, "reason": "invalid-task-kind"}
     result["gateway"] = f"blun-language-gateway/{GUARD.VERSION}"

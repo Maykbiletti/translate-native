@@ -26,6 +26,7 @@ ATTESTATION_SCHEMA = "translate-native.host-subagent-http-attestation.v1"
 ATTESTATION_PAYLOAD_SCHEMA = "translate-native.host-subagent-http-attestation-payload.v1"
 EVIDENCE_SCHEMA = "translate-native.host-subagent-http-evidence.v1"
 REVIEW_SCHEMA = "translate-native.host-subagent-review.v1"
+RESPONSE_REVIEW_SCHEMA = "translate-native.response-subagent-review.v1"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_REQUEST_BYTES = 4_500_000
@@ -46,6 +47,12 @@ CONTROL_FIELDS = {
     "inherit_context", "tools", "max_delegation_depth", "provider_id",
     "execution_key", "request_sha256", "task_sha256", "phase",
     "previous_receipt_sha256",
+}
+RESPONSE_CONTROL_FIELDS = (
+    CONTROL_FIELDS - {"creator_id", "creator_session_id"}
+) | {
+    "creator_id_sha256", "creator_session_id_sha256", "reviewer_role",
+    "assignment_id",
 }
 NATIVE_INPUT_FIELDS = {
     "candidate", "target", "content_type", "quality_profile", "response_schema",
@@ -207,10 +214,13 @@ def _headers(value: Any) -> dict[str, str]:
 def _validate_task(task: Any, control: Any) -> tuple[dict, dict]:
     task, control = _copy(task), _validate_control(control)
     if (not isinstance(task, dict) or set(task) != {"schema", "phase", "system_instruction", "input"}
-            or task.get("schema") != REVIEW_SCHEMA or task.get("phase") not in {"target_native", "source_fidelity"}
+            or task.get("schema") not in {REVIEW_SCHEMA, RESPONSE_REVIEW_SCHEMA}
+            or task.get("phase") not in {"target_native", "source_fidelity"}
+            or (task.get("schema") == RESPONSE_REVIEW_SCHEMA
+                and task.get("phase") != "target_native")
             or not isinstance(task.get("system_instruction"), str) or not task["system_instruction"]
             or not isinstance(task.get("input"), dict)
-            or control.get("schema") != REVIEW_SCHEMA or control.get("phase") != task["phase"]
+            or control.get("schema") != task["schema"] or control.get("phase") != task["phase"]
             or control["task_sha256"] != _sha(task)):
         raise HTTPReviewHostFailed("http.request_invalid", retryable=False)
     expected_inputs = set(NATIVE_INPUT_FIELDS)
@@ -223,9 +233,16 @@ def _validate_task(task: Any, control: Any) -> tuple[dict, dict]:
 
 def _validate_control(control: Any) -> dict:
     control = _copy(control)
-    if (not isinstance(control, dict) or set(control) != CONTROL_FIELDS
-            or control.get("schema") != REVIEW_SCHEMA
+    schema = control.get("schema") if isinstance(control, dict) else None
+    expected_fields = RESPONSE_CONTROL_FIELDS if schema == RESPONSE_REVIEW_SCHEMA else CONTROL_FIELDS
+    if (not isinstance(control, dict) or set(control) != expected_fields
+            or schema not in {REVIEW_SCHEMA, RESPONSE_REVIEW_SCHEMA}
             or control.get("phase") not in {"target_native", "source_fidelity"}
+            or (schema == RESPONSE_REVIEW_SCHEMA
+                and (control.get("phase") != "target_native"
+                     or control.get("reviewer_role") != "target-native-reviewer"
+                     or not isinstance(control.get("assignment_id"), str)
+                     or SHA256.fullmatch(control["assignment_id"]) is None))
             or control.get("inherit_context") is not False or control.get("tools") != []
             or type(control.get("max_delegation_depth")) is not int
             or control["max_delegation_depth"] != 0
@@ -234,8 +251,17 @@ def _validate_control(control: Any) -> dict:
             or type(control.get("max_output_tokens")) is not int
             or not 128 <= control["max_output_tokens"] <= 32768
             or any(not isinstance(control.get(key), str) or TOKEN.fullmatch(control[key]) is None
-                   for key in ("creator_id", "creator_session_id", "model_id", "model_version",
-                               "host_policy_version", "provider_id"))
+                   for key in ("model_id", "model_version", "host_policy_version", "provider_id"))
+            or (schema == RESPONSE_REVIEW_SCHEMA and any(
+                not isinstance(control.get(key), str)
+                or SHA256.fullmatch(control[key]) is None
+                for key in ("creator_id_sha256", "creator_session_id_sha256")
+            ))
+            or (schema == REVIEW_SCHEMA and any(
+                not isinstance(control.get(key), str)
+                or TOKEN.fullmatch(control[key]) is None
+                for key in ("creator_id", "creator_session_id")
+            ))
             or not isinstance(control.get("execution_key"), str)
             or SHA256.fullmatch(control["execution_key"]) is None
             or any(not isinstance(control.get(key), str) or SHA256.fullmatch(control[key]) is None

@@ -109,6 +109,10 @@ def parse_envelope(raw: str, max_bytes: int = DEFAULT_MAX_BYTES) -> dict[str, An
 
 def verify_envelope(envelope: dict[str, Any], policy: HostPolicy, key: bytes) -> str:
     validate_policy(policy)
+    if policy.task_kind == "response":
+        raise DeliveryBlocked(
+            "response delivery requires the isolated guard's current session context"
+        )
     target = envelope["target_text"]
     verification = QUALITY.verify_receipt(
         envelope["release_token"],
@@ -136,6 +140,10 @@ def verify_envelope_with_service(
     timeout: float = 10.0,
 ) -> str:
     validate_policy(policy)
+    if policy.task_kind == "response":
+        raise DeliveryBlocked(
+            "response delivery requires the isolated guard authorization and one-time grant path"
+        )
     target = envelope["target_text"]
     result = SERVICE_CLIENT.call_guard_service(
         endpoint,

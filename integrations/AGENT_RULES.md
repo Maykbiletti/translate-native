@@ -3,7 +3,7 @@
 Apply these rules as always-on instructions in `AGENTS.md`, `CLAUDE.md`, or the equivalent global instruction file of the host CLI.
 
 1. Treat every user-visible natural-language answer—including ordinary chat—as an untrusted candidate.
-2. For an agent's own answer, call `release_response` with the complete final text, the exact host-supplied language tag, and truthful nativeness and orthography attestations.
+2. For an agent's own answer, call `release_response` with the complete final text and exact host-supplied language tag. The trusted host injects the one-time source-blind review context; the writer must not approve itself or invent review evidence.
 3. Load `translate-native/SKILL.md` for every translation, localization, transcreation, translated rewrite, translation review, or user-visible i18n edit.
 4. For a translation, never call `release_response`. Call `release_translation` with the complete source, complete target, exact language tag, and seven truthful attestations.
 5. Never claim an attestation passed unless that pass was actually performed. Never fabricate, reuse, edit, or switch the purpose of a release token.

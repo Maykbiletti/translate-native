@@ -31,6 +31,11 @@ class EnforcedDeliveryTests(unittest.TestCase):
     def envelope(self, target: str, *, source: str = "", language: str = "de-DE", purpose: str = "response") -> str:
         token = MODULE.QUALITY.issue_receipt(
             source, target, language, self.key, purpose=purpose,
+            response_review_sha256="a" * 64 if purpose == "response" else "",
+            response_session_sha256="b" * 64 if purpose == "response" else "",
+            response_session_epoch_sha256="c" * 64 if purpose == "response" else "",
+            response_agent_sha256="d" * 64 if purpose == "response" else "",
+            response_guard_boot_sha256="e" * 64 if purpose == "response" else "",
         )
         return json.dumps({"target_text": target, "release_token": token}, ensure_ascii=False)
 
@@ -48,8 +53,9 @@ class EnforcedDeliveryTests(unittest.TestCase):
         result = self.run_delivery(
             self.envelope(target), "--task-kind", "response", "--language", "de-DE",
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, target)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("isolated guard", result.stderr)
 
     def test_raw_or_unsigned_output_is_blocked_without_leaking_candidate(self) -> None:
         target = "Das waere falsch."
@@ -108,7 +114,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertIn("target", result.stderr)
+        self.assertIn("isolated guard", result.stderr)
 
     def test_child_process_does_not_receive_signing_environment(self) -> None:
         helper = Path(self.temporary.name) / "helper.py"
@@ -134,25 +140,19 @@ class EnforcedDeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("secret-value", result.stdout + result.stderr)
 
-    def test_isolated_service_verifies_without_exposing_local_key(self) -> None:
+    def test_isolated_service_response_requires_one_time_delivery_grant(self) -> None:
         target = "Natürlich ist das möglich."
         envelope = json.loads(self.envelope(target))
         policy = MODULE.HostPolicy("response", "de-DE")
-        with mock.patch.object(
-            MODULE.SERVICE_CLIENT,
-            "call_guard_service",
-            return_value={"valid": True, "checks": {"target": True}},
-        ) as service_call:
-            result = MODULE.verify_envelope_with_service(
+        with mock.patch.object(MODULE.SERVICE_CLIENT, "call_guard_service") as service_call:
+            with self.assertRaisesRegex(MODULE.DeliveryBlocked, "one-time grant"):
+                MODULE.verify_envelope_with_service(
                 envelope,
                 policy,
                 "unix:/guard.sock",
                 service_token="service-token-with-at-least-32-characters",
             )
-        self.assertEqual(result, target)
-        request = service_call.call_args.args[1]
-        self.assertEqual(request["task_kind"], "response")
-        self.assertEqual(request["target_text"], target)
+        service_call.assert_not_called()
 
     def test_require_service_blocks_local_key_fallback(self) -> None:
         target = "Natürlich ist das möglich."
@@ -463,14 +463,17 @@ class EnforcedDeliveryTests(unittest.TestCase):
     def test_async_sender_receives_only_verified_text(self) -> None:
         calls: list[str] = []
         target = "Hej världen."
+        source = "Hello world."
 
         async def sender(text: str) -> str:
             calls.append(text)
             return "sent"
 
         result = asyncio.run(MODULE.guarded_send_async(
-            self.envelope(target, language="sv-SE"),
-            MODULE.HostPolicy("response", "sv-SE"),
+            self.envelope(
+                target, source=source, language="sv-SE", purpose="translation",
+            ),
+            MODULE.HostPolicy("translation", "sv-SE", source_text=source),
             self.key,
             sender,
         ))

@@ -1,13 +1,78 @@
-# Host-isolated website review delegation
+# Host-isolated review delegation
 
 `integrations/website_localization_subagents.py` supplies a provider-neutral
 `HostSubagentProvider` for the existing localization worker and production
-`provider_resolver`. It delegates **website translation reviews**, not ordinary
-chat responses, to two separate host-managed executions. The provider-neutral
-HTTPS host bridge described below is implemented; product-specific Claude,
-Codex and other host launchers plus ordinary-response delegation remain
-follow-up work.
-Existing MCP, Skill, Stop and SubagentStop behavior is unchanged.
+`provider_resolver`. It delegates website translations to two separate
+host-managed reviewers. `integrations/response_subagent_review.py` uses the
+same provider-neutral host boundary for exactly one source-blind review of an
+ordinary response. The authenticated HTTPS bridge described below supports
+both contracts. The Guard service exposes a provider-neutral factory slot for
+deployment-owned Claude, Codex or other host implementations; none is bundled
+or activated. Existing translation, Stop and SubagentStop enforcement stays
+authoritative.
+
+## Ordinary-response review
+
+For `release_response`, the trusted host-side `PreToolUse` boundary asks the
+isolated Guard for an opaque one-time review context. The ticket is HMAC-bound
+to the current Guard boot and protocol version, exact target hash, locale,
+content type, current session epoch and creator agent. The Guard reserves its
+short-lived nonce before external work, so a timeout or lost reply cannot cause
+ambiguous reuse. Text, locale, content-type, identity, epoch, version, boot,
+signature or replay mismatches block before the reviewer runs.
+
+`ResponseSubagentReviewer` submits a `target_native` task with schema
+`translate-native.response-subagent-review.v1`. Its model-visible input is
+limited to the candidate, target locale, content type, versioned quality
+profile, response schema and independently approved target-only native brief.
+There is no source field, prior conversation, creator identity, inherited
+context, tool access or delegation depth. The host-only control fixes creator
+identity, model/version, policy, budgets and exact request/task hashes.
+
+The reviewer returns `translate-native.response-native-review.v1` with exact
+phase and locale, `PASS` or `FAIL`, high or low confidence, structured findings
+(`code`, `severity`, `reason`, `uncertainty`) and unresolved uncertainties.
+Only a host-verified high-confidence `PASS` without major/blocking defects or
+uncertainty can continue. Reviewer agent and session must both differ from the
+creator. The Guard—not the reviewer—runs deterministic Unicode/script checks
+and signs the final response receipt with the complete review-evidence digest.
+That receipt also binds the creator session, session epoch, creator agent and
+Guard boot. The Guard rechecks the epoch after the external review while
+holding the signing lock. Local signing without a configured host is disabled;
+readiness reports the missing reviewer and release remains fail-closed.
+
+The MCP schema intentionally does not require `review_context_token` from the
+model. Claude's trusted `PreToolUse` hook obtains and injects it after the tool
+call is formed. The isolated service still requires an authentic, unused token
+for the exact request, so omission or direct calls without hook injection block.
+
+The normal Guard process accepts a deployment factory without learning any
+specific provider:
+
+```console
+python integrations/guard_service.py \
+  --response-review-factory my_product.review_host:build_response_reviewer
+```
+
+The trusted zero-argument callable must return a configured object implementing
+`review(...)`. Invalid references or objects prevent service startup; omitting
+the option starts in the explicit blocked state. The factory owns endpoint,
+credentials, pinned attestation verifier, model/profile versions and target-only
+brief configuration. It receives no Guard signing key and must not expose those
+values to the reviewer task.
+
+Stop and SubagentStop consume already signed one-time delivery grants. They do
+not invoke review agents, and review tasks have empty tools and zero delegation
+depth, so internal reports cannot recurse through user-output hooks or become
+publishable user output.
+
+A response receipt is evidence for the Guard, not a bearer publication token.
+The generic `verify` operation rejects response delivery even when the receipt
+is otherwise authentic. A trusted host must use `authorize_delivery` and then
+`consume_delivery` with the exact session ID, current session epoch, creator
+agent and channel. Both steps are checked against the receipt and the live
+Guard state; the grant is one-time and Guard-boot-bound. Translation receipts
+remain available to the existing portable verification path.
 
 ## Authenticated HTTPS host bridge
 
@@ -55,7 +120,8 @@ exact retry. `task` alone may enter the reviewer context. `control` is used by
 the host to enforce identity, fresh context, empty tools, zero delegation,
 deadline and token limits; it must never enter the model prompt or inherited
 history. The client independently allowlists native-task fields before any
-network access, so source fields and extra metadata fail closed.
+network access, so source fields and extra metadata fail closed. This also
+applies to the ordinary-response schema, which has no source-aware phase.
 
 The response contains exactly the response schema, host ID, execution key,
 request digest, existing `{response, receipt}` result, and `attestation`.
@@ -77,7 +143,6 @@ The verifier is deliberately provider-neutral. Production deployments should
 use an asymmetric or managed trust verifier with pinned host identity and key
 policy; the HMAC authority in tests is explicitly a fixture. After the
 attestation passes, `verify_execution` accepts only the exact receipt and
-control snapshot held by this client and verifies the attestation again. The
 worker commits the complete host ID, request/result digests, receipt and
 attestation into the existing review evidence hash, so a later approval is
 bound to the authenticated remote execution. A
@@ -215,8 +280,12 @@ a major or blocking defect. Text changes invalidate the bound result.
 
 `tests/test_website_localization_subagents.py` exercises the registered adapter
 through worker, durable queue restart, evidence coordinator and signed release.
-It uses synthetic Finnish and Maltese text and an in-memory host ledger. These
-fixtures test protocol behavior, **not** linguistic acceptance, concrete host
-sandboxing or superiority over DeepL. A deployment must implement and verify
-the host contract above before enabling this provider identity. No live host
+`tests/test_response_subagent_review.py`, `tests/test_guard_service.py`, the
+Claude hook suite and the HTTPS bridge suite cover the ordinary-response path,
+including source isolation, self-review, false identities/phases/locales,
+replay, edited candidates, missing hosts, low confidence and timeout. The tests
+use synthetic Finnish and Maltese text plus fixture host ledgers. These fixtures
+test protocol behavior, **not** linguistic acceptance, concrete host sandboxing
+or superiority over DeepL. A deployment must implement and verify the host
+contract above before enabling either provider identity. No live host
 configuration is installed by this change.

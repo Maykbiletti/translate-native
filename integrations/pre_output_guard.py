@@ -48,9 +48,14 @@ def main() -> int:
         if task_kind == "response" and source.strip():
             raise ValueError("response receipts cannot carry source_text")
         key_path = Path(os.environ.get("BLUN_LANGUAGE_GUARD_KEY_FILE", Path.home() / ".config" / "blun-language-guard" / "signing.key"))
+        key = load_verification_key(key_path)
+        if task_kind == "response":
+            raise ValueError(
+                "response receipts require isolated current-session verification"
+            )
         result = QUALITY.verify_receipt(
             request["release_token"], source, request["target_text"],
-            request["language"], load_verification_key(key_path),
+            request["language"], key,
             request.get("content_type", "prose"), request.get("short_text_reviewed") is True,
             purpose=task_kind,
         )

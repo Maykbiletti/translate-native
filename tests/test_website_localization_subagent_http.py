@@ -14,6 +14,10 @@ HTTP = BASE.load(
     "test_host_subagent_http",
     BASE.ROOT / "integrations" / "website_localization_subagent_http.py",
 )
+RESPONSE = BASE.load(
+    "test_response_subagent_http_review",
+    BASE.ROOT / "integrations" / "response_subagent_review.py",
+)
 
 
 class FixtureAuthority:
@@ -62,13 +66,27 @@ class FixtureHostTransport:
             response_body = self.ledger[key]
         else:
             phase, locale = task["phase"], task["input"]["target"]["locale"]
-            response = BASE.review(locale, phase)
+            if task["schema"] == RESPONSE.SCHEMA:
+                response = {
+                    "schema": RESPONSE.RESPONSE_SCHEMA,
+                    "phase": phase,
+                    "locale": locale,
+                    "status": "PASS",
+                    "confidence": "high",
+                    "findings": [],
+                    "uncertainties": [],
+                }
+                response_sha256 = RESPONSE._hash(response)
+            else:
+                response = BASE.review(locale, phase)
+                response_sha256 = BASE.SUB._hash(response)
             bound = {name: control[name] for name in {
                 "schema", "execution_key", "request_sha256", "task_sha256", "phase",
                 "previous_receipt_sha256", "model_id", "model_version",
                 "inherit_context", "tools", "max_delegation_depth",
-            }}
-            receipt = {**bound, "response_sha256": BASE.SUB._hash(response),
+            } | ({"reviewer_role", "assignment_id"}
+                 if task["schema"] == RESPONSE.SCHEMA else set())}
+            receipt = {**bound, "response_sha256": response_sha256,
                        "agent_id": "https-reviewer:" + phase,
                        "session_id": "https-session:" + key}
             result = {"response": response, "receipt": receipt}
@@ -111,6 +129,44 @@ def execute(review_host, locale="fi-FI"):
 
 
 class HTTPSReviewHostTests(unittest.TestCase):
+    def test_ordinary_finnish_and_maltese_responses_use_same_authenticated_bridge(self):
+        for locale, target in BASE.TARGETS.items():
+            with self.subTest(locale=locale):
+                review_host, transport = host()
+                reviewer = RESPONSE.ResponseSubagentReviewer(
+                    review_host, model_id="review-model", model_version="model-1",
+                    host_policy_version="isolated-host-1",
+                    quality_profile_version="eu-native-1",
+                    prompt_version="native-prompt-1", software_version="6.185.0",
+                    native_brief={"audience": "Website users",
+                                  "tone_profile": "Natural and clear",
+                                  "target_terms": ["BLUN"]},
+                )
+                reviewed = reviewer.review(
+                    target, locale, "prose",
+                    creator_id_sha256=hashlib.sha256(
+                        b"creator-main"
+                    ).hexdigest(),
+                    creator_session_id_sha256=hashlib.sha256(
+                        b"creator-session"
+                    ).hexdigest(),
+                )
+                self.assertRegex(reviewed["evidence_sha256"], r"^[0-9a-f]{64}$")
+                request = json.loads(transport.calls[0][2].decode("utf-8"))
+                self.assertEqual(request["task"]["schema"], RESPONSE.SCHEMA)
+                self.assertEqual(set(request["task"]["input"]), HTTP.NATIVE_INPUT_FIELDS)
+                self.assertNotIn("source", request["task"]["input"])
+                self.assertEqual(len(transport.calls), 1)
+                wrong_task = json.loads(json.dumps(request["task"]))
+                wrong_control = json.loads(json.dumps(request["control"]))
+                wrong_task["phase"] = "source_fidelity"
+                wrong_control["phase"] = "source_fidelity"
+                wrong_control["task_sha256"] = HTTP._sha(wrong_task)
+                with self.assertRaisesRegex(
+                    HTTP.HTTPReviewHostFailed, "http.request_invalid"
+                ):
+                    HTTP._validate_task(wrong_task, wrong_control)
+
     def test_finnish_and_maltese_run_through_authenticated_host_bridge(self):
         for locale in BASE.TARGETS:
             with self.subTest(locale=locale):

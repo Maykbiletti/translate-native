@@ -1138,7 +1138,7 @@ function hostPolicyInstruction() {
   return parts.join(" ");
 }
 
-function preTool(input) {
+async function preTool(input) {
   const toolName = String(input.tool_name || "");
   const purpose = toolName.endsWith("__release_translation") ? "translation"
     : toolName.endsWith("__release_response") ? "response" : "";
@@ -1156,8 +1156,8 @@ function preTool(input) {
     });
     return;
   }
-  if (!policy) return;
-  if (policy.taskKind && policy.taskKind !== purpose) {
+  if (!policy && purpose !== "response") return;
+  if (policy?.taskKind && policy.taskKind !== purpose) {
     const required = policy.taskKind === "translation" ? "release_translation" : "release_response";
     emit({
       hookSpecificOutput: {
@@ -1168,14 +1168,53 @@ function preTool(input) {
     });
     return;
   }
-  if (!policy.language) return;
   const toolInput = input.tool_input && typeof input.tool_input === "object" && !Array.isArray(input.tool_input)
     ? input.tool_input : {};
+  const language = policy?.language || (typeof toolInput.language === "string" ? toolInput.language : "");
+  const updatedInput = { ...toolInput, ...(policy?.language ? { language: policy.language } : {}) };
+  if (purpose === "response") {
+    try {
+      if (!EXACT_LANGUAGE.test(language) || ["auto", "all"].includes(language.toLowerCase())) {
+        throw new Error("response language must be an exact host-approved language tag");
+      }
+      if (typeof updatedInput.target_text !== "string" || !updatedInput.target_text) {
+        throw new Error("response candidate is missing");
+      }
+      const { session, agent } = hookIdentity(input);
+      const { epoch } = readSessionEpoch(input);
+      const prepared = await callGuard({
+        operation: "prepare_response_review",
+        task_kind: "response",
+        target_text: updatedInput.target_text,
+        language,
+        content_type: typeof updatedInput.content_type === "string" ? updatedInput.content_type : "prose",
+        session_id: session,
+        session_epoch: epoch,
+        agent_id: agent,
+        channel: "claude-pre-tool"
+      });
+      if (prepared.status !== "PASS" || typeof prepared.review_context_token !== "string") {
+        throw new Error("response review context was not issued");
+      }
+      updatedInput.review_context_token = prepared.review_context_token;
+    } catch (_) {
+      emit({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "BLUN Language Guard could not prepare the mandatory isolated response review. Repair the trusted host integration and retry."
+        }
+      });
+      return;
+    }
+  }
   emit({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
-      updatedInput: { ...toolInput, language: policy.language },
-      additionalContext: `The trusted host fixed this release to language ${JSON.stringify(policy.language)}.`,
+      updatedInput,
+      additionalContext: policy?.language
+        ? `The trusted host fixed this release to language ${JSON.stringify(policy.language)} and prepared one source-blind review context.`
+        : "The trusted host prepared one source-blind review context for this exact response candidate.",
     }
   });
 }

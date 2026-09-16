@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "6.20.0"
+VERSION = "6.21.0"
 MAX_SIGNING_KEY_BYTES = 64 * 1024
 DANGEROUS_BIDI = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e"}
 ISOLATE_OPENERS = {"\u2066", "\u2067", "\u2068"}
@@ -276,7 +276,11 @@ def load_or_create_key(path: Path) -> bytes:
 def issue_receipt(
     source: str, target: str, language: str, key: bytes, ttl: int = 86400,
     content_type: str = "prose", short_text_reviewed: bool = False,
-    purpose: str = "translation",
+    purpose: str = "translation", response_review_sha256: str = "",
+    response_session_sha256: str = "",
+    response_session_epoch_sha256: str = "",
+    response_agent_sha256: str = "",
+    response_guard_boot_sha256: str = "",
 ) -> str:
     now = int(time.time())
     payload = {
@@ -287,6 +291,15 @@ def issue_receipt(
         "purpose": purpose,
         "content_type": content_type,
         "short_text_reviewed": short_text_reviewed,
+        "response_review_sha256": response_review_sha256 if purpose == "response" else "",
+        "response_session_sha256": response_session_sha256 if purpose == "response" else "",
+        "response_session_epoch_sha256": (
+            response_session_epoch_sha256 if purpose == "response" else ""
+        ),
+        "response_agent_sha256": response_agent_sha256 if purpose == "response" else "",
+        "response_guard_boot_sha256": (
+            response_guard_boot_sha256 if purpose == "response" else ""
+        ),
         "iat": now,
         "exp": now + max(60, min(ttl, 604800)),
         "nonce": _b64encode(os.urandom(12)),
@@ -314,6 +327,22 @@ def verify_receipt(
             "purpose": payload.get("purpose") == purpose,
             "content_type": payload.get("content_type") == content_type,
             "short_text_reviewed": payload.get("short_text_reviewed") is short_text_reviewed,
+            "response_review": all(
+                isinstance(payload.get(name), str)
+                and re.fullmatch(r"[0-9a-f]{64}", payload[name]) is not None
+                for name in (
+                    "response_review_sha256", "response_session_sha256",
+                    "response_session_epoch_sha256", "response_agent_sha256",
+                    "response_guard_boot_sha256",
+                )
+            ) if purpose == "response" else all(
+                payload.get(name, "") == ""
+                for name in (
+                    "response_review_sha256", "response_session_sha256",
+                    "response_session_epoch_sha256", "response_agent_sha256",
+                    "response_guard_boot_sha256",
+                )
+            ),
             "version": payload.get("v") == VERSION,
             "not_expired": int(payload.get("exp", 0)) >= int(time.time()),
         }

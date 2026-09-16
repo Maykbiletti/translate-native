@@ -439,7 +439,9 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
       `The host classified this output as ${guardContext.route.taskKind} in ${guardContext.route.language}.`,
       `Pass language exactly as ${JSON.stringify(guardContext.route.language)} to ${tool}; do not substitute a base language or another locale.`,
       translationRule,
-      `Before final output, call ${tool} for the complete final candidate with truthful attestations.`,
+      guardContext.route.taskKind === "translation"
+        ? `Before final output, call ${tool} for the complete final candidate with truthful seven-pass attestations.`
+        : `Before final output, call ${tool} for the complete final candidate; the trusted host performs the separate source-blind review.`,
       "Final output must be exactly one JSON object with only target_text and release_token.",
       "Do not stream, print, or send the candidate through another channel.",
       "[/BLUN LANGUAGE GUARD]",

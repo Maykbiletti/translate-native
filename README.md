@@ -81,14 +81,14 @@ Version 6 extends the gateway beyond translations. Every user-visible natural-la
 ```text
 Agent candidate
       ↓ trusted host classifies the task and supplies the expected locale
-      ├── response    → release_response
+      ├── response    → isolated source-blind native review → release_response
       └── translation → translate-native skill/plugin → release_translation
       ↓
 PASS + purpose-bound receipt → deliver
 BLOCK                        → revise or stop
 ```
 
-`release_response` validates the agent's own answer for Unicode integrity, expected script, native spelling and measurable ASCII folding. It rejects `auto` and `all`: the trusted host must supply the exact language or locale rather than letting the agent choose a convenient label. A German answer such as `Haendler pruefen taeglich die Qualitaet im Buero` blocks; the correctly written `Händler prüfen täglich die Qualität im Büro` can pass.
+`release_response` no longer accepts the writing agent's own quality attestations. A trusted host must first issue a one-time context for the exact candidate and run a separate, source-blind native-language reviewer. The Guard then applies Unicode integrity, expected-script, native-spelling and measurable ASCII-folding checks before it alone signs the response. It rejects `auto` and `all`: the trusted host must supply the exact language or locale rather than letting the agent choose a convenient label. A German answer such as `Haendler pruefen taeglich die Qualitaet im Buero` blocks; a correctly written candidate such as `Händler prüfen täglich die Qualität im Büro` still needs the separate review.
 
 Translations always take the separate, stricter path. The MCP initialization response tells compatible agents to load the installed `translate-native` skill/plugin before drafting, exposes the same workflow as the MCP prompt `translate-native`, and requires `release_translation` for the complete source-target pair. Translation and response receipts are purpose-bound, so a response receipt cannot authorize a translation.
 
@@ -98,14 +98,61 @@ The portable gateway requires a host-owned `task_kind`:
 {
   "task_kind": "response",
   "target_text": "Natürlich können wir das zuverlässig prüfen.",
-  "language": "de-DE",
-  "attestations": {"nativeness": true, "orthography": true}
+  "language": "de-DE"
 }
 ```
+
+The host-side `PreToolUse` boundary adds the opaque `review_context_token`; the
+writing model must never invent, reuse or copy it. Direct local response
+signing is disabled.
 
 For a translation, use `"task_kind": "translation"`, include the complete `source_text`, and supply all seven translation attestations. The gateway blocks ambiguous task kinds, a translation without source, and any attempt to carry a source through the response route.
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
+
+### Version 6.185.0: mandatory subagent review for ordinary responses
+
+Ordinary target-language answers now use the same separation-of-duties
+principle as website localization. Before `release_response`, the trusted host
+issues an HMAC-bound one-time context for the exact target hash, locale,
+content type, session epoch and creator identity. The isolated Guard consumes
+that context before any external work and delegates exactly one source-blind
+native-language review through the provider-neutral host adapter. The reviewer
+receives only the target, target-locale profile and bounded review contract—no
+source, conversation, inherited creator context, tools, signing key or
+publication authority.
+
+Only a host-verified, high-confidence structured `PASS` without major or
+blocking findings or unresolved uncertainty can reach the deterministic Guard.
+The signed response receipt binds the complete verified-review evidence hash,
+creator session, current session epoch, creator agent and current Guard boot.
+It is not directly deliverable through the generic receipt-verification API:
+the host must exchange it for a context-bound delivery grant and consume that
+grant once with the same session, epoch, agent and channel. Claude's protected
+hook performs that exchange. Generic or portable adapters without the complete
+trusted context block response delivery while retaining portable translation
+verification.
+The epoch is checked again after the external review while signing is locked,
+so a prompt transition cannot race an old review into a new turn. Replay,
+changed text, phase/locale/identity mismatch, self-review, timeout, missing
+host support and local-signing attempts fail closed. `Stop` and
+`SubagentStop` remain delivery verifiers and never launch reviewers, preventing
+recursive hook loops.
+
+The normal Guard service can load one trusted, provider-neutral deployment
+adapter with `--response-review-factory package.module:callable`. The callable
+returns the configured reviewer and runs outside model input; omitting it keeps
+readiness and response release fail-closed. The MCP input leaves the opaque
+review ticket optional because `PreToolUse` creates and injects it after the
+model forms the tool call; the isolated service still requires and consumes it.
+
+The adapter contract is exercised end to end with synthetic Finnish and
+Maltese fixtures, including authenticated HTTPS transport. These tests prove
+isolation and binding behavior, not native-language quality or superiority over
+DeepL. A product-specific factory implementation, its live configuration and
+real qualified/native quality evidence remain deployment responsibilities;
+without such host configuration, readiness and response release deliberately
+stay blocked.
 
 ### Version 6.184.0: authenticated host-subagent HTTPS bridge
 
@@ -117,7 +164,7 @@ host attestation over the complete response and receipt. Native requests are
 source-field allowlisted before network access. Redirects, authentication
 failures, idempotency conflicts, forged attestations and changed bindings fail
 closed, while the existing queue owns bounded retries for transient failures.
-No product-specific host launcher or live configuration is installed.
+No product-specific host implementation or live configuration is installed.
 
 ### Version 6.183.0: host-isolated website review delegation
 
@@ -128,8 +175,8 @@ excludes source-bearing project metadata. Verified execution receipts are bound
 into the existing queue-result and signed-approval hashes, without changing the
 final Guard or treating same-model subagents as independent-model evidence.
 The new provider identity requires evidence; legacy provider behavior remains
-compatible. Concrete host bridges and ordinary-response delegation are not yet
-implemented by this adapter.
+compatible. Version 6.185.0 reuses this bridge for ordinary-response review;
+product-specific host implementations remain deployment work.
 
 ### Version 6.182.0: authenticated hosted-recovery sidecar
 
@@ -2821,7 +2868,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.184.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.185.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

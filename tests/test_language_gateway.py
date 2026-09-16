@@ -20,6 +20,13 @@ GATEWAY = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = GATEWAY
 SPEC.loader.exec_module(GATEWAY)
 
+RESPONSE_BINDING = {
+    "response_session_sha256": "b" * 64,
+    "response_session_epoch_sha256": "c" * 64,
+    "response_agent_sha256": "d" * 64,
+    "response_guard_boot_sha256": "e" * 64,
+}
+
 
 class LanguageGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -42,7 +49,8 @@ class LanguageGatewayTests(unittest.TestCase):
             "target_text": "Hej",
             "language": "sv-SE",
             "attestations": {"nativeness": True, "orthography": True},
-        })
+        }, response_review_sha256="a" * 64,
+            response_context_binding=RESPONSE_BINDING)
         self.assertFalse(result["release_allowed"])
         self.assertEqual(result["reason"], "response-cannot-carry-source")
 
@@ -50,7 +58,8 @@ class LanguageGatewayTests(unittest.TestCase):
         result = GATEWAY.gate({
             "task_kind": "translation", "source_text": "Hello",
             "target_text": "Hej", "language": "sv-SE",
-        })
+        }, response_review_sha256="a" * 64,
+            response_context_binding=RESPONSE_BINDING)
         self.assertFalse(result["release_allowed"])
 
     def test_translation_requires_exact_host_language(self) -> None:
@@ -73,7 +82,8 @@ class LanguageGatewayTests(unittest.TestCase):
             "target_text": "Natürlich können wir das zuverlässig prüfen.",
             "language": "de-DE",
             "attestations": {"nativeness": True, "orthography": True},
-        })
+        }, response_review_sha256="a" * 64,
+            response_context_binding=RESPONSE_BINDING)
         self.assertTrue(result["release_allowed"], result)
         self.assertEqual(result["task_kind"], "response")
 
@@ -83,7 +93,8 @@ class LanguageGatewayTests(unittest.TestCase):
             "target_text": "Haendler pruefen taeglich die Qualitaet im Buero.",
             "language": "de-DE",
             "attestations": {"nativeness": True, "orthography": True},
-        })
+        }, response_review_sha256="a" * 64,
+            response_context_binding=RESPONSE_BINDING)
         self.assertFalse(result["release_allowed"])
         self.assertIn("ascii-folding-pressure", {item["code"] for item in result["findings"]})
 
@@ -94,7 +105,8 @@ class LanguageGatewayTests(unittest.TestCase):
             "target_text": target,
             "language": "de-DE",
             "attestations": {"nativeness": True, "orthography": True},
-        })
+        }, response_review_sha256="a" * 64,
+            response_context_binding=RESPONSE_BINDING)
         self.assertTrue(released["release_allowed"], released)
         base_request = {
             "task_kind": "response",
@@ -109,7 +121,7 @@ class LanguageGatewayTests(unittest.TestCase):
             input="\ufeff" + json.dumps(base_request, ensure_ascii=False),
             text=True, capture_output=True, check=False, env=environment,
         )
-        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertEqual(accepted.returncode, 1, accepted.stdout + accepted.stderr)
         edited = dict(base_request, target_text=target + " Wirklich.")
         rejected = subprocess.run(
             [sys.executable, str(PRE_OUTPUT)],

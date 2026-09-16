@@ -1202,6 +1202,16 @@ async function main() {
           sessionEpochs.set(request.session_id, tombstone);
         }
         response = { status: valid ? "PASS" : "BLOCK", retired: valid };
+      } else if (request.operation === "prepare_response_review") {
+        const valid = request.service_token === token
+          && sessionEpochs.get(request.session_id) === request.session_epoch
+          && request.task_kind === "response"
+          && typeof request.target_text === "string" && request.target_text.length > 0
+          && typeof request.language === "string" && request.language.length > 0;
+        response = {
+          status: valid ? "PASS" : "BLOCK",
+          ...(valid ? { review_context_token: `fixture-review-${crypto.randomUUID()}` } : {})
+        };
       } else if (request.operation === "authorize_delivery") {
         if (request.release_token === "restart-valid-token") {
           grants.clear();
@@ -2559,6 +2569,16 @@ async function main() {
   assert.match(policyStartupContext, /requires release_response/);
   assert.match(policyStartupContext, /language exactly as "de-DE"/);
 
+  const noPolicyRelease = await runHook("pre-tool", {
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__release_response",
+    tool_input: { target_text: clean, language: "de-DE" }
+  }, environment);
+  const noPolicyOutput = JSON.parse(noPolicyRelease.stdout).hookSpecificOutput;
+  assert.strictEqual(noPolicyOutput.hookEventName, "PreToolUse");
+  assert.match(noPolicyOutput.updatedInput.review_context_token, /^fixture-review-/);
+
   const rewrittenRelease = await runHook("pre-tool", {
     ...policyCommon,
     hook_event_name: "PreToolUse",
@@ -2569,6 +2589,8 @@ async function main() {
   assert.strictEqual(rewrittenOutput.hookEventName, "PreToolUse");
   assert.strictEqual(rewrittenOutput.updatedInput.language, "de-DE");
   assert.strictEqual(rewrittenOutput.updatedInput.target_text, clean);
+  assert.match(rewrittenOutput.updatedInput.review_context_token, /^fixture-review-/);
+  assert.strictEqual(rewrittenOutput.updatedInput.attestations, undefined);
   assert.match(rewrittenOutput.additionalContext, /"de-DE"/);
 
   const directTelegramReply = await runHook("pre-delivery", {

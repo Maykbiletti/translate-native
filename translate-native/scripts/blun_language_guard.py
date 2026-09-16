@@ -16,13 +16,14 @@ from typing import Any
 
 
 DIACRITICS_PATH = Path(__file__).with_name("check_diacritics.py")
-VERSION = "6.20.0"
+VERSION = "6.21.0"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", PROTOCOL_VERSION}
 EXACT_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$")
 MCP_INSTRUCTIONS = (
     "Treat every user-visible natural-language answer as an untrusted candidate. "
-    "Before delivery, call release_response with the complete answer and exact language tag. "
+    "Before delivery, call release_response with the complete answer and exact language tag; "
+    "the trusted host must inject a one-time context and run a separate source-blind native review. "
     "For every translation, localization, transcreation, or target-language rewrite, first apply "
     "the installed translate-native skill/plugin and then call release_translation with the complete "
     "source-target pair and truthful seven-pass attestations. Never use release_response to bypass "
@@ -151,6 +152,7 @@ def _isolated_release(task_kind: str, arguments: dict[str, Any]) -> dict[str, An
             SERVICE_ENDPOINT,
             request,
             auth_token=_service_token(),
+            timeout=75.0 if task_kind == "response" else 10.0,
         )
     except (OSError, SERVICE_CLIENT.GuardServiceError) as error:
         return {
@@ -159,6 +161,21 @@ def _isolated_release(task_kind: str, arguments: dict[str, Any]) -> dict[str, An
             "reason": "isolated-guard-unavailable",
             "error": str(error),
         }
+
+
+def _response_requires_isolated_review() -> dict[str, Any]:
+    return {
+        "status": "BLOCK",
+        "release_allowed": False,
+        "reason": "isolated-response-review-required",
+        "findings": [{
+            "code": "response-review-unavailable",
+            "message": "A trusted host-isolated target-language review is required.",
+            "blocking": True,
+            "line": None,
+            "language": None,
+        }],
+    }
 
 
 def _languages_for(text: str, language: str) -> tuple[str, ...]:
@@ -378,11 +395,33 @@ def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
     isolated = _isolated_release("response", arguments)
     if isolated is not None:
         return isolated
+    return _response_requires_isolated_review()
+
+
+def release_response_verified(
+    arguments: dict[str, Any], response_review_sha256: str,
+    response_context_binding: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Service-internal response signer after verified host review.
+
+    This function is intentionally absent from the MCP tool list.  The digest
+    originates in the isolated service, not in model-controlled tool input.
+    """
+    if (not isinstance(response_review_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", response_review_sha256) is None):
+        return _response_requires_isolated_review()
+    binding_fields = {
+        "response_session_sha256", "response_session_epoch_sha256",
+        "response_agent_sha256", "response_guard_boot_sha256",
+    }
+    if (not isinstance(response_context_binding, dict)
+            or set(response_context_binding) != binding_fields
+            or any(not isinstance(value, str)
+                   or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                   for value in response_context_binding.values())):
+        return _response_requires_isolated_review()
     target = arguments.get("target_text", "")
     language = arguments.get("language", "")
-    attestations = arguments.get("attestations") or {}
-    if not isinstance(attestations, dict):
-        attestations = {}
     target_is_text = isinstance(target, str)
     language_is_exact = (
         isinstance(language, str)
@@ -408,17 +447,10 @@ def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
                 "A host-supplied exact language or locale tag is required for response release.",
             ))
         )
-    missing = [name for name in ("nativeness", "orthography") if attestations.get(name) is not True]
-    if missing:
-        report["findings"].append(
-            asdict(Finding(
-                "missing-response-attestations",
-                "The following response checks were not explicitly passed: " + ", ".join(missing),
-            ))
-        )
     report["status"] = "BLOCK" if report["findings"] else "PASS"
     report["release_allowed"] = not report["findings"]
-    report["required_attestations"] = ["nativeness", "orthography"]
+    report["required_attestations"] = []
+    report["response_review_sha256"] = response_review_sha256
     report["limitations"] = (
         "Deterministic checks cannot prove that every word is native or correctly accented. "
         "Response release also requires nativeness and orthography review plus a trusted host interceptor."
@@ -430,6 +462,8 @@ def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
             content_type=arguments.get("content_type", "prose"),
             short_text_reviewed=arguments.get("short_text_reviewed") is True,
             purpose="response",
+            response_review_sha256=response_review_sha256,
+            **response_context_binding,
         )
     return report
 
@@ -455,7 +489,7 @@ TOOLS = [
     },
     {
         "name": "release_response",
-        "description": "Mandatory final gate for an agent's own user-visible natural-language answer. Returns a purpose-bound token only after deterministic Unicode, script, native-diacritics, and explicit nativeness/orthography checks pass. Never use this tool for a translation.",
+        "description": "Mandatory final gate for an agent's own user-visible natural-language answer. The isolated service delegates a source-blind native-language review to a trusted host subagent before signing. Never use this tool for a translation.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -464,17 +498,9 @@ TOOLS = [
                 "glossary": {"type": "object"},
                 "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
                 "short_text_reviewed": {"type": "boolean", "description": "Compatibility metadata only; never suppresses measurable findings."},
-                "attestations": {
-                    "type": "object",
-                    "properties": {
-                        "nativeness": {"type": "boolean"},
-                        "orthography": {"type": "boolean"},
-                    },
-                    "required": ["nativeness", "orthography"],
-                    "additionalProperties": False,
-                },
+                "review_context_token": {"type": "string", "description": "Opaque host-issued one-time review context. The PreToolUse hook supplies it; never invent or reuse it."},
             },
-            "required": ["target_text", "language", "attestations"],
+            "required": ["target_text", "language"],
             "additionalProperties": False,
         },
     },

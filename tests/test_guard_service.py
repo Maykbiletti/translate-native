@@ -38,7 +38,21 @@ class GuardServiceTests(unittest.TestCase):
         root = Path(self.temporary.name)
         self.key_path = root / "signing.key"
         self.audit_path = root / "audit.jsonl"
-        self.service = SERVICE.GuardService(self.key_path, self.audit_path, "service-secret-with-at-least-32-characters")
+        class Reviewer:
+            def __init__(self):
+                self.calls = []
+
+            def review(inner, target, locale, content_type, **identity):
+                inner.calls.append((target, locale, content_type, identity))
+                return {"evidence_sha256": SERVICE.QUALITY.canonical_hash(
+                    "review\0" + target + "\0" + locale + "\0" + content_type
+                )}
+
+        self.reviewer = Reviewer()
+        self.service = SERVICE.GuardService(
+            self.key_path, self.audit_path,
+            "service-secret-with-at-least-32-characters", self.reviewer,
+        )
         self.session_epoch = "a" * 64
         registered = self.service.handle({
             "service_token": "service-secret-with-at-least-32-characters",
@@ -169,7 +183,21 @@ class GuardServiceTests(unittest.TestCase):
         self.assertEqual((trusted / "service.token").read_text(encoding="ascii").strip(), "x" * 64)
         self.assertEqual((displaced / "service.token").read_text(encoding="ascii").strip(), "t" * 64)
 
-    def release_request(self, target: str = "Natürlich ist das möglich.") -> dict:
+    def release_request(self, target: str = "Natürlich ist das möglich.",
+                        *, epoch: str | None = None) -> dict:
+        epoch = self.session_epoch if epoch is None else epoch
+        prepared = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "prepare_response_review",
+            "task_kind": "response",
+            "target_text": target,
+            "language": "de-DE",
+            "content_type": "prose",
+            "session_id": "session-one",
+            "session_epoch": epoch,
+            "agent_id": "test-agent",
+            "channel": "test",
+        })
         return {
             "service_token": "service-secret-with-at-least-32-characters",
             "operation": "release",
@@ -178,12 +206,13 @@ class GuardServiceTests(unittest.TestCase):
             "language": "de-DE",
             "agent_id": "test-agent",
             "channel": "test",
-            "attestations": {"nativeness": True, "orthography": True},
+            "review_context_token": prepared["review_context_token"],
         }
 
-    def test_release_and_verify_use_service_owned_key(self) -> None:
+    def test_response_release_requires_context_bound_delivery_authorization(self) -> None:
         released = self.service.handle(self.release_request())
         self.assertTrue(released["release_allowed"], released)
+        self.assertRegex(released["response_review_sha256"], r"^[0-9a-f]{64}$")
         verified = self.service.handle({
             "service_token": "service-secret-with-at-least-32-characters",
             "operation": "verify",
@@ -193,7 +222,65 @@ class GuardServiceTests(unittest.TestCase):
             "language": "de-DE",
             "release_token": released["release_token"],
         })
-        self.assertTrue(verified["valid"], verified)
+        self.assertFalse(verified["valid"], verified)
+        self.assertFalse(
+            verified["checks"]["response_delivery_authorization_required"]
+        )
+        authorized = self.service.handle(self.authorize_request(released["release_token"]))
+        self.assertTrue(authorized["valid"], authorized)
+
+    def test_response_review_context_is_one_time_and_exactly_bound(self) -> None:
+        request = self.release_request()
+        released = self.service.handle(request)
+        self.assertTrue(released["release_allowed"], released)
+        calls_after_release = len(self.reviewer.calls)
+        with self.assertRaisesRegex(SERVICE.GuardProtocolError, "replayed"):
+            self.service.handle(request)
+        self.assertEqual(len(self.reviewer.calls), calls_after_release)
+
+        for field, value in (
+            ("target_text", "Nachträglich verändert."),
+            ("language", "fi-FI"),
+            ("content_type", "title"),
+        ):
+            with self.subTest(field=field):
+                changed = self.release_request()
+                changed[field] = value
+                calls_before = len(self.reviewer.calls)
+                with self.assertRaisesRegex(SERVICE.GuardProtocolError, "invalid"):
+                    self.service.handle(changed)
+                self.assertEqual(len(self.reviewer.calls), calls_before)
+
+    def test_missing_response_review_host_is_explicitly_fail_closed(self) -> None:
+        unavailable = SERVICE.GuardService(
+            self.key_path, self.audit_path,
+            "service-secret-with-at-least-32-characters",
+        )
+        registered = unavailable.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "register_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": self.session_epoch,
+        })
+        self.assertTrue(registered["registered"], registered)
+        health = unavailable.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "health",
+        })
+        self.assertEqual(health["status"], "BLOCK", health)
+        self.assertFalse(health["self_test"]["response_review_configured"])
+        with self.assertRaisesRegex(SERVICE.GuardProtocolError, "host is unavailable"):
+            unavailable.handle({
+                "service_token": "service-secret-with-at-least-32-characters",
+                "operation": "prepare_response_review",
+                "task_kind": "response",
+                "target_text": "Tista’ timmaniġġja l-abbonament tiegħek.",
+                "language": "mt-MT",
+                "content_type": "prose",
+                "session_id": "session-one",
+                "session_epoch": self.session_epoch,
+                "agent_id": "test-agent",
+            })
 
     def test_tamper_and_wrong_service_token_block(self) -> None:
         released = self.service.handle(self.release_request())
@@ -222,6 +309,7 @@ class GuardServiceTests(unittest.TestCase):
             "signature": True,
             "tamper_blocked": True,
             "audit_paths": True,
+            "response_review_configured": True,
         })
         self.assertFalse(self.audit_path.exists())
 
@@ -329,8 +417,16 @@ class GuardServiceTests(unittest.TestCase):
         self.assertFalse(forged_result["valid"], forged_result)
 
         restarted = SERVICE.GuardService(
-            self.key_path, self.audit_path, "service-secret-with-at-least-32-characters"
+            self.key_path, self.audit_path, "service-secret-with-at-least-32-characters",
+            self.reviewer,
         )
+        registered = restarted.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "register_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": self.session_epoch,
+        })
+        self.assertTrue(registered["registered"], registered)
         restart_grant = fresh_grant()
         restarted_result = restarted.handle(self.consume_request(restart_grant))
         self.assertFalse(restarted_result["valid"], restarted_result)
@@ -354,6 +450,20 @@ class GuardServiceTests(unittest.TestCase):
         })
         self.assertTrue(rotated["registered"], rotated)
 
+        stale_verify = self.service.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "verify",
+            "task_kind": "response",
+            "source_text": "",
+            "target_text": "Natürlich ist das möglich.",
+            "language": "de-DE",
+            "release_token": released["release_token"],
+        })
+        self.assertFalse(stale_verify["valid"], stale_verify)
+        self.assertFalse(
+            stale_verify["checks"]["response_delivery_authorization_required"]
+        )
+
         restored = self.service.handle(self.consume_request(old_grant))
         self.assertFalse(restored["valid"], restored)
         self.assertTrue(restored["checks"]["session_epoch"])
@@ -361,7 +471,9 @@ class GuardServiceTests(unittest.TestCase):
 
         stale_authorization = self.service.handle(self.authorize_request(released["release_token"]))
         self.assertFalse(stale_authorization["valid"], stale_authorization)
-        self.assertFalse(stale_authorization["checks"]["session_epoch_current"])
+        self.assertFalse(
+            stale_authorization["checks"]["response_session_epoch_current"]
+        )
 
         replayed_registration = self.service.handle({
             "service_token": "service-secret-with-at-least-32-characters",
@@ -372,6 +484,13 @@ class GuardServiceTests(unittest.TestCase):
         self.assertFalse(replayed_registration["registered"], replayed_registration)
 
         new_authorization_request = self.authorize_request(released["release_token"])
+        new_authorization_request["session_epoch"] = new_epoch
+        new_authorized = self.service.handle(new_authorization_request)
+        self.assertFalse(new_authorized["valid"], new_authorized)
+        self.assertFalse(new_authorized["checks"]["response_session_epoch_current"])
+
+        fresh_release = self.service.handle(self.release_request(epoch=new_epoch))
+        new_authorization_request = self.authorize_request(fresh_release["release_token"])
         new_authorization_request["session_epoch"] = new_epoch
         new_authorized = self.service.handle(new_authorization_request)
         self.assertTrue(new_authorized["valid"], new_authorized)
@@ -407,7 +526,9 @@ class GuardServiceTests(unittest.TestCase):
             self.authorize_request(released["release_token"])
         )
         self.assertFalse(stale_authorization["valid"], stale_authorization)
-        self.assertFalse(stale_authorization["checks"]["session_epoch_current"])
+        self.assertFalse(
+            stale_authorization["checks"]["response_session_epoch_current"]
+        )
 
         new_epoch = "b" * 64
         registered = self.service.handle({
@@ -426,10 +547,45 @@ class GuardServiceTests(unittest.TestCase):
         })
         self.assertEqual(delayed_retirement, {"status": "BLOCK", "retired": False})
 
-        fresh_request = self.authorize_request(released["release_token"])
+        fresh_release = self.service.handle(self.release_request(epoch=new_epoch))
+        fresh_request = self.authorize_request(fresh_release["release_token"])
         fresh_request["session_epoch"] = new_epoch
         fresh = self.service.handle(fresh_request)
         self.assertTrue(fresh["valid"], fresh)
+
+    def test_epoch_change_during_external_review_blocks_before_signing(self) -> None:
+        request = self.release_request()
+        real_review = self.reviewer.review
+
+        def rotate_during_review(*args, **kwargs):
+            rotated = self.service.handle({
+                "service_token": "service-secret-with-at-least-32-characters",
+                "operation": "register_session_epoch",
+                "session_id": "session-one",
+                "session_epoch": "b" * 64,
+            })
+            self.assertTrue(rotated["registered"], rotated)
+            return real_review(*args, **kwargs)
+
+        self.reviewer.review = rotate_during_review
+        released = self.service.handle(request)
+        self.assertFalse(released["release_allowed"], released)
+        self.assertEqual(released["reason"], "response_review.context_stale")
+        self.assertNotIn("release_token", released)
+
+    def test_response_reviewer_factory_is_explicit_and_provider_neutral(self) -> None:
+        module_name = "test_configured_response_reviewer"
+        fake_module = SimpleNamespace(build=lambda: self.reviewer)
+        with mock.patch.dict(sys.modules, {module_name: fake_module}):
+            loaded = SERVICE._response_reviewer_from_factory(
+                module_name + ":build"
+            )
+        self.assertIs(loaded, self.reviewer)
+        self.assertIsNone(SERVICE._response_reviewer_from_factory(None))
+        for reference in ("missing", "bad-module:factory", "os:not_present"):
+            with self.subTest(reference=reference):
+                with self.assertRaises((ValueError, ModuleNotFoundError)):
+                    SERVICE._response_reviewer_from_factory(reference)
 
     def test_fresh_release_recovers_session_after_service_restart(self) -> None:
         old_release = self.service.handle(self.release_request())
@@ -437,7 +593,8 @@ class GuardServiceTests(unittest.TestCase):
         self.assertTrue(old_authorized["valid"], old_authorized)
 
         restarted = SERVICE.GuardService(
-            self.key_path, self.audit_path, "service-secret-with-at-least-32-characters"
+            self.key_path, self.audit_path, "service-secret-with-at-least-32-characters",
+            self.reviewer,
         )
         old_result = restarted.handle(self.consume_request(old_authorized["delivery_grant"]))
         self.assertFalse(old_result["valid"], old_result)
@@ -449,7 +606,19 @@ class GuardServiceTests(unittest.TestCase):
         session_hash = SERVICE.GuardService._identity_hash("session-one")
         self.assertNotIn(session_hash, restarted.session_epochs)
 
-        fresh_release = restarted.handle(self.release_request())
+        registered = restarted.handle({
+            "service_token": "service-secret-with-at-least-32-characters",
+            "operation": "register_session_epoch",
+            "session_id": "session-one",
+            "session_epoch": self.session_epoch,
+        })
+        self.assertTrue(registered["registered"], registered)
+
+        original_service, self.service = self.service, restarted
+        try:
+            fresh_release = restarted.handle(self.release_request())
+        finally:
+            self.service = original_service
         recovered = restarted.handle(self.authorize_request(fresh_release["release_token"]))
         self.assertTrue(recovered["valid"], recovered)
         self.assertEqual(

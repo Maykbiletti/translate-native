@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import importlib
 import importlib.util
 import json
 import os
@@ -25,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GATEWAY_PATH = ROOT / "integrations" / "language_gateway.py"
 AUDIT_PATH = ROOT / "integrations" / "audit_log.py"
 CLIENT_PATH = ROOT / "translate-native" / "scripts" / "guard_service_client.py"
+RESPONSE_REVIEW_PATH = ROOT / "integrations" / "response_subagent_review.py"
 
 
 def _load(name: str, path: Path):
@@ -40,6 +42,7 @@ def _load(name: str, path: Path):
 GATEWAY = _load("blun_isolated_gateway", GATEWAY_PATH)
 AUDIT = _load("blun_isolated_audit", AUDIT_PATH)
 CLIENT = _load("blun_isolated_client", CLIENT_PATH)
+RESPONSE_REVIEW = _load("blun_response_subagent_review", RESPONSE_REVIEW_PATH)
 QUALITY = GATEWAY.GUARD.QUALITY
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 
@@ -87,13 +90,16 @@ def _decision_audit(request: dict[str, Any], result: dict[str, Any], event: str)
 
 
 class GuardService:
-    def __init__(self, key_path: Path, audit_path: Path, service_token: str = "") -> None:
+    def __init__(self, key_path: Path, audit_path: Path, service_token: str = "",
+                 response_reviewer: Any | None = None) -> None:
         self.key_path = key_path
         self.audit_path = audit_path
         self.service_token = service_token
+        self.response_reviewer = response_reviewer
         self.key = QUALITY.load_or_create_key(key_path)
         self.boot_id = QUALITY._b64encode(os.urandom(12))
         self.consumed_delivery_nonces: dict[str, int] = {}
+        self.consumed_review_context_nonces: dict[str, int] = {}
         self.session_epochs: dict[str, str] = {}
         self.session_epoch_history: dict[str, set[str]] = {}
         self.delivery_lock = threading.Lock()
@@ -107,13 +113,19 @@ class GuardService:
         target = "Hälsokontrollen är aktiv."
         audit_paths = AUDIT.audit_paths_healthy(self.audit_path)
         try:
+            binding = {
+                "response_session_sha256": "1" * 64,
+                "response_session_epoch_sha256": "2" * 64,
+                "response_agent_sha256": "3" * 64,
+                "response_guard_boot_sha256": self._identity_hash(self.boot_id),
+            }
             released = GATEWAY.gate({
                 "task_kind": "response",
                 "source_text": "",
                 "target_text": target,
                 "language": "sv-SE",
-                "attestations": {"nativeness": True, "orthography": True},
-            })
+            }, response_review_sha256="0" * 64,
+                response_context_binding=binding)
             release_ok = released.get("release_allowed") is True
             token = released.get("release_token", "") if release_ok else ""
             verified = QUALITY.verify_receipt(
@@ -127,6 +139,7 @@ class GuardService:
                 "signature": verified.get("valid") is True,
                 "tamper_blocked": tampered.get("valid") is False,
                 "audit_paths": audit_paths,
+                "response_review_configured": self.response_reviewer is not None,
             }
         except Exception:
             return {
@@ -134,7 +147,135 @@ class GuardService:
                 "signature": False,
                 "tamper_blocked": False,
                 "audit_paths": audit_paths,
+                "response_review_configured": self.response_reviewer is not None,
             }
+
+    def _issue_response_review_context(self, request: dict[str, Any]) -> str:
+        if self.response_reviewer is None:
+            raise GuardProtocolError("response review host is unavailable")
+        if _exact_string(request, "task_kind") != "response":
+            raise GuardProtocolError("response review context requires response task_kind")
+        target = _exact_string(request, "target_text")
+        language = _exact_string(request, "language")
+        session_id = _exact_string(request, "session_id")
+        session_epoch = _exact_string(request, "session_epoch")
+        agent_id = _exact_string(request, "agent_id")
+        if re.fullmatch(r"[0-9a-f]{64}", session_epoch) is None:
+            raise GuardProtocolError("session_epoch must be 64 lowercase hexadecimal characters")
+        session_hash = self._identity_hash(session_id)
+        epoch_hash = self._identity_hash(session_epoch)
+        with self.delivery_lock:
+            if self.session_epochs.get(session_hash) != epoch_hash:
+                raise GuardProtocolError("session epoch is not current")
+        now = int(time.time())
+        payload = {
+            "v": QUALITY.VERSION,
+            "boot": self.boot_id,
+            "target_sha256": QUALITY.canonical_hash(target),
+            "language": language,
+            "content_type": _content_type(request),
+            "session_sha256": session_hash,
+            "session_epoch_sha256": epoch_hash,
+            "agent_sha256": self._identity_hash(agent_id),
+            "iat": now,
+            "exp": now + 180,
+            "nonce": QUALITY._b64encode(os.urandom(16)),
+        }
+        encoded = QUALITY._b64encode(json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8"))
+        signature = QUALITY._b64encode(hmac.new(
+            self.key, encoded.encode("ascii"), hashlib.sha256,
+        ).digest())
+        return f"blrr1.{encoded}.{signature}"
+
+    def _consume_response_review_context(self, request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            prefix, encoded, signature = _exact_string(
+                request, "review_context_token",
+            ).split(".")
+            expected = QUALITY._b64encode(hmac.new(
+                self.key, encoded.encode("ascii"), hashlib.sha256,
+            ).digest())
+            if prefix != "blrr1" or not hmac.compare_digest(signature, expected):
+                raise ValueError
+            payload = json.loads(QUALITY._b64decode(encoded))
+            if not isinstance(payload, dict) or set(payload) != {
+                "v", "boot", "target_sha256", "language", "content_type",
+                "session_sha256", "session_epoch_sha256", "agent_sha256",
+                "iat", "exp", "nonce",
+            }:
+                raise ValueError
+            nonce = payload["nonce"]
+            now = int(time.time())
+            checks = {
+                "version": payload["v"] == QUALITY.VERSION,
+                "boot": payload["boot"] == self.boot_id,
+                "target": payload["target_sha256"] == QUALITY.canonical_hash(
+                    _exact_string(request, "target_text")),
+                "language": payload["language"] == _exact_string(request, "language"),
+                "content_type": payload["content_type"] == _content_type(request),
+                "time": type(payload["exp"]) is int and type(payload["iat"]) is int
+                        and payload["iat"] <= now <= payload["exp"],
+                "nonce": isinstance(nonce, str) and bool(nonce),
+            }
+            if not all(checks.values()):
+                raise ValueError
+            with self.delivery_lock:
+                if self.session_epochs.get(payload["session_sha256"]) != payload["session_epoch_sha256"]:
+                    raise ValueError
+                expired = [item for item, expiry in self.consumed_review_context_nonces.items()
+                           if expiry < now]
+                for item in expired:
+                    self.consumed_review_context_nonces.pop(item, None)
+                if nonce in self.consumed_review_context_nonces:
+                    raise ValueError
+                # Reserve before external work. A retry needs a fresh host context.
+                self.consumed_review_context_nonces[nonce] = payload["exp"]
+            return payload
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeDecodeError):
+            raise GuardProtocolError("invalid or replayed response review context") from None
+
+    def _release_reviewed_response(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self.response_reviewer is None:
+            return {"status": "BLOCK", "release_allowed": False,
+                    "reason": "response-review-host-unavailable"}
+        try:
+            context = self._consume_response_review_context(request)
+            reviewed = self.response_reviewer.review(
+                _exact_string(request, "target_text"),
+                _exact_string(request, "language"),
+                _content_type(request),
+                creator_id_sha256=context["agent_sha256"],
+                creator_session_id_sha256=context["session_sha256"],
+            )
+            digest = reviewed.get("evidence_sha256") if isinstance(reviewed, dict) else None
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise RESPONSE_REVIEW.ResponseReviewBlocked("evidence_invalid")
+            binding = {
+                "response_session_sha256": context["session_sha256"],
+                "response_session_epoch_sha256": context["session_epoch_sha256"],
+                "response_agent_sha256": context["agent_sha256"],
+                "response_guard_boot_sha256": self._identity_hash(self.boot_id),
+            }
+            # Recheck the epoch after the external review and hold the same
+            # lock through signing. A prompt/session transition therefore
+            # cannot race an old candidate into a new delivery epoch.
+            with self.delivery_lock:
+                if (self.session_epochs.get(context["session_sha256"])
+                        != context["session_epoch_sha256"]):
+                    raise RESPONSE_REVIEW.ResponseReviewBlocked("context_stale")
+                result = GATEWAY.gate(
+                    request,
+                    response_review_sha256=digest,
+                    response_context_binding=binding,
+                )
+            if result.get("release_allowed"):
+                result["response_review_sha256"] = digest
+            return result
+        except RESPONSE_REVIEW.ResponseReviewBlocked as error:
+            return {"status": "BLOCK", "release_allowed": False,
+                    "reason": error.code, "retryable": error.retryable}
 
     @staticmethod
     def _identity_hash(value: str) -> str:
@@ -159,6 +300,30 @@ class GuardService:
             request.get("short_text_reviewed") is True,
             purpose=task_kind,
         )
+        if task_kind == "response" and result.get("valid"):
+            payload = result.get("payload")
+            checks = result.setdefault("checks", {})
+            if not isinstance(payload, dict):
+                checks["response_context_current"] = False
+            else:
+                session_hash = payload.get("response_session_sha256")
+                epoch_hash = payload.get("response_session_epoch_sha256")
+                with self.delivery_lock:
+                    checks["response_session_epoch_current"] = (
+                        isinstance(session_hash, str)
+                        and isinstance(epoch_hash, str)
+                        and self.session_epochs.get(session_hash) == epoch_hash
+                    )
+                checks["response_guard_boot_current"] = (
+                    payload.get("response_guard_boot_sha256")
+                    == self._identity_hash(self.boot_id)
+                )
+                supplied_agent = request.get("agent_id")
+                checks["response_agent_current"] = (
+                    payload.get("response_agent_sha256")
+                    == self._identity_hash(supplied_agent)
+                ) if isinstance(supplied_agent, str) and supplied_agent else True
+            result["valid"] = all(checks.values())
         return task_kind, source, result
 
     def _issue_delivery_grant(self, request: dict[str, Any], task_kind: str) -> str:
@@ -234,6 +399,24 @@ class GuardService:
                     "status": "BLOCK",
                     "checks": {"session_epoch_current": False},
                 }
+            if task_kind == "response":
+                payload = request.get("_verified_release_payload")
+                expected = {
+                    "response_session_sha256": session_hash,
+                    "response_session_epoch_sha256": epoch_hash,
+                    "response_agent_sha256": self._identity_hash(
+                        _exact_string(request, "agent_id")
+                    ),
+                    "response_guard_boot_sha256": self._identity_hash(self.boot_id),
+                }
+                if (not isinstance(payload, dict)
+                        or any(payload.get(key) != value
+                               for key, value in expected.items())):
+                    return {
+                        "valid": False,
+                        "status": "BLOCK",
+                        "checks": {"response_context_current": False},
+                    }
             return {
                 "valid": True,
                 "status": "PASS",
@@ -314,11 +497,26 @@ class GuardService:
                 "isolated_key": healthy,
                 "self_test": self_test,
             }
+        if operation == "prepare_response_review":
+            token = self._issue_response_review_context(request)
+            return {"status": "PASS", "review_context_token": token,
+                    "expires_in": 180}
         if operation == "release":
-            result = GATEWAY.gate(request)
+            result = (
+                self._release_reviewed_response(request)
+                if request.get("task_kind") == "response" else GATEWAY.gate(request)
+            )
             AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "release"))
             return result
         if operation == "verify":
+            if request.get("task_kind") == "response":
+                result = {
+                    "valid": False,
+                    "status": "BLOCK",
+                    "checks": {"response_delivery_authorization_required": False},
+                }
+                AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "verify"))
+                return result
             _, _, result = self._verify_release(request)
             result["status"] = "PASS" if result.get("valid") else "BLOCK"
             AUDIT.append_audit(self.audit_path, _decision_audit(request, result, "verify"))
@@ -330,6 +528,7 @@ class GuardService:
         if operation == "authorize_delivery":
             task_kind, _, result = self._verify_release(request)
             if result.get("valid"):
+                request["_verified_release_payload"] = result.get("payload")
                 result = self._authorize_delivery(request, task_kind)
             else:
                 result["status"] = "BLOCK"
@@ -374,6 +573,26 @@ def _token_from_file(path: Path | None) -> str:
     return CLIENT.load_service_token(path)
 
 
+def _response_reviewer_from_factory(reference: str | None) -> Any | None:
+    """Load one trusted host-owned reviewer factory for the service runtime."""
+    if reference is None:
+        return None
+    if (not isinstance(reference, str) or reference.count(":") != 1
+            or not all(part for part in reference.split(":"))):
+        raise ValueError("response review factory must be package.module:callable")
+    module_name, attribute = reference.split(":", 1)
+    if (not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", module_name)
+            or not re.fullmatch(r"[A-Za-z_]\w*", attribute)):
+        raise ValueError("response review factory must be package.module:callable")
+    factory = getattr(importlib.import_module(module_name), attribute, None)
+    if not callable(factory):
+        raise ValueError("response review factory is not callable")
+    reviewer = factory()
+    if not callable(getattr(reviewer, "review", None)):
+        raise ValueError("response review factory returned an invalid reviewer")
+    return reviewer
+
+
 def build_server(endpoint: str, service: GuardService):
     transport, address = CLIENT.parse_endpoint(endpoint)
     if transport == "unix":
@@ -403,11 +622,19 @@ def main() -> int:
     parser.add_argument("--key-file", type=Path, default=default_runtime / "signing.key")
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--audit-file", type=Path, default=default_runtime / "audit.jsonl")
+    parser.add_argument(
+        "--response-review-factory",
+        help=("Trusted host-owned package.module:callable returning a configured "
+              "provider-neutral response reviewer"),
+    )
     args = parser.parse_args()
     try:
-        service = GuardService(args.key_file, args.audit_file, _token_from_file(args.token_file))
+        reviewer = _response_reviewer_from_factory(args.response_review_factory)
+        service = GuardService(
+            args.key_file, args.audit_file, _token_from_file(args.token_file), reviewer,
+        )
         server = build_server(args.endpoint, service)
-    except (OSError, RuntimeError, ValueError) as error:
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
         print(f"BLOCK: {error}", file=sys.stderr)
         return 1
 
