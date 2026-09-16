@@ -169,6 +169,74 @@ class PublisherProbe:
         }
 
 
+WATCH_CAMPAIGN_ID = "benchmark-campaign-" + "a" * 64
+WATCH_POLICY_SHA256 = "b" * 64
+WATCH_SUITE_SHA256 = "c" * 64
+
+
+class BenchmarkWatchSnapshot:
+    def __init__(self, *, status="PASS", private_text="private benchmark text"):
+        allowed = status == "PASS"
+        self.report = {
+            "valid_until": 1000.0,
+            "status": status,
+            "superiority_claim_allowed": allowed,
+            "claim_block_reasons": (
+                [] if allowed else ["configured_locale_evaluation_failed"]
+            ),
+            "locales": [{"locale": "mt-MT"}, {"locale": "fi-FI"}],
+            "private_fixture": {"source_text": private_text},
+        }
+        self.campaign = {
+            "campaign_id": WATCH_CAMPAIGN_ID,
+            "policy_sha256": WATCH_POLICY_SHA256,
+            "suite_sha256": WATCH_SUITE_SHA256,
+            "valid_until": 1000.0,
+            "work_count": 2,
+            "counts": {
+                "pending": 0,
+                "leased": 0,
+                "retry_wait": 0,
+                "succeeded": 2,
+                "failed": 0,
+            },
+            "error_counts": {},
+            "complete": True,
+            "blocked": False,
+            "report_finalization": {
+                "status": "succeeded",
+                "attempt": 1,
+                "max_attempts": 3,
+                "next_attempt_at": 100.0,
+                "error_code": None,
+            },
+        }
+        self.report_sha256 = hashlib.sha256(
+            RUNTIME._BENCHMARK_WATCHER._CLIENT._HTTP._canonical_json(
+                self.report,
+            )
+        ).hexdigest()
+
+    def as_payload(self):
+        return self.report
+
+
+class BenchmarkWatchClient:
+    def __init__(self, outcomes):
+        self.expected_campaign_id = WATCH_CAMPAIGN_ID
+        self.expected_policy_sha256 = WATCH_POLICY_SHA256
+        self.expected_suite_sha256 = WATCH_SUITE_SHA256
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def report(self):
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
 class WebsiteLocalizationRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.connections = [sqlite3.connect(":memory:") for _ in range(5)]
@@ -314,6 +382,21 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
             "benchmark_evidence_authority": authority,
             "benchmark_execution": execution,
         }
+
+    def benchmark_watch_configuration(self, outcomes, **overrides):
+        connection = sqlite3.connect(":memory:")
+        self.connections.append(connection)
+        values = {
+            "connection": connection,
+            "client": BenchmarkWatchClient(outcomes),
+            "worker_id": "benchmark-watch-worker",
+            "lease_seconds": 30,
+            "base_delay_seconds": 5,
+            "max_delay_seconds": 20,
+            "max_attempts": 3,
+        }
+        values.update(overrides)
+        return values
 
     def ingest(self, runtime, event=None):
         event = self.event() if event is None else event
@@ -907,6 +990,230 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
                         connection.total_changes for connection in self.connections
                     ),
                 )
+
+    def test_runtime_composes_runs_and_reports_benchmark_watcher(self):
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(),
+        ])
+        client = watch["client"]
+
+        runtime = self.runtime(benchmark_watch=watch)
+        outcome = runtime.run_once(now=100)
+        report = runtime.health(now=100)
+        component = next(
+            item for item in report.components
+            if item.component == "benchmark_report_watcher"
+        )
+
+        self.assertIsInstance(
+            runtime.benchmark_report_watcher,
+            RUNTIME._BENCHMARK_WATCHER.DurableBenchmarkReportWatcher,
+        )
+        self.assertEqual(outcome.tick["phase"], "benchmark")
+        self.assertEqual(outcome.tick["status"], "succeeded")
+        self.assertEqual(outcome.tick["attempt"], 1)
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(component.status, "healthy")
+        self.assertEqual(dict(component.counts)["report_ready"], 1)
+        self.assertEqual(dict(component.counts)["locale_count"], 2)
+        self.assertNotIn("private benchmark text", repr(report))
+        self.assertNotIn("mt-MT", repr(report))
+        self.assertNotIn(WATCH_CAMPAIGN_ID, repr(report))
+
+    def test_runtime_keeps_valid_benchmark_block_fail_closed(self):
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(status="BLOCK"),
+        ])
+
+        runtime = self.runtime(benchmark_watch=watch)
+        outcome = runtime.run_once(now=100)
+        report = runtime.health(now=100)
+        component = next(
+            item for item in report.components
+            if item.component == "benchmark_report_watcher"
+        )
+
+        self.assertEqual((outcome.tick["phase"], outcome.tick["status"]), (
+            "benchmark", "blocked",
+        ))
+        self.assertEqual(
+            outcome.tick["error_code"],
+            "benchmark_watcher.report_blocked",
+        )
+        self.assertEqual(component.status, "blocked")
+        self.assertIn(
+            "configured_locale_evaluation_failed",
+            component.reasons,
+        )
+        self.assertEqual(report.status, "blocked")
+        self.assertFalse(
+            runtime.benchmark_report_watcher.status(
+                now=100,
+            ).superiority_claim_allowed,
+        )
+
+    def test_runtime_preserves_benchmark_watcher_retry_decision(self):
+        failure = (
+            RUNTIME._BENCHMARK_WATCHER._CLIENT.BenchmarkClientFailed(
+                "benchmark_client.network", retryable=True,
+            )
+        )
+        watch = self.benchmark_watch_configuration([failure])
+
+        runtime = self.runtime(benchmark_watch=watch)
+        outcome = runtime.run_once(now=100)
+        report = runtime.health(now=100)
+        component = next(
+            item for item in report.components
+            if item.component == "benchmark_report_watcher"
+        )
+
+        self.assertEqual((outcome.tick["phase"], outcome.tick["status"]), (
+            "benchmark", "retry_wait",
+        ))
+        self.assertEqual(
+            outcome.tick["error_code"], "benchmark_client.network",
+        )
+        self.assertEqual(outcome.tick["attempt"], 1)
+        self.assertEqual(component.status, "degraded")
+        self.assertEqual(dict(component.counts)["retry_wait"], 1)
+
+    def test_runtime_prioritizes_customer_work_over_benchmark_watcher(self):
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(),
+        ])
+        client = watch["client"]
+        runtime = self.runtime(benchmark_watch=watch)
+        self.ingest(runtime)
+
+        phases = []
+        for now in (100, 101, 102):
+            self.clock.value = now
+            phases.append(runtime.run_once(now=now).tick["phase"])
+            self.assertEqual(client.calls, 0)
+        self.clock.value = 103
+        benchmark = runtime.run_once(now=103)
+
+        self.assertEqual(phases, ["translation", "release", "delivery"])
+        self.assertEqual(benchmark.tick["phase"], "benchmark")
+        self.assertEqual(benchmark.tick["status"], "succeeded")
+        self.assertEqual(client.calls, 1)
+
+    def test_runtime_prioritizes_local_benchmark_before_report_watcher(self):
+        values = self.benchmark_configuration()
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(),
+        ])
+        client = watch["client"]
+        fake = mock.Mock()
+        fake.campaign_id = values["benchmark_campaign_id"]
+        fake.review_store = (
+            RUNTIME._HEALTH._BENCHMARK_REVIEW.BenchmarkReviewEvidenceStore(
+                values["benchmark_execution"]["review_connection"],
+            )
+        )
+        fake.reviewer_route_id = values["benchmark_execution"][
+            "reviewer_route_id"
+        ]
+        fake.run_once.return_value = SimpleNamespace(
+            status="succeeded",
+            work_id="benchmark-work-" + "d" * 64,
+            target_locale="fi-FI",
+            attempt=1,
+            error_code=None,
+        )
+        with mock.patch.object(
+            RUNTIME._BENCHMARK_RUNTIME,
+            "WebsiteLocalizationBenchmarkRuntime",
+            return_value=fake,
+        ):
+            runtime = self.runtime(benchmark_watch=watch, **values)
+
+        outcome = runtime.run_once(now=100)
+
+        self.assertEqual((outcome.tick["phase"], outcome.tick["status"]), (
+            "benchmark", "succeeded",
+        ))
+        self.assertEqual(outcome.tick["job_id"], "benchmark-work-" + "d" * 64)
+        fake.run_once.assert_called_once()
+        self.assertEqual(client.calls, 0)
+
+    def test_runtime_rejects_invalid_benchmark_watch_before_schema_writes(self):
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(),
+        ])
+        watch.pop("worker_id")
+        before = tuple(
+            connection.total_changes for connection in self.connections
+        )
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.benchmark.watch.invalid",
+        ):
+            self.runtime(benchmark_watch=watch)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+        self.assertTrue(all(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'",
+            ).fetchone() is None
+            for connection in self.connections
+        ))
+
+    def test_runtime_rejects_reused_benchmark_watch_connection_before_writes(self):
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(),
+        ])
+        watch["connection"] = self.connections[0]
+        before = tuple(
+            connection.total_changes for connection in self.connections
+        )
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.connections.not_distinct",
+        ):
+            self.runtime(benchmark_watch=watch)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+        self.assertTrue(all(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'",
+            ).fetchone() is None
+            for connection in self.connections
+        ))
+
+    def test_runtime_benchmark_watch_lease_must_fit_outer_lease(self):
+        watch = self.benchmark_watch_configuration(
+            [BenchmarkWatchSnapshot()], lease_seconds=301,
+        )
+        before = tuple(
+            connection.total_changes for connection in self.connections
+        )
+
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.lease_hierarchy.invalid",
+        ):
+            self.runtime(benchmark_watch=watch)
+
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+        self.assertTrue(all(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'",
+            ).fetchone() is None
+            for connection in self.connections
+        ))
 
     def test_runtime_integrates_bound_benchmark_campaign_health(self):
         campaign = RUNTIME._HEALTH._CAMPAIGN

@@ -72,6 +72,10 @@ _BENCHMARK_RUNTIME = _load_module(
     "blun_website_localization_runtime_benchmark_execution",
     _ROOT / "integrations" / "website_localization_benchmark_runtime.py",
 )
+_BENCHMARK_WATCHER = _load_module(
+    "blun_website_localization_runtime_benchmark_watcher",
+    _ROOT / "integrations" / "website_localization_benchmark_watcher.py",
+)
 _API = _load_module(
     "blun_website_localization_runtime_api",
     _ROOT / "integrations" / "website_localization_api.py",
@@ -189,7 +193,7 @@ def _validate_dependencies(values: Mapping[str, Any]) -> MappingProxyType:
 
 
 def _validate_connections(connections: tuple[Any, ...]) -> None:
-    if len(connections) not in {5, 6, 10} or any(
+    if len(connections) not in {5, 6, 7, 10, 11} or any(
         not isinstance(connection, sqlite3.Connection) for connection in connections
     ):
         raise LocalizationRuntimeBlocked("runtime.connections.invalid")
@@ -221,6 +225,7 @@ def _validate_lease_hierarchy(
     supervisor_policy: Any,
     *,
     benchmark_lease_seconds: float | None = None,
+    benchmark_watch_lease_seconds: float | None = None,
 ) -> None:
     leases = [
         float(dependencies.get(name, default))
@@ -228,6 +233,8 @@ def _validate_lease_hierarchy(
     ]
     if benchmark_lease_seconds is not None:
         leases.append(benchmark_lease_seconds)
+    if benchmark_watch_lease_seconds is not None:
+        leases.append(benchmark_watch_lease_seconds)
     longest_operation_lease = max(leases)
     if float(supervisor_policy.lease_seconds) <= longest_operation_lease:
         raise LocalizationRuntimeBlocked("runtime.lease_hierarchy.invalid")
@@ -243,6 +250,75 @@ BENCHMARK_EXECUTION_KEYS = frozenset({
     "blinding_key", "worker_id", "max_attempts", "lease_seconds",
     "retry_base_seconds", "retry_max_seconds",
 })
+
+BENCHMARK_WATCH_KEYS = frozenset({
+    "connection", "client", "worker_id", "lease_seconds",
+    "base_delay_seconds", "max_delay_seconds", "max_attempts",
+})
+
+
+def _benchmark_watch(value: Any) -> MappingProxyType | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != BENCHMARK_WATCH_KEYS:
+        raise LocalizationRuntimeBlocked("runtime.benchmark.watch.invalid")
+    copied = dict(value)
+    connection = copied["connection"]
+    client = copied["client"]
+    try:
+        if (
+            not isinstance(connection, sqlite3.Connection)
+            or connection.in_transaction
+            or not callable(getattr(client, "report", None))
+        ):
+            raise ValueError
+        campaign_id = getattr(client, "expected_campaign_id", None)
+        policy_sha256 = getattr(client, "expected_policy_sha256", None)
+        suite_sha256 = getattr(client, "expected_suite_sha256", None)
+        if (
+            not isinstance(campaign_id, str)
+            or _BENCHMARK_WATCHER._CLIENT._HTTP.CAMPAIGN_ID.fullmatch(
+                campaign_id,
+            ) is None
+            or not isinstance(policy_sha256, str)
+            or _BENCHMARK_WATCHER._CLIENT._HTTP.SHA256.fullmatch(
+                policy_sha256,
+            ) is None
+            or not isinstance(suite_sha256, str)
+            or _BENCHMARK_WATCHER._CLIENT._HTTP.SHA256.fullmatch(
+                suite_sha256,
+            ) is None
+        ):
+            raise ValueError
+        copied["worker_id"] = _BENCHMARK_WATCHER._worker(
+            copied["worker_id"],
+        )
+        copied["lease_seconds"] = _BENCHMARK_WATCHER._number(
+            copied["lease_seconds"], "lease", minimum=0.1, maximum=3600,
+        )
+        copied["base_delay_seconds"] = _BENCHMARK_WATCHER._number(
+            copied["base_delay_seconds"], "delay", minimum=0.1,
+            maximum=_BENCHMARK_WATCHER.MAX_DELAY_SECONDS,
+        )
+        copied["max_delay_seconds"] = _BENCHMARK_WATCHER._number(
+            copied["max_delay_seconds"], "delay", minimum=0.1,
+            maximum=_BENCHMARK_WATCHER.MAX_DELAY_SECONDS,
+        )
+        if copied["base_delay_seconds"] > copied["max_delay_seconds"]:
+            raise ValueError
+        if (
+            isinstance(copied["max_attempts"], bool)
+            or not isinstance(copied["max_attempts"], int)
+            or not 1 <= copied["max_attempts"] <= (
+                _BENCHMARK_WATCHER.MAX_ATTEMPTS
+            )
+        ):
+            raise ValueError
+    except Exception:
+        raise LocalizationRuntimeBlocked(
+            "runtime.benchmark.watch.invalid",
+        ) from None
+    return MappingProxyType(copied)
 
 
 def _benchmark_execution(value: Any) -> MappingProxyType | None:
@@ -350,6 +426,7 @@ class WebsiteLocalizationRuntime:
         benchmark_evidence_authority: Any | None = None,
         benchmark_stale_after_seconds: float | int = 3600,
         benchmark_execution: Mapping[str, Any] | None = None,
+        benchmark_watch: Mapping[str, Any] | None = None,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
     ):
@@ -363,6 +440,7 @@ class WebsiteLocalizationRuntime:
         if benchmark_execution is not None and not benchmark_enabled:
             raise LocalizationRuntimeBlocked("runtime.benchmark.incomplete")
         benchmark_execution = _benchmark_execution(benchmark_execution)
+        benchmark_watch = _benchmark_watch(benchmark_watch)
         if benchmark_enabled:
             if not isinstance(benchmark_campaign_id, str) or re.fullmatch(
                 r"benchmark-campaign-[0-9a-f]{64}", benchmark_campaign_id,
@@ -433,6 +511,9 @@ class WebsiteLocalizationRuntime:
                 benchmark_execution["native_reference_connection"],
                 benchmark_execution["review_connection"],
             ) if benchmark_execution is not None else ()
+        ) + (
+            (benchmark_watch["connection"],)
+            if benchmark_watch is not None else ()
         )
         _validate_connections(connections)
         validated = _validate_dependencies(dependencies)
@@ -466,6 +547,10 @@ class WebsiteLocalizationRuntime:
             benchmark_lease_seconds=(
                 benchmark_execution["lease_seconds"]
                 if benchmark_execution is not None else None
+            ),
+            benchmark_watch_lease_seconds=(
+                benchmark_watch["lease_seconds"]
+                if benchmark_watch is not None else None
             ),
         )
         _number(
@@ -567,6 +652,26 @@ class WebsiteLocalizationRuntime:
         self._benchmark_policy = benchmark_policy
         self._benchmark_campaign_id = benchmark_campaign_id
         self._benchmark_evidence_authority = benchmark_evidence_authority
+        self._benchmark_watch = benchmark_watch
+        self.benchmark_report_watcher = None
+        if benchmark_watch is not None:
+            try:
+                self.benchmark_report_watcher = (
+                    _BENCHMARK_WATCHER.DurableBenchmarkReportWatcher(
+                        benchmark_watch["connection"],
+                        benchmark_watch["client"],
+                        lease_seconds=benchmark_watch["lease_seconds"],
+                        base_delay_seconds=(
+                            benchmark_watch["base_delay_seconds"]
+                        ),
+                        max_delay_seconds=benchmark_watch["max_delay_seconds"],
+                        max_attempts=benchmark_watch["max_attempts"],
+                    )
+                )
+            except Exception:
+                raise LocalizationRuntimeBlocked(
+                    "runtime.benchmark.watch.invalid",
+                ) from None
 
         def tick():
             service_tick = _SERVICE.run_service_tick(
@@ -576,34 +681,68 @@ class WebsiteLocalizationRuntime:
                 operation_guard=self.supervisor.renew_active_lease,
                 **self._dependencies,
             )
-            if (
-                service_tick.phase != "idle"
-                or service_tick.status != "idle"
-                or self.benchmark_runtime is None
-            ):
+            if service_tick.phase != "idle" or service_tick.status != "idle":
+                return service_tick
+            if self.benchmark_runtime is not None:
+                try:
+                    benchmark_tick = self.benchmark_runtime.run_once(
+                        operation_guard=self.supervisor.renew_active_lease,
+                        lease_seconds=self._benchmark_execution["lease_seconds"],
+                        retry_base_seconds=(
+                            self._benchmark_execution["retry_base_seconds"]
+                        ),
+                        retry_max_seconds=(
+                            self._benchmark_execution["retry_max_seconds"]
+                        ),
+                    )
+                except Exception as error:
+                    return _SERVICE._runtime_error("benchmark", error)
+                if benchmark_tick is not None:
+                    return _SERVICE._outcome(
+                        "benchmark",
+                        benchmark_tick.status,
+                        job_id=getattr(benchmark_tick, "work_id", None),
+                        target_locale=getattr(
+                            benchmark_tick, "target_locale", None,
+                        ),
+                        attempt=getattr(benchmark_tick, "attempt", None),
+                        error_code=getattr(benchmark_tick, "error_code", None),
+                    )
+            if self.benchmark_report_watcher is None:
                 return service_tick
             try:
-                benchmark_tick = self.benchmark_runtime.run_once(
-                    operation_guard=self.supervisor.renew_active_lease,
-                    lease_seconds=self._benchmark_execution["lease_seconds"],
-                    retry_base_seconds=(
-                        self._benchmark_execution["retry_base_seconds"]
-                    ),
-                    retry_max_seconds=(
-                        self._benchmark_execution["retry_max_seconds"]
-                    ),
+                watch = self.benchmark_report_watcher.run_once(
+                    self._benchmark_watch["worker_id"],
+                    now=self._clock(),
+                )
+            except _BENCHMARK_WATCHER.BenchmarkWatcherBlocked as error:
+                code = str(error)
+                if _SERVICE.ERROR_CODE.fullmatch(code) is None:
+                    code = "benchmark_watcher.state_invalid"
+                return _SERVICE._outcome(
+                    "benchmark", "blocked", error_code=code,
                 )
             except Exception as error:
                 return _SERVICE._runtime_error("benchmark", error)
-            if benchmark_tick is None:
+            if not watch.attempted:
                 return service_tick
+            if watch.state == "succeeded" and watch.report_status == "PASS":
+                status = "succeeded"
+                error_code = None
+            elif watch.state == "succeeded" and watch.report_status == "BLOCK":
+                status = "blocked"
+                error_code = "benchmark_watcher.report_blocked"
+            elif watch.state in {"retry_wait", "failed"}:
+                status = watch.state
+                error_code = watch.error_code
+            else:
+                status = "blocked"
+                error_code = "benchmark_watcher.state_invalid"
             return _SERVICE._outcome(
                 "benchmark",
-                benchmark_tick.status,
-                job_id=getattr(benchmark_tick, "work_id", None),
-                target_locale=getattr(benchmark_tick, "target_locale", None),
-                attempt=getattr(benchmark_tick, "attempt", None),
-                error_code=getattr(benchmark_tick, "error_code", None),
+                status,
+                attempt=watch.attempt,
+                error_code=error_code,
             )
 
         self.supervisor = _SUPERVISOR.LocalizationServiceSupervisor(
@@ -640,6 +779,7 @@ class WebsiteLocalizationRuntime:
                 )
                 else None
             ),
+            benchmark_report_watcher=self.benchmark_report_watcher,
         )
         self.health_http = None
         if health_http_authenticator is not None:

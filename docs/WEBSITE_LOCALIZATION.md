@@ -1006,13 +1006,33 @@ failed watcher and cannot replace a verified final result. `run_forever`
 provides an interruptible synchronous host loop and returns when retrieval
 succeeds, fails terminally, or the host stop event is set.
 
-Configure that watcher as `benchmark_report_watcher` on
-`LocalizationHealthMonitor` to include its durable state in the existing
-authenticated service-health response. The monitor emits one content-free
-`benchmark_report_watcher` component with state counters, attempt ceiling,
-due/lease flags, report readiness, and only the final locale cardinality. It
-does not expose campaign, policy, or suite identifiers; locale names; report or
-fixture text; provider or reviewer identity; credentials; or exception text.
+For the production composition root, pass one exact `benchmark_watch` mapping
+to `WebsiteLocalizationRuntime`. It contains a distinct SQLite connection, the
+already configured strict benchmark client, worker ID, lease duration, retry
+delays, and attempt ceiling. The runtime validates the complete client binding
+and timing policy before any service schema is written, rejects reused store
+connections, and requires the outer supervisor lease to outlive the watcher
+lease. It then constructs the durable watcher and supplies that same instance
+to `LocalizationHealthMonitor`; execution and authenticated observation cannot
+silently use different state.
+
+One supervised tick always prioritizes customer translation, release, and
+delivery work. If those are idle, configured local benchmark case execution
+runs next. Only when both are idle may the runtime perform one due report-watch
+attempt. A verified `PASS` produces a successful benchmark tick. A valid
+`BLOCK` produces `benchmark_watcher.report_blocked`, retryable client failures
+remain `retry_wait` under the watcher's durable deadline, and terminal or
+malformed watcher state remains fail-closed with a stable reason. A live lease
+or future retry deadline performs no network read and leaves the service tick
+idle.
+
+The monitor emits one content-free `benchmark_report_watcher` component with
+state counters, attempt ceiling, due/lease flags, report readiness, and only the
+final locale cardinality. It does not expose campaign, policy, or suite
+identifiers; locale names; report or fixture text; provider or reviewer
+identity; credentials; or exception text. Hosts that compose the monitor
+without `WebsiteLocalizationRuntime` may still pass the same watcher directly
+as `benchmark_report_watcher`.
 
 The integration does not trust the watcher object merely because it exposes a
 `health` method. It checks the SQLite schema before composing the service
