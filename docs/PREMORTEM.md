@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Axis-visible benchmark defects (16 September 2026)
+
+Assume every signed case preserves its exact phase-bound finding hashes, but
+the final report exposes only aggregate defect totals across both review axes.
+
+- A statistically strong target-native axis could still appear to pass despite
+  one candidate Major or Blocking finding in that same phase.
+- The overall locale block would not reveal whether native quality or source
+  fidelity failed, weakening independent review and operational routing.
+- Several findings in one case could be reduced to a single affected-case
+  count, hiding repeated defects behind an otherwise strong average.
+- Copying reviewer text into the report would disclose content or prose that
+  the signed evidence deliberately excludes.
+
+Each axis will therefore derive separate candidate and baseline Major and
+Blocking counts, plus affected-case counts, solely from the validated signed
+pass registries. Any candidate finding will block that exact axis with a stable
+severity reason before statistical success can authorize it. Reports retain
+only counts and fixed reason codes; they never add finding text, excerpts,
+targets, or reviewer prose.
+
 ## Phase-bound benchmark findings (16 September 2026)
 
 Assume both benchmark reviews run in the correct order, but the signed case

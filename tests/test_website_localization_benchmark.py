@@ -1124,6 +1124,30 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             item for item in report["locales"] if item["locale"] == "mt-MT"
         )
         lane = locale_report["content_type_lanes"][0]
+        lane_axes = {item["phase"]: item for item in lane["axes"]}
+        native_axis = lane_axes["target_native"]
+        fidelity_axis = lane_axes["source_fidelity"]
+        self.assertEqual(native_axis["status"], "PASS")
+        self.assertEqual(native_axis["candidate_defect_cases"], 0)
+        self.assertEqual(native_axis["baseline_defect_cases"], 0)
+        self.assertEqual(
+            native_axis["candidate_findings"], {"blocking": 0, "major": 0},
+        )
+        self.assertEqual(
+            native_axis["baseline_findings"], {"blocking": 0, "major": 0},
+        )
+        self.assertEqual(fidelity_axis["status"], "BLOCK")
+        self.assertEqual(
+            fidelity_axis["block_reasons"], ["candidate_major_defect"],
+        )
+        self.assertEqual(fidelity_axis["candidate_defect_cases"], 1)
+        self.assertEqual(fidelity_axis["baseline_defect_cases"], 0)
+        self.assertEqual(
+            fidelity_axis["candidate_findings"], {"blocking": 0, "major": 1},
+        )
+        self.assertEqual(
+            fidelity_axis["baseline_findings"], {"blocking": 0, "major": 0},
+        )
         audit = next(
             item for item in lane["commercial_dimensions"]
             if item["dimension"] == dimension

@@ -39,7 +39,7 @@ CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v14"
 COMMERCIAL_CASE_EVALUATION_SCHEMA = (
     "translate-native.commercial-benchmark-case-evaluation.v7"
 )
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v18"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v19"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -1749,12 +1749,39 @@ def _axis_report(
     policy: BenchmarkPolicy,
     minimum_cases: int,
 ) -> dict[str, Any]:
-    preferences = [
-        next(item for item in case["passes"] if item["phase"] == phase)[
-            "preference"
-        ]
+    phase_passes = [
+        next(item for item in case["passes"] if item["phase"] == phase)
         for case in cases
     ]
+    preferences = [item["preference"] for item in phase_passes]
+    candidate_findings = {
+        severity: sum(
+            len(item["finding_hashes"]["candidate"][severity])
+            for item in phase_passes
+        )
+        for severity in ("blocking", "major")
+    }
+    baseline_findings = {
+        severity: sum(
+            len(item["finding_hashes"]["baseline"][severity])
+            for item in phase_passes
+        )
+        for severity in ("blocking", "major")
+    }
+    candidate_defect_cases = sum(
+        any(
+            item["finding_hashes"]["candidate"][severity]
+            for severity in ("blocking", "major")
+        )
+        for item in phase_passes
+    )
+    baseline_defect_cases = sum(
+        any(
+            item["finding_hashes"]["baseline"][severity]
+            for severity in ("blocking", "major")
+        )
+        for item in phase_passes
+    )
     candidate_wins = preferences.count("candidate")
     baseline_wins = preferences.count("baseline")
     ties = preferences.count("tie")
@@ -1763,6 +1790,10 @@ def _axis_report(
     candidate_win_rate = candidate_wins / decisive if decisive else 0.0
     one_sided_sign_p = _one_sided_sign_p(candidate_wins, decisive)
     block_reasons: list[str] = []
+    if candidate_findings["blocking"]:
+        block_reasons.append("candidate_blocking_defect")
+    if candidate_findings["major"]:
+        block_reasons.append("candidate_major_defect")
     if len(cases) < minimum_cases:
         block_reasons.append("insufficient_sample")
     if decisive_rate < policy.minimum_decisive_rate:
@@ -1778,6 +1809,10 @@ def _axis_report(
         "candidate_wins": candidate_wins,
         "baseline_wins": baseline_wins,
         "ties": ties,
+        "candidate_defect_cases": candidate_defect_cases,
+        "baseline_defect_cases": baseline_defect_cases,
+        "candidate_findings": candidate_findings,
+        "baseline_findings": baseline_findings,
         "decisive_rate": decisive_rate,
         "candidate_win_rate": candidate_win_rate,
         "one_sided_sign_p": one_sided_sign_p,

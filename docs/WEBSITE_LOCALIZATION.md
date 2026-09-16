@@ -996,6 +996,14 @@ attested report. Joint case winners remain an additional conservative metric,
 but discarded cross-axis disagreements can no longer make a weak axis appear
 statistically convincing.
 
+Each axis also reconstructs candidate and baseline Major and Blocking finding
+totals from that phase's exact signed hash registry and reports the number of
+affected cases. Any candidate finding blocks its own axis with a stable
+severity reason, even when the statistical thresholds pass; no aggregate or
+success on the other axis can override it. Baseline defects remain visible for
+comparison. These report fields are content-free counts only and never retain
+finding text, excerpts, targets, or reviewer prose.
+
 Suite v4 predeclares all eight content types as required statistical lanes with
 a minimum of eight cases per type and locale. For every lane, the report repeats
 the joint and independent `target_native` and `source_fidelity` statistics. A
