@@ -166,6 +166,74 @@ class SupervisorProbe:
         }
 
 
+class BenchmarkWatcherProbe:
+    def __init__(self, payload, *, schema_valid=True):
+        self.connection = sqlite3.connect(":memory:")
+        self.payload = payload
+        self.schema_valid = schema_valid
+        self.calls = []
+
+    def _validate_schema(self):
+        if not self.schema_valid:
+            raise RuntimeError("private watcher schema diagnostic")
+
+    def health(self, *, now):
+        self.calls.append(now)
+        return json.loads(json.dumps(self.payload))
+
+
+def benchmark_watcher_health(*, now=250.0, state="pending", report_status=None):
+    report = None
+    reasons = []
+    status = "degraded"
+    ready = state == "succeeded"
+    due = state in {"pending", "retry_wait"}
+    last_error_code = None
+    if state == "pending":
+        reasons.append("benchmark_watcher.pending")
+    elif state == "retry_wait":
+        reasons.append("benchmark_watcher.retry_wait")
+        last_error_code = "benchmark_client.network"
+    elif state == "failed":
+        reasons.append("benchmark_watcher.failed")
+        last_error_code = "benchmark_client.policy_mismatch"
+        status = "blocked"
+        due = False
+    elif state == "succeeded":
+        due = False
+        status = "healthy" if report_status == "PASS" else "blocked"
+        block_reasons = (
+            [] if report_status == "PASS"
+            else ["configured_locale_evaluation_failed"]
+        )
+        if report_status == "BLOCK":
+            reasons.append("benchmark_watcher.report_blocked")
+        report = {
+            "sha256": "a" * 64,
+            "status": report_status,
+            "superiority_claim_allowed": report_status == "PASS",
+            "block_reasons": block_reasons,
+            "locale_count": 24,
+            "completed_at": now - 1,
+        }
+    return {
+        "schema": HEALTH.BENCHMARK_WATCHER_SCHEMA,
+        "checked_at": now,
+        "status": status,
+        "state": state,
+        "ready": ready,
+        "due": due,
+        "active_lease": False,
+        "lease_expired": False,
+        "attempts": 1 if state != "pending" else 0,
+        "max_attempts": 3,
+        "next_action_at": now,
+        "last_error_code": last_error_code,
+        "report": report,
+        "watcher_reasons": reasons,
+    }
+
+
 def event():
     return {
         "schema": CMS.CHANGE_SCHEMA,
@@ -363,6 +431,20 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             now=now,
         )
 
+    def report_with_watcher(self, watcher, *, now=250):
+        monitor = HEALTH.LocalizationHealthMonitor(
+            self.bridge,
+            self.evidence_state,
+            benchmark_report_watcher=watcher,
+        )
+        return monitor.check(
+            event_verifier=self.event_authority,
+            approval_authority=self.approval_authority,
+            publication_authority=self.publication_authority,
+            provider_probe=self.probe,
+            now=now,
+        )
+
     @staticmethod
     def component(report, name):
         return next(item for item in report.components if item.component == name)
@@ -385,6 +467,189 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             dict(self.component(report, "evidence").counts),
             {status: 0 for status in HEALTH.EVIDENCE_STATUSES},
         )
+
+    def test_pending_benchmark_report_watcher_is_visible_and_read_only(self):
+        watcher = BenchmarkWatcherProbe(benchmark_watcher_health())
+        try:
+            before = watcher.connection.total_changes
+            report = self.report_with_watcher(watcher)
+            after = watcher.connection.total_changes
+
+            component = self.component(report, "benchmark_report_watcher")
+            self.assertEqual(report.status, "degraded")
+            self.assertEqual(component.status, "degraded")
+            self.assertEqual(component.reasons, ("benchmark_watcher.pending",))
+            self.assertEqual(dict(component.counts)["pending"], 1)
+            self.assertEqual(dict(component.counts)["due"], 1)
+            self.assertEqual(watcher.calls, [250.0])
+            self.assertEqual(before, after)
+            self.assertEqual(
+                dict(self.component(report, "storage").counts)["connections"],
+                5,
+            )
+        finally:
+            watcher.connection.close()
+
+    def test_verified_benchmark_pass_is_healthy_but_block_remains_blocking(self):
+        scenarios = (
+            ("PASS", "healthy", ()),
+            (
+                "BLOCK",
+                "blocked",
+                (
+                    "benchmark_watcher.report_blocked",
+                    "configured_locale_evaluation_failed",
+                ),
+            ),
+        )
+        for report_status, expected_status, expected_reasons in scenarios:
+            with self.subTest(report_status=report_status):
+                watcher = BenchmarkWatcherProbe(benchmark_watcher_health(
+                    state="succeeded", report_status=report_status,
+                ))
+                try:
+                    report = self.report_with_watcher(watcher)
+                    component = self.component(
+                        report, "benchmark_report_watcher",
+                    )
+                    counts = dict(component.counts)
+                    self.assertEqual(report.status, expected_status)
+                    self.assertEqual(component.status, expected_status)
+                    self.assertEqual(component.reasons, expected_reasons)
+                    self.assertEqual(counts["succeeded"], 1)
+                    self.assertEqual(counts["report_ready"], 1)
+                    self.assertEqual(counts["locale_count"], 24)
+                finally:
+                    watcher.connection.close()
+
+    def test_retry_failure_and_lease_states_map_exactly(self):
+        retrying = benchmark_watcher_health(state="retry_wait")
+        failed = benchmark_watcher_health(state="failed")
+        leased = benchmark_watcher_health()
+        leased.update({
+            "state": "leased",
+            "due": False,
+            "active_lease": True,
+            "attempts": 1,
+            "next_action_at": 260.0,
+            "watcher_reasons": [],
+        })
+        expired = json.loads(json.dumps(leased))
+        expired.update({
+            "due": True,
+            "active_lease": False,
+            "lease_expired": True,
+            "next_action_at": 249.0,
+            "watcher_reasons": ["benchmark_watcher.lease_expired"],
+        })
+        scenarios = (
+            (retrying, "degraded", "retry_wait", 0),
+            (failed, "blocked", "failed", 0),
+            (leased, "degraded", "leased", 1),
+            (expired, "degraded", "leased", 0),
+        )
+        for payload, expected_status, state, active in scenarios:
+            with self.subTest(state=state, active=active):
+                watcher = BenchmarkWatcherProbe(payload)
+                try:
+                    report = self.report_with_watcher(watcher)
+                    component = self.component(
+                        report, "benchmark_report_watcher",
+                    )
+                    counts = dict(component.counts)
+                    self.assertEqual(component.status, expected_status)
+                    self.assertEqual(counts[state], 1)
+                    self.assertEqual(counts["active_lease"], active)
+                    self.assertEqual(report.status, expected_status)
+                finally:
+                    watcher.connection.close()
+
+    def test_watcher_consistency_forgery_always_fails_closed(self):
+        scenarios = []
+        wrong_status = benchmark_watcher_health()
+        wrong_status["status"] = "healthy"
+        scenarios.append(wrong_status)
+        wrong_due = benchmark_watcher_health()
+        wrong_due["due"] = False
+        scenarios.append(wrong_due)
+        wrong_claim = benchmark_watcher_health(
+            state="succeeded", report_status="PASS",
+        )
+        wrong_claim["report"]["superiority_claim_allowed"] = False
+        scenarios.append(wrong_claim)
+        wrong_digest = benchmark_watcher_health(
+            state="succeeded", report_status="PASS",
+        )
+        wrong_digest["report"]["sha256"] = "not-a-digest"
+        scenarios.append(wrong_digest)
+        wrong_reasons = benchmark_watcher_health(state="failed")
+        wrong_reasons["watcher_reasons"] = []
+        scenarios.append(wrong_reasons)
+
+        for index, payload in enumerate(scenarios):
+            with self.subTest(index=index):
+                watcher = BenchmarkWatcherProbe(payload)
+                try:
+                    report = self.report_with_watcher(watcher)
+                    component = self.component(
+                        report, "benchmark_report_watcher",
+                    )
+                    self.assertEqual(report.status, "blocked")
+                    self.assertEqual(
+                        component.reasons,
+                        ("benchmark_watcher.state_invalid",),
+                    )
+                finally:
+                    watcher.connection.close()
+
+    def test_invalid_or_prose_bearing_watcher_state_fails_closed_without_echo(self):
+        malformed = benchmark_watcher_health()
+        malformed["private_campaign_text"] = "secret benchmark prose"
+        watcher = BenchmarkWatcherProbe(malformed)
+        try:
+            report = self.report_with_watcher(watcher)
+            component = self.component(report, "benchmark_report_watcher")
+            self.assertEqual(report.status, "blocked")
+            self.assertEqual(component.status, "blocked")
+            self.assertEqual(
+                component.reasons,
+                ("benchmark_watcher.state_invalid",),
+            )
+            self.assertNotIn(
+                "secret benchmark prose",
+                json.dumps(report.as_payload()),
+            )
+        finally:
+            watcher.connection.close()
+
+    def test_watcher_schema_failure_blocks_storage_and_never_hides_state(self):
+        watcher = BenchmarkWatcherProbe(
+            benchmark_watcher_health(), schema_valid=False,
+        )
+        try:
+            report = self.report_with_watcher(watcher)
+            self.assertEqual(report.status, "blocked")
+            self.assertIn(
+                "benchmark_watcher.schema_invalid",
+                self.component(report, "storage").reasons,
+            )
+            self.assertEqual(
+                self.component(report, "benchmark_report_watcher").status,
+                "degraded",
+            )
+        finally:
+            watcher.connection.close()
+
+    def test_incomplete_benchmark_report_watcher_dependency_is_rejected(self):
+        with self.assertRaisesRegex(
+            HEALTH.LocalizationHealthBlocked,
+            "benchmark report watcher is invalid",
+        ):
+            HEALTH.LocalizationHealthMonitor(
+                self.bridge,
+                self.evidence_state,
+                benchmark_report_watcher=object(),
+            )
 
     def test_commercial_contract_stale_queue_job_blocks_read_only_health(self):
         plan = PLANNER.plan_website_localization(

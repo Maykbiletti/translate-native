@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Benchmark watcher in authenticated service health (16 September 2026)
+
+Assume durable benchmark retrieval is correct, but only the watcher process can
+see its lease, retry, terminal, and final-report state.
+
+- An operator dashboard could report the localization service healthy while
+  benchmark retrieval is stuck on an expired lease or exhausted attempt limit.
+- A valid `BLOCK` report could be reduced to retrieval success and disappear
+  behind otherwise healthy service components.
+- Passing the watcher payload through unchanged could disclose campaign,
+  policy, suite, locale, benchmark, provider, reviewer, or credential data.
+- A malformed snapshot could forge a healthy aggregate through inconsistent
+  state, counters, timing, reasons, report digest, or superiority semantics.
+- A health read could accidentally repair, rearm, lease, or otherwise mutate
+  the durable watcher.
+
+The general health monitor will therefore accept only the exact content-free
+watcher schema, independently reconstruct all state and report invariants, and
+expose a dedicated component through the existing authenticated HTTPS boundary.
+Pending and retrying work degrades health; a terminal failure, malformed state,
+or valid `BLOCK` report blocks it. Reads validate SQLite without mutation and
+never return private campaign bindings or report content.
+
 ## Durable benchmark report watcher (16 September 2026)
 
 Assume the strict benchmark client works, but an operator process must keep

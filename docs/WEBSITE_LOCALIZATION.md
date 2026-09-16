@@ -1006,6 +1006,24 @@ failed watcher and cannot replace a verified final result. `run_forever`
 provides an interruptible synchronous host loop and returns when retrieval
 succeeds, fails terminally, or the host stop event is set.
 
+Configure that watcher as `benchmark_report_watcher` on
+`LocalizationHealthMonitor` to include its durable state in the existing
+authenticated service-health response. The monitor emits one content-free
+`benchmark_report_watcher` component with state counters, attempt ceiling,
+due/lease flags, report readiness, and only the final locale cardinality. It
+does not expose campaign, policy, or suite identifiers; locale names; report or
+fixture text; provider or reviewer identity; credentials; or exception text.
+
+The integration does not trust the watcher object merely because it exposes a
+`health` method. It checks the SQLite schema before composing the service
+report, then independently validates the exact snapshot schema, timestamp,
+state, counters, due and lease relationships, stable reasons, report digest,
+claim decision, block-reason rules, locale count, and completion time. Pending
+or retrying retrieval degrades aggregate health. A terminal watcher failure, a
+valid final `BLOCK`, or any malformed snapshot blocks aggregate health with a
+stable content-free reason. The read path never invokes `run_once`, `rearm`, a
+network client, or a signing capability and never changes watcher state.
+
 `BenchmarkCampaignStore.health` verifies the complete campaign binding, every
 row invariant, successful result hash, and case attestation in a consistent
 read-only snapshot. It reports only status counts, stable reason codes, the
