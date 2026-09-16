@@ -985,6 +985,27 @@ claim-block reasons remain unchanged. Callers must treat every
 `BenchmarkClientFailed` as no authority to publish a superiority claim and may
 retry only when its explicit `retryable` field is true.
 
+`integrations/website_localization_benchmark_watcher.py` provides the durable
+operator path around that strict client. Its SQLite generation is pinned to the
+client's exact campaign, policy, suite, retry ceiling, and timing policy. Every
+attempt uses a random expiring lease; another process cannot complete a stolen
+lease, while a confirmed expired lease is recoverable after a crash. Retryable
+incomplete-campaign, provider, authentication-source, and network failures use
+capped exponential backoff and stop at the configured attempt ceiling.
+
+The watcher reaches `succeeded` only after `report()` returns a digest-valid,
+unexpired report with the exact pinned campaign binding. It then becomes
+idempotent and never contacts the client again. Durable state contains only the
+report digest, aggregate `PASS` or `BLOCK` decision, stable claim-block reason
+codes, locale cardinality, and completion time—not the report, locale names,
+benchmark text, reviewer metadata, provider identity, or credentials. A valid
+`BLOCK` report is retrieval success but produces blocked watcher health and
+keeps `superiority_claim_allowed: false`. Terminal client, parser, binding,
+state, and lease failures remain fail-closed; an explicit rearm resets only a
+failed watcher and cannot replace a verified final result. `run_forever`
+provides an interruptible synchronous host loop and returns when retrieval
+succeeds, fails terminally, or the host stop event is set.
+
 `BenchmarkCampaignStore.health` verifies the complete campaign binding, every
 row invariant, successful result hash, and case attestation in a consistent
 read-only snapshot. It reports only status counts, stable reason codes, the

@@ -1,5 +1,29 @@
 # Version 6 premortem
 
+## Durable benchmark report watcher (16 September 2026)
+
+Assume the strict benchmark client works, but an operator process must keep
+retrying manually after every restart or temporary network failure.
+
+- A restarted watcher could adopt a different campaign, policy, or suite while
+  reusing old durable state.
+- Two processes could fetch or complete the same report attempt concurrently,
+  or a crashed lease could remain stuck forever.
+- Retryable campaign and network states could loop without a ceiling, while a
+  terminal integrity failure could be retried as though it were transient.
+- Persisting the complete report could leak benchmark evidence, locale details,
+  reviewer metadata, or provider information into an operator database.
+- A valid `BLOCK` report could be mistaken for a failed transport attempt or,
+  conversely, an HTTP success could be mistaken for authority to claim
+  superiority.
+
+The watcher will therefore pin its SQLite generation to the client's exact
+campaign, policy, and suite; use token-bound expiring leases and bounded
+backoff; stop permanently after a verified report or terminal failure; and
+persist only the report digest, aggregate decision, stable block reasons, and
+cardinalities. A verified `BLOCK` report is a successful fetch but remains a
+blocked claim, and an explicit operator rearm can resume only a failed watcher.
+
 ## Contract-bound benchmark OpenAPI discovery (16 September 2026)
 
 Assume a CMS can read the authenticated benchmark status and report, but must
