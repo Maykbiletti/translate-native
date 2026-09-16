@@ -1159,6 +1159,30 @@ provider or model details, or response prose. `run_forever()` is interruptible;
 after a successful rearm the benchmark watcher still resumes only through its
 ordinary supervised production tick and outer-lease guard.
 
+`website_localization_benchmark_watcher_recovery_runtime.py` is the safe
+production composition root for that operator runner. It validates the client,
+worker identity, lease, retry policy, SQLite timeout, and loop wait entirely in
+memory before creating a database. A disk-backed deployment accepts only a
+canonical absolute path below a safe owner-controlled parent, creates the file
+with mode `0600`, pins its device and inode, rejects links and replacements,
+and guards that identity before and after every serialized runner operation.
+
+Call `open_durable_benchmark_watcher_recovery(...)` to retain explicit control:
+invoke `start(operation_id)` once to record operator intent, then use
+`start_worker()` or `run_once()`. `open_hosted_benchmark_watcher_recovery(...)`
+performs those steps as one composition operation, but still requires the
+caller to supply the explicit operation ID; merely opening the runtime never
+rearms a watcher. The non-daemon worker belongs to its creator process and
+cannot be reused after a fork.
+
+Shutdown signals and joins the worker before SQLite is closed. If a remote
+request does not return within the configured join budget, close fails with a
+stable code and deliberately leaves the database open until the host retries
+shutdown. `readiness()` is content-free: it exposes only runtime/worker state,
+recovery state and phase, attempt count, and a stable error code. It contains no
+operation ID, watcher generation details, remote origin, benchmark identifiers,
+locale, provider, model, credential, content, or response prose.
+
 One supervised tick always prioritizes customer translation, release, and
 delivery work. If those are idle, configured local benchmark case execution
 runs next. Only when both are idle may the runtime perform one due report-watch
