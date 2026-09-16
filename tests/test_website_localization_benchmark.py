@@ -266,26 +266,30 @@ def review_response(request, preference, defects=None):
             item["label"]: item["text"] for item in request.input["variants"]
         }
         count = contract["offer_count"]
+        target_offer_registries = {
+            label: BENCHMARK._commercial_target_offer_registry(
+                text,
+                [
+                    [(len(text) * index // count,
+                      len(text) * (index + 1) // count)]
+                    for index in range(count)
+                ],
+                [],
+            )
+            for label, text in texts.items()
+        }
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
             "offer_count": count,
-            "target_offer_registries": {
-                label: BENCHMARK._commercial_target_offer_registry(
-                    text,
-                    [
-                        [(len(text) * index // count,
-                          len(text) * (index + 1) // count)]
-                        for index in range(count)
-                    ],
-                    [],
-                )
-                for label, text in texts.items()
-            },
+            "target_offer_registries": target_offer_registries,
             "dimensions": [
                 {
                     "dimension": item["dimension"],
                     "variants": {
                         label: {
+                            "target_offer_registry_sha256": (
+                                target_offer_registries[label]["sha256"]
+                            ),
                             "status": "equivalent",
                             "offers": [
                                 {
@@ -730,6 +734,15 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             evaluation["baseline_target_offer_registry_sha256"],
             registries[baseline_label]["sha256"],
         )
+        for item in evaluation["dimensions"]:
+            self.assertEqual(
+                item["candidate_target_offer_registry_sha256"],
+                evaluation["candidate_target_offer_registry_sha256"],
+            )
+            self.assertEqual(
+                item["baseline_target_offer_registry_sha256"],
+                evaluation["baseline_target_offer_registry_sha256"],
+            )
 
         def validate(value):
             return BENCHMARK._validate_review(
@@ -767,6 +780,28 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                     "B": registries["A"],
                 },
             ),
+            "missing_decision_binding": lambda value: value[
+                "commercial_evaluation"
+            ]["dimensions"][0]["variants"]["A"].pop(
+                "target_offer_registry_sha256"
+            ),
+            "foreign_decision_binding": lambda value: value[
+                "commercial_evaluation"
+            ]["dimensions"][0]["variants"]["A"].__setitem__(
+                "target_offer_registry_sha256", registries["B"]["sha256"],
+            ),
+            "swapped_decision_bindings": lambda value: (
+                value["commercial_evaluation"]["dimensions"][0]["variants"][
+                    "A"
+                ].__setitem__(
+                    "target_offer_registry_sha256", registries["B"]["sha256"],
+                ),
+                value["commercial_evaluation"]["dimensions"][0]["variants"][
+                    "B"
+                ].__setitem__(
+                    "target_offer_registry_sha256", registries["A"]["sha256"],
+                ),
+            ),
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name):
@@ -774,6 +809,22 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 mutate(invalid)
                 with self.assertRaises(BENCHMARK.BenchmarkBlocked):
                     validate(invalid)
+
+        rebound = copy.deepcopy(response)
+        split = len(texts["A"]) // 2 + 1
+        replacement = BENCHMARK._commercial_target_offer_registry(
+            texts["A"], [[(0, split)], [(split, len(texts["A"]))]], [],
+        )
+        rebound["commercial_evaluation"]["target_offer_registries"][
+            "A"
+        ] = replacement
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked):
+            validate(rebound)
+        for item in rebound["commercial_evaluation"]["dimensions"]:
+            item["variants"]["A"][
+                "target_offer_registry_sha256"
+            ] = replacement["sha256"]
+        validate(rebound)
 
         unicode_registry = BENCHMARK._commercial_target_offer_registry(
             "ċ€ż", [[(0, 1)], [(1, 2)]], [(2, 3)],
@@ -980,8 +1031,14 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 "dimension": list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)[-1],
                 "candidate_status": "equivalent",
                 "candidate_offers": ["equivalent", "equivalent"],
+                "candidate_target_offer_registry_sha256": evaluation[
+                    "candidate_target_offer_registry_sha256"
+                ],
                 "baseline_status": "major",
                 "baseline_offers": ["equivalent", "major"],
+                "baseline_target_offer_registry_sha256": evaluation[
+                    "baseline_target_offer_registry_sha256"
+                ],
             },
         )
 
@@ -1064,6 +1121,18 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         unsigned = copy.deepcopy(results[-1])
         unsigned.pop("attestation")
         unsigned["commercial_evaluation"]["review_response_sha256"] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [*results[:-1], rebound])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[-1])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][0][
+            "candidate_target_offer_registry_sha256"
+        ] = "0" * 64
         rebound = BENCHMARK._attest(
             unsigned, benchmark_policy, self.authority,
         )

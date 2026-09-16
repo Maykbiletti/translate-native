@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Decision-bound commercial target registries (16 September 2026)
+
+Assume both anonymous target registries are complete and valid, but an
+individual commercial dimension decision is copied from another variant or
+survives a later registry replacement.
+
+- A reviewer could swap an A/B decision while leaving both global registries
+  independently valid.
+- A registry could be replaced and canonically rehashed while existing
+  dimension decisions still refer to the previous target partition.
+- Unblinding could retain only top-level registry digests and lose the binding
+  between each signed candidate or baseline decision and its exact registry.
+- Adding the binding to the target-native pass would reveal commercial
+  structure and weaken source-blind review independence.
+
+Every source-fidelity decision will therefore repeat the exact digest of its
+anonymous variant's validated target registry. Validation will reject missing,
+foreign, swapped, or stale decision bindings. Unblinding will preserve an
+explicit candidate and baseline registry digest on every signed dimension row
+and revalidate it against the corresponding top-level digest. The target-native
+contract remains unchanged and contains neither registries nor decision
+bindings.
+
 ## Target-bound commercial benchmark offer registry (16 September 2026)
 
 Assume the source-fidelity reviewer reports a complete per-offer status matrix,

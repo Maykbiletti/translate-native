@@ -163,22 +163,26 @@ def response(review_request, preference="A"):
             item["label"]: item["text"]
             for item in review_request.input["variants"]
         }
+        target_offer_registries = {
+            label: BENCHMARK._commercial_target_offer_registry(
+                text,
+                [[(0, len(text) // 2)], [(len(text) // 2, len(text))]],
+                [],
+            )
+            for label, text in texts.items()
+        }
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
             "offer_count": 2,
-            "target_offer_registries": {
-                label: BENCHMARK._commercial_target_offer_registry(
-                    text,
-                    [[(0, len(text) // 2)], [(len(text) // 2, len(text))]],
-                    [],
-                )
-                for label, text in texts.items()
-            },
+            "target_offer_registries": target_offer_registries,
             "dimensions": [
                 {
                     "dimension": dimension,
                     "variants": {
                         label: {
+                            "target_offer_registry_sha256": (
+                                target_offer_registries[label]["sha256"]
+                            ),
                             "status": "equivalent",
                             "offers": [
                                 {
@@ -286,6 +290,25 @@ class BenchmarkReviewEvidenceStoreTests(unittest.TestCase):
 
         with self.assertRaises(STORE.BenchmarkReviewEvidenceFailed) as caught:
             self.durable(TargetDriftReviewer()).review(target_drift_request)
+        self.assertEqual(caught.exception.code, "review.store.response_invalid")
+        self.assertFalse(caught.exception.retryable)
+
+        decision_drift_request = request(
+            phase="source_fidelity", commercial=True, suffix="decision-drift",
+        )
+
+        class DecisionDriftReviewer(Reviewer):
+            def review(self, review_request):
+                value = super().review(review_request)
+                value["commercial_evaluation"]["dimensions"][0]["variants"][
+                    "A"
+                ]["target_offer_registry_sha256"] = "0" * 64
+                return value
+
+        with self.assertRaises(STORE.BenchmarkReviewEvidenceFailed) as caught:
+            self.durable(DecisionDriftReviewer()).review(
+                decision_drift_request
+            )
         self.assertEqual(caught.exception.code, "review.store.response_invalid")
         self.assertFalse(caught.exception.retryable)
 

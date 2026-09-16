@@ -24,22 +24,22 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v10"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v11"
 BASELINE_SCHEMA = "blun.website-localization-baseline.v2"
 BASELINE_PROVENANCE_SCHEMA = "blun.website-localization-baseline-provenance.v1"
 NATIVE_REFERENCE_SCHEMA = "blun.website-localization-native-reference.v1"
 NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-request.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v3"
-COMMERCIAL_REVIEW_SCHEMA = "translate-native.commercial-benchmark-review.v4"
+COMMERCIAL_REVIEW_SCHEMA = "translate-native.commercial-benchmark-review.v5"
 COMMERCIAL_TARGET_OFFER_REGISTRY_SCHEMA = (
     "translate-native.commercial-benchmark-target-offer-registry.v1"
 )
 ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v11"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v12"
 COMMERCIAL_CASE_EVALUATION_SCHEMA = (
-    "translate-native.commercial-benchmark-case-evaluation.v4"
+    "translate-native.commercial-benchmark-case-evaluation.v5"
 )
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v15"
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v16"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -985,6 +985,9 @@ def _commercial_response_contract(
                 "dimension": dimension,
                 "variants": {
                     label: {
+                        "target_offer_registry_sha256": (
+                            "exact matching anonymous target registry SHA-256"
+                        ),
                         "status": status,
                         "offers": [
                             {
@@ -1328,7 +1331,11 @@ def _validate_commercial_evaluation(
             decision = item["variants"][label]
             if (
                 not isinstance(decision, dict)
-                or set(decision) != {"status", "offers"}
+                or set(decision) != {
+                    "target_offer_registry_sha256", "status", "offers",
+                }
+                or decision["target_offer_registry_sha256"]
+                != parsed_registries[label]["sha256"]
                 or not isinstance(decision["status"], str)
                 or decision["status"] not in _COMMERCIAL_STATUSES
                 or not isinstance(decision["offers"], list)
@@ -1370,6 +1377,9 @@ def _validate_commercial_evaluation(
             if decision["status"] != aggregate:
                 raise BenchmarkBlocked("benchmark.review.invalid")
             parsed_item["variants"][label] = {
+                "target_offer_registry_sha256": parsed_registries[label][
+                    "sha256"
+                ],
                 "status": aggregate,
                 "offers": offer_statuses,
             }
@@ -1476,8 +1486,14 @@ def _unblind_commercial_evaluation(
                 "dimension": item["dimension"],
                 "candidate_status": decision(item, "candidate")["status"],
                 "candidate_offers": decision(item, "candidate")["offers"],
+                "candidate_target_offer_registry_sha256": decision(
+                    item, "candidate"
+                )["target_offer_registry_sha256"],
                 "baseline_status": decision(item, "baseline")["status"],
                 "baseline_offers": decision(item, "baseline")["offers"],
+                "baseline_target_offer_registry_sha256": decision(
+                    item, "baseline"
+                )["target_offer_registry_sha256"],
             }
             for item in evaluation["dimensions"]
         ],
@@ -2030,7 +2046,9 @@ def _validated_case_result(
                 not isinstance(item, dict)
                 or set(item) != {
                     "dimension", "candidate_status", "candidate_offers",
+                    "candidate_target_offer_registry_sha256",
                     "baseline_status", "baseline_offers",
+                    "baseline_target_offer_registry_sha256",
                 }
                 or item["dimension"] != expected_dimension
             ):
@@ -2038,10 +2056,18 @@ def _validated_case_result(
             for origin in ("candidate", "baseline"):
                 status = item[origin + "_status"]
                 offers = item[origin + "_offers"]
-                if status not in {
-                    "equivalent", "not_present", "major", "blocking",
-                } or (
-                    not isinstance(offers, list)
+                target_registry_sha256 = item[
+                    origin + "_target_offer_registry_sha256"
+                ]
+                if (
+                    target_registry_sha256
+                    != commercial_evaluation[
+                        origin + "_target_offer_registry_sha256"
+                    ]
+                    or status not in {
+                        "equivalent", "not_present", "major", "blocking",
+                    }
+                    or not isinstance(offers, list)
                     or len(offers) != benchmark_case["commercial_offer_count"]
                     or any(
                         offer_status not in {

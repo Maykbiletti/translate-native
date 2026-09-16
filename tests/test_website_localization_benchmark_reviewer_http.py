@@ -128,26 +128,30 @@ def review_response(request, *, preference="A", **overrides):
             item["label"]: item["text"] for item in request.input["variants"]
         }
         count = contract["offer_count"]
+        target_offer_registries = {
+            label: BENCHMARK._commercial_target_offer_registry(
+                text,
+                [
+                    [(len(text) * index // count,
+                      len(text) * (index + 1) // count)]
+                    for index in range(count)
+                ],
+                [],
+            )
+            for label, text in texts.items()
+        }
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
             "offer_count": count,
-            "target_offer_registries": {
-                label: BENCHMARK._commercial_target_offer_registry(
-                    text,
-                    [
-                        [(len(text) * index // count,
-                          len(text) * (index + 1) // count)]
-                        for index in range(count)
-                    ],
-                    [],
-                )
-                for label, text in texts.items()
-            },
+            "target_offer_registries": target_offer_registries,
             "dimensions": [
                 {
                     "dimension": item["dimension"],
                     "variants": {
                         label: {
+                            "target_offer_registry_sha256": (
+                                target_offer_registries[label]["sha256"]
+                            ),
                             "status": "equivalent",
                             "offers": [
                                 {
@@ -350,6 +354,21 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
             commercial_evaluation=response["commercial_evaluation"],
         )]
         error = self.failure(lambda: adapter.review(target_drift))
+        self.assertEqual((error.code, error.retryable), ("response_invalid", False))
+
+        decision_drift = review_request(
+            phase="source_fidelity", content_type="commercial",
+            suffix="decision-registry-drift",
+        )
+        response = review_response(decision_drift)
+        response["commercial_evaluation"]["dimensions"][0]["variants"][
+            "A"
+        ]["target_offer_registry_sha256"] = "0" * 64
+        self.transport.results = [http_response(
+            decision_drift,
+            commercial_evaluation=response["commercial_evaluation"],
+        )]
+        error = self.failure(lambda: adapter.review(decision_drift))
         self.assertEqual((error.code, error.retryable), ("response_invalid", False))
 
     def test_headers_bind_authentication_idempotency_and_request_hash(self):
