@@ -1,5 +1,33 @@
 # Version 6 premortem
 
+## Provider-neutral watcher recovery client (16 September 2026)
+
+Assume an external operator has a valid failed watcher generation but must
+invoke its recovery endpoint through an untrusted network path.
+
+- A redirect or unsafe origin could disclose operator credentials and the
+  recovery request.
+- A credential adapter could replace framing or idempotency headers after the
+  request was hashed.
+- A lost response could prompt a newly generated request that resets a later
+  failure generation instead of replaying the accepted operation.
+- A valid-looking receipt could describe another attempt, failure time, or
+  stable error code.
+- Duplicate headers or JSON keys, compression, transfer framing, or an
+  oversized response could create a different parsed message.
+- Treating every failure as retryable could loop on an integrity conflict;
+  treating every failure as terminal could strand an accepted rearm after a
+  lost response.
+
+The client will pin HTTPS except for explicit loopback development, disable
+redirects, reserve all protocol-owned headers, and give the credential adapter
+only the exact method, path, body digest, and idempotency identity. It will
+validate strict response framing and bind every receipt field to the canonical
+request. Network, authentication-service, ambiguous transport/parser, and
+valid retryable remote failures permit only the same bounded replay; a changed
+remote error contract or semantically mismatched receipt remains terminal and
+content-free.
+
 ## Authenticated benchmark watcher recovery (16 September 2026)
 
 Assume a report watcher reaches terminal failure and an operator must recover it

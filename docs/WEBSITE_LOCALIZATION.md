@@ -1044,7 +1044,7 @@ WSGI application at `benchmark_watch_control_http`. It accepts only HTTPS
 non-callable authenticator, fails composition before service schemas are
 created.
 
-The closed request has exactly three fields:
+The closed request has exactly five fields:
 
 ```json
 {
@@ -1073,6 +1073,32 @@ the request SHA-256, prior `failed` state, attempt count, stable error code and
 failure time, new `pending` state, and rearm time. Actual work still enters the
 normal supervised tick, including its outer-lease guard immediately before
 network access.
+
+External operator services can use
+`website_localization_benchmark_watcher_control_client.py` instead of
+constructing this security-sensitive request themselves. The client accepts a
+single origin and a provider-neutral credential callback. That callback sees a
+closed context containing only the `POST` method, rearm path, canonical body
+SHA-256, and request ID used as the idempotency key; it may return bearer,
+signature, gateway, or other host-specific headers but cannot override the
+method framing, content length/type, host, connection policy, or idempotency
+header.
+
+`rearm(...)` requires the exact attempt count, failure timestamp, and stable
+error code observed from the blocked watcher health state. It sends one
+canonical JSON body over pinned HTTPS without redirects and returns only a
+defensive copy of the verified content-free receipt. A transport outcome that
+may have followed server acceptance is retryable: the caller must invoke the
+same arguments and request ID so the server replays its stored response. The
+client never rotates that identity automatically.
+
+Response status, length, security headers, transfer framing, UTF-8, unique JSON
+keys, schema, request digest, prior state, attempt, failure time, error code,
+new state, and rearm time are all authoritative. A valid `503` retry decision
+or network outage permits replay. A stale-generation `409`, altered receipt,
+unsafe origin, forged protocol header, malformed response, or future-dated
+rearm remains fail-closed. The default implementation permits plain HTTP only
+when a host explicitly opts into a loopback origin for local testing.
 
 One supervised tick always prioritizes customer translation, release, and
 delivery work. If those are idle, configured local benchmark case execution
