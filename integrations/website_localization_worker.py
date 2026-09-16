@@ -317,6 +317,9 @@ def _invoke(provider: Any, request: ProviderRequest) -> tuple[dict[str, Any], st
     invoke = getattr(provider, "invoke", None)
     if not callable(invoke):
         raise LocalizationWorkerBlocked("provider.adapter.invalid", retryable=False)
+    delegated = request.provider_id.startswith("host-subagents-v1-")
+    if delegated and not callable(getattr(provider, "verified_call_evidence", None)):
+        raise LocalizationWorkerBlocked("provider.evidence.required", retryable=False)
     request_hash = _hash_json(request.as_payload())
     try:
         response = invoke(request)
@@ -344,8 +347,27 @@ def _invoke(provider: Any, request: ProviderRequest) -> tuple[dict[str, Any], st
         raise LocalizationWorkerBlocked("provider.adapter.mutated_request", retryable=False)
     if not isinstance(response, Mapping):
         raise LocalizationWorkerBlocked("provider.response.invalid", retryable=True)
-    response = dict(response)
+    response = json.loads(_canonical_json(dict(response)))
     response_hash = _hash_json(response)
+    evidence_reader = getattr(provider, "verified_call_evidence", None)
+    if callable(evidence_reader):
+        try:
+            evidence = evidence_reader(request, json.loads(_canonical_json(response)))
+            if delegated and request.phase != "transcreation" and evidence is None:
+                raise ValueError
+            if evidence is not None:
+                if not isinstance(evidence, dict):
+                    raise ValueError
+                # Preserve strict result/approval schemas while committing the
+                # host-verified execution identity into the signed result hash.
+                response_hash = _hash_json({
+                    "schema": "translate-native.host-review-commitment.v1",
+                    "response": response, "host_evidence": evidence,
+                })
+        except Exception:
+            raise LocalizationWorkerBlocked("provider.evidence.invalid", retryable=False) from None
+    if _hash_json(request.as_payload()) != request_hash:
+        raise LocalizationWorkerBlocked("provider.adapter.mutated_request", retryable=False)
     return response, request_hash, response_hash
 
 
