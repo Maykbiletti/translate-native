@@ -125,6 +125,61 @@ agent and channel. Both steps are checked against the receipt and the live
 Guard state; the grant is one-time and Guard-boot-bound. Translation receipts
 remain available to the existing portable verification path.
 
+### Durable reference host endpoint
+
+`integrations/website_localization_subagent_host.py` implements the server half
+of the authenticated HTTPS bridge. Its WSGI boundary authenticates the fixed
+bearer before reading or parsing a request body. A closed `PinnedReviewPolicy`
+then resolves the exact schema, phase, locale, content type and complete
+target-language task-policy digest. The target-native digest covers every task
+field except the candidate itself, so source text hidden in a brief, profile or
+other nested metadata blocks before launcher access.
+
+The trusted route—not the model or caller—assigns agent identity, session,
+reviewer role, model version and budgets. The launcher receives only that
+assignment and a reduced model task. Target-native input contains no source,
+creator context, inherited messages, tools, credentials, journal or signing
+authority. Fidelity input contains the source and candidate needed for its
+separate comparison, but excludes internal job and policy identifiers.
+
+A launcher implements both methods:
+
+```python
+execute_idempotent(
+    assignment, model_input,
+    deadline_seconds=deadline_seconds,
+    max_output_tokens=max_output_tokens,
+)
+reconcile(assignment)
+```
+
+`execute_idempotent` must atomically deduplicate the physical model start by
+`assignment.execution_key` across processes. SQLite lease generations fence
+stale commits, but cannot stop an old paused process from crossing an external
+start boundary after its lease expires. `reconcile` returns exactly one of
+`completed`, `not_started`, `running`, `unknown` or `cancel_pending`; only a
+trustworthy `not_started` result may start work after recovery.
+
+The owner-controlled SQLite journal binds the authenticated principal, host,
+request, candidate, locale, phase, provider, host policy and complete review
+sequence. It stores the complete validated HMAC-attested reply before HTTP 200,
+replays exact completed requests byte-for-byte, and rejects a changed request
+under the same execution key. Permanent identity, response-contract and
+reconciliation errors use non-retryable HTTP status. Ambiguous launcher loss
+remains retryable and must be reconciled without inventing a review.
+
+Source-fidelity work requires the exact completed native receipt for the same
+sequence, principal and host, with distinct reviewer agent and session
+identities. The host validates the complete phase-specific structured response
+before signing; it does not treat an eventual downstream rejection as license
+to attest malformed reviewer output. Commercial fidelity retains its pinned
+public evidence contract and is validated with the same portable commercial
+validator used by the worker before the host attests it.
+
+The endpoint is provider-neutral and deliberately does not contain a real
+model-specific launcher. Finnish and Maltese fixtures exercise the protocol,
+not native-language quality, model independence or superiority over DeepL.
+
 ## Authenticated HTTPS host bridge
 
 `integrations/website_localization_subagent_http.py` implements the `ReviewHost`

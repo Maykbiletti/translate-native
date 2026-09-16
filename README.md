@@ -110,6 +110,32 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.187.0: durable host endpoint for isolated reviewers
+
+The authenticated reviewer client now has a provider-neutral server half in
+`integrations/website_localization_subagent_host.py`. The WSGI endpoint
+authenticates before reading JSON, resolves only pinned locale/profile routes,
+assigns reviewer identity and budgets from trusted host policy, and sends a
+source-blind reviewer only the target candidate and permitted target-language
+profile. Source-fidelity review is accepted only after the exact successful
+native receipt for the same candidate, target policy, authenticated principal,
+host, provider and model generation.
+
+The host commits the complete HMAC-attested response to an atomic SQLite
+journal before returning HTTP 200. Exact retries replay identical bytes;
+changed requests conflict. Crash continuation requires a launcher with atomic
+`execute_idempotent` physical-start deduplication plus `reconcile`, so an
+expired database lease cannot start the same model job twice. Invalid reviewer
+identity, execution metadata or complete phase-specific response structure is
+never attested.
+
+Synthetic Finnish and Maltese tests exercise ordinary target-language answers
+and ordered website translation reviews through the real HTTPS client and WSGI
+endpoint, including source isolation, self-review, replay, response loss,
+concurrency and expired-worker races. They prove protocol behavior only. A
+deployment must still supply a real model-specific isolated launcher and real
+qualified native-language evidence; these tests make no DeepL-quality claim.
+
 ### Version 6.186.0: deployable HTTPS response-review runtime
 
 The isolated Guard can now construct its mandatory ordinary-response reviewer
@@ -134,8 +160,9 @@ and the [host contract](docs/host-subagent-reviews.md).
 Synthetic Finnish and Maltese integration fixtures cover the complete
 configuration-to-Guard path, source isolation, forged attestation, secret-file
 protection and bounded concurrency. They establish protocol behavior only.
-The remote host must still supply a real isolated subagent executor and durable
-execution-key ledger, and qualified native evidence or independent-model
+Version 6.187.0 supplies the provider-neutral durable host endpoint and its
+strict launcher contract. A deployment must still supply a real isolated
+model-specific launcher, and qualified native evidence or independent-model
 evidence remains required where confidence is insufficient. No DeepL-quality
 claim follows from these tests.
 
@@ -180,9 +207,10 @@ Maltese fixtures, including authenticated HTTPS transport. These tests prove
 isolation and binding behavior, not native-language quality or superiority over
 DeepL. A product-specific factory implementation, its live configuration and
 real qualified/native quality evidence remain deployment responsibilities.
-Version 6.186.0 supplies the protected generic HTTPS factory, but without a
-configured remote host, trust files and real reviewer execution, readiness and
-response release deliberately stay blocked.
+Versions 6.186.0 and 6.187.0 supply the protected generic HTTPS factory and
+durable provider-neutral host endpoint. Without configured trust files, a real
+model-specific launcher and actual reviewer execution, readiness and response
+release deliberately stay blocked.
 
 ### Version 6.184.0: authenticated host-subagent HTTPS bridge
 
@@ -2898,7 +2926,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.186.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.187.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
