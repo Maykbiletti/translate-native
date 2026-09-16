@@ -1052,6 +1052,16 @@ content.
 non-callable authenticator, fails composition before service schemas are
 created.
 
+The same application exposes the strictly bodyless
+`GET /v1/benchmarks/watcher/openapi` route under the separate exact scope
+`benchmark-watcher:openapi:read`. It returns an origin-free OpenAPI 3.1 document
+for status, rearm, and discovery itself, together with the closed contract and
+document SHA-256 values. The document is built only from versioned constants;
+the route does not read watcher state and cannot disclose campaign, policy,
+suite, locale, provider, model, credential, error-instance, or benchmark
+content. The 4-KiB recovery request limit remains unchanged while the bounded
+response limit independently accommodates the complete contract.
+
 The closed request has exactly five fields:
 
 ```json
@@ -1100,6 +1110,12 @@ the caller-supplied identity for the canonical rearm request. If the watcher is
 not failed, it performs no `POST`. A race after the `GET` remains safe because
 the controller atomically compares the submitted generation with current
 durable state.
+
+`openapi()` uses its own bodyless credential context, reconstructs the complete
+expected contract and document locally, and compares the server's contract
+digest, document digest, and full value. A stale document, changed path or
+scope, removed error status, altered schema, or self-rehashed substitute blocks
+before the document is returned to a caller.
 
 `rearm(...)` requires the exact attempt count, failure timestamp, and stable
 error code observed from the blocked watcher health state. It sends one

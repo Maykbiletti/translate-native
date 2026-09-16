@@ -115,6 +115,24 @@ def status_response(*, state="failed", **changes):
     })
 
 
+def openapi_response(*, document=None, contract_digest=None, document_digest=None):
+    contract = CONTROL._openapi_contract()
+    expected = CONTROL._OPENAPI.build_document(contract)
+    document = expected if document is None else document
+    return http_result({
+        "schema": CONTROL.OPENAPI_RESPONSE_SCHEMA,
+        "contract_sha256": (
+            CONTROL._OPENAPI.document_sha256(contract)
+            if contract_digest is None else contract_digest
+        ),
+        "openapi_sha256": (
+            CONTROL._OPENAPI.document_sha256(document)
+            if document_digest is None else document_digest
+        ),
+        "openapi": document,
+    })
+
+
 class Transport:
     def __init__(self, *results):
         self.results = list(results)
@@ -277,6 +295,62 @@ class BenchmarkWatcherControlClientTests(unittest.TestCase):
         payload = status.as_payload()
         payload["generation"]["attempts"] = 1
         self.assertEqual(status.generation["attempts"], 20)
+
+    def test_openapi_is_exact_reconstructed_and_uses_separate_bodyless_auth(self):
+        contexts = []
+        transport = Transport(openapi_response())
+        snapshot = self.make_client(
+            transport,
+            credentials=lambda context: contexts.append(context) or {
+                "Authorization": "Bearer openapi-token",
+            },
+        ).openapi()
+
+        method, url, headers, body, timeout = transport.calls[0]
+        self.assertEqual(method, "GET")
+        self.assertEqual(url, "https://control.example" + CONTROL.OPENAPI_PATH)
+        self.assertIsNone(body)
+        self.assertNotIn("Content-Type", headers)
+        self.assertNotIn("Content-Length", headers)
+        self.assertNotIn("Idempotency-Key", headers)
+        self.assertEqual(headers["Authorization"], "Bearer openapi-token")
+        self.assertEqual(timeout, 10.0)
+        self.assertEqual(contexts, [{
+            "schema": CLIENT.AUTH_CONTEXT_SCHEMA,
+            "method": "GET",
+            "path": CONTROL.OPENAPI_PATH,
+            "body_sha256": hashlib.sha256(b"").hexdigest(),
+            "idempotency_key": None,
+        }])
+        expected = CONTROL._OPENAPI.build_document(CONTROL._openapi_contract())
+        self.assertEqual(snapshot.openapi, expected)
+        self.assertEqual(set(snapshot.openapi["paths"]), {
+            CONTROL.OPENAPI_PATH, CONTROL.REARM_PATH, CONTROL.STATUS_PATH,
+        })
+        self.assertNotIn("servers", snapshot.openapi)
+        payload = snapshot.as_payload()
+        payload["info"]["title"] = "changed"
+        self.assertNotEqual(snapshot.openapi["info"]["title"], "changed")
+
+    def test_openapi_rejects_self_rehashed_stale_and_digest_substitutions(self):
+        altered = deepcopy(
+            CONTROL._OPENAPI.build_document(CONTROL._openapi_contract())
+        )
+        altered["info"]["description"] = "Altered contract"
+        scenarios = (
+            openapi_response(document=altered),
+            openapi_response(contract_digest="d" * 64),
+            openapi_response(document_digest="e" * 64),
+        )
+        for response in scenarios:
+            with self.subTest(response=response.body[:120]):
+                self.assert_failure(
+                    "benchmark_watcher.control_client.openapi_mismatch",
+                    lambda response=response: self.make_client(
+                        Transport(response)
+                    ).openapi(),
+                    retryable=False,
+                )
 
     def test_rearm_failed_completes_status_to_recovery_vertical(self):
         connection = sqlite3.connect(":memory:")
@@ -734,7 +808,7 @@ class BenchmarkWatcherControlClientTests(unittest.TestCase):
                 )
 
 
-MAX_PADDING = CONTROL.MAX_BODY_BYTES + 1
+MAX_PADDING = CONTROL.MAX_RESPONSE_BYTES + 1
 
 
 if __name__ == "__main__":

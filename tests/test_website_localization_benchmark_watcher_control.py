@@ -147,6 +147,98 @@ class BenchmarkWatcherControlTests(unittest.TestCase):
         ))
         return captured["status"], captured["headers"], json.loads(encoded), encoded
 
+    def call_openapi(self, **overrides):
+        captured = {}
+        environ = {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": CONTROL.OPENAPI_PATH,
+            "QUERY_STRING": "",
+            "wsgi.url_scheme": "https",
+            "wsgi.input": io.BytesIO(b""),
+            "HTTP_AUTHORIZATION": "Bearer private-openapi-token",
+        }
+        environ.update(overrides)
+        encoded = b"".join(self.app(
+            environ,
+            lambda status, headers: captured.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        return captured["status"], captured["headers"], json.loads(encoded), encoded
+
+    def test_authenticated_openapi_is_exact_origin_free_and_state_independent(self):
+        self.app.authenticator = lambda request: (
+            self.requests.append(request)
+            or self.principal(scope=CONTROL.OPENAPI_SCOPE)
+        )
+        self.connection.execute("DROP TABLE benchmark_report_watcher")
+        self.connection.commit()
+
+        status, headers, payload, encoded = self.call_openapi()
+
+        contract = CONTROL._openapi_contract()
+        expected = CONTROL._OPENAPI.build_document(contract)
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(payload, {
+            "schema": CONTROL.OPENAPI_RESPONSE_SCHEMA,
+            "contract_sha256": CONTROL._OPENAPI.document_sha256(contract),
+            "openapi_sha256": CONTROL._OPENAPI.document_sha256(expected),
+            "openapi": expected,
+        })
+        self.assertEqual(set(expected["paths"]), {
+            CONTROL.OPENAPI_PATH, CONTROL.REARM_PATH, CONTROL.STATUS_PATH,
+        })
+        self.assertNotIn("servers", expected)
+        self.assertGreater(len(encoded), CONTROL.MAX_BODY_BYTES)
+        self.assertLessEqual(len(encoded), CONTROL.MAX_RESPONSE_BYTES)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertNotIn(CAMPAIGN_ID, encoded.decode("utf-8"))
+        self.assertNotIn(POLICY_SHA256, encoded.decode("utf-8"))
+        self.assertNotIn(SUITE_SHA256, encoded.decode("utf-8"))
+        self.assertEqual(self.requests, [{
+            "schema": CONTROL.AUTH_REQUEST_SCHEMA,
+            "method": "GET",
+            "path": CONTROL.OPENAPI_PATH,
+            "headers": [["authorization", "Bearer private-openapi-token"]],
+            "body_sha256": hashlib.sha256(b"").hexdigest(),
+        }])
+
+    def test_openapi_scope_and_body_are_enforced_before_document_build(self):
+        builds = []
+        original = CONTROL._OPENAPI.build_document
+
+        def observed(contract):
+            builds.append(contract)
+            return original(contract)
+
+        CONTROL._OPENAPI.build_document = observed
+        try:
+            self.app.authenticator = lambda request: self.principal(
+                scope=CONTROL.STATUS_SCOPE,
+            )
+            status, _, payload, _ = self.call_openapi()
+            self.assertEqual(status, "401 Unauthorized")
+            self.assertEqual(
+                payload["error_code"],
+                "benchmark_watcher.control.authentication_failed",
+            )
+            self.assertEqual(builds, [])
+
+            auth_calls = []
+            self.app.authenticator = lambda request: (
+                auth_calls.append(request)
+                or self.principal(scope=CONTROL.OPENAPI_SCOPE)
+            )
+            status, _, payload, _ = self.call_openapi(CONTENT_LENGTH="1")
+            self.assertEqual(status, "400 Bad Request")
+            self.assertEqual(
+                payload["error_code"], "benchmark_watcher.control.body_invalid",
+            )
+            self.assertEqual(auth_calls, [])
+            self.assertEqual(builds, [])
+        finally:
+            CONTROL._OPENAPI.build_document = original
+
     def test_authenticated_status_returns_only_exact_failed_generation(self):
         self.app.authenticator = lambda request: (
             self.requests.append(request)

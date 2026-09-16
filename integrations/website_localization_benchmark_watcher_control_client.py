@@ -79,7 +79,7 @@ def _load_control():
 
 
 _CONTROL = _load_control()
-MAX_RESPONSE_BYTES = _CONTROL.MAX_BODY_BYTES
+MAX_RESPONSE_BYTES = _CONTROL.MAX_RESPONSE_BYTES
 
 
 class BenchmarkWatcherControlClientFailed(RuntimeError):
@@ -329,6 +329,16 @@ class BenchmarkWatcherRecoveryStatus:
         }
 
 
+@dataclass(frozen=True)
+class BenchmarkWatcherControlOpenAPISnapshot:
+    contract_sha256: str
+    openapi_sha256: str
+    openapi: dict[str, Any]
+
+    def as_payload(self) -> dict[str, Any]:
+        return deepcopy(self.openapi)
+
+
 class WebsiteLocalizationBenchmarkWatcherControlClient:
     """Inspect and rearm one exact watcher generation through strict HTTPS."""
 
@@ -486,6 +496,48 @@ class WebsiteLocalizationBenchmarkWatcherControlClient:
         return BenchmarkWatcherRecoveryStatus(
             checked_at, status["state"], status["rearmable"],
             deepcopy(generation),
+        )
+
+    def openapi(self) -> BenchmarkWatcherControlOpenAPISnapshot:
+        """Read and locally reconstruct the exact origin-free contract."""
+        headers = self._authorization_headers(
+            method="GET", path=_CONTROL.OPENAPI_PATH, body=b"",
+            idempotency_key=None,
+        )
+        result_status, value = self._response(
+            method="GET", path=_CONTROL.OPENAPI_PATH, headers=headers, body=None,
+        )
+        if (
+            result_status != 200
+            or set(value) != {
+                "schema", "contract_sha256", "openapi_sha256", "openapi",
+            }
+            or value.get("schema") != _CONTROL.OPENAPI_RESPONSE_SCHEMA
+            or not isinstance(value.get("contract_sha256"), str)
+            or _CONTROL.SHA256.fullmatch(value["contract_sha256"]) is None
+            or not isinstance(value.get("openapi_sha256"), str)
+            or _CONTROL.SHA256.fullmatch(value["openapi_sha256"]) is None
+            or not isinstance(value.get("openapi"), dict)
+        ):
+            _fail("benchmark_watcher.control_client.response_invalid", retryable=True)
+        try:
+            contract = _CONTROL._openapi_contract()
+            expected_contract_sha256 = _CONTROL._OPENAPI.document_sha256(contract)
+            expected = _CONTROL._OPENAPI.build_document(contract)
+            expected_openapi_sha256 = _CONTROL._OPENAPI.document_sha256(expected)
+        except Exception:
+            _fail("benchmark_watcher.control_client.openapi_mismatch")
+        if (
+            value["contract_sha256"] != expected_contract_sha256
+            or value["openapi_sha256"] != expected_openapi_sha256
+            or _CONTROL._OPENAPI.document_sha256(value["openapi"])
+            != value["openapi_sha256"]
+            or value["openapi"] != expected
+        ):
+            _fail("benchmark_watcher.control_client.openapi_mismatch")
+        return BenchmarkWatcherControlOpenAPISnapshot(
+            expected_contract_sha256, expected_openapi_sha256,
+            deepcopy(expected),
         )
 
     def rearm_failed(self, *, request_id: str) -> BenchmarkWatcherRearmSnapshot:

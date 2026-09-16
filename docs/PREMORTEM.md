@@ -1,5 +1,30 @@
 # Version 6 premortem
 
+## Contract-bound watcher recovery discovery (16 September 2026)
+
+Assume the recovery endpoints work, but an external operator cannot safely
+discover or verify their exact contract.
+
+- Reusing the status or rearm scope for discovery could grant unnecessary
+  read or write authority.
+- Building the document from live watcher state could leak campaign, locale,
+  provider, model, or failure metadata.
+- The existing request-size limit could truncate a valid OpenAPI response or
+  encourage an unsafe increase in accepted request bodies.
+- A proxy or compromised endpoint could alter the document and recompute only
+  its outer digest.
+- A stale client could trust changed paths, scopes, error statuses, or schema
+  identifiers and invoke the wrong operation.
+- A body-bearing discovery `GET` could be parsed differently across network
+  layers.
+
+Discovery will use its own exact read scope and a strictly bodyless route. The
+origin-free document will be derived only from a closed, versioned constant
+contract and will never read watcher state. Request and response byte limits
+will remain separate. The client will reconstruct the complete expected
+document locally and require the contract digest, document digest, and value
+to match, so a stale or self-rehashed substitute fails closed.
+
 ## Observable watcher recovery (16 September 2026)
 
 Assume an operator can call the rearm endpoint but cannot safely obtain the

@@ -1035,9 +1035,13 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
                 "credential_id": "benchmark-control-1",
                 "credential_version": "2026-09-16",
                 "scope": (
-                    control.STATUS_SCOPE
-                    if request["path"] == control.STATUS_PATH
-                    else control.REARM_SCOPE
+                    control.OPENAPI_SCOPE
+                    if request["path"] == control.OPENAPI_PATH
+                    else (
+                        control.STATUS_SCOPE
+                        if request["path"] == control.STATUS_PATH
+                        else control.REARM_SCOPE
+                    )
                 ),
             }
 
@@ -1054,6 +1058,26 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         """)
         watch["connection"].commit()
         self.clock.value = 200
+        openapi_capture = {}
+        openapi_bytes = b"".join(runtime.benchmark_watch_control_http(
+            {
+                "REQUEST_METHOD": "GET",
+                "PATH_INFO": control.OPENAPI_PATH,
+                "QUERY_STRING": "",
+                "wsgi.url_scheme": "https",
+                "wsgi.input": io.BytesIO(b""),
+                "HTTP_AUTHORIZATION": "Bearer private-openapi-token",
+            },
+            lambda status, headers: openapi_capture.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        openapi_payload = json.loads(openapi_bytes)
+        self.assertEqual(openapi_capture["status"], "200 OK")
+        self.assertEqual(set(openapi_payload["openapi"]["paths"]), {
+            control.OPENAPI_PATH, control.REARM_PATH, control.STATUS_PATH,
+        })
+        self.assertNotIn("servers", openapi_payload["openapi"])
         status_capture = {}
         status_bytes = b"".join(runtime.benchmark_watch_control_http(
             {
@@ -1113,14 +1137,16 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertEqual(
             runtime.benchmark_report_watcher.status(now=200).state, "pending",
         )
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 3)
         self.assertEqual(
             [(item["method"], item["path"]) for item in requests],
             [
+                ("GET", control.OPENAPI_PATH),
                 ("GET", control.STATUS_PATH),
                 ("POST", control.REARM_PATH),
             ],
         )
+        self.assertNotIn(WATCH_CAMPAIGN_ID, openapi_bytes.decode("utf-8"))
         self.assertNotIn(WATCH_CAMPAIGN_ID, encoded.decode("utf-8"))
 
     def test_runtime_rejects_incomplete_or_invalid_watcher_control(self):

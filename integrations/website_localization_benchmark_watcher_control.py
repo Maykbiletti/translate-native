@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping
 
 REARM_PATH = "/v1/benchmarks/watcher/rearm"
 STATUS_PATH = "/v1/benchmarks/watcher/status"
+OPENAPI_PATH = "/v1/benchmarks/watcher/openapi"
 REQUEST_SCHEMA = "blun.website-localization-benchmark-watcher-rearm-request.v1"
 RESPONSE_SCHEMA = "blun.website-localization-benchmark-watcher-rearm-response.v1"
 RECEIPT_SCHEMA = "blun.website-localization-benchmark-watcher-rearm-receipt.v1"
@@ -29,12 +30,15 @@ STATUS_RESPONSE_SCHEMA = (
     "blun.website-localization-benchmark-watcher-control-status-response.v1"
 )
 STATUS_SCHEMA = "blun.website-localization-benchmark-watcher-control-status.v1"
+CONTRACT_SCHEMA = "blun.website-localization-benchmark-watcher-control-contract.v1"
 AUTH_REQUEST_SCHEMA = "blun.website-localization-benchmark-watcher-control-auth.v1"
 PRINCIPAL_SCHEMA = "blun.website-localization-benchmark-watcher-operator.v1"
 ERROR_SCHEMA = "blun.website-localization-benchmark-watcher-control-error.v1"
 REARM_SCOPE = "benchmark-watcher:rearm"
 STATUS_SCOPE = "benchmark-watcher:status:read"
+OPENAPI_SCOPE = "benchmark-watcher:openapi:read"
 MAX_BODY_BYTES = 4096
+MAX_RESPONSE_BYTES = 65536
 MAX_HEADERS = 64
 MAX_HEADER_VALUE = 4096
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,255}$")
@@ -63,7 +67,24 @@ def _load_watcher():
     return module
 
 
+def _load_openapi():
+    path = Path(__file__).resolve().with_name(
+        "website_localization_benchmark_watcher_control_openapi.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "blun_website_localization_benchmark_watcher_control_openapi", path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("benchmark watcher control OpenAPI is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 _WATCHER = _load_watcher()
+_OPENAPI = _load_openapi()
+OPENAPI_RESPONSE_SCHEMA = _OPENAPI.RESPONSE_SCHEMA
 
 
 class BenchmarkWatcherControlFailed(RuntimeError):
@@ -88,7 +109,7 @@ class BenchmarkWatcherOperator:
     scope: str
 
 
-def _canonical_json(value: Any) -> bytes:
+def _canonical_json(value: Any, *, max_bytes: int = MAX_BODY_BYTES) -> bytes:
     try:
         encoded = json.dumps(
             value, ensure_ascii=False, allow_nan=False, sort_keys=True,
@@ -99,7 +120,7 @@ def _canonical_json(value: Any) -> bytes:
             "benchmark_watcher.control.response_invalid",
             status=503, retryable=True,
         ) from None
-    if not encoded or len(encoded) > MAX_BODY_BYTES:
+    if not encoded or len(encoded) > max_bytes:
         raise BenchmarkWatcherControlFailed(
             "benchmark_watcher.control.response_invalid",
             status=503, retryable=True,
@@ -179,6 +200,65 @@ def _request(value: Any) -> dict[str, Any]:
         raise BenchmarkWatcherControlFailed(
             "benchmark_watcher.control.request_invalid", status=400,
         ) from None
+
+
+def _openapi_contract() -> dict[str, Any]:
+    common = {
+        "auth_request_schema": AUTH_REQUEST_SCHEMA,
+        "principal_schema": PRINCIPAL_SCHEMA,
+        "success_status": 200,
+    }
+    return {
+        "schema": CONTRACT_SCHEMA,
+        "version": "6.179.0",
+        "auth_request_schema": AUTH_REQUEST_SCHEMA,
+        "principal_schema": PRINCIPAL_SCHEMA,
+        "request_schema": REQUEST_SCHEMA,
+        "rearm_response_schema": RESPONSE_SCHEMA,
+        "receipt_schema": RECEIPT_SCHEMA,
+        "status_response_schema": STATUS_RESPONSE_SCHEMA,
+        "status_schema": STATUS_SCHEMA,
+        "error_response_schema": ERROR_SCHEMA,
+        "openapi_response_schema": OPENAPI_RESPONSE_SCHEMA,
+        "states": (
+            "pending", "leased", "retry_wait", "succeeded", "failed",
+        ),
+        "max_request_bytes": MAX_BODY_BYTES,
+        "max_response_bytes": MAX_RESPONSE_BYTES,
+        "max_attempts": _WATCHER.MAX_ATTEMPTS,
+        "operations": {
+            "openapi": {
+                "name": "openapi", "method": "GET", "path": OPENAPI_PATH,
+                "scope": OPENAPI_SCOPE,
+                "operation_id": "readBenchmarkWatcherControlOpenAPI",
+                "summary": "Read the exact watcher control contract",
+                "response_component": "OpenAPIResponse",
+                "request_component": None,
+                "error_statuses": (400, 401, 404, 503),
+                **common,
+            },
+            "rearm": {
+                "name": "rearm", "method": "POST", "path": REARM_PATH,
+                "scope": REARM_SCOPE,
+                "operation_id": "rearmFailedBenchmarkWatcher",
+                "summary": "Rearm one exact terminally failed generation",
+                "response_component": "RearmResponse",
+                "request_component": "RearmRequest",
+                "error_statuses": (400, 401, 404, 409, 413, 415, 503),
+                **common,
+            },
+            "status": {
+                "name": "status", "method": "GET", "path": STATUS_PATH,
+                "scope": STATUS_SCOPE,
+                "operation_id": "readBenchmarkWatcherControlStatus",
+                "summary": "Read the content-free watcher recovery status",
+                "response_component": "StatusResponse",
+                "request_component": None,
+                "error_statuses": (400, 401, 404, 503),
+                **common,
+            },
+        },
+    }
 
 
 class DurableBenchmarkWatcherRearmController:
@@ -524,7 +604,7 @@ class BenchmarkWatcherControlHTTPApplication:
 
     @staticmethod
     def _send(start_response, status: int, payload: Mapping[str, Any]):
-        body = _canonical_json(dict(payload))
+        body = _canonical_json(dict(payload), max_bytes=MAX_RESPONSE_BYTES)
         phrases = {
             200: "OK", 400: "Bad Request", 401: "Unauthorized",
             403: "Forbidden", 404: "Not Found", 409: "Conflict",
@@ -557,7 +637,8 @@ class BenchmarkWatcherControlHTTPApplication:
             method = environ.get("REQUEST_METHOD")
             path = environ.get("PATH_INFO")
             if (method, path) not in {
-                ("GET", STATUS_PATH), ("POST", REARM_PATH),
+                ("GET", OPENAPI_PATH), ("GET", STATUS_PATH),
+                ("POST", REARM_PATH),
             }:
                 raise BenchmarkWatcherControlFailed(
                     "benchmark_watcher.control.route_not_found", status=404,
@@ -572,13 +653,22 @@ class BenchmarkWatcherControlHTTPApplication:
                         "benchmark_watcher.control.body_invalid", status=400,
                     )
                 headers = self._headers(environ)
-                self._authenticate(
-                    "GET", STATUS_PATH, headers, b"", STATUS_SCOPE,
-                )
+                if path == OPENAPI_PATH:
+                    self._authenticate(
+                        "GET", OPENAPI_PATH, headers, b"", OPENAPI_SCOPE,
+                    )
+                    contract = _openapi_contract()
+                    document = _OPENAPI.build_document(contract)
+                    return self._send(start_response, 200, {
+                        "schema": OPENAPI_RESPONSE_SCHEMA,
+                        "contract_sha256": _OPENAPI.document_sha256(contract),
+                        "openapi_sha256": _OPENAPI.document_sha256(document),
+                        "openapi": document,
+                    })
+                self._authenticate("GET", STATUS_PATH, headers, b"", STATUS_SCOPE)
                 status = self.controller.status(now=self.clock())
                 return self._send(start_response, 200, {
-                    "schema": STATUS_RESPONSE_SCHEMA,
-                    "status": status,
+                    "schema": STATUS_RESPONSE_SCHEMA, "status": status,
                 })
             body = self._body(environ)
             headers = self._headers(environ)
