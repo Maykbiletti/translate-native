@@ -3280,6 +3280,27 @@ class InstallerTests(unittest.TestCase):
                     INSTALLER.AUDIT_LOG,
                 ) = originals
 
+    def test_persistent_guard_uses_existing_response_review_configuration(self) -> None:
+        original = INSTALLER.RESPONSE_REVIEW_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            configuration = Path(directory) / "response-review.json"
+            INSTALLER.RESPONSE_REVIEW_CONFIG = configuration
+            try:
+                absent = INSTALLER._service_arguments(ROOT)
+                self.assertNotIn("--response-review-config", absent)
+                configuration.write_text("{}", encoding="utf-8")
+                configuration.chmod(0o600)
+                configured = INSTALLER._service_arguments(ROOT)
+                index = configured.index("--response-review-config")
+                self.assertEqual(configured[index + 1], str(configuration))
+                configuration.unlink()
+                configuration.symlink_to(Path(directory) / "missing.json")
+                unsafe = INSTALLER._service_arguments(ROOT)
+                self.assertEqual(unsafe[unsafe.index("--response-review-config") + 1],
+                                 str(configuration))
+            finally:
+                INSTALLER.RESPONSE_REVIEW_CONFIG = original
+
     def test_service_token_rejects_invalid_existing_size(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             token = Path(directory) / "service.token"

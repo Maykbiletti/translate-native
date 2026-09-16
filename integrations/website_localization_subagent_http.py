@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import socket
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -299,6 +300,7 @@ class HTTPSReviewHost:
             raise TypeError("transport must provide post")
         self.timeout = float(timeout)
         self._verified: dict[str, dict[str, Any]] = {}
+        self._verified_lock = threading.RLock()
 
     def run_isolated(self, task: dict, *, control: dict) -> Mapping[str, Any]:
         task, control = _validate_task(task, control)
@@ -389,12 +391,13 @@ class HTTPSReviewHost:
             "receipt_sha256": _sha(receipt_copy),
             "signed": signed, "attestation": _copy(attestation),
         }
-        previous = self._verified.get(control["execution_key"])
-        if previous is not None:
-            stable = {"control_sha256", "receipt_sha256", "signed"}
-            if any(previous[key] != verified[key] for key in stable):
-                raise HTTPReviewHostFailed("http.idempotency_conflict", retryable=False)
-        self._verified[control["execution_key"]] = verified
+        with self._verified_lock:
+            previous = self._verified.get(control["execution_key"])
+            if previous is not None:
+                stable = {"control_sha256", "receipt_sha256", "signed"}
+                if any(previous[key] != verified[key] for key in stable):
+                    raise HTTPReviewHostFailed("http.idempotency_conflict", retryable=False)
+            self._verified[control["execution_key"]] = verified
         return _copy(reply["result"])
 
     def verify_execution(self, receipt: dict, *, control: dict) -> bool:
@@ -402,7 +405,9 @@ class HTTPSReviewHost:
             control, receipt = _validate_control(control), _copy(receipt)
         except Exception:
             return False
-        saved = self._verified.get(control.get("execution_key")) if isinstance(control, dict) else None
+        with self._verified_lock:
+            saved = (self._verified.get(control.get("execution_key"))
+                     if isinstance(control, dict) else None)
         if (saved is None or saved["control_sha256"] != _sha(control)
                 or saved["receipt_sha256"] != _sha(receipt)):
             return False
@@ -421,7 +426,8 @@ class HTTPSReviewHost:
             control, receipt = _validate_control(control), _copy(receipt)
         except Exception:
             raise HTTPReviewHostFailed("http.evidence_invalid", retryable=False) from None
-        saved = self._verified.get(control["execution_key"])
+        with self._verified_lock:
+            saved = self._verified.get(control["execution_key"])
         if (saved is None or saved["control_sha256"] != _sha(control)
                 or saved["receipt_sha256"] != _sha(receipt)):
             raise HTTPReviewHostFailed("http.evidence_missing", retryable=False)

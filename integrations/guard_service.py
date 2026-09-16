@@ -27,6 +27,9 @@ GATEWAY_PATH = ROOT / "integrations" / "language_gateway.py"
 AUDIT_PATH = ROOT / "integrations" / "audit_log.py"
 CLIENT_PATH = ROOT / "translate-native" / "scripts" / "guard_service_client.py"
 RESPONSE_REVIEW_PATH = ROOT / "integrations" / "response_subagent_review.py"
+RESPONSE_REVIEW_RUNTIME_PATH = (
+    ROOT / "integrations" / "response_subagent_https_runtime.py"
+)
 
 
 def _load(name: str, path: Path):
@@ -43,6 +46,9 @@ GATEWAY = _load("blun_isolated_gateway", GATEWAY_PATH)
 AUDIT = _load("blun_isolated_audit", AUDIT_PATH)
 CLIENT = _load("blun_isolated_client", CLIENT_PATH)
 RESPONSE_REVIEW = _load("blun_response_subagent_review", RESPONSE_REVIEW_PATH)
+RESPONSE_REVIEW_RUNTIME = _load(
+    "blun_response_subagent_https_runtime", RESPONSE_REVIEW_RUNTIME_PATH,
+)
 QUALITY = GATEWAY.GUARD.QUALITY
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 
@@ -593,6 +599,18 @@ def _response_reviewer_from_factory(reference: str | None) -> Any | None:
     return reviewer
 
 
+def _response_reviewer_from_config(path: Path | None) -> Any | None:
+    """Build the bundled provider-neutral HTTPS reviewer from protected state."""
+    if path is None:
+        return None
+    reviewer = RESPONSE_REVIEW_RUNTIME.build_response_reviewer_from_config(
+        path, response_module=RESPONSE_REVIEW,
+    )
+    if not callable(getattr(reviewer, "review", None)):
+        raise ValueError("response review configuration returned an invalid reviewer")
+    return reviewer
+
+
 def build_server(endpoint: str, service: GuardService):
     transport, address = CLIENT.parse_endpoint(endpoint)
     if transport == "unix":
@@ -622,14 +640,25 @@ def main() -> int:
     parser.add_argument("--key-file", type=Path, default=default_runtime / "signing.key")
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--audit-file", type=Path, default=default_runtime / "audit.jsonl")
-    parser.add_argument(
+    review_source = parser.add_mutually_exclusive_group()
+    review_source.add_argument(
         "--response-review-factory",
         help=("Trusted host-owned package.module:callable returning a configured "
               "provider-neutral response reviewer"),
     )
+    review_source.add_argument(
+        "--response-review-config",
+        type=Path,
+        help=("Protected configuration for the bundled provider-neutral HTTPS "
+              "response reviewer"),
+    )
     args = parser.parse_args()
     try:
-        reviewer = _response_reviewer_from_factory(args.response_review_factory)
+        reviewer = (
+            _response_reviewer_from_config(args.response_review_config)
+            if args.response_review_config is not None
+            else _response_reviewer_from_factory(args.response_review_factory)
+        )
         service = GuardService(
             args.key_file, args.audit_file, _token_from_file(args.token_file), reviewer,
         )

@@ -1,0 +1,31 @@
+{
+  "schema": "translate-native.response-review-https-runtime.v1",
+  "endpoint": "https://review-host.example/v1/subagent-reviews",
+  "host_id": "production-review-host-1",
+  "allow_loopback_http": false,
+  "authentication": {
+    "scheme": "bearer",
+    "token_file": "/absolute/protected/path/review-host.token"
+  },
+  "attestation": {
+    "algorithm": "hmac-sha256",
+    "key_id": "production-review-host-key-1",
+    "secret_file": "/absolute/protected/path/review-host-attestation.secret"
+  },
+  "review": {
+    "model_id": "deployment-review-model",
+    "model_version": "immutable-model-revision",
+    "host_policy_version": "isolated-host-policy-1",
+    "quality_profile_version": "eu-native-profile-1",
+    "prompt_version": "target-native-review-1",
+    "software_version": "6.186.0",
+    "timeout_seconds": 60,
+    "max_output_tokens": 4096,
+    "max_concurrent_reviews": 2,
+    "native_brief": {
+      "audience": "Website visitors",
+      "tone_profile": "Natural, clear and appropriate for the target locale",
+      "target_terms": []
+    }
+  }
+}

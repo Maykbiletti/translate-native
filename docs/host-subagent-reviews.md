@@ -6,10 +6,10 @@
 host-managed reviewers. `integrations/response_subagent_review.py` uses the
 same provider-neutral host boundary for exactly one source-blind review of an
 ordinary response. The authenticated HTTPS bridge described below supports
-both contracts. The Guard service exposes a provider-neutral factory slot for
-deployment-owned Claude, Codex or other host implementations; none is bundled
-or activated. Existing translation, Stop and SubagentStop enforcement stays
-authoritative.
+both contracts. The Guard service exposes a provider-neutral factory slot and
+a bundled protected HTTPS runtime for deployment-owned Claude, Codex or other
+host implementations. Neither path activates a provider or creates secrets.
+Existing translation, Stop and SubagentStop enforcement stays authoritative.
 
 ## Ordinary-response review
 
@@ -60,6 +60,57 @@ the option starts in the explicit blocked state. The factory owns endpoint,
 credentials, pinned attestation verifier, model/profile versions and target-only
 brief configuration. It receives no Guard signing key and must not expose those
 values to the reviewer task.
+
+### Bundled protected HTTPS factory
+
+Deployments that implement the authenticated HTTPS host contract do not need
+custom Python glue. Copy `integrations/response-review.example.json` to an
+operator-owned absolute path, replace every placeholder, keep the JSON, bearer
+token and HMAC attestation secret in separate owner-only regular files, and
+start the Guard with:
+
+```console
+python integrations/guard_service.py \
+  --response-review-config /absolute/protected/path/response-review.json
+```
+
+The schema `translate-native.response-review-https-runtime.v1` is closed. It
+pins the endpoint, host ID, bearer-token file, `hmac-sha256` attestation key ID
+and secret file, immutable model/policy/profile/prompt/software versions,
+target-only native brief, deadline, output-token ceiling and concurrency cap.
+All paths must be absolute. On POSIX systems each file must be owned by the
+service user, have one link and mode `0600`; its directory is walked without
+following links and its identity is rechecked after each read. A linked,
+hard-linked, oversized, broadly readable, replaced, malformed or duplicate-key
+configuration blocks service startup. Credentials are loaded only by the host
+adapter and never enter task JSON, evidence or errors.
+
+The maximum review deadline is 60 seconds, below the Guard client's 75-second
+ordinary-response deadline. The bundled runtime performs the single HTTPS
+exchange in a dedicated credential-minimal process and kills and reaps it at
+that wall deadline; a slowly streaming socket cannot extend the review
+indefinitely. `max_concurrent_reviews` accepts 1–32 and rejects excess work
+immediately as retryable host capacity; it does not create an unbounded local
+queue or automatic retry loop. The stable execution key and remote host ledger
+remain responsible for exact lost-response deduplication. Concurrent local
+replies for the same key are committed under one atomic lock; a different
+second attested result is an idempotency conflict, never alternate evidence.
+
+The installer never creates this deployment state. When the standard path
+`~/.config/blun-language-guard/response-review.json` exists—including as an
+unsafe or dangling link—the generated persistent Guard command passes it
+explicitly. The Guard then validates it and fails closed instead of silently
+starting an unreviewed response path. Re-run installation or runtime refresh
+after intentionally adding or removing the file so the service definition
+reflects that operator action.
+
+HMAC authenticates a trusted host that shares the pinned secret; it does not
+prove linguistic quality or model independence. Protect and rotate that secret
+as production trust material. A deployment requiring an asymmetric or managed
+attestation authority can continue to use
+`--response-review-factory package.module:callable` with the same adapter
+contract. The bundled runtime connects to an existing review host; it does not
+implement that host's model-specific subagent launcher.
 
 Stop and SubagentStop consume already signed one-time delivery grants. They do
 not invoke review agents, and review tasks have empty tools and zero delegation

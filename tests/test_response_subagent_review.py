@@ -78,7 +78,7 @@ def reviewer(host=None):
         host or LedgerHost(), model_id="review-model", model_version="model-1",
         host_policy_version="isolated-host-1",
         quality_profile_version="eu-native-1", prompt_version="native-prompt-1",
-        software_version="6.185.0",
+        software_version="6.186.0",
         native_brief={"audience": "Website users", "tone_profile": "Natural and clear",
                       "target_terms": ["Translate Native"]},
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import threading
 import unittest
 
 import test_website_localization_subagents as BASE
@@ -112,6 +113,46 @@ class FixtureHostTransport:
                                      ("Content-Length", str(len(response_body)))), response_body)
 
 
+class ConflictingConcurrentTransport(FixtureHostTransport):
+    """Return two validly attested identities for one execution key."""
+
+    def __init__(self, authority):
+        super().__init__(authority)
+        self.barrier = threading.Barrier(2)
+        self.counter = 0
+        self.counter_lock = threading.Lock()
+
+    def post(self, url, headers, body, *, timeout):
+        self.barrier.wait(2)
+        base = super().post(url, headers, body, timeout=timeout)
+        with self.counter_lock:
+            self.counter += 1
+            number = self.counter
+        envelope = json.loads(base.body.decode("utf-8"))
+        receipt = envelope["result"]["receipt"]
+        receipt["agent_id"] = f"https-reviewer-conflict-{number}"
+        receipt["session_id"] = f"https-session-conflict-{number}"
+        signed = {
+            "schema": HTTP.ATTESTATION_PAYLOAD_SCHEMA,
+            "host_id": envelope["host_id"],
+            "execution_key": envelope["execution_key"],
+            "request_sha256": envelope["request_sha256"],
+            "result_sha256": HTTP._sha(envelope["result"]),
+            "completed": True,
+        }
+        envelope["attestation"] = self.authority.sign(HTTP._raw(
+            signed, code="fixture", maximum=HTTP.MAX_RESPONSE_BYTES,
+        ))
+        encoded = json.dumps(envelope, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode("utf-8")
+        return HTTP.HTTPResult(
+            200,
+            (("Content-Type", "application/json; charset=utf-8"),
+             ("Content-Length", str(len(encoded)))),
+            encoded,
+        )
+
+
 def host(transport=None, authority=None, **kwargs):
     authority = authority or FixtureAuthority()
     transport = transport or FixtureHostTransport(authority)
@@ -129,6 +170,47 @@ def execute(review_host, locale="fi-FI"):
 
 
 class HTTPSReviewHostTests(unittest.TestCase):
+    def test_concurrent_conflicting_execution_is_atomically_rejected(self):
+        authority = FixtureAuthority()
+        transport = ConflictingConcurrentTransport(authority)
+        review_host, _unused = host(transport=transport, authority=authority)
+        reviewer = RESPONSE.ResponseSubagentReviewer(
+            review_host, model_id="review-model", model_version="model-1",
+            host_policy_version="isolated-host-1",
+            quality_profile_version="eu-native-1",
+            prompt_version="native-prompt-1", software_version="6.186.0",
+            native_brief={"audience": "Website users",
+                          "tone_profile": "Natural and clear",
+                          "target_terms": ["BLUN"]},
+        )
+        outcomes = []
+
+        def run():
+            try:
+                outcomes.append(reviewer.review(
+                    BASE.TARGETS["fi-FI"], "fi-FI", "prose",
+                    creator_id_sha256=hashlib.sha256(b"creator-main").hexdigest(),
+                    creator_session_id_sha256=hashlib.sha256(
+                        b"creator-session"
+                    ).hexdigest(),
+                ))
+            except Exception as error:
+                outcomes.append(error)
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(sum(isinstance(item, dict) for item in outcomes), 1)
+        blocked = [item for item in outcomes if not isinstance(item, dict)]
+        self.assertEqual(len(blocked), 1)
+        self.assertIsInstance(blocked[0], RESPONSE.ResponseReviewBlocked)
+        self.assertEqual(
+            blocked[0].code, "response_review.http.idempotency_conflict",
+        )
+
     def test_ordinary_finnish_and_maltese_responses_use_same_authenticated_bridge(self):
         for locale, target in BASE.TARGETS.items():
             with self.subTest(locale=locale):
@@ -137,7 +219,7 @@ class HTTPSReviewHostTests(unittest.TestCase):
                     review_host, model_id="review-model", model_version="model-1",
                     host_policy_version="isolated-host-1",
                     quality_profile_version="eu-native-1",
-                    prompt_version="native-prompt-1", software_version="6.185.0",
+                    prompt_version="native-prompt-1", software_version="6.186.0",
                     native_brief={"audience": "Website users",
                                   "tone_profile": "Natural and clear",
                                   "target_terms": ["BLUN"]},
