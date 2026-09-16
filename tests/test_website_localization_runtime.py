@@ -1020,6 +1020,103 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertNotIn("mt-MT", repr(report))
         self.assertNotIn(WATCH_CAMPAIGN_ID, repr(report))
 
+    def test_runtime_exposes_authenticated_idempotent_watcher_rearm(self):
+        watch = self.benchmark_watch_configuration([
+            BenchmarkWatchSnapshot(),
+        ])
+        requests = []
+        control = RUNTIME._BENCHMARK_WATCHER_CONTROL
+
+        def authenticate(request):
+            requests.append(request)
+            return {
+                "schema": control.PRINCIPAL_SCHEMA,
+                "operator_id": "operator-1",
+                "credential_id": "benchmark-control-1",
+                "credential_version": "2026-09-16",
+                "scope": "benchmark-watcher:rearm",
+            }
+
+        runtime = self.runtime(
+            benchmark_watch=watch,
+            benchmark_watch_control_authenticator=authenticate,
+        )
+        watch["connection"].execute("""
+            UPDATE benchmark_report_watcher
+            SET state = 'failed', attempts = 3,
+                last_error_code = 'benchmark_client.network',
+                next_attempt_at = 100, updated_at = 100
+            WHERE singleton = 1
+        """)
+        watch["connection"].commit()
+        self.clock.value = 200
+        request = {
+            "schema": control.REQUEST_SCHEMA,
+            "request_id": "runtime-rearm-1",
+            "expected_attempts": 3,
+            "expected_failed_at": 100,
+            "expected_error_code": "benchmark_client.network",
+        }
+        body = json.dumps(request, separators=(",", ":")).encode("utf-8")
+        captured = {}
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": control.REARM_PATH,
+            "QUERY_STRING": "",
+            "wsgi.url_scheme": "https",
+            "CONTENT_TYPE": "application/json",
+            "CONTENT_LENGTH": str(len(body)),
+            "wsgi.input": io.BytesIO(body),
+            "HTTP_AUTHORIZATION": "Bearer private-control-token",
+            "HTTP_IDEMPOTENCY_KEY": request["request_id"],
+        }
+
+        encoded = b"".join(runtime.benchmark_watch_control_http(
+            environ,
+            lambda status, headers: captured.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        payload = json.loads(encoded)
+
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertEqual(payload["receipt"]["state"], "pending")
+        self.assertEqual(payload["receipt"]["previous_attempts"], 3)
+        self.assertEqual(
+            runtime.benchmark_report_watcher.status(now=200).state, "pending",
+        )
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn(WATCH_CAMPAIGN_ID, encoded.decode("utf-8"))
+
+    def test_runtime_rejects_incomplete_or_invalid_watcher_control(self):
+        before = tuple(connection.total_changes for connection in self.connections)
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.benchmark.watch_control.incomplete",
+        ):
+            self.runtime(
+                benchmark_watch_control_authenticator=lambda request: None,
+            )
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+
+        watch = self.benchmark_watch_configuration([BenchmarkWatchSnapshot()])
+        before = tuple(connection.total_changes for connection in self.connections)
+        with self.assertRaisesRegex(
+            RUNTIME.LocalizationRuntimeBlocked,
+            "runtime.benchmark.watch_control.authenticator.invalid",
+        ):
+            self.runtime(
+                benchmark_watch=watch,
+                benchmark_watch_control_authenticator=object(),
+            )
+        self.assertEqual(
+            before,
+            tuple(connection.total_changes for connection in self.connections),
+        )
+
     def test_runtime_renews_outer_lease_immediately_before_watch_client(self):
         events = []
         watch = self.benchmark_watch_configuration([

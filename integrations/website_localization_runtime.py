@@ -76,6 +76,10 @@ _BENCHMARK_WATCHER = _load_module(
     "blun_website_localization_runtime_benchmark_watcher",
     _ROOT / "integrations" / "website_localization_benchmark_watcher.py",
 )
+_BENCHMARK_WATCHER_CONTROL = _load_module(
+    "blun_website_localization_runtime_benchmark_watcher_control",
+    _ROOT / "integrations" / "website_localization_benchmark_watcher_control.py",
+)
 _API = _load_module(
     "blun_website_localization_runtime_api",
     _ROOT / "integrations" / "website_localization_api.py",
@@ -427,6 +431,9 @@ class WebsiteLocalizationRuntime:
         benchmark_stale_after_seconds: float | int = 3600,
         benchmark_execution: Mapping[str, Any] | None = None,
         benchmark_watch: Mapping[str, Any] | None = None,
+        benchmark_watch_control_authenticator: (
+            Callable[[dict[str, Any]], Any] | None
+        ) = None,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
     ):
@@ -441,6 +448,20 @@ class WebsiteLocalizationRuntime:
             raise LocalizationRuntimeBlocked("runtime.benchmark.incomplete")
         benchmark_execution = _benchmark_execution(benchmark_execution)
         benchmark_watch = _benchmark_watch(benchmark_watch)
+        if (
+            benchmark_watch_control_authenticator is not None
+            and not callable(benchmark_watch_control_authenticator)
+        ):
+            raise LocalizationRuntimeBlocked(
+                "runtime.benchmark.watch_control.authenticator.invalid",
+            )
+        if (
+            benchmark_watch_control_authenticator is not None
+            and benchmark_watch is None
+        ):
+            raise LocalizationRuntimeBlocked(
+                "runtime.benchmark.watch_control.incomplete",
+            )
         if benchmark_enabled:
             if not isinstance(benchmark_campaign_id, str) or re.fullmatch(
                 r"benchmark-campaign-[0-9a-f]{64}", benchmark_campaign_id,
@@ -654,6 +675,7 @@ class WebsiteLocalizationRuntime:
         self._benchmark_evidence_authority = benchmark_evidence_authority
         self._benchmark_watch = benchmark_watch
         self.benchmark_report_watcher = None
+        self.benchmark_watch_control_http = None
         if benchmark_watch is not None:
             try:
                 self.benchmark_report_watcher = (
@@ -672,6 +694,26 @@ class WebsiteLocalizationRuntime:
                 raise LocalizationRuntimeBlocked(
                     "runtime.benchmark.watch.invalid",
                 ) from None
+            if benchmark_watch_control_authenticator is not None:
+                try:
+                    controller = (
+                        _BENCHMARK_WATCHER_CONTROL.
+                        DurableBenchmarkWatcherRearmController(
+                            self.benchmark_report_watcher,
+                        )
+                    )
+                    self.benchmark_watch_control_http = (
+                        _BENCHMARK_WATCHER_CONTROL.
+                        BenchmarkWatcherControlHTTPApplication(
+                            controller,
+                            benchmark_watch_control_authenticator,
+                            clock=self._clock,
+                        )
+                    )
+                except Exception:
+                    raise LocalizationRuntimeBlocked(
+                        "runtime.benchmark.watch_control.invalid",
+                    ) from None
 
         def tick():
             service_tick = _SERVICE.run_service_tick(

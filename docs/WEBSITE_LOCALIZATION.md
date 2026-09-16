@@ -1032,6 +1032,48 @@ a stale supervisor cannot continue to network access merely because its inner
 watcher claim remains structurally valid. The supervisor lease must still
 strictly outlive the configured watcher lease, as enforced during construction.
 
+### Authenticated watcher recovery
+
+A production host may pass `benchmark_watch_control_authenticator` beside the
+existing `benchmark_watch` configuration. The runtime then exposes a separate
+WSGI application at `benchmark_watch_control_http`. It accepts only HTTPS
+`POST /v1/benchmarks/watcher/rearm`, `Content-Type: application/json`, an
+`Idempotency-Key` equal to the body `request_id`, and a principal with schema
+`blun.website-localization-benchmark-watcher-operator.v1` plus the exact scope
+`benchmark-watcher:rearm`. Supplying the authenticator without a watcher, or a
+non-callable authenticator, fails composition before service schemas are
+created.
+
+The closed request has exactly three fields:
+
+```json
+{
+  "schema": "blun.website-localization-benchmark-watcher-rearm-request.v1",
+  "request_id": "operator-generated-unique-id",
+  "expected_attempts": 20,
+  "expected_failed_at": 1789549200,
+  "expected_error_code": "benchmark_client.network"
+}
+```
+
+Authentication receives only the method, path, sorted transport headers and
+body SHA-256. After authentication, the controller atomically verifies that
+the watcher is still terminally `failed` at exactly the observed attempt count,
+failure timestamp and stable error code, resets it to `pending`, and stores a
+receipt under hashes of the request ID and full request. The failure timestamp
+is the failed watcher's health `next_action_at`. The controller does not store
+the request ID, call the benchmark client, or begin a watch attempt. Retrying
+the identical request returns the exact stored receipt; reusing the key with
+different input returns an idempotency conflict.
+
+Pending and retry-wait states do not need rearm. Active leases, final reports,
+stale attempt counts, malformed framing, authentication failure, altered
+schemas and corrupted receipts remain fail-closed. The receipt contains only
+the request SHA-256, prior `failed` state, attempt count, stable error code and
+failure time, new `pending` state, and rearm time. Actual work still enters the
+normal supervised tick, including its outer-lease guard immediately before
+network access.
+
 One supervised tick always prioritizes customer translation, release, and
 delivery work. If those are idle, configured local benchmark case execution
 runs next. Only when both are idle may the runtime perform one due report-watch

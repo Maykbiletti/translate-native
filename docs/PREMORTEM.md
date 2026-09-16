@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Authenticated benchmark watcher recovery (16 September 2026)
+
+Assume a report watcher reaches terminal failure and an operator must recover it
+through a remote production boundary.
+
+- Retrying after a lost HTTP response could reset a later watcher generation.
+- A reused idempotency key with changed input could hide an operator mistake.
+- Reading state before authentication could disclose whether recovery is due.
+- A stale dashboard could reset a live lease or an already verified result.
+- Persisting request IDs or provider diagnostics could leak operator metadata.
+- A modified replay receipt could be returned as if it were prior success.
+
+The control boundary will authenticate an exact write-scoped principal before
+parsing or reading watcher state, require an idempotency header equal to the
+body request ID, bind the request to the observed failed attempt count, time
+and stable error code, and atomically store only request hashes plus a
+content-free response. Exact
+replays return the stored receipt. Changed input, stale state, live leases,
+final results, schema drift, and receipt tampering all fail closed. Rearm only
+makes the watcher pending; it performs no external request.
+
 ## Benchmark watcher outer-lease fencing (16 September 2026)
 
 Assume the durable watcher lease is correct, but the production supervisor's
