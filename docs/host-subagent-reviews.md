@@ -3,9 +3,86 @@
 `integrations/website_localization_subagents.py` supplies a provider-neutral
 `HostSubagentProvider` for the existing localization worker and production
 `provider_resolver`. It delegates **website translation reviews**, not ordinary
-chat responses, to two separate host-managed executions. Ordinary-response
-delegation and concrete Claude/Codex/other-host bridges remain follow-up work.
+chat responses, to two separate host-managed executions. The provider-neutral
+HTTPS host bridge described below is implemented; product-specific Claude,
+Codex and other host launchers plus ordinary-response delegation remain
+follow-up work.
 Existing MCP, Skill, Stop and SubagentStop behavior is unchanged.
+
+## Authenticated HTTPS host bridge
+
+`integrations/website_localization_subagent_http.py` implements the `ReviewHost`
+protocol for a remote trusted host. Configure one fixed HTTPS endpoint, an
+authentication-header callback, a stable host ID and an attestation verifier
+whose trust keys come from deployment configuration. The endpoint and trust
+anchor never come from model output or from the response. Plain HTTP is
+accepted only for explicitly enabled loopback tests.
+
+```python
+review_host = HTTPSReviewHost(
+    "https://review-host.example/v1/subagent-reviews",
+    authentication_headers,
+    deployment_attestation_verifier,
+    host_id="production-review-host-1",
+)
+```
+
+Each `run_isolated` call performs exactly one request. It rejects redirects,
+credentials in URLs, reserved authentication headers, duplicate JSON keys,
+non-finite numbers, invalid UTF-8, oversized bodies and non-JSON responses.
+Network errors, 408/425/429 and server errors are retryable by the durable
+queue. Authentication rejection, redirects, idempotency conflicts, binding
+errors and rejected attestations are terminal. Error bodies and authentication
+values are never propagated into worker errors.
+
+The request body is canonical UTF-8 JSON with this exact top-level shape:
+
+```json
+{
+  "schema": "translate-native.host-subagent-http-request.v1",
+  "host_id": "production-review-host-1",
+  "execution_key": "<64 lowercase hex characters>",
+  "task": "<the complete model-visible review task object>",
+  "control": "<the complete host-only control object>",
+  "request_sha256": "<SHA-256 of the other five fields>"
+}
+```
+
+The strings describing objects above stand for the actual JSON objects. The
+same execution key is sent as `Idempotency-Key`. The remote host must durably
+reject reuse with a different body and return the same completed result for an
+exact retry. `task` alone may enter the reviewer context. `control` is used by
+the host to enforce identity, fresh context, empty tools, zero delegation,
+deadline and token limits; it must never enter the model prompt or inherited
+history. The client independently allowlists native-task fields before any
+network access, so source fields and extra metadata fail closed.
+
+The response contains exactly the response schema, host ID, execution key,
+request digest, existing `{response, receipt}` result, and `attestation`.
+Attestation has the exact fields `schema`, `algorithm`, `key_id`, and
+`signature`. It signs canonical JSON containing:
+
+```json
+{
+  "schema": "translate-native.host-subagent-http-attestation-payload.v1",
+  "host_id": "production-review-host-1",
+  "execution_key": "<execution key>",
+  "request_sha256": "<request digest>",
+  "result_sha256": "<digest of the complete response and receipt>",
+  "completed": true
+}
+```
+
+The verifier is deliberately provider-neutral. Production deployments should
+use an asymmetric or managed trust verifier with pinned host identity and key
+policy; the HMAC authority in tests is explicitly a fixture. After the
+attestation passes, `verify_execution` accepts only the exact receipt and
+control snapshot held by this client and verifies the attestation again. The
+worker commits the complete host ID, request/result digests, receipt and
+attestation into the existing review evidence hash, so a later approval is
+bound to the authenticated remote execution. A
+valid transport signature proves host origin and binding, not native-language
+quality, reviewer independence or superiority over another system.
 
 ## Trust boundary and registration
 

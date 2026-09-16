@@ -17,6 +17,7 @@ SCHEMA = "translate-native.host-subagent-review.v1"
 PROVIDER_PREFIX = "host-subagents-v1-"
 MAX_BYTES = 4_000_000
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
+HOST_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,117}$")
 
 
 class SubagentReviewBlocked(RuntimeError):
@@ -198,13 +199,20 @@ class HostSubagentProvider:
             reply = self._host.run_isolated(_copy(task), control=_copy(control))
         except TimeoutError:
             raise SubagentReviewBlocked("timeout", retryable=True) from None
-        except Exception:
+        except Exception as error:
+            if (getattr(error, "host_subagent_failure", False) is True
+                    and isinstance(getattr(error, "code", None), str)
+                    and HOST_ERROR_CODE.fullmatch(error.code) is not None
+                    and type(getattr(error, "retryable", None)) is bool):
+                raise SubagentReviewBlocked(
+                    error.code, retryable=error.retryable,
+                ) from None
             raise SubagentReviewBlocked("host_failed", retryable=True) from None
         reply = _copy(reply)
         if not isinstance(reply, dict) or set(reply) != {"response", "receipt"}:
             raise SubagentReviewBlocked("receipt_invalid")
         response, receipt = reply["response"], reply["receipt"]
-        self._validate_receipt(receipt, response, control)
+        host_evidence = self._validate_receipt(receipt, response, control)
         if (not isinstance(response, dict)
                 or response.get("schema") != "blun.website-localization-review.v2"
                 or response.get("phase") != phase
@@ -215,14 +223,14 @@ class HostSubagentProvider:
                 or not isinstance(response.get("major_defects"), list)):
             raise SubagentReviewBlocked("review_invalid")
         # Existing worker validates full findings and commercial evidence.
-        self._evidence[_hash(payload)] = (_hash(response), _copy(receipt))
+        self._evidence[_hash(payload)] = (_hash(response), host_evidence)
         if (phase == "target_native" and response["status"] == "PASS"
                 and not response["blocking_defects"] and not response["major_defects"]):
             self._native_receipt = receipt
             self._finished = False
         return response
 
-    def _validate_receipt(self, receipt: Any, response: Any, control: dict) -> None:
+    def _validate_receipt(self, receipt: Any, response: Any, control: dict) -> dict:
         expected = {"schema", "execution_key", "request_sha256", "task_sha256",
                     "phase", "previous_receipt_sha256", "response_sha256",
                     "agent_id", "session_id", "model_id", "model_version",
@@ -243,10 +251,38 @@ class HostSubagentProvider:
             raise SubagentReviewBlocked("self_review")
         try:
             valid = self._host.verify_execution(_copy(receipt), control=_copy(control))
-        except Exception:
+        except Exception as error:
+            if (getattr(error, "host_subagent_failure", False) is True
+                    and isinstance(getattr(error, "code", None), str)
+                    and HOST_ERROR_CODE.fullmatch(error.code) is not None
+                    and type(getattr(error, "retryable", None)) is bool):
+                raise SubagentReviewBlocked(
+                    error.code, retryable=error.retryable,
+                ) from None
             raise SubagentReviewBlocked("verification_unavailable", retryable=True) from None
         if valid is not True:
             raise SubagentReviewBlocked("unverified_execution")
+        evidence = _copy(receipt)
+        evidence_method = getattr(self._host, "verified_execution_evidence", None)
+        if callable(evidence_method):
+            try:
+                evidence = _copy(evidence_method(
+                    _copy(receipt), control=_copy(control),
+                ))
+            except Exception as error:
+                if (getattr(error, "host_subagent_failure", False) is True
+                        and isinstance(getattr(error, "code", None), str)
+                        and HOST_ERROR_CODE.fullmatch(error.code) is not None
+                        and type(getattr(error, "retryable", None)) is bool):
+                    raise SubagentReviewBlocked(
+                        error.code, retryable=error.retryable,
+                    ) from None
+                raise SubagentReviewBlocked(
+                    "verification_unavailable", retryable=True,
+                ) from None
+            if not isinstance(evidence, dict):
+                raise SubagentReviewBlocked("unverified_execution")
+        return evidence
 
     def verified_call_evidence(self, request: Any, response: Any) -> dict | None:
         """Called by the worker, never by a model; commits the verified receipt."""
