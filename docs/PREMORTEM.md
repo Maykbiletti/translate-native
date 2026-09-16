@@ -1,5 +1,26 @@
 # Version 6 premortem
 
+## Observable watcher recovery (16 September 2026)
+
+Assume an operator can call the rearm endpoint but cannot safely obtain the
+exact failed generation it must bind.
+
+- Reading status before authentication could disclose whether recovery is due.
+- Reusing the write scope for read-only status could grant unnecessary power.
+- A status response could leak campaign, provider, locale, or benchmark data.
+- A body-bearing or ambiguously framed `GET` could be interpreted differently
+  by a proxy and the application.
+- State could change after status is read but before rearm is submitted.
+- A convenience client could invent a new idempotency identity or post when no
+  terminal failure exists.
+
+The status operation will require a distinct exact read scope, reject request
+bodies before authentication or state access, and return only a closed
+content-free failed-generation tuple. The client will require the operator's
+request ID and post only after validating a rearmable status. The existing
+transactional rearm comparison remains authoritative, so a stale observation
+cannot reset a later generation.
+
 ## Provider-neutral watcher recovery client (16 September 2026)
 
 Assume an external operator has a valid failed watcher generation but must

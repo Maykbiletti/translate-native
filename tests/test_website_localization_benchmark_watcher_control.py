@@ -128,6 +128,107 @@ class BenchmarkWatcherControlTests(unittest.TestCase):
         ))
         return captured["status"], captured["headers"], json.loads(encoded), encoded
 
+    def call_status(self, **overrides):
+        captured = {}
+        environ = {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": CONTROL.STATUS_PATH,
+            "QUERY_STRING": "",
+            "wsgi.url_scheme": "https",
+            "wsgi.input": io.BytesIO(b""),
+            "HTTP_AUTHORIZATION": "Bearer private-status-token",
+        }
+        environ.update(overrides)
+        encoded = b"".join(self.app(
+            environ,
+            lambda status, headers: captured.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        return captured["status"], captured["headers"], json.loads(encoded), encoded
+
+    def test_authenticated_status_returns_only_exact_failed_generation(self):
+        self.app.authenticator = lambda request: (
+            self.requests.append(request)
+            or self.principal(scope=CONTROL.STATUS_SCOPE)
+        )
+
+        status, headers, payload, encoded = self.call_status()
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(payload["schema"], CONTROL.STATUS_RESPONSE_SCHEMA)
+        self.assertEqual(payload["status"], {
+            "schema": CONTROL.STATUS_SCHEMA,
+            "checked_at": 200.0,
+            "state": "failed",
+            "rearmable": True,
+            "generation": {
+                "attempts": 3,
+                "failed_at": 100.0,
+                "error_code": "benchmark_client.network",
+            },
+        })
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertNotIn(CAMPAIGN_ID, encoded.decode("utf-8"))
+        self.assertNotIn(POLICY_SHA256, encoded.decode("utf-8"))
+        self.assertNotIn(SUITE_SHA256, encoded.decode("utf-8"))
+        self.assertEqual(self.requests, [{
+            "schema": CONTROL.AUTH_REQUEST_SCHEMA,
+            "method": "GET",
+            "path": CONTROL.STATUS_PATH,
+            "headers": [["authorization", "Bearer private-status-token"]],
+            "body_sha256": hashlib.sha256(b"").hexdigest(),
+        }])
+
+        self.connection.execute("""
+            UPDATE benchmark_report_watcher
+            SET state = 'pending', attempts = 0, next_attempt_at = 200,
+                last_error_code = NULL, updated_at = 200
+            WHERE singleton = 1
+        """)
+        self.connection.commit()
+        payload = self.call_status()[2]["status"]
+        self.assertFalse(payload["rearmable"])
+        self.assertIsNone(payload["generation"])
+
+    def test_status_scope_and_body_are_enforced_before_store_access(self):
+        reads = []
+        original = self.controller.status
+
+        def observed_status(*, now):
+            reads.append(now)
+            return original(now=now)
+
+        self.controller.status = observed_status
+        self.app.authenticator = lambda request: self.principal()
+        status, _, payload, _ = self.call_status()
+        self.assertEqual(status, "401 Unauthorized")
+        self.assertEqual(
+            payload["error_code"],
+            "benchmark_watcher.control.authentication_failed",
+        )
+        self.assertEqual(reads, [])
+
+        auth_calls = []
+        self.app.authenticator = lambda request: (
+            auth_calls.append(request)
+            or self.principal(scope=CONTROL.STATUS_SCOPE)
+        )
+        for overrides in (
+            {"CONTENT_LENGTH": "1", "wsgi.input": io.BytesIO(b"x")},
+            {"CONTENT_TYPE": "application/json"},
+            {"HTTP_TRANSFER_ENCODING": "chunked"},
+        ):
+            with self.subTest(overrides=overrides):
+                status, _, payload, _ = self.call_status(**overrides)
+                self.assertEqual(status, "400 Bad Request")
+                self.assertEqual(
+                    payload["error_code"],
+                    "benchmark_watcher.control.body_invalid",
+                )
+        self.assertEqual(auth_calls, [])
+        self.assertEqual(reads, [])
+
     def test_authenticated_rearm_is_atomic_content_free_and_exactly_replayed(self):
         status, headers, first, first_bytes = self.call()
 

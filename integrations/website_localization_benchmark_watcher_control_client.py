@@ -312,8 +312,25 @@ class BenchmarkWatcherRearmSnapshot:
         return deepcopy(self.receipt)
 
 
+@dataclass(frozen=True)
+class BenchmarkWatcherRecoveryStatus:
+    checked_at: float
+    state: str
+    rearmable: bool
+    generation: dict[str, Any] | None
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "schema": _CONTROL.STATUS_SCHEMA,
+            "checked_at": self.checked_at,
+            "state": self.state,
+            "rearmable": self.rearmable,
+            "generation": deepcopy(self.generation),
+        }
+
+
 class WebsiteLocalizationBenchmarkWatcherControlClient:
-    """Rearm one exact failed watcher generation through strict HTTPS."""
+    """Inspect and rearm one exact watcher generation through strict HTTPS."""
 
     def __init__(
         self, origin: str,
@@ -343,22 +360,16 @@ class WebsiteLocalizationBenchmarkWatcherControlClient:
         except Exception:
             _fail("benchmark_watcher.control_client.clock_invalid")
 
-    def rearm(
-        self, *, request_id: str, expected_attempts: int,
-        expected_failed_at: float | int, expected_error_code: str,
-    ) -> BenchmarkWatcherRearmSnapshot:
-        request = _request(
-            request_id, expected_attempts, expected_failed_at,
-            expected_error_code,
-        )
-        body = _canonical(request)
-        request_sha256 = hashlib.sha256(body).hexdigest()
+    def _authorization_headers(
+        self, *, method: str, path: str, body: bytes,
+        idempotency_key: str | None,
+    ) -> dict[str, str]:
         auth_context = {
             "schema": AUTH_CONTEXT_SCHEMA,
-            "method": "POST",
-            "path": _CONTROL.REARM_PATH,
-            "body_sha256": request_sha256,
-            "idempotency_key": request_id,
+            "method": method,
+            "path": path,
+            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "idempotency_key": idempotency_key,
         }
         try:
             headers = _credential_headers(
@@ -374,13 +385,16 @@ class WebsiteLocalizationBenchmarkWatcherControlClient:
         headers.update({
             "Accept": "application/json",
             "Connection": "close",
-            "Content-Type": "application/json",
-            "Content-Length": str(len(body)),
-            "Idempotency-Key": request_id,
         })
+        return headers
+
+    def _response(
+        self, *, method: str, path: str, headers: Mapping[str, str],
+        body: bytes | None,
+    ) -> tuple[int, dict[str, Any]]:
         try:
             result = self.transport.request(
-                "POST", self.origin + _CONTROL.REARM_PATH, headers, body,
+                method, self.origin + path, headers, body,
                 timeout=self.timeout,
             )
         except BenchmarkWatcherControlClientFailed:
@@ -408,7 +422,112 @@ class WebsiteLocalizationBenchmarkWatcherControlClient:
             if REMOTE_ERRORS.get(code) != (result.status, retryable):
                 _fail("benchmark_watcher.control_client.contract_mismatch")
             _fail(code, retryable=retryable)
-        if result.status != 200 or set(value) != {"schema", "receipt"} or value.get(
+        return result.status, value
+
+    def status(self) -> BenchmarkWatcherRecoveryStatus:
+        """Read the exact content-free generation that may be rearmed."""
+        headers = self._authorization_headers(
+            method="GET", path=_CONTROL.STATUS_PATH, body=b"",
+            idempotency_key=None,
+        )
+        result_status, value = self._response(
+            method="GET", path=_CONTROL.STATUS_PATH, headers=headers, body=None,
+        )
+        if (
+            result_status != 200
+            or set(value) != {"schema", "status"}
+            or value.get("schema") != _CONTROL.STATUS_RESPONSE_SCHEMA
+        ):
+            _fail("benchmark_watcher.control_client.response_invalid", retryable=True)
+        status = value.get("status")
+        if not isinstance(status, dict) or set(status) != {
+            "schema", "checked_at", "state", "rearmable", "generation",
+        }:
+            _fail("benchmark_watcher.control_client.status_mismatch")
+        try:
+            checked_at = _CONTROL._timestamp(status["checked_at"])
+        except (KeyError, TypeError, ValueError):
+            _fail("benchmark_watcher.control_client.status_mismatch")
+        states = {"pending", "leased", "retry_wait", "succeeded", "failed"}
+        if (
+            status.get("schema") != _CONTROL.STATUS_SCHEMA
+            or status.get("state") not in states
+            or type(status.get("rearmable")) is not bool
+            or status["rearmable"] != (status["state"] == "failed")
+            or checked_at > self._now() + self.max_future_skew
+        ):
+            _fail("benchmark_watcher.control_client.status_mismatch")
+        generation = status.get("generation")
+        if status["rearmable"]:
+            if not isinstance(generation, dict) or set(generation) != {
+                "attempts", "failed_at", "error_code",
+            }:
+                _fail("benchmark_watcher.control_client.status_mismatch")
+            try:
+                failed_at = _CONTROL._timestamp(generation["failed_at"])
+            except (KeyError, TypeError, ValueError):
+                _fail("benchmark_watcher.control_client.status_mismatch")
+            if (
+                isinstance(generation.get("attempts"), bool)
+                or not isinstance(generation.get("attempts"), int)
+                or not 1 <= generation["attempts"] <= _CONTROL._WATCHER.MAX_ATTEMPTS
+                or not isinstance(generation.get("error_code"), str)
+                or _CONTROL.ERROR_CODE.fullmatch(generation["error_code"]) is None
+                or failed_at > checked_at
+            ):
+                _fail("benchmark_watcher.control_client.status_mismatch")
+            generation = {
+                "attempts": generation["attempts"],
+                "failed_at": failed_at,
+                "error_code": generation["error_code"],
+            }
+        elif generation is not None:
+            _fail("benchmark_watcher.control_client.status_mismatch")
+        return BenchmarkWatcherRecoveryStatus(
+            checked_at, status["state"], status["rearmable"],
+            deepcopy(generation),
+        )
+
+    def rearm_failed(self, *, request_id: str) -> BenchmarkWatcherRearmSnapshot:
+        """Read and rearm the current failed generation without inventing an ID."""
+        if (
+            not isinstance(request_id, str)
+            or _CONTROL.IDENTIFIER.fullmatch(request_id) is None
+        ):
+            _fail("benchmark_watcher.control_client.request_invalid")
+        status = self.status()
+        if not status.rearmable or status.generation is None:
+            _fail("benchmark_watcher.control_client.not_rearmable")
+        return self.rearm(
+            request_id=request_id,
+            expected_attempts=status.generation["attempts"],
+            expected_failed_at=status.generation["failed_at"],
+            expected_error_code=status.generation["error_code"],
+        )
+
+    def rearm(
+        self, *, request_id: str, expected_attempts: int,
+        expected_failed_at: float | int, expected_error_code: str,
+    ) -> BenchmarkWatcherRearmSnapshot:
+        request = _request(
+            request_id, expected_attempts, expected_failed_at,
+            expected_error_code,
+        )
+        body = _canonical(request)
+        request_sha256 = hashlib.sha256(body).hexdigest()
+        headers = self._authorization_headers(
+            method="POST", path=_CONTROL.REARM_PATH, body=body,
+            idempotency_key=request_id,
+        )
+        headers.update({
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+            "Idempotency-Key": request_id,
+        })
+        result_status, value = self._response(
+            method="POST", path=_CONTROL.REARM_PATH, headers=headers, body=body,
+        )
+        if result_status != 200 or set(value) != {"schema", "receipt"} or value.get(
             "schema"
         ) != _CONTROL.RESPONSE_SCHEMA:
             _fail("benchmark_watcher.control_client.response_invalid", retryable=True)

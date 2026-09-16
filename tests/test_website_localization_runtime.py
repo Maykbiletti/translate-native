@@ -1034,7 +1034,11 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
                 "operator_id": "operator-1",
                 "credential_id": "benchmark-control-1",
                 "credential_version": "2026-09-16",
-                "scope": "benchmark-watcher:rearm",
+                "scope": (
+                    control.STATUS_SCOPE
+                    if request["path"] == control.STATUS_PATH
+                    else control.REARM_SCOPE
+                ),
             }
 
         runtime = self.runtime(
@@ -1050,6 +1054,30 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         """)
         watch["connection"].commit()
         self.clock.value = 200
+        status_capture = {}
+        status_bytes = b"".join(runtime.benchmark_watch_control_http(
+            {
+                "REQUEST_METHOD": "GET",
+                "PATH_INFO": control.STATUS_PATH,
+                "QUERY_STRING": "",
+                "wsgi.url_scheme": "https",
+                "wsgi.input": io.BytesIO(b""),
+                "HTTP_AUTHORIZATION": "Bearer private-status-token",
+            },
+            lambda status, headers: status_capture.update(
+                status=status, headers=dict(headers),
+            ),
+        ))
+        status_payload = json.loads(status_bytes)
+        self.assertEqual(status_capture["status"], "200 OK")
+        self.assertEqual(status_payload["status"]["generation"], {
+            "attempts": 3,
+            "failed_at": 100.0,
+            "error_code": "benchmark_client.network",
+        })
+        self.assertEqual(
+            runtime.benchmark_report_watcher.status(now=200).state, "failed",
+        )
         request = {
             "schema": control.REQUEST_SCHEMA,
             "request_id": "runtime-rearm-1",
@@ -1085,7 +1113,14 @@ class WebsiteLocalizationRuntimeTests(unittest.TestCase):
         self.assertEqual(
             runtime.benchmark_report_watcher.status(now=200).state, "pending",
         )
-        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            [(item["method"], item["path"]) for item in requests],
+            [
+                ("GET", control.STATUS_PATH),
+                ("POST", control.REARM_PATH),
+            ],
+        )
         self.assertNotIn(WATCH_CAMPAIGN_ID, encoded.decode("utf-8"))
 
     def test_runtime_rejects_incomplete_or_invalid_watcher_control(self):

@@ -21,12 +21,19 @@ from typing import Any, Callable, Mapping
 
 
 REARM_PATH = "/v1/benchmarks/watcher/rearm"
+STATUS_PATH = "/v1/benchmarks/watcher/status"
 REQUEST_SCHEMA = "blun.website-localization-benchmark-watcher-rearm-request.v1"
 RESPONSE_SCHEMA = "blun.website-localization-benchmark-watcher-rearm-response.v1"
 RECEIPT_SCHEMA = "blun.website-localization-benchmark-watcher-rearm-receipt.v1"
+STATUS_RESPONSE_SCHEMA = (
+    "blun.website-localization-benchmark-watcher-control-status-response.v1"
+)
+STATUS_SCHEMA = "blun.website-localization-benchmark-watcher-control-status.v1"
 AUTH_REQUEST_SCHEMA = "blun.website-localization-benchmark-watcher-control-auth.v1"
 PRINCIPAL_SCHEMA = "blun.website-localization-benchmark-watcher-operator.v1"
 ERROR_SCHEMA = "blun.website-localization-benchmark-watcher-control-error.v1"
+REARM_SCOPE = "benchmark-watcher:rearm"
+STATUS_SCOPE = "benchmark-watcher:status:read"
 MAX_BODY_BYTES = 4096
 MAX_HEADERS = 64
 MAX_HEADER_VALUE = 4096
@@ -115,14 +122,12 @@ def _timestamp(value: Any) -> float:
     return result
 
 
-def _principal(value: Any) -> BenchmarkWatcherOperator:
+def _principal(value: Any, expected_scope: str) -> BenchmarkWatcherOperator:
     try:
         if not isinstance(value, Mapping) or set(value) != {
             "schema", "operator_id", "credential_id", "credential_version",
             "scope",
-        } or value["schema"] != PRINCIPAL_SCHEMA or value["scope"] != (
-            "benchmark-watcher:rearm"
-        ):
+        } or value["schema"] != PRINCIPAL_SCHEMA or value["scope"] != expected_scope:
             raise ValueError
         return BenchmarkWatcherOperator(
             _identifier(value["operator_id"]),
@@ -373,9 +378,51 @@ class DurableBenchmarkWatcherRearmController:
             ))
             return receipt
 
+    def status(self, *, now: float | int) -> dict[str, Any]:
+        """Return only the exact content-free generation needed for recovery."""
+        try:
+            now = _timestamp(now)
+        except ValueError:
+            raise BenchmarkWatcherControlFailed(
+                "benchmark_watcher.control.clock_invalid",
+                status=503, retryable=True,
+            ) from None
+        try:
+            self._validate_schema()
+            row = self.watcher._row()
+            self.watcher._validated_row(row)
+            updated_at = _timestamp(row["updated_at"])
+            if updated_at > now:
+                raise BenchmarkWatcherControlFailed(
+                    "benchmark_watcher.control.clock_invalid",
+                    status=503, retryable=True,
+                )
+            state = row["state"]
+            generation = None
+            if state == "failed":
+                generation = {
+                    "attempts": row["attempts"],
+                    "failed_at": updated_at,
+                    "error_code": row["last_error_code"],
+                }
+            return {
+                "schema": STATUS_SCHEMA,
+                "checked_at": now,
+                "state": state,
+                "rearmable": state == "failed",
+                "generation": generation,
+            }
+        except BenchmarkWatcherControlFailed:
+            raise
+        except Exception:
+            raise BenchmarkWatcherControlFailed(
+                "benchmark_watcher.control.state_invalid",
+                status=503, retryable=False,
+            ) from None
+
 
 class BenchmarkWatcherControlHTTPApplication:
-    """Strict authenticated WSGI endpoint for durable watcher rearm."""
+    """Strict authenticated WSGI endpoints for watcher status and rearm."""
 
     def __init__(
         self,
@@ -455,17 +502,18 @@ class BenchmarkWatcherControlHTTPApplication:
         return body
 
     def _authenticate(
-        self, headers: tuple[tuple[str, str], ...], body: bytes,
+        self, method: str, path: str, headers: tuple[tuple[str, str], ...],
+        body: bytes, expected_scope: str,
     ) -> None:
         request = {
             "schema": AUTH_REQUEST_SCHEMA,
-            "method": "POST",
-            "path": REARM_PATH,
+            "method": method,
+            "path": path,
             "headers": [list(item) for item in headers],
             "body_sha256": hashlib.sha256(body).hexdigest(),
         }
         try:
-            _principal(self.authenticator(request))
+            _principal(self.authenticator(request), expected_scope)
         except BenchmarkWatcherControlFailed:
             raise
         except Exception:
@@ -506,15 +554,35 @@ class BenchmarkWatcherControlHTTPApplication:
                 raise BenchmarkWatcherControlFailed(
                     "benchmark_watcher.control.query_invalid", status=400,
                 )
-            if environ.get("REQUEST_METHOD") != "POST" or environ.get(
-                "PATH_INFO"
-            ) != REARM_PATH:
+            method = environ.get("REQUEST_METHOD")
+            path = environ.get("PATH_INFO")
+            if (method, path) not in {
+                ("GET", STATUS_PATH), ("POST", REARM_PATH),
+            }:
                 raise BenchmarkWatcherControlFailed(
                     "benchmark_watcher.control.route_not_found", status=404,
                 )
+            if method == "GET":
+                if (
+                    environ.get("HTTP_TRANSFER_ENCODING") not in {None, ""}
+                    or environ.get("CONTENT_TYPE") not in {None, ""}
+                    or environ.get("CONTENT_LENGTH") not in {None, "", "0"}
+                ):
+                    raise BenchmarkWatcherControlFailed(
+                        "benchmark_watcher.control.body_invalid", status=400,
+                    )
+                headers = self._headers(environ)
+                self._authenticate(
+                    "GET", STATUS_PATH, headers, b"", STATUS_SCOPE,
+                )
+                status = self.controller.status(now=self.clock())
+                return self._send(start_response, 200, {
+                    "schema": STATUS_RESPONSE_SCHEMA,
+                    "status": status,
+                })
             body = self._body(environ)
             headers = self._headers(environ)
-            self._authenticate(headers, body)
+            self._authenticate("POST", REARM_PATH, headers, body, REARM_SCOPE)
             try:
                 decoded = body.decode("utf-8")
                 payload = json.loads(

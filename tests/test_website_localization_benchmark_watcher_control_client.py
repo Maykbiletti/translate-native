@@ -93,6 +93,28 @@ def error_response(code, *, status, retryable):
     }, status=status)
 
 
+def status_response(*, state="failed", **changes):
+    status = {
+        "schema": CONTROL.STATUS_SCHEMA,
+        "checked_at": 1500.0,
+        "state": state,
+        "rearmable": state == "failed",
+        "generation": (
+            {
+                "attempts": 20,
+                "failed_at": 1000.0,
+                "error_code": "benchmark_client.network",
+            }
+            if state == "failed" else None
+        ),
+    }
+    status.update(changes)
+    return http_result({
+        "schema": CONTROL.STATUS_RESPONSE_SCHEMA,
+        "status": status,
+    })
+
+
 class Transport:
     def __init__(self, *results):
         self.results = list(results)
@@ -218,6 +240,217 @@ class BenchmarkWatcherControlClientTests(unittest.TestCase):
         payload = snapshot.as_payload()
         payload["state"] = "changed"
         self.assertEqual(snapshot.receipt["state"], "pending")
+
+    def test_status_reads_exact_generation_with_separate_bodyless_auth(self):
+        contexts = []
+        transport = Transport(status_response())
+        status = self.make_client(
+            transport,
+            credentials=lambda context: contexts.append(context) or {
+                "Authorization": "Bearer status-token",
+            },
+        ).status()
+
+        method, url, headers, body, timeout = transport.calls[0]
+        self.assertEqual(method, "GET")
+        self.assertEqual(url, "https://control.example" + CONTROL.STATUS_PATH)
+        self.assertIsNone(body)
+        self.assertNotIn("Content-Type", headers)
+        self.assertNotIn("Content-Length", headers)
+        self.assertNotIn("Idempotency-Key", headers)
+        self.assertEqual(headers["Authorization"], "Bearer status-token")
+        self.assertEqual(timeout, 10.0)
+        self.assertEqual(contexts, [{
+            "schema": CLIENT.AUTH_CONTEXT_SCHEMA,
+            "method": "GET",
+            "path": CONTROL.STATUS_PATH,
+            "body_sha256": hashlib.sha256(b"").hexdigest(),
+            "idempotency_key": None,
+        }])
+        self.assertEqual(status.state, "failed")
+        self.assertTrue(status.rearmable)
+        self.assertEqual(status.generation, {
+            "attempts": 20,
+            "failed_at": 1000.0,
+            "error_code": "benchmark_client.network",
+        })
+        payload = status.as_payload()
+        payload["generation"]["attempts"] = 1
+        self.assertEqual(status.generation["attempts"], 20)
+
+    def test_rearm_failed_completes_status_to_recovery_vertical(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            watcher = CONTROL._WATCHER.DurableBenchmarkReportWatcher(
+                connection, WatcherBackendClient(), lease_seconds=10,
+                base_delay_seconds=5, max_delay_seconds=20, max_attempts=20,
+            )
+            connection.execute("""
+                UPDATE benchmark_report_watcher
+                SET state = 'failed', attempts = 20, next_attempt_at = 1000,
+                    lease_owner = NULL, lease_token = NULL,
+                    lease_expires_at = NULL,
+                    last_error_code = 'benchmark_client.network',
+                    updated_at = 1000
+                WHERE singleton = 1
+            """)
+            connection.commit()
+            auth_requests = []
+
+            def authenticate(request):
+                auth_requests.append(request)
+                scope = (
+                    CONTROL.STATUS_SCOPE
+                    if request["path"] == CONTROL.STATUS_PATH
+                    else CONTROL.REARM_SCOPE
+                )
+                return {
+                    "schema": CONTROL.PRINCIPAL_SCHEMA,
+                    "operator_id": "operator-1",
+                    "credential_id": "control-credential-1",
+                    "credential_version": "2026-09-16",
+                    "scope": scope,
+                }
+
+            app = CONTROL.BenchmarkWatcherControlHTTPApplication(
+                CONTROL.DurableBenchmarkWatcherRearmController(watcher),
+                authenticate, clock=lambda: 1500,
+            )
+            transport = WSGITransport(app)
+            snapshot = self.make_client(transport).rearm_failed(
+                request_id="operator-rearm-from-status-1",
+            )
+
+            self.assertEqual(snapshot.receipt["previous_attempts"], 20)
+            self.assertEqual(snapshot.receipt["failed_at"], 1000.0)
+            self.assertEqual(watcher.status(now=1500).state, "pending")
+            self.assertEqual(
+                [call[0:2] for call in transport.calls],
+                [
+                    ("GET", "https://control.example" + CONTROL.STATUS_PATH),
+                    ("POST", "https://control.example" + CONTROL.REARM_PATH),
+                ],
+            )
+            self.assertEqual(
+                [request["body_sha256"] for request in auth_requests],
+                [
+                    hashlib.sha256(b"").hexdigest(),
+                    hashlib.sha256(transport.calls[1][3]).hexdigest(),
+                ],
+            )
+        finally:
+            connection.close()
+
+    def test_rearm_failed_never_posts_when_status_is_not_failed(self):
+        transport = Transport(status_response(state="pending"))
+        client = self.make_client(transport)
+
+        self.assert_failure(
+            "benchmark_watcher.control_client.not_rearmable",
+            lambda: client.rearm_failed(request_id="operator-rearm-1"),
+            retryable=False,
+        )
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(transport.calls[0][0], "GET")
+
+    def test_rearm_failed_cannot_reset_a_generation_changed_after_status(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            watcher = CONTROL._WATCHER.DurableBenchmarkReportWatcher(
+                connection, WatcherBackendClient(), lease_seconds=10,
+                base_delay_seconds=5, max_delay_seconds=20, max_attempts=20,
+            )
+            connection.execute("""
+                UPDATE benchmark_report_watcher
+                SET state = 'failed', attempts = 20, next_attempt_at = 1000,
+                    last_error_code = 'benchmark_client.network',
+                    updated_at = 1000
+                WHERE singleton = 1
+            """)
+            connection.commit()
+
+            def authenticate(request):
+                return {
+                    "schema": CONTROL.PRINCIPAL_SCHEMA,
+                    "operator_id": "operator-1",
+                    "credential_id": "control-credential-1",
+                    "credential_version": "2026-09-16",
+                    "scope": (
+                        CONTROL.STATUS_SCOPE
+                        if request["path"] == CONTROL.STATUS_PATH
+                        else CONTROL.REARM_SCOPE
+                    ),
+                }
+
+            backend = WSGITransport(
+                CONTROL.BenchmarkWatcherControlHTTPApplication(
+                    CONTROL.DurableBenchmarkWatcherRearmController(watcher),
+                    authenticate, clock=lambda: 1500,
+                ),
+            )
+
+            class RacingTransport:
+                def __init__(self):
+                    self.calls = backend.calls
+
+                def request(self, method, url, headers, body, *, timeout):
+                    result = backend.request(
+                        method, url, headers, body, timeout=timeout,
+                    )
+                    if method == "GET":
+                        connection.execute("""
+                            UPDATE benchmark_report_watcher
+                            SET last_error_code = 'benchmark_client.timeout',
+                                updated_at = 1200
+                            WHERE singleton = 1
+                        """)
+                        connection.commit()
+                    return result
+
+            client = self.make_client(RacingTransport())
+            self.assert_failure(
+                "benchmark_watcher.control.state_conflict",
+                lambda: client.rearm_failed(request_id="operator-rearm-race-1"),
+                retryable=False,
+            )
+            current = watcher.status(now=1500)
+            self.assertEqual(current.state, "failed")
+            self.assertEqual(current.attempts, 20)
+            self.assertEqual(current.last_error_code, "benchmark_client.timeout")
+            self.assertEqual(len(backend.calls), 2)
+        finally:
+            connection.close()
+
+    def test_status_semantic_mismatches_fail_closed(self):
+        scenarios = (
+            status_response(rearmable=False),
+            status_response(generation=None),
+            status_response(generation={
+                "attempts": True,
+                "failed_at": 1000.0,
+                "error_code": "benchmark_client.network",
+            }),
+            status_response(generation={
+                "attempts": 20,
+                "failed_at": 1501.0,
+                "error_code": "benchmark_client.network",
+            }),
+            status_response(checked_at=2001.0),
+            status_response(state="pending", generation={
+                "attempts": 20,
+                "failed_at": 1000.0,
+                "error_code": "benchmark_client.network",
+            }),
+        )
+        for response in scenarios:
+            with self.subTest(response=response.body):
+                self.assert_failure(
+                    "benchmark_watcher.control_client.status_mismatch",
+                    lambda response=response: self.make_client(
+                        Transport(response), max_future_skew=0,
+                    ).status(),
+                    retryable=False,
+                )
 
     def test_uncertain_retry_reuses_exact_identity_and_bytes(self):
         response = success_response()

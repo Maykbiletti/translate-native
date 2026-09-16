@@ -1037,8 +1037,16 @@ strictly outlive the configured watcher lease, as enforced during construction.
 A production host may pass `benchmark_watch_control_authenticator` beside the
 existing `benchmark_watch` configuration. The runtime then exposes a separate
 WSGI application at `benchmark_watch_control_http`. It accepts only HTTPS
-`POST /v1/benchmarks/watcher/rearm`, `Content-Type: application/json`, an
-`Idempotency-Key` equal to the body `request_id`, and a principal with schema
+requests. The strictly bodyless `GET /v1/benchmarks/watcher/status` operation
+requires the exact `benchmark-watcher:status:read` scope. It returns only the
+current watcher state and, for a terminal failure, the exact attempt count,
+failure time, and stable error code needed for recovery. It exposes no
+campaign, policy, suite, locale, provider, model, credential, or benchmark
+content.
+
+`POST /v1/benchmarks/watcher/rearm` requires
+`Content-Type: application/json`, an `Idempotency-Key` equal to the body
+`request_id`, and a principal with schema
 `blun.website-localization-benchmark-watcher-operator.v1` plus the exact scope
 `benchmark-watcher:rearm`. Supplying the authenticator without a watcher, or a
 non-callable authenticator, fails composition before service schemas are
@@ -1078,11 +1086,20 @@ External operator services can use
 `website_localization_benchmark_watcher_control_client.py` instead of
 constructing this security-sensitive request themselves. The client accepts a
 single origin and a provider-neutral credential callback. That callback sees a
-closed context containing only the `POST` method, rearm path, canonical body
-SHA-256, and request ID used as the idempotency key; it may return bearer,
+closed context containing only the method, path, canonical body SHA-256, and
+the request ID used as the idempotency key for `POST` or `null` for `GET`; it
+may return bearer,
 signature, gateway, or other host-specific headers but cannot override the
 method framing, content length/type, host, connection policy, or idempotency
 header.
+
+`status()` performs the bodyless, read-scoped operation and validates the
+complete closed response, including its timestamp and failed-generation
+semantics. `rearm_failed(request_id=...)` then uses exactly that generation and
+the caller-supplied identity for the canonical rearm request. If the watcher is
+not failed, it performs no `POST`. A race after the `GET` remains safe because
+the controller atomically compares the submitted generation with current
+durable state.
 
 `rearm(...)` requires the exact attempt count, failure timestamp, and stable
 error code observed from the blocked watcher health state. It sends one
