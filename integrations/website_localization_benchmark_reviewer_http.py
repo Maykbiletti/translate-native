@@ -537,6 +537,15 @@ class HTTPBenchmarkReviewerAdapter:
                     and payload["input"]["content_type"] == "commercial"
                     else None
                 ),
+                commercial_variant_texts=(
+                    {
+                        item["label"]: item["text"]
+                        for item in payload["input"]["variants"]
+                    }
+                    if payload["phase"] == "source_fidelity"
+                    and payload["input"]["content_type"] == "commercial"
+                    else None
+                ),
             )
         except Exception:
             raise HTTPBenchmarkReviewerFailed("response_invalid", retryable=False) from None

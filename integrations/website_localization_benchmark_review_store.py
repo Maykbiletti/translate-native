@@ -336,6 +336,15 @@ def _response(value: Any, request: dict[str, Any]) -> dict[str, Any]:
                 and isinstance(request["input"].get("benchmark_suite"), dict)
                 else None
             ),
+            commercial_variant_texts=(
+                {
+                    item["label"]: item["text"]
+                    for item in request["input"]["variants"]
+                }
+                if request["phase"] == "source_fidelity"
+                and request["input"].get("content_type") == "commercial"
+                else None
+            ),
         )
     except BenchmarkReviewEvidenceFailed:
         raise

@@ -783,18 +783,25 @@ preferences, defect counts and finding hashes—not reviewer reasons, excerpts,
 source text or either target.
 
 For a commercial `source_fidelity` response, persistence additionally requires
-the complete `translate-native.commercial-benchmark-review.v3` acknowledgement.
+the complete `translate-native.commercial-benchmark-review.v4` acknowledgement.
 The versioned suite registers an opaque offer count and a SHA-256-bound
 `translate-native.commercial-benchmark-offer-registry.v1` for every fixture.
 That manually maintained registry partitions the exact source into ordered
 Unicode-code-point spans owned by each offer plus explicit shared spans. The
-response lists all ten dimensions in profile order and, for both anonymous
+response also carries one
+`translate-native.commercial-benchmark-target-offer-registry.v1` for each
+anonymous variant. Each registry binds the exact target hash and length and
+semantically partitions its Unicode code points into non-empty offer-owned
+spans plus explicit shared spans; no language-independent extraction rule is
+accepted as semantic evidence. The response lists all ten dimensions in
+profile order and, for both anonymous
 variants, returns exactly one ordered status for every registered offer.
 `major` and `blocking` offer statuses must reference the matching variant's
 zero-based defect entry; `equivalent` and `not_present` cannot carry a defect
 reference. The dimension status is derived by fixed severity, so an aggregate
 cannot hide a major or blocking defect in another offer. Missing, duplicated or
-reordered offer indexes, gaps, overlaps, stale source lengths or digests,
+reordered offer indexes, source or target gaps and overlaps, swapped variants,
+stale source or target lengths or digests,
 inconsistent aggregates and `uncertain` all block the case. The registry and
 its digest cross the HTTPS and durable-review boundaries, and the signed case
 result retains the digest. The `target_native` request receives neither the
@@ -821,7 +828,7 @@ owners of retry limits, backoff, leases, and reuse.
 
 Each `POST` body uses
 `blun.website-localization-benchmark-review-http-request.v1` and contains the
-exact anonymous `blun.website-localization-benchmark.v9`
+exact anonymous `blun.website-localization-benchmark.v10`
 `BenchmarkReviewRequest`, its deterministic `review_id`, and the SHA-256 digest
 of its canonical UTF-8 JSON. Its expected review object uses
 `blun.website-localization-benchmark-review.v3`. The same values are bound in

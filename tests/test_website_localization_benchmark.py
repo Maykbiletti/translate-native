@@ -262,9 +262,25 @@ def review_response(request, preference, defects=None):
     }
     contract = request.input["response_schema"].get("commercial_evaluation")
     if contract is not None:
+        texts = {
+            item["label"]: item["text"] for item in request.input["variants"]
+        }
+        count = contract["offer_count"]
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
-            "offer_count": contract["offer_count"],
+            "offer_count": count,
+            "target_offer_registries": {
+                label: BENCHMARK._commercial_target_offer_registry(
+                    text,
+                    [
+                        [(len(text) * index // count,
+                          len(text) * (index + 1) // count)]
+                        for index in range(count)
+                    ],
+                    [],
+                )
+                for label, text in texts.items()
+            },
             "dimensions": [
                 {
                     "dimension": item["dimension"],
@@ -664,6 +680,108 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             "not digit strings", fidelity.system_instruction,
         )
         self.assertEqual(outcome["winner"], "candidate")
+
+    def test_commercial_target_offer_registries_bind_exact_anonymous_variants(self):
+        payload = job("mt-MT", "target-registry-7")
+        result = candidate_result(payload)
+        reviewer = PreferenceReviewer(result["candidate"])
+        outcome = self.run_benchmark(
+            payload, result, baseline(payload), assets(), policy(), reviewer,
+            blinding_key=self.key,
+        )
+        native, fidelity = reviewer.requests
+        self.assertNotIn(
+            "commercial_evaluation", native.input["response_schema"],
+        )
+        contract = fidelity.input["response_schema"]["commercial_evaluation"]
+        self.assertEqual(
+            set(contract["target_offer_registries"]), {"A", "B"},
+        )
+        response = review_response(fidelity, "tie")
+        registries = response["commercial_evaluation"][
+            "target_offer_registries"
+        ]
+        texts = {
+            item["label"]: item["text"] for item in fidelity.input["variants"]
+        }
+        for label, registry in registries.items():
+            self.assertEqual(registry["target_length"], len(texts[label]))
+            self.assertEqual(
+                registry["target_sha256"],
+                hashlib.sha256(texts[label].encode("utf-8")).hexdigest(),
+            )
+            self.assertEqual(
+                registry,
+                BENCHMARK.validate_commercial_target_offer_registry(
+                    registry, target_text=texts[label], offer_count=2,
+                ),
+            )
+        candidate_label = next(
+            label for label, text in texts.items()
+            if text == result["candidate"]
+        )
+        baseline_label = "B" if candidate_label == "A" else "A"
+        evaluation = outcome["commercial_evaluation"]
+        self.assertEqual(
+            evaluation["candidate_target_offer_registry_sha256"],
+            registries[candidate_label]["sha256"],
+        )
+        self.assertEqual(
+            evaluation["baseline_target_offer_registry_sha256"],
+            registries[baseline_label]["sha256"],
+        )
+
+        def validate(value):
+            return BENCHMARK._validate_review(
+                value, phase="source_fidelity", locale="mt-MT",
+                blind_id=fidelity.input["blind_id"],
+                commercial_dimensions=list(
+                    BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS
+                ),
+                commercial_offer_count=2,
+                commercial_variant_texts=texts,
+            )
+
+        validate(response)
+        mutations = {
+            "gap": lambda value: value["commercial_evaluation"][
+                "target_offer_registries"
+            ]["A"]["offers"][0]["target_spans"][0].__setitem__(
+                "end", registries["A"]["offers"][0]["target_spans"][0]["end"] - 1,
+            ),
+            "overlap": lambda value: value["commercial_evaluation"][
+                "target_offer_registries"
+            ]["A"]["offers"][1]["target_spans"][0].__setitem__(
+                "start", registries["A"]["offers"][1]["target_spans"][0]["start"] - 1,
+            ),
+            "boolean_index": lambda value: value["commercial_evaluation"][
+                "target_offer_registries"
+            ]["A"]["offers"][0].__setitem__("offer_index", False),
+            "bad_digest": lambda value: value["commercial_evaluation"][
+                "target_offer_registries"
+            ]["A"].__setitem__("sha256", "0" * 64),
+            "swapped_variants": lambda value: value["commercial_evaluation"].__setitem__(
+                "target_offer_registries",
+                {
+                    "A": registries["B"],
+                    "B": registries["A"],
+                },
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                invalid = copy.deepcopy(response)
+                mutate(invalid)
+                with self.assertRaises(BENCHMARK.BenchmarkBlocked):
+                    validate(invalid)
+
+        unicode_registry = BENCHMARK._commercial_target_offer_registry(
+            "ċ€ż", [[(0, 1)], [(1, 2)]], [(2, 3)],
+        )
+        self.assertEqual(unicode_registry["target_length"], 3)
+        self.assertEqual(
+            unicode_registry["shared_target_spans"], [{"start": 2, "end": 3}],
+        )
 
     def test_commercial_review_requires_exact_ordered_dimension_acknowledgement(self):
         mutations = {

@@ -103,7 +103,13 @@ def request(*, phase="target_native", locale="mt-MT", suffix="1", commercial=Fal
     digest = hashlib.sha256(
         f"{phase}:{locale}:{suffix}:{commercial}".encode()
     ).hexdigest()
-    review_input = {"blind_id": "blind-" + digest, "variants": []}
+    review_input = {
+        "blind_id": "blind-" + digest,
+        "variants": [
+            {"label": "A", "text": "L-ewwel offerta u t-tieni offerta."},
+            {"label": "B", "text": "L-ewwel pjan u t-tieni pjan."},
+        ],
+    }
     if commercial:
         source_text = "Commercial source text."
         midpoint = len(source_text) // 2
@@ -153,9 +159,21 @@ def response(review_request, preference="A"):
         dimensions = review_request.input["benchmark_suite"][
             "commercial_dimensions"
         ]
+        texts = {
+            item["label"]: item["text"]
+            for item in review_request.input["variants"]
+        }
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
             "offer_count": 2,
+            "target_offer_registries": {
+                label: BENCHMARK._commercial_target_offer_registry(
+                    text,
+                    [[(0, len(text) // 2)], [(len(text) // 2, len(text))]],
+                    [],
+                )
+                for label, text in texts.items()
+            },
             "dimensions": [
                 {
                     "dimension": dimension,
@@ -253,6 +271,23 @@ class BenchmarkReviewEvidenceStoreTests(unittest.TestCase):
         self.assertEqual(
             len(first["commercial_evaluation"]["dimensions"]), 10,
         )
+
+        target_drift_request = request(
+            phase="source_fidelity", commercial=True, suffix="target-drift",
+        )
+
+        class TargetDriftReviewer(Reviewer):
+            def review(self, review_request):
+                value = super().review(review_request)
+                value["commercial_evaluation"]["target_offer_registries"][
+                    "A"
+                ]["sha256"] = "0" * 64
+                return value
+
+        with self.assertRaises(STORE.BenchmarkReviewEvidenceFailed) as caught:
+            self.durable(TargetDriftReviewer()).review(target_drift_request)
+        self.assertEqual(caught.exception.code, "review.store.response_invalid")
+        self.assertFalse(caught.exception.retryable)
 
         uncertain_request = request(
             phase="source_fidelity", commercial=True, suffix="uncertain",

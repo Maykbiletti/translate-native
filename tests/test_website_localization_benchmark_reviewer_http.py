@@ -124,9 +124,25 @@ def review_response(request, *, preference="A", **overrides):
     }
     contract = request.input["response_schema"].get("commercial_evaluation")
     if contract is not None:
+        texts = {
+            item["label"]: item["text"] for item in request.input["variants"]
+        }
+        count = contract["offer_count"]
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
-            "offer_count": contract["offer_count"],
+            "offer_count": count,
+            "target_offer_registries": {
+                label: BENCHMARK._commercial_target_offer_registry(
+                    text,
+                    [
+                        [(len(text) * index // count,
+                          len(text) * (index + 1) // count)]
+                        for index in range(count)
+                    ],
+                    [],
+                )
+                for label, text in texts.items()
+            },
             "dimensions": [
                 {
                     "dimension": item["dimension"],
@@ -246,6 +262,21 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
             sent["input"]["benchmark_suite"]["commercial_dimensions"],
             dimensions,
         )
+        target_registries = response["commercial_evaluation"][
+            "target_offer_registries"
+        ]
+        variant_texts = {
+            item["label"]: item["text"] for item in sent["input"]["variants"]
+        }
+        for label in ("A", "B"):
+            self.assertEqual(
+                target_registries[label]["target_length"],
+                len(variant_texts[label]),
+            )
+            self.assertEqual(
+                target_registries[label]["target_sha256"],
+                hashlib.sha256(variant_texts[label].encode("utf-8")).hexdigest(),
+            )
         self.assertEqual(
             sent["input"]["benchmark_suite"]["commercial_offer_count"], 2,
         )
@@ -304,6 +335,21 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
             request, commercial_evaluation=incomplete["commercial_evaluation"],
         )]
         error = self.failure(lambda: adapter.review(request))
+        self.assertEqual((error.code, error.retryable), ("response_invalid", False))
+
+        target_drift = review_request(
+            phase="source_fidelity", content_type="commercial",
+            suffix="target-registry-drift",
+        )
+        response = review_response(target_drift)
+        response["commercial_evaluation"]["target_offer_registries"]["A"][
+            "target_length"
+        ] += 1
+        self.transport.results = [http_response(
+            target_drift,
+            commercial_evaluation=response["commercial_evaluation"],
+        )]
+        error = self.failure(lambda: adapter.review(target_drift))
         self.assertEqual((error.code, error.retryable), ("response_invalid", False))
 
     def test_headers_bind_authentication_idempotency_and_request_hash(self):

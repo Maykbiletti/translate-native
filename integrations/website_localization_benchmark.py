@@ -24,19 +24,22 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 
-BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v9"
+BENCHMARK_SCHEMA = "blun.website-localization-benchmark.v10"
 BASELINE_SCHEMA = "blun.website-localization-baseline.v2"
 BASELINE_PROVENANCE_SCHEMA = "blun.website-localization-baseline-provenance.v1"
 NATIVE_REFERENCE_SCHEMA = "blun.website-localization-native-reference.v1"
 NATIVE_REFERENCE_REQUEST_SCHEMA = "blun.website-localization-native-reference-request.v1"
 REVIEW_SCHEMA = "blun.website-localization-benchmark-review.v3"
-COMMERCIAL_REVIEW_SCHEMA = "translate-native.commercial-benchmark-review.v3"
-ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
-CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v10"
-COMMERCIAL_CASE_EVALUATION_SCHEMA = (
-    "translate-native.commercial-benchmark-case-evaluation.v3"
+COMMERCIAL_REVIEW_SCHEMA = "translate-native.commercial-benchmark-review.v4"
+COMMERCIAL_TARGET_OFFER_REGISTRY_SCHEMA = (
+    "translate-native.commercial-benchmark-target-offer-registry.v1"
 )
-REPORT_SCHEMA = "blun.website-localization-benchmark-report.v14"
+ATTESTATION_SCHEMA = "blun.website-localization-benchmark-attestation.v1"
+CASE_RESULT_SCHEMA = "blun.website-localization-benchmark-case-result.v11"
+COMMERCIAL_CASE_EVALUATION_SCHEMA = (
+    "translate-native.commercial-benchmark-case-evaluation.v4"
+)
+REPORT_SCHEMA = "blun.website-localization-benchmark-report.v15"
 CLAIM_SCOPE_SCHEMA = "blun.website-localization-benchmark-claim-scope.v2"
 PHASES = ("target_native", "source_fidelity")
 VARIANTS = ("A", "B")
@@ -78,7 +81,10 @@ not digit strings. Native digits, number words, written percentages, locale sepa
 be faithful. Never guess an ambiguous amount, basis, tax status, billing interval, commitment, renewal, cancellation
 term or condition; record the affected variant as having a blocking or major defect. Return one ordered commercial
 evaluation item for every listed dimension and both anonymous variants. Within every variant return exactly one
-ordered status for each opaque source offer index. Derive the dimension aggregate from those offer statuses; no
+ordered status for each opaque source offer index. For each anonymous target variant, return one semantic and
+complete Unicode-code-point registry that maps those same offer indexes to their target spans and identifies shared
+target spans. Do not derive target spans with regular expressions or surface number matching: transcreation may
+reorder, inflect or spell out values. Derive the dimension aggregate from those offer statuses; no
 aggregate may hide a major or blocking offer defect. Use the supplied Unicode-code-point registry to associate each
 opaque offer index with its exact source spans; apply every explicitly shared source span to each relevant offer.
 Never infer a different partition or expose this registry to the source-blind pass.
@@ -956,6 +962,24 @@ def _commercial_response_contract(
     return {
         "schema": COMMERCIAL_REVIEW_SCHEMA,
         "offer_count": offer_count,
+        "target_offer_registries": {
+            label: {
+                "schema": COMMERCIAL_TARGET_OFFER_REGISTRY_SCHEMA,
+                "offset_unit": "unicode-code-point",
+                "target_length": "exact anonymous variant code-point length",
+                "target_sha256": "exact anonymous variant UTF-8 SHA-256",
+                "offers": [
+                    {
+                        "offer_index": index,
+                        "target_spans": "non-empty ordered semantic ranges",
+                    }
+                    for index in range(offer_count)
+                ],
+                "shared_target_spans": "ordered semantic ranges",
+                "sha256": "canonical registry SHA-256",
+            }
+            for label in VARIANTS
+        },
         "dimensions": [
             {
                 "dimension": dimension,
@@ -979,6 +1003,129 @@ def _commercial_response_contract(
             for dimension in dimensions
         ],
     }
+
+
+def _commercial_target_offer_registry(
+    target_text: str,
+    offer_spans: Sequence[Sequence[tuple[int, int]]],
+    shared_spans: Sequence[tuple[int, int]],
+) -> dict[str, Any]:
+    """Build a canonical reviewer-supplied semantic target partition."""
+    if (
+        not isinstance(target_text, str)
+        or not target_text
+        or len(target_text) > MAX_TEXT_BYTES
+        or not isinstance(offer_spans, (list, tuple))
+        or not offer_spans
+        or not isinstance(shared_spans, (list, tuple))
+    ):
+        raise BenchmarkBlocked("benchmark.review.invalid")
+    offers = []
+    all_spans: list[dict[str, int]] = []
+    for index, spans in enumerate(offer_spans):
+        if not isinstance(spans, (list, tuple)) or not spans:
+            raise BenchmarkBlocked("benchmark.review.invalid")
+        rendered = []
+        for span in spans:
+            if not isinstance(span, (list, tuple)) or len(span) != 2:
+                raise BenchmarkBlocked("benchmark.review.invalid")
+            rendered.append({"start": span[0], "end": span[1]})
+        offers.append({"offer_index": index, "target_spans": rendered})
+        all_spans.extend(rendered)
+    rendered_shared = []
+    for span in shared_spans:
+        if not isinstance(span, (list, tuple)) or len(span) != 2:
+            raise BenchmarkBlocked("benchmark.review.invalid")
+        rendered_shared.append({"start": span[0], "end": span[1]})
+    all_spans.extend(rendered_shared)
+    if (
+        any(
+            type(span["start"]) is not int
+            or type(span["end"]) is not int
+            or not 0 <= span["start"] < span["end"] <= len(target_text)
+            for span in all_spans
+        )
+        or any(
+            offer["target_spans"] != sorted(
+                offer["target_spans"], key=lambda item: (item["start"], item["end"]),
+            )
+            for offer in offers
+        )
+        or rendered_shared != sorted(
+            rendered_shared, key=lambda item: (item["start"], item["end"]),
+        )
+        or sorted((span["start"], span["end"]) for span in all_spans)
+        != _complete_partition(len(target_text), all_spans)
+    ):
+        raise BenchmarkBlocked("benchmark.review.invalid")
+    body = {
+        "schema": COMMERCIAL_TARGET_OFFER_REGISTRY_SCHEMA,
+        "offset_unit": "unicode-code-point",
+        "target_length": len(target_text),
+        "target_sha256": _hash_text(target_text),
+        "offers": offers,
+        "shared_target_spans": rendered_shared,
+    }
+    return {**body, "sha256": _hash_json(body)}
+
+
+def _complete_partition(
+    length: int, spans: Sequence[Mapping[str, int]],
+) -> list[tuple[int, int]]:
+    ordered = sorted((span["start"], span["end"]) for span in spans)
+    if not ordered or ordered[0][0] != 0 or ordered[-1][1] != length:
+        return []
+    if any(left[1] != right[0] for left, right in zip(ordered, ordered[1:])):
+        return []
+    return ordered
+
+
+def validate_commercial_target_offer_registry(
+    value: Any, *, target_text: str, offer_count: int,
+) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "offset_unit", "target_length", "offers",
+            "target_sha256", "shared_target_spans", "sha256",
+        }
+        or value.get("schema") != COMMERCIAL_TARGET_OFFER_REGISTRY_SCHEMA
+        or value.get("offset_unit") != "unicode-code-point"
+        or value.get("target_length") != len(target_text)
+        or value.get("target_sha256") != _hash_text(target_text)
+        or not isinstance(value.get("offers"), list)
+        or len(value["offers"]) != offer_count
+        or not isinstance(value.get("shared_target_spans"), list)
+    ):
+        raise BenchmarkBlocked("benchmark.review.invalid")
+    offer_spans: list[list[tuple[int, int]]] = []
+    for expected_index, offer in enumerate(value["offers"]):
+        if (
+            not isinstance(offer, dict)
+            or set(offer) != {"offer_index", "target_spans"}
+            or type(offer["offer_index"]) is not int
+            or offer["offer_index"] != expected_index
+            or not isinstance(offer["target_spans"], list)
+            or not offer["target_spans"]
+        ):
+            raise BenchmarkBlocked("benchmark.review.invalid")
+        spans = []
+        for span in offer["target_spans"]:
+            if not isinstance(span, dict) or set(span) != {"start", "end"}:
+                raise BenchmarkBlocked("benchmark.review.invalid")
+            spans.append((span["start"], span["end"]))
+        offer_spans.append(spans)
+    shared_spans = []
+    for span in value["shared_target_spans"]:
+        if not isinstance(span, dict) or set(span) != {"start", "end"}:
+            raise BenchmarkBlocked("benchmark.review.invalid")
+        shared_spans.append((span["start"], span["end"]))
+    canonical = _commercial_target_offer_registry(
+        target_text, offer_spans, shared_spans,
+    )
+    if canonical != value:
+        raise BenchmarkBlocked("benchmark.review.invalid")
+    return canonical
 
 
 def _review_response_contract(
@@ -1131,11 +1278,32 @@ def _validate_commercial_evaluation(
     offer_count: int,
     variants: dict[str, dict[str, tuple[str, ...]]],
     preferred: str,
-) -> list[dict[str, Any]]:
+    variant_texts: Mapping[str, str],
+) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
-        "schema", "offer_count", "dimensions",
+        "schema", "offer_count", "target_offer_registries", "dimensions",
     }:
         raise BenchmarkBlocked("benchmark.review.invalid")
+    registries = value["target_offer_registries"]
+    if (
+        not isinstance(registries, dict)
+        or set(registries) != set(VARIANTS)
+        or not isinstance(variant_texts, Mapping)
+        or set(variant_texts) != set(VARIANTS)
+        or any(
+            not isinstance(variant_texts[label], str)
+            or not variant_texts[label]
+            for label in VARIANTS
+        )
+    ):
+        raise BenchmarkBlocked("benchmark.review.invalid")
+    parsed_registries = {
+        label: validate_commercial_target_offer_registry(
+            registries[label], target_text=variant_texts[label],
+            offer_count=offer_count,
+        )
+        for label in VARIANTS
+    }
     items = value["dimensions"]
     if (
         value["schema"] != COMMERCIAL_REVIEW_SCHEMA
@@ -1206,7 +1374,10 @@ def _validate_commercial_evaluation(
                 "offers": offer_statuses,
             }
         parsed.append(parsed_item)
-    return parsed
+    return {
+        "dimensions": parsed,
+        "target_offer_registries": parsed_registries,
+    }
 
 
 def _commercial_aggregate_status(statuses: Sequence[str]) -> str:
@@ -1225,6 +1396,7 @@ def _validate_review(
     response: dict[str, Any], *, phase: str, locale: str, blind_id: str,
     commercial_dimensions: Any = None,
     commercial_offer_count: Any = None,
+    commercial_variant_texts: Any = None,
 ) -> dict[str, Any]:
     expected = {"schema", "phase", "target_locale", "blind_id", "preference", "variants"}
     if commercial_dimensions is not None:
@@ -1267,12 +1439,13 @@ def _validate_review(
             offer_count=commercial_offer_count,
             variants=parsed["variants"],
             preferred=preferred,
+            variant_texts=commercial_variant_texts,
         )
     return parsed
 
 
 def _unblind_commercial_evaluation(
-    items: Sequence[Mapping[str, Any]],
+    evaluation: Mapping[str, Any],
     origins: Mapping[str, str],
     response_sha256: str,
     offer_count: int,
@@ -1289,6 +1462,14 @@ def _unblind_commercial_evaluation(
         "schema": COMMERCIAL_CASE_EVALUATION_SCHEMA,
         "review_response_sha256": response_sha256,
         "offer_registry_sha256": offer_registry_sha256,
+        "candidate_target_offer_registry_sha256": next(
+            evaluation["target_offer_registries"][label]["sha256"]
+            for label, resolved in origins.items() if resolved == "candidate"
+        ),
+        "baseline_target_offer_registry_sha256": next(
+            evaluation["target_offer_registries"][label]["sha256"]
+            for label, resolved in origins.items() if resolved == "baseline"
+        ),
         "offer_count": offer_count,
         "dimensions": [
             {
@@ -1298,7 +1479,7 @@ def _unblind_commercial_evaluation(
                 "baseline_status": decision(item, "baseline")["status"],
                 "baseline_offers": decision(item, "baseline")["offers"],
             }
-            for item in items
+            for item in evaluation["dimensions"]
         ],
     }
 
@@ -1422,6 +1603,12 @@ def run_blind_benchmark_case(
             commercial_offer_count=(
                 benchmark_case["commercial_offer_count"]
                 if phase == "source_fidelity" and job["content_type"] == "commercial"
+                else None
+            ),
+            commercial_variant_texts=(
+                variants
+                if phase == "source_fidelity"
+                and job["content_type"] == "commercial"
                 else None
             ),
         )
@@ -1810,6 +1997,8 @@ def _validated_case_result(
             not isinstance(commercial_evaluation, dict)
             or set(commercial_evaluation) != {
                 "schema", "review_response_sha256", "offer_registry_sha256",
+                "candidate_target_offer_registry_sha256",
+                "baseline_target_offer_registry_sha256",
                 "offer_count", "dimensions",
             }
             or commercial_evaluation["schema"]
@@ -1826,6 +2015,8 @@ def _validated_case_result(
         )
         if commercial_evaluation["review_response_sha256"] != fidelity_response_sha256:
             raise BenchmarkBlocked("benchmark.results.invalid")
+        _sha256(commercial_evaluation["candidate_target_offer_registry_sha256"])
+        _sha256(commercial_evaluation["baseline_target_offer_registry_sha256"])
         dimensions = commercial_evaluation["dimensions"]
         if (
             not isinstance(dimensions, list)

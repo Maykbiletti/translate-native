@@ -1,5 +1,31 @@
 # Version 6 premortem
 
+## Target-bound commercial benchmark offer registry (16 September 2026)
+
+Assume the source-fidelity reviewer reports a complete per-offer status matrix,
+but silently attaches an opaque offer index to different target passages in
+variants A and B.
+
+- A reviewer could swap the two variant registries while preserving otherwise
+  valid statuses and hashes.
+- UTF-8 byte offsets could split native characters or disagree with Python's
+  Unicode-code-point indexing.
+- Gaps, overlaps, or empty offer ranges could leave a changed price or
+  condition outside every reviewed offer.
+- Deriving target ranges with a language-independent regular expression could
+  misread reordered transcreation, number words, native digits, or shared
+  commercial conditions.
+- Returning target mappings to the target-native pass would weaken its source-
+  blind independence.
+
+The source-fidelity reviewer must therefore supply one semantic, complete
+Unicode-code-point partition for each exact anonymous target variant. The
+boundary validates variant identity, target length, ordered offer indexes,
+non-empty offer ranges, explicit shared ranges, complete coverage, and a
+canonical digest; it never invents ranges. Only content-free candidate and
+baseline registry digests survive unblinding into the signed case result.
+Target-native requests remain free of every commercial registry.
+
 ## Source-bound commercial benchmark offer registry (16 September 2026)
 
 Assume two independent reviewers receive the same opaque offer count but attach
