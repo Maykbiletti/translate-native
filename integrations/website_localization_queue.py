@@ -10,15 +10,18 @@ that the output is reviewed, signed, or ready for publication.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import re
 import secrets
 import sqlite3
+import sys
 import time
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterator, Mapping
+from pathlib import Path
+from typing import Any, Callable, Iterator, Mapping
 
 
 SCHEMA_VERSION = 1
@@ -26,6 +29,7 @@ MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
 MAX_PAYLOAD_BYTES = 2_000_000
 MAX_RESULT_BYTES = 2_000_000
+MAX_BINDING_QUARANTINE = 24
 QUALITY_PASSES = ["target_native", "source_fidelity"]
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
@@ -49,6 +53,7 @@ _COLUMNS = (
     "updated_at",
 )
 _PLAN_COLUMNS = ("plan_id", "job_id", "target_locale", "created_at")
+_DEFAULT_BINDING_VALIDATOR: Callable[[dict[str, Any]], bool] | None = None
 
 
 class LocalizationQueueBlocked(RuntimeError):
@@ -154,6 +159,32 @@ def _error(code: Any, detail: Any = None) -> tuple[str, str | None]:
     if "\x00" in detail or not unicodedata.is_normalized("NFC", detail):
         raise LocalizationQueueBlocked("error_detail contains unsafe Unicode text")
     return code, _hash_text(detail)
+
+
+def _default_binding_validator() -> Callable[[dict[str, Any]], bool]:
+    """Load the current worker validator without duplicating its contract."""
+    global _DEFAULT_BINDING_VALIDATOR
+    if _DEFAULT_BINDING_VALIDATOR is None:
+        path = Path(__file__).with_name("website_localization_worker.py")
+        spec = importlib.util.spec_from_file_location(
+            "blun_website_localization_queue_worker",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            raise LocalizationQueueBlocked("current job binding validator is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        def validate(payload: dict[str, Any]) -> bool:
+            try:
+                module._validated_job(payload)
+            except module.LocalizationWorkerBlocked:
+                return False
+            return True
+
+        _DEFAULT_BINDING_VALIDATOR = validate
+    return _DEFAULT_BINDING_VALIDATOR
 
 
 @contextmanager
@@ -339,18 +370,53 @@ class LocalizationQueue:
         now: float | int | None = None,
         lease_seconds: float | int = 300,
         eligible_plan_ids: tuple[str, ...] | None = None,
+        binding_validator: Callable[[dict[str, Any]], bool] | None = None,
     ) -> ClaimedJob | None:
         worker_id = _field("worker_id", worker_id, limit=128)
         now = _timestamp("now", now)
         lease_seconds = _duration("lease_seconds", lease_seconds)
+        if binding_validator is None:
+            binding_validator = _default_binding_validator()
+        elif not callable(binding_validator):
+            raise LocalizationQueueBlocked("binding_validator must be callable")
         if eligible_plan_ids is not None:
             if not isinstance(eligible_plan_ids, tuple):
                 raise LocalizationQueueBlocked("eligible_plan_ids must be an immutable tuple")
             eligible_plan_ids = tuple(sorted({
                 _field("eligible_plan_id", value) for value in eligible_plan_ids
             }))
+        selection_sql: str | None
+        selection_parameters: tuple[Any, ...]
+        if eligible_plan_ids is not None and not eligible_plan_ids:
+            selection_sql = None
+            selection_parameters = ()
+        elif eligible_plan_ids is None:
+            selection_sql = """
+                SELECT * FROM localization_jobs
+                WHERE status IN ('pending', 'retry_wait')
+                  AND next_attempt_at <= ? AND attempts < max_attempts
+                ORDER BY created_at, target_locale, job_id
+                LIMIT 1
+            """
+            selection_parameters = (now,)
+        else:
+            placeholders = ",".join("?" for _ in eligible_plan_ids)
+            selection_sql = f"""
+                SELECT jobs.* FROM localization_jobs AS jobs
+                WHERE jobs.status IN ('pending', 'retry_wait')
+                  AND jobs.next_attempt_at <= ? AND jobs.attempts < jobs.max_attempts
+                  AND EXISTS (
+                      SELECT 1 FROM localization_plan_jobs AS mapping
+                      WHERE mapping.job_id = jobs.job_id
+                        AND mapping.plan_id IN ({placeholders})
+                  )
+                ORDER BY jobs.created_at, jobs.target_locale, jobs.job_id
+                LIMIT 1
+            """
+            selection_parameters = (now, *eligible_plan_ids)
         blocked_error: str | None = None
         claimed: ClaimedJob | None = None
+        quarantined = 0
         with _transaction(self.connection):
             self.connection.execute("""
                 UPDATE localization_jobs
@@ -368,31 +434,12 @@ class LocalizationQueue:
                 WHERE status = 'leased' AND lease_expires_at <= ?
                   AND attempts < max_attempts
             """, (now, now, now))
-            if eligible_plan_ids is not None and not eligible_plan_ids:
-                row = None
-            elif eligible_plan_ids is None:
-                row = self.connection.execute("""
-                    SELECT * FROM localization_jobs
-                    WHERE status IN ('pending', 'retry_wait')
-                      AND next_attempt_at <= ? AND attempts < max_attempts
-                    ORDER BY created_at, target_locale, job_id
-                    LIMIT 1
-                """, (now,)).fetchone()
-            else:
-                placeholders = ",".join("?" for _ in eligible_plan_ids)
-                row = self.connection.execute(f"""
-                    SELECT jobs.* FROM localization_jobs AS jobs
-                    WHERE jobs.status IN ('pending', 'retry_wait')
-                      AND jobs.next_attempt_at <= ? AND jobs.attempts < jobs.max_attempts
-                      AND EXISTS (
-                          SELECT 1 FROM localization_plan_jobs AS mapping
-                          WHERE mapping.job_id = jobs.job_id
-                            AND mapping.plan_id IN ({placeholders})
-                      )
-                    ORDER BY jobs.created_at, jobs.target_locale, jobs.job_id
-                    LIMIT 1
-                """, (now, *eligible_plan_ids)).fetchone()
-            if row is not None:
+            while selection_sql is not None:
+                row = self.connection.execute(
+                    selection_sql, selection_parameters,
+                ).fetchone()
+                if row is None:
+                    break
                 payload_hash = _hash_text(row["payload_json"])
                 if payload_hash != row["payload_sha256"]:
                     self.connection.execute("""
@@ -414,36 +461,59 @@ class LocalizationQueue:
                         """, (now, row["job_id"]))
                         blocked_error = "queued payload is no longer valid JSON"
                     else:
-                        lease_token = secrets.token_urlsafe(32)
-                        lease_expires_at = now + lease_seconds
-                        updated = self.connection.execute("""
-                            UPDATE localization_jobs
-                            SET status = 'leased', attempts = attempts + 1,
-                                lease_owner = ?, lease_token = ?, lease_expires_at = ?,
-                                last_error_code = NULL, last_error_detail_hash = NULL,
-                                updated_at = ?
-                            WHERE job_id = ? AND status IN ('pending', 'retry_wait')
-                        """, (
-                            worker_id,
-                            lease_token,
-                            lease_expires_at,
-                            now,
-                            row["job_id"],
-                        ))
-                        if updated.rowcount != 1:
-                            raise LocalizationQueueBlocked("claim lost its transactional job identity")
-                        claimed = ClaimedJob(
-                            job_id=row["job_id"],
-                            plan_ids=self._plan_ids(row["job_id"]),
-                            target_locale=row["target_locale"],
-                            payload=payload,
-                            attempt=int(row["attempts"]) + 1,
-                            max_attempts=int(row["max_attempts"]),
-                            lease_owner=worker_id,
-                            lease_token=lease_token,
-                            lease_expires_at=lease_expires_at,
-                        )
-        if blocked_error:
+                        payload_before = _canonical_json(payload)
+                        binding_valid = binding_validator(payload)
+                        if _canonical_json(payload) != payload_before:
+                            raise LocalizationQueueBlocked(
+                                "binding_validator must not mutate queued payload"
+                            )
+                        if binding_valid is not True:
+                            self.connection.execute("""
+                                UPDATE localization_jobs
+                                SET status = 'failed',
+                                    last_error_code = 'job_binding_invalid',
+                                    last_error_detail_hash = NULL,
+                                    updated_at = ?
+                                WHERE job_id = ?
+                            """, (now, row["job_id"]))
+                            blocked_error = "queued job binding is no longer current"
+                            quarantined += 1
+                            if quarantined >= MAX_BINDING_QUARANTINE:
+                                break
+                            continue
+                        else:
+                            lease_token = secrets.token_urlsafe(32)
+                            lease_expires_at = now + lease_seconds
+                            updated = self.connection.execute("""
+                                UPDATE localization_jobs
+                                SET status = 'leased', attempts = attempts + 1,
+                                    lease_owner = ?, lease_token = ?, lease_expires_at = ?,
+                                    last_error_code = NULL, last_error_detail_hash = NULL,
+                                    updated_at = ?
+                                WHERE job_id = ? AND status IN ('pending', 'retry_wait')
+                            """, (
+                                worker_id,
+                                lease_token,
+                                lease_expires_at,
+                                now,
+                                row["job_id"],
+                            ))
+                            if updated.rowcount != 1:
+                                raise LocalizationQueueBlocked("claim lost its transactional job identity")
+                            claimed = ClaimedJob(
+                                job_id=row["job_id"],
+                                plan_ids=self._plan_ids(row["job_id"]),
+                                target_locale=row["target_locale"],
+                                payload=payload,
+                                attempt=int(row["attempts"]) + 1,
+                                max_attempts=int(row["max_attempts"]),
+                                lease_owner=worker_id,
+                                lease_token=lease_token,
+                                lease_expires_at=lease_expires_at,
+                            )
+                            break
+                break
+        if blocked_error and claimed is None:
             raise LocalizationQueueBlocked(blocked_error)
         return claimed
 

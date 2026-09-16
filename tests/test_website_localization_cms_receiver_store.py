@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,14 +90,17 @@ def tombstone_for(publication, publication_payload_sha256):
 class DurableCMSReceiverStoreTests(unittest.TestCase):
     def setUp(self):
         self.connection = sqlite3.connect(":memory:")
+        self.publication_authority = HELPERS.Authority(
+            b"publication-key", "publication-key-1",
+        )
         self.store = STORE.DurableCMSReceiverStore(
-            self.connection, clock=lambda: 1000,
+            self.connection,
+            release_evidence_validator=RECEIVER.release_evidence_is_current,
+            publication_signature_validator=self.signature_is_valid,
+            clock=lambda: 1000,
         )
         self.assertEqual(
             self.connection.execute("PRAGMA secure_delete").fetchone()[0], 1,
-        )
-        self.publication_authority = HELPERS.Authority(
-            b"publication-key", "publication-key-1",
         )
         self.acknowledgement_authority = HELPERS.Authority(
             b"ack-key", "ack-key-1",
@@ -105,6 +109,11 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
             CMS.WebsiteLocalizationCMSBridge._publication_http_capabilities()[
                 "sha256"
             ]
+        )
+
+    def signature_is_valid(self, payload, signature):
+        return RECEIVER.message_signature_is_valid(
+            payload, signature, self.publication_authority,
         )
 
     def tearDown(self):
@@ -164,6 +173,19 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.assertEqual(first["status"], "accepted")
         self.assertEqual(replay, first)
         self.assertEqual(active, publication)
+        self.assertEqual(
+            active["localizations"][0]["release_evidence"]["evidence_request_id"],
+            "blun-l10n-evidence-" + "9" * 64,
+        )
+        self.assertEqual(
+            active["localizations"][0]["release_evidence"]["evidence_revision"],
+            "native-evidence-1",
+        )
+        self.assertEqual(
+            active["localizations"][0]["release_evidence"]
+            ["release_evidence_contract_sha256"],
+            CMS._RELEASE.publication_evidence_contract()["sha256"],
+        )
         self.assertEqual(deleted["status"], "deleted")
         self.assertEqual(deleted_replay, deleted)
         self.assertEqual(registration_replay["status"], "deleted")
@@ -412,6 +434,278 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
                 contract_sha256=self.contract_sha256,
             ))
 
+    def test_expired_active_authorization_blocks_read_health_and_replay(self):
+        now = [1000]
+        self.store.clock = lambda: now[0]
+        publication = HELPERS.publication_payload(expires_at=2000)
+        expected = HELPERS.expectation(publication)
+        verified = HELPERS.request(publication, self.publication_authority)
+        self.store.register_source(expected)
+        self.store.commit(verified)
+        now[0] = 2000
+
+        operations = (
+            lambda: self.store.read_active_bundle(expected),
+            lambda: self.store.commit(verified),
+            lambda: self.store.check(SimpleNamespace(
+                probe_id="publisher-health-probe-401",
+                contract_sha256=self.contract_sha256,
+            )),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                    operation()
+
+    def test_contract_stale_active_bundle_blocks_but_can_be_deleted(self):
+        publication = HELPERS.publication_payload()
+        expected = HELPERS.expectation(publication)
+        verified = HELPERS.request(publication, self.publication_authority)
+        self.store.register_source(expected)
+        self.store.commit(verified)
+        tombstone = tombstone_for(publication, verified.payload_sha256)
+        deletion = HELPERS.tombstone_request(
+            tombstone, self.publication_authority,
+        )
+
+        with patch.object(
+            CMS._RELEASE,
+            "publication_evidence_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            operations = (
+                lambda: self.store.read_active_bundle(expected),
+                lambda: self.store.commit(verified),
+                lambda: self.store.check(SimpleNamespace(
+                    probe_id="publisher-health-probe-401",
+                    contract_sha256=self.contract_sha256,
+                )),
+            )
+            for operation in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                        operation()
+            self.store.register_tombstone(
+                HELPERS.tombstone_expectation(tombstone),
+            )
+            deleted = self.store.delete(deletion)
+
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertIsNone(self.store.read_active_bundle(expected))
+
+    def test_locale_policy_stale_active_bundle_blocks_but_can_be_deleted(self):
+        publication = HELPERS.publication_payload()
+        expected = HELPERS.expectation(publication)
+        verified = HELPERS.request(publication, self.publication_authority)
+        self.store.register_source(expected)
+        self.store.commit(verified)
+        tombstone = tombstone_for(publication, verified.payload_sha256)
+        deletion = HELPERS.tombstone_request(
+            tombstone, self.publication_authority,
+        )
+        current = CMS._RELEASE._WORKER._PLANNER.commercial_quality_profile_for(
+            "fi-FI",
+        )
+        changed = json.loads(json.dumps(current))
+        changed["version"] = current["version"] + "-next"
+        changed["sha256"] = "0" * 64
+
+        with patch.object(
+            CMS._RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            return_value=changed,
+        ):
+            operations = (
+                lambda: self.store.read_active_bundle(expected),
+                lambda: self.store.commit(verified),
+                lambda: self.store.check(SimpleNamespace(
+                    probe_id="publisher-health-probe-401",
+                    contract_sha256=self.contract_sha256,
+                )),
+            )
+            for operation in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                        operation()
+            self.store.register_tombstone(
+                HELPERS.tombstone_expectation(tombstone),
+            )
+            deleted = self.store.delete(deletion)
+
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertIsNone(self.store.read_active_bundle(expected))
+
+    def test_general_locale_policy_stale_bundle_blocks_but_can_be_deleted(self):
+        publication = HELPERS.publication_payload(commercial=False)
+        expected = HELPERS.expectation(
+            publication, content_type="cta", commercial_profile=None,
+        )
+        verified = HELPERS.request(publication, self.publication_authority)
+        self.store.register_source(expected)
+        self.store.commit(verified)
+        tombstone = tombstone_for(publication, verified.payload_sha256)
+        deletion = HELPERS.tombstone_request(
+            tombstone, self.publication_authority,
+        )
+        current = CMS._RELEASE._WORKER._PLANNER.quality_profile_for("fi-FI")
+        changed = json.loads(json.dumps(current))
+        changed["version"] = current["version"] + "-next"
+        changed["sha256"] = "0" * 64
+
+        with patch.object(
+            CMS._RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            return_value=changed,
+        ), patch.object(
+            CMS._RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=AssertionError("commercial resolver called"),
+        ):
+            operations = (
+                lambda: self.store.read_active_bundle(expected),
+                lambda: self.store.commit(verified),
+                lambda: self.store.check(SimpleNamespace(
+                    probe_id="publisher-health-probe-401",
+                    contract_sha256=self.contract_sha256,
+                )),
+            )
+            for operation in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                        operation()
+            self.store.register_tombstone(
+                HELPERS.tombstone_expectation(tombstone),
+            )
+            deleted = self.store.delete(deletion)
+
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertIsNone(self.store.read_active_bundle(expected))
+
+    def test_rehashed_database_rewrite_fails_publisher_signature_check(self):
+        publication = HELPERS.publication_payload()
+        expected = HELPERS.expectation(publication)
+        verified = HELPERS.request(publication, self.publication_authority)
+        self.store.register_source(expected)
+        self.store.commit(verified)
+
+        changed = json.loads(json.dumps(publication))
+        target = "Aloita maksutta – muutettu hinta 490 € vuodessa."
+        evidence = HELPERS.release_evidence(target)
+        localization = changed["localizations"][0]
+        localization.update({
+            "target_text": target,
+            "target_sha256": evidence["target_sha256"],
+            "approval_id": evidence["approval_id"],
+            "release_evidence": evidence,
+        })
+        payload_json = STORE._canonical_json(changed)
+        payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        self.connection.execute(
+            "UPDATE cms_receiver_publications "
+            "SET payload_json = ?, payload_sha256 = ? WHERE delivery_id = ?",
+            (payload_json, payload_sha256, publication["delivery_id"]),
+        )
+        self.connection.execute("""
+            UPDATE cms_receiver_localizations
+            SET target_text = ?, target_sha256 = ?, approval_id = ?,
+                release_evidence_json = ?
+            WHERE delivery_id = ? AND locale = ?
+        """, (
+            target, evidence["target_sha256"], evidence["approval_id"],
+            STORE._canonical_json(evidence), publication["delivery_id"],
+            localization["locale"],
+        ))
+        self.connection.commit()
+
+        with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+            self.store.read_active_bundle(expected)
+        with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+            self.store.check(SimpleNamespace(
+                probe_id="publisher-health-probe-401",
+                contract_sha256=self.contract_sha256,
+            ))
+
+    def test_direct_commit_rejects_invalid_publisher_signature(self):
+        publication = HELPERS.publication_payload()
+        expected = HELPERS.expectation(publication)
+        verified = HELPERS.request(publication, self.publication_authority)
+        invalid = SimpleNamespace(
+            delivery_id=verified.delivery_id,
+            payload_sha256=verified.payload_sha256,
+            payload=verified.payload,
+            signature=SimpleNamespace(
+                algorithm="hmac-sha256-test",
+                key_id="publication-key-1",
+                signature="0" * 64,
+            ),
+        )
+        self.store.register_source(expected)
+
+        with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+            self.store.commit(invalid)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM cms_receiver_publications"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_v1_active_bundle_migrates_blocked_but_remains_deletable(self):
+        publication = HELPERS.publication_payload()
+        expected = HELPERS.expectation(publication)
+        verified = HELPERS.request(publication, self.publication_authority)
+        tombstone = tombstone_for(publication, verified.payload_sha256)
+        deletion = HELPERS.tombstone_request(
+            tombstone, self.publication_authority,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-cms-receiver.sqlite3"
+            first_connection = sqlite3.connect(path)
+            first = STORE.DurableCMSReceiverStore(
+                first_connection,
+                release_evidence_validator=RECEIVER.release_evidence_is_current,
+                publication_signature_validator=self.signature_is_valid,
+                clock=lambda: 1000,
+            )
+            first.register_source(expected)
+            first.commit(verified)
+            first_connection.execute(
+                "ALTER TABLE cms_receiver_publications "
+                "DROP COLUMN signature_json"
+            )
+            first_connection.execute(
+                f"PRAGMA user_version = {STORE.LEGACY_SCHEMA_VERSION}"
+            )
+            first_connection.commit()
+            first_connection.close()
+
+            second_connection = sqlite3.connect(path)
+            second = STORE.DurableCMSReceiverStore(
+                second_connection,
+                release_evidence_validator=RECEIVER.release_evidence_is_current,
+                publication_signature_validator=self.signature_is_valid,
+                clock=lambda: 1001,
+            )
+            try:
+                self.assertEqual(
+                    second_connection.execute(
+                        "PRAGMA user_version"
+                    ).fetchone()[0],
+                    STORE.SCHEMA_VERSION,
+                )
+                with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                    second.read_active_bundle(expected)
+                with self.assertRaises(STORE.CMSReceiverStoreBlocked):
+                    second.commit(verified)
+                second.register_tombstone(
+                    HELPERS.tombstone_expectation(tombstone),
+                )
+                self.assertEqual(second.delete(deletion)["status"], "deleted")
+                self.assertIsNone(second.read_active_bundle(expected))
+            finally:
+                second_connection.close()
+
     def test_direct_commit_rejects_inconsistent_commercial_quality_binding(self):
         publication = HELPERS.publication_payload()
         self.store.register_source(HELPERS.expectation(publication))
@@ -468,7 +762,10 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
             path = Path(directory) / "cms-receiver.sqlite3"
             first_connection = sqlite3.connect(path)
             first = STORE.DurableCMSReceiverStore(
-                first_connection, clock=lambda: 1000,
+                first_connection,
+                release_evidence_validator=RECEIVER.release_evidence_is_current,
+                publication_signature_validator=self.signature_is_valid,
+                clock=lambda: 1000,
             )
             first.register_source(HELPERS.expectation(publication))
             verified = HELPERS.request(publication, self.publication_authority)
@@ -477,7 +774,10 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
 
             second_connection = sqlite3.connect(path)
             second = STORE.DurableCMSReceiverStore(
-                second_connection, clock=lambda: 1001,
+                second_connection,
+                release_evidence_validator=RECEIVER.release_evidence_is_current,
+                publication_signature_validator=self.signature_is_valid,
+                clock=lambda: 1001,
             )
             replay = second.commit(verified)
             active = second.read_active_bundle(HELPERS.expectation(publication))
@@ -493,7 +793,12 @@ class DurableCMSReceiverStoreTests(unittest.TestCase):
         self.connection.commit()
 
         with self.assertRaises(STORE.CMSReceiverStoreBlocked):
-            STORE.DurableCMSReceiverStore(self.connection, clock=lambda: 1000)
+            STORE.DurableCMSReceiverStore(
+                self.connection,
+                release_evidence_validator=RECEIVER.release_evidence_is_current,
+                publication_signature_validator=self.signature_is_valid,
+                clock=lambda: 1000,
+            )
 
 
 if __name__ == "__main__":

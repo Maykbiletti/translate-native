@@ -11,6 +11,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 
@@ -69,6 +70,12 @@ def release_evidence(
     resolution_method="independent_model",
 ):
     target_sha256 = hashlib.sha256(target.encode("utf-8")).hexdigest()
+    locale_quality = CMS._PLANNER.quality_profile_for(locale)
+    release_quality_profile = {
+        "locale": locale_quality["locale"],
+        "version": locale_quality["version"],
+        "sha256": locale_quality["sha256"],
+    }
     review = None
     profile = None
     quality_profile = None
@@ -90,15 +97,43 @@ def release_evidence(
             "review_required_dimensions": (
                 ["tax_status", "cancellation"] if review_required else []
             ),
+            "offer_count": 1,
+            "review_required_offers": (
+                [
+                    {"dimension": "tax_status", "offer_indexes": [0]},
+                    {"dimension": "cancellation", "offer_indexes": [0]},
+                ]
+                if review_required else []
+            ),
+            "review_evidence_contract_sha256": (
+                CMS._RELEASE._WORKER._COMMERCIAL
+                .public_review_evidence_contract(profile)["sha256"]
+            ),
             "evidence_sha256": "5" * 64,
         }
         if review_required:
+            primary_provider = {
+                "id": "customer-llm",
+                "model_id": "king",
+                "model_version": "2026-09-12",
+            }
             resolution = {
                 "schema": CMS._RELEASE.COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
+                "profile": profile,
+                "contract_sha256": (
+                    CMS._RELEASE._WORKER._COMMERCIAL
+                    .public_review_resolution_contract(profile)["sha256"]
+                ),
                 "status": "resolved",
                 "reviewed_dimensions": ["tax_status", "cancellation"],
+                "reviewed_offer_count": 1,
+                "reviewed_offers": [
+                    {"dimension": "tax_status", "offer_indexes": [0]},
+                    {"dimension": "cancellation", "offer_indexes": [0]},
+                ],
                 "method": resolution_method,
                 "receipt_sha256": "7" * 64,
+                "primary_provider": primary_provider,
                 "provider": (
                     {
                         "id": "independent-reviewer",
@@ -110,6 +145,9 @@ def release_evidence(
             }
     return {
         "schema": CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+        "release_evidence_contract_sha256": (
+            CMS._RELEASE.publication_evidence_contract()["sha256"]
+        ),
         "job_id": "blun-l10n-job-" + "1" * 64,
         "target_locale": locale,
         "target_sha256": target_sha256,
@@ -118,16 +156,29 @@ def release_evidence(
         "result_sha256": "3" * 64,
         "approval_sha256": "4" * 64,
         "quality_receipt_sha256": "6" * 64,
+        "evidence_request_id": "blun-l10n-evidence-" + "9" * 64,
+        "evidence_revision": "native-evidence-1",
+        "quality_profile": release_quality_profile,
         "commercial_profile": profile,
         "commercial_quality_profile": quality_profile,
         "commercial_review": review,
+        "commercial_review_routing_contract_sha256": (
+            CMS._RELEASE._WORKER._COMMERCIAL
+            .public_review_routing_contract(profile)["sha256"]
+            if profile is not None else None
+        ),
+        "commercial_review_resolution_contract_sha256": (
+            CMS._RELEASE._WORKER._COMMERCIAL
+            .public_review_resolution_contract(profile)["sha256"]
+            if profile is not None else None
+        ),
         "commercial_review_resolution": resolution,
     }
 
 
-def publication_payload(*, expires_at=2000):
+def publication_payload(*, expires_at=2000, commercial=True):
     target = "Aloita maksutta – hinta 480 € vuodessa."
-    evidence = release_evidence(target)
+    evidence = release_evidence(target, commercial=commercial)
     unsigned = {
         "schema": CMS.PUBLICATION_SCHEMA,
         "event_id": "cms-event-201",
@@ -515,6 +566,12 @@ class CMSPublicationReceiverTests(unittest.TestCase):
         committed = self.commits[0]
         self.assertEqual(committed.payload, payload)
         evidence = committed.payload["localizations"][0]["release_evidence"]
+        locale_quality = CMS._PLANNER.quality_profile_for("fi-FI")
+        self.assertEqual(evidence["quality_profile"], {
+            "locale": locale_quality["locale"],
+            "version": locale_quality["version"],
+            "sha256": locale_quality["sha256"],
+        })
         self.assertEqual(evidence["commercial_profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
         canonical = CMS._PLANNER.commercial_quality_profile_for("fi-FI")
         self.assertEqual(evidence["commercial_quality_profile"], {
@@ -523,7 +580,19 @@ class CMSPublicationReceiverTests(unittest.TestCase):
             "sha256": canonical["sha256"],
         })
         self.assertEqual(evidence["commercial_review"]["status"], "verified")
+        self.assertEqual(
+            evidence["commercial_review_resolution_contract_sha256"],
+            CMS._RELEASE._WORKER._COMMERCIAL
+            .public_review_resolution_contract(
+                CMS._PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"],
+        )
         self.assertIsNone(evidence["commercial_review_resolution"])
+        self.assertEqual(
+            evidence["evidence_request_id"],
+            "blun-l10n-evidence-" + "9" * 64,
+        )
+        self.assertEqual(evidence["evidence_revision"], "native-evidence-1")
 
     def test_targeted_commercial_resolution_reaches_commit_content_free(self):
         for method in ("independent_model", "qualified_human"):
@@ -557,10 +626,21 @@ class CMSPublicationReceiverTests(unittest.TestCase):
                     resolution["reviewed_dimensions"],
                     ["tax_status", "cancellation"],
                 )
+                self.assertEqual(resolution["reviewed_offers"], [
+                    {"dimension": "tax_status", "offer_indexes": [0]},
+                    {"dimension": "cancellation", "offer_indexes": [0]},
+                ])
                 self.assertNotIn("receipt", resolution)
+                self.assertEqual(resolution["profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
+                self.assertEqual(
+                    resolution["primary_provider"]["id"], "customer-llm",
+                )
 
     def test_invalid_targeted_commercial_resolution_never_reaches_commit(self):
         mutations = (
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                commercial_review_resolution_contract_sha256="8" * 64,
+            ),
             lambda value: value["localizations"][0]["release_evidence"].update(
                 commercial_review_resolution=None,
             ),
@@ -569,12 +649,23 @@ class CMSPublicationReceiverTests(unittest.TestCase):
                 reviewed_dimensions=["cancellation"],
             ),
             lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"]["reviewed_offers"][0]
+            .update(offer_indexes=[1]),
+            lambda value: value["localizations"][0]["release_evidence"]
             ["commercial_review_resolution"].update(
                 method="qualified_human",
             ),
             lambda value: value["localizations"][0]["release_evidence"]
             ["commercial_review_resolution"].update(
                 receipt_sha256="8" * 63,
+            ),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"].update(
+                contract_sha256="8" * 64,
+            ),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["commercial_review_resolution"]["provider"].update(
+                id="customer-llm",
             ),
         )
         for mutation in mutations:
@@ -624,6 +715,12 @@ class CMSPublicationReceiverTests(unittest.TestCase):
                     json.loads(response.body)["acknowledgement"]["status"],
                     "accepted",
                 )
+                self.assertTrue(RECEIVER.release_evidence_is_current(
+                    item["release_evidence"],
+                    locale=locale,
+                    target_sha256=item["target_sha256"],
+                    approval_id=item["approval_id"],
+                ))
 
     def test_exact_replay_uses_the_same_host_idempotency_binding(self):
         payload = publication_payload()
@@ -649,7 +746,22 @@ class CMSPublicationReceiverTests(unittest.TestCase):
     def test_invalid_publication_never_reaches_commit(self):
         mutations = (
             lambda value: value["localizations"][0]["release_evidence"].pop(
+                "release_evidence_contract_sha256"
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                release_evidence_contract_sha256="0" * 64
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].pop(
                 "quality_receipt_sha256"
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].pop(
+                "evidence_request_id"
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                evidence_request_id="blun-l10n-evidence-" + "a" * 63
+            ),
+            lambda value: value["localizations"][0]["release_evidence"].update(
+                evidence_revision=" stale-evidence-1"
             ),
             lambda value: value["localizations"][0]["release_evidence"].update(
                 target_locale="mt-MT"
@@ -743,6 +855,50 @@ class CMSPublicationReceiverTests(unittest.TestCase):
                     now=1000,
                 )
             self.assertEqual(caught.exception.code, code)
+        self.assertEqual(self.commits, [])
+
+    def test_locale_quality_profile_drift_blocks_before_commit(self):
+        mutations = (
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["quality_profile"].update(version="eu-fi-FI-old"),
+            lambda value: value["localizations"][0]["release_evidence"]
+            ["quality_profile"].update(sha256="9" * 64),
+        )
+        for mutation in mutations:
+            payload = publication_payload(commercial=False)
+            expected = expectation(
+                payload, content_type="cta", commercial_profile=None,
+            )
+            mutation(payload)
+            rebind_publication(payload)
+            body, headers, _, _ = wire(payload, self.publication_authority)
+            with self.subTest(mutation=mutation), self.assertRaises(
+                RECEIVER.CMSReceiverBlocked,
+            ) as caught:
+                RECEIVER.receive_publication(
+                    body, headers, self.publication_authority,
+                    self.acknowledgement_authority, expected, self.commit,
+                    now=1000,
+                )
+            self.assertEqual(caught.exception.code, "receiver.release_scope")
+
+        payload = publication_payload(commercial=False)
+        expected = expectation(
+            payload, content_type="cta", commercial_profile=None,
+        )
+        body, headers, _, _ = wire(payload, self.publication_authority)
+        with patch.object(
+            RECEIVER._CMS._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("resolver unavailable"),
+        ):
+            with self.assertRaises(RECEIVER.CMSReceiverBlocked) as caught:
+                RECEIVER.receive_publication(
+                    body, headers, self.publication_authority,
+                    self.acknowledgement_authority, expected, self.commit,
+                    now=1000,
+                )
+        self.assertEqual(caught.exception.code, "receiver.release_scope")
         self.assertEqual(self.commits, [])
 
     def test_invalid_host_expectation_never_reaches_commit(self):

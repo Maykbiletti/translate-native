@@ -87,7 +87,8 @@ are derived from canonical JSON bound to:
   plus content type;
 - glossary and quality-policy versions;
 - provider, model ID, and model version;
-- Translate Native software version.
+- Translate Native software version;
+- for commercial work, the exact current review-evidence-contract SHA-256.
 
 Changing any bound value creates a new job and plan identity. A queue may
 therefore deduplicate an exact retry, while stale work cannot silently survive
@@ -110,6 +111,20 @@ states, bounded attempt counts, the next eligible attempt time, result hashes,
 and stable error codes. Free-form error detail is represented only by a
 SHA-256 hash so status inspection does not disclose customer prose. Payloads
 are hashed on insertion and checked again before a worker receives them.
+Immediately before leasing, the queue also replays the exact current worker
+binding. A stale but internally consistent job becomes terminal with
+`job_binding_invalid` without consuming an attempt or reaching caches, asset
+resolvers, or providers. A bounded batch of up to 24 consecutive stale jobs is
+quarantined in the same transaction before the first current job is leased,
+covering one complete EU-locale plan without an unbounded write transaction.
+Expected contract mismatch is distinct from validator unavailability:
+unexpected failure or payload mutation rolls back the complete
+quarantine-and-lease batch and leaves every job pending.
+The read-only health monitor additionally replays the complete current
+planner/worker validation for every stored job. Canonical but obsolete jobs,
+including commercial jobs from an earlier evidence-contract generation, block
+health locally with `queue.job_binding_invalid`, independently of provider
+health and without changing queue state.
 
 Queue `succeeded` means only that a worker returned finite, NFC JSON. It is not
 a native-quality attestation, signed release, or publication permission. The
@@ -752,6 +767,12 @@ defect-schema checks, the runtime binds it to the canonical request hash,
 benchmark policy, configured reviewer route and reviewer identity, then signs
 and verifies that artifact before continuing. The source-blind
 `target_native` response is therefore durable before `source_fidelity` begins.
+Each signed pass also retains separate, content-free candidate and baseline
+finding-hash lists for `blocking` and `major` severity. The final defect totals
+must be exactly reconstructable from these two ordered phase registries;
+missing, duplicated, malformed, or phase-swapped hashes block report
+validation. This preserves the independence of native-only and source-aware
+judgment without retaining reviewer prose.
 If the second review or final campaign commit fails, a retry reverifies and
 reuses the first response; after both are stored, neither review is called
 again. The deterministic `review_id` remains the external adapter's
@@ -768,13 +789,44 @@ preferences, defect counts and finding hashes—not reviewer reasons, excerpts,
 source text or either target.
 
 For a commercial `source_fidelity` response, persistence additionally requires
-the complete `translate-native.commercial-benchmark-review.v1` acknowledgement.
-It lists all ten dimensions in profile order and records a status for both
-anonymous variants. `major` and `blocking` statuses must reference the matching
-variant's zero-based defect entry; `equivalent` and `not_present` cannot carry a
-defect reference. `uncertain` blocks the case instead of becoming durable PASS
-evidence. The `target_native` response has no commercial acknowledgement and
-therefore remains source-blind.
+the complete `translate-native.commercial-benchmark-review.v5` acknowledgement.
+The versioned suite registers an opaque offer count and a SHA-256-bound
+`translate-native.commercial-benchmark-offer-registry.v1` for every fixture.
+That manually maintained registry partitions the exact source into ordered
+Unicode-code-point spans owned by each offer plus explicit shared spans. The
+response also carries one
+`translate-native.commercial-benchmark-target-offer-registry.v1` for each
+anonymous variant. Each registry binds the exact target hash and length and
+semantically partitions its Unicode code points into non-empty offer-owned
+spans plus explicit shared spans; no language-independent extraction rule is
+accepted as semantic evidence. The response lists all ten dimensions in
+profile order and, for both anonymous
+variants, returns exactly one ordered status for every registered offer.
+Every per-dimension variant decision repeats the canonical digest of its exact
+anonymous target registry. Missing, stale, foreign, or swapped decision
+bindings fail closed even when both target registries are independently valid.
+`major` and `blocking` offer statuses must reference the matching variant's
+zero-based defect entry; `equivalent` and `not_present` cannot carry a defect
+reference. Before unblinding, every non-passing reference is resolved to the
+exact validated finding hash. Signed candidate and baseline evidence preserves
+the content-free source-fidelity finding registries by severity, while each
+ordered offer record carries its index, status and matching hash. Passing and
+absent offers require `null`; missing, invented, foreign or wrong-severity
+hashes block report validation. No finding excerpt or reason survives.
+The commercial registries must equal the corresponding signed
+`source_fidelity` pass registries exactly; a finding from `target_native` can
+never be reused as commercial fidelity evidence.
+
+The dimension status is derived by fixed severity, so an aggregate cannot hide
+a major or blocking defect in another offer. Missing, duplicated or reordered
+offer indexes, source or target gaps and overlaps, swapped variants, stale
+source or target lengths or digests, inconsistent aggregates and `uncertain`
+all block the case. The registry and its digest cross the HTTPS and
+durable-review boundaries, and the signed case result retains both the
+top-level digest and the matching digest on every candidate and baseline
+dimension row. Report validation requires those values to remain identical.
+The `target_native` request receives neither the
+registry nor the commercial acknowledgement and therefore remains source-blind.
 
 The review store also exposes a strictly read-only, content-free health view
 for one exact reviewer route and benchmark policy. It rechecks canonical rows,
@@ -797,10 +849,10 @@ owners of retry limits, backoff, leases, and reuse.
 
 Each `POST` body uses
 `blun.website-localization-benchmark-review-http-request.v1` and contains the
-exact anonymous `blun.website-localization-benchmark.v7`
+exact anonymous `blun.website-localization-benchmark.v11`
 `BenchmarkReviewRequest`, its deterministic `review_id`, and the SHA-256 digest
 of its canonical UTF-8 JSON. Its expected review object uses
-`blun.website-localization-benchmark-review.v2`. The same values are bound in
+`blun.website-localization-benchmark-review.v3`. The same values are bound in
 `Idempotency-Key`, `X-Benchmark-Review-Id`,
 `X-Benchmark-Review-Phase`, and
 `X-Benchmark-Review-Request-Sha256`. Authentication headers are obtained for
@@ -812,8 +864,9 @@ The source-blind request is accepted only with the exact `target_native`
 instruction and input field set; `source`, `glossary`, and `protected_terms`
 are forbidden. The later `source_fidelity` request has a different exact field
 set and instruction and carries the source. Commercial fidelity requests also
-carry the ten ordered dimensions and exact acknowledgement schema; other
-content types do not. Both retain only anonymous `A` and `B` variants.
+carry the ten ordered dimensions, the complete source-bound offer registry and
+the exact acknowledgement schema; other content types do not. Both retain only
+anonymous `A` and `B` variants.
 Candidate provider, baseline identity, acquisition provenance, and unblinding
 data are absent from the transport contract.
 
@@ -856,7 +909,7 @@ byte-for-byte without signing again. A failed, omitted, duplicated, exchanged,
 or policy-stale work item therefore cannot disappear behind a partial aggregate,
 and a crash cannot silently replace the report used for a claim. Existing v1
 and v2 campaign databases migrate transactionally to the v3 report schema.
-Case-result schema v7 and report schema v11 bind the same `valid_until` value.
+Case-result schema v8 and report schema v11 bind the same `valid_until` value.
 
 After finalization, `BenchmarkCampaignStore.load_report` is the read-only
 consumer boundary. It opens a consistent snapshot, requires the exact complete
@@ -1031,17 +1084,24 @@ service or hardware-backed signer; the repository tests use HMAC only as a
 deterministic test double.
 
 The receipt-verifier contract receives exactly `binding` and `receipt`.
-`binding` uses `blun.localization-quality-receipt-binding.v3` and contains the
+`binding` uses `blun.localization-quality-receipt-binding.v9` and contains the
 review purpose, job and canonical result hashes, full source and target text
 plus hashes and locales, content type, glossary and policy versions, primary
 and optional review-provider identities, software version, two-pass
 confidence, locale quality profile, and, for commercial content, the exact
 nested locale-specific commercial profile plus its content-free targeted-review
-summary and the human/independent-review
-requirements. The verifier must cryptographically
+summary and exact advertised review-evidence-contract SHA-256, the canonical
+advertised routing-contract SHA-256 for every commercial result, the canonical
+advertised resolution-contract SHA-256 when targeted
+review is unresolved, the private text-free mapping from each opaque offer
+index to its ordered source and target Unicode code-point spans, and the
+human/independent-review
+requirements. It also carries the canonical quality-evidence request ID and
+evidence revision that produced the opaque receipt. The verifier must cryptographically
 bind every field. It must reject a receipt issued for another result, policy,
 model, profile, software version, locale, or review purpose. In particular, a
-quality receipt cannot satisfy a qualified-human or independent-model review.
+quality receipt cannot satisfy a qualified-human or independent-model review,
+and an old receipt cannot be relabelled under a newer evidence response.
 
 For deployments that keep verification behind a network trust boundary,
 `integrations/website_localization_receipt_verifier_http.py` provides one
@@ -1099,13 +1159,18 @@ source and target, plus their hashes, the CMS event, plan and job identities,
 source and target locales, content type, glossary and policy versions,
 provider/model identity, software version, and a host-chosen
 `evidence_revision`. Its deterministic `request_id` binds all non-text fields
-and the exact validated queue-result hash. The adapter may call an independent
+and the exact validated queue-result hash; both text hashes bind the complete
+source and target bytes. The durable store and HTTPS adapter independently
+recompute the ID from the same closed v8 identity field set before persistence
+or network access. The coordinator carries that exact ID and revision into
+each v5 receipt binding and the v5 signed approval; missing or substituted
+context blocks before receipt verification or signing. The adapter may call an independent
 model, a qualified native reviewer, or a host-owned review service; no
 provider transport or credential is built into the coordinator.
 
 For deployments that need a concrete network boundary,
 `integrations/website_localization_evidence_http.py` implements that interface
-as one request-bound HTTPS attempt. It validates the exact v4 evidence request,
+as one request-bound HTTPS attempt. It validates the exact v8 evidence request,
 canonicalizes native Unicode without ASCII folding, binds the inner digest and
 deterministic evidence ID in both headers and body, disables redirects, and
 strictly validates the response envelope before the coordinator verifies its
@@ -1305,19 +1370,35 @@ creates one `blun.cms-localization-publication.v3` payload for the complete
 locale set. It includes the site and website version, source identity, signed
 source sequence and hash,
 and, for each locale, the exact target text and hash, approval ID, expiry, and
-a `blun.website-localization-release-evidence.v3` object. That content-free
-object binds the signed approval and worker-result hashes, quality-receipt
-hash, and either a null commercial scope or the exact commercial-profile ID,
+a `blun.website-localization-release-evidence.v14` object. That content-free
+object binds the exact machine-readable release-evidence-contract SHA-256,
+signed approval and worker-result hashes, quality-receipt
+hash, canonical evidence request ID and evidence revision, and the exact
+current target-locale quality-profile locale, version, and digest. It then
+binds either a null commercial scope or the exact commercial-profile ID,
 locale-specific commercial quality-profile version and digest, and validated
-review summary. If that summary requires targeted review, the object also binds
-the exact ordered dimensions, resolution method, receipt hash, and independent
-provider identity when a second model was used. The receiver rejects a missing,
-unexpected, cross-scope, or method-inconsistent resolution before the host
-commit. It contains no source text, target text, amount,
+review summary including its exact review-evidence-contract digest, plus the
+exact current content-free offer-routing- and resolution-contract digests. The
+resolution-policy digest is present even when the summary is already verified,
+while the separate resolution result remains absent. If that
+summary requires targeted review, the object also binds
+the exact ordered dimensions, commercial profile, resolution-contract digest,
+resolution method, receipt hash, primary provider identity, and independent
+provider identity when a second model was used. The receiver proves the two
+provider IDs differ and rejects a missing, stale, unexpected, cross-scope, or
+method-inconsistent resolution before the host commit. It contains no source
+text, target text, amount, private offer-routing map,
 currency, tax wording, brand, or reviewer explanation. A CMS can therefore
-pin the advertised profile and reject missing, malformed, or drifted evidence
+identify the exact evidence and contract generation, pin the advertised profile, and reject
+missing, malformed, or drifted evidence
 before replacing its current content, without treating a cross-language regex
 as semantic proof.
+The reference receiver repeats the exact general locale-quality lookup for
+every active read, health check, and idempotent replay. This universal binding
+is independent of the additional commercial quality profile. A later language,
+morphology, terminology, or evaluation-profile generation therefore blocks the
+old bundle without overwriting it; the structural tombstone path remains
+available.
 Its deterministic `delivery_id` is an idempotency key over those immutable
 bytes. The host-owned publication authority signs and immediately verifies the
 payload before the durable outbox accepts it. A partial, changed, expired, or
@@ -1405,8 +1486,14 @@ signed payload with a host-supplied
 `PublicationExpectation`. That expectation binds the exact current event,
 site, website version, plan, source identity, source generation and hash,
 complete sorted required-locale set, content type, and commercial profile.
+The public capabilities additionally carry a separately hashed release-evidence
+contract with the exact field, digest, lineage, commercial-scope, and privacy
+rules. Every signed approval and release proof binds its exact contract digest.
+The runtime validates that complete contract against its canonical registry,
+so stale evidence and altered but self-rehashed substitutes block before host
+code.
 For commercial content, the receiver also recomputes each locale's canonical
-commercial quality-profile version and digest and requires the signed v2
+commercial quality-profile version and digest and requires the signed v7
 release evidence to match it exactly. A correctly signed but partial, stale,
 cross-locale, or differently scoped publication is therefore rejected before
 any CMS write.
@@ -1462,7 +1549,9 @@ must redact authorization headers and verified target text from logs.
 Deployments without an existing atomic CMS transaction can use
 `integrations/website_localization_cms_receiver_store.py` as the durable
 reference host behind that WSGI application. Give `DurableCMSReceiverStore` a
-dedicated host-owned SQLite connection. The trusted CMS first calls
+dedicated host-owned SQLite connection, the receiver's canonical
+`release_evidence_is_current` validator, and a closed validator backed by the
+configured publisher authority. The trusted CMS first calls
 `register_source` with its exact current source expectation, then wires the
 store's publication resolver, commit, tombstone resolver, delete, and health
 methods directly into `CMSReceiverApplication`. Resolver results are exact
@@ -1482,10 +1571,19 @@ Backups and filesystem-level retention remain the host's responsibility. For
 deletion, the trusted host must separately call `register_tombstone` with the exact active
 publication ID, payload hash, generation, and locale set. A successful delete
 atomically clears the active pointer, removes localized prose, and retains only
-content-free publication and tombstone bindings for replay detection. Startup
-and health verify the schema, SQLite integrity, active pointers, canonical
-payload and expectation hashes, every locale row, and tombstone state. This
-reference store is not a substitute for an existing CMS authorization model:
+content-free publication and tombstone bindings for replay detection. The exact
+canonical publisher signature is stored beside each active payload. Startup and
+health verify the schema, SQLite integrity, active pointers, canonical payload
+and expectation hashes, that publisher signature, every locale row, current
+release-evidence contract, approval expiry, and tombstone state. Active
+rendering and exact publication replay perform the same authorization checks
+after every restart. Schema v1 databases migrate to v2 without fabricating
+signatures: legacy active rows without the original proof stay blocked and
+unhealthy but remain structurally deletable.
+Structural-only tombstone operations deliberately remain available when an
+approval expires or a contract advances, so stale content can still be removed.
+This reference store is not a substitute for an existing CMS authorization
+model:
 source and tombstone registration remain trusted host operations and its
 content-reading method
 requires the complete trusted publication expectation for the exact page
@@ -1657,13 +1755,26 @@ public request, response, deployment, and failure contract is documented in
 
 Select `content_type: "commercial"` in the trusted CMS/backend for pricing,
 offers, subscriptions and their contextual CTAs/conditions. This adds the
-versioned `translate-native.commercial.v5` profile plus one exact
+versioned `translate-native.commercial.v13` profile plus one exact
 `translate-native.commercial-locale-quality-profile.v2` object to the job
 payload, job ID and plan ID; the existing seven types retain their previous
 payloads and IDs. It is available for every planner locale, including `mt-MT`
 and `fi-FI`.
 The public skill's [commercial guide](../translate-native/references/commercial-localization.md)
 applies to all languages, with no hardcoded project prices, brands or products.
+For every review dimension, the private evidence must name exactly one verdict
+for each registered offer in registry order. The worker derives the global
+verdict from that matrix and requires offer-bound items for every equivalent,
+changed, or uncertain entry; evidence for one tier therefore cannot silently
+stand in for another tier.
+
+When any offer-local verdict remains uncertain, the content-free review
+summary retains the affected dimension and zero-based position in the private
+offer registry. It never publishes configured offer identifiers. A qualified
+human or independent model resolution must acknowledge the exact same ordered
+scope; missing, duplicated, reordered, cross-dimension, or out-of-range entries
+block before publication. Global uncertainty remains representable with no
+offer positions when the evidence cannot safely identify an offer.
 
 The 24 locale objects are not aliases for one universal prompt. Each has a
 distinct version and canonical SHA-256, binds the corresponding general locale
@@ -1691,24 +1802,53 @@ while exact values and currency identities must survive without rounding or
 conversion. Any ambiguity is routed to an independent model or qualified
 native-domain review and remains blocked until resolved.
 
+At the outer CMS dispatch boundary,
+`GET /v1/localization/cms-submission-dispatch/commercial-profile` exposes this
+same complete profile and 24-locale rendering registry without project
+content. The separately scoped response is bound to both the public dispatch
+capability and the live website capability generation. A CMS can therefore
+discover the exact amount, currency, discount basis, qualifier, tax, billing,
+commitment, renewal, cancellation, condition, and offer-assignment rules it
+must preserve without receiving publication authority or any configured
+price, brand, or product value.
+
+The profile now embeds a separately versioned and hashed
+`review_evidence_contract`. It gives CMS and provider adapters the exact closed
+report fields, limits, Unicode code-point span rules, offer containment,
+relation semantics, ten-dimension order and verdict invariants without exposing
+project prices, source or target text, actual spans, brands, or reviewer prose.
+Capability discovery rejects a missing, altered, reordered, or self-rehashed
+contract. The contract validates evidence structure only, grants no publication
+authority, and leaves uncertain meaning on the independent-review route.
+
 The three provider calls stay ordered: transcreation, source-hidden native
 editing, source-aware fidelity. Commercial fidelity additionally returns
 `commercial_review` with the profile schema, `coverage` (`complete` or
-`uncertain`), and `checks` for `amount_currency`, `discount_basis`, `qualifiers`,
+`uncertain`), a canonical `offers` registry, and `checks` for
+`amount_currency`, `discount_basis`, `qualifiers`,
 `tax_status`, `billing_interval`, `commitment`, `renewal`, `cancellation`,
-`conditions`, and `offer_assignment`. Every check has `status` (`equivalent`,
+`conditions`, and `offer_assignment`. Each registered offer has a unique ID and
+ordered, non-overlapping source and target regions; multiple discontiguous
+regions may bind linked footnotes, but no region may overlap another offer.
+Every check has `status` (`equivalent`,
 `not_present`, `changed`, `uncertain`) and `items`; each item has `offer`,
 `relation` (`matched`, `source_only`, or `target_only`), `source_span`,
 `target_span`, and `explanation`. Spans are zero-based Unicode code-point
-offsets with an exclusive end. A one-sided item uses `null` only for the side
+offsets with an exclusive end and must remain inside the named offer's declared
+regions. A one-sided item uses `null` only for the side
 that is absent, so an omitted condition and an invented target claim can be
-represented without fabricating a counterpart. The exact response contract and
-dimension guidance are supplied in each fidelity request.
+represented without fabricating a counterpart. The illustrative response shape
+and dimension guidance are supplied alongside the complete, separately hashed
+`review_evidence_contract` in each commercial fidelity request. The worker
+verifies that contract against the installed public commercial profile before
+any provider access. It remains absent from transcreation and source-hidden
+native review, preserving the independent first quality stage.
 
 Equivalent checks require matched evidence; absent dimensions require empty
-items. A dimension-level changed or uncertain verdict requires at least one
-specific evidence item, while globally uncertain coverage may remain span-free
-instead of inventing a location. Changed terms, missing dimensions, invalid
+items, and equivalent `offer_assignment` evidence names every registered offer
+exactly once. A dimension-level changed or uncertain verdict requires at least
+one specific evidence item, while globally uncertain coverage may remain
+span-free instead of inventing a location. Changed terms, missing dimensions, invalid
 relations/spans or a normal PASS without the commercial report block the worker
 without a publishable result. Uncertain coverage, an uncertain dimension or an
 all-absent report instead preserve the candidate as a low-confidence fidelity
@@ -1719,17 +1859,42 @@ publish. The evidence request and independent verifier both receive the bound
 commercial profile and policy context. The old known-good translation remains.
 Do not classify legal text as commercial to bypass the legal human-review gate.
 
-The full commercial response hash stays in the normal quality-pass receipt;
-job IDs bind the profile version through queue, signed memory and publication.
+The full commercial response hash stays in the normal quality-pass receipt.
+Plan v3 and job v3 also carry the exact current review-evidence-contract
+SHA-256. That digest participates in every commercial job ID, idempotency key,
+and plan ID, and the worker joins it to the complete fidelity-request contract
+before provider access. A contract-only policy change therefore creates new
+work identity and cannot reuse a stale queue or translation-memory entry.
 The content-free result summary uses
-`translate-native.commercial-review-summary.v2`; the authenticated capability
+`translate-native.commercial-review-summary.v6`; the authenticated capability
 response publishes its exact separately hashed machine contract, including the
 ordered allowed dimensions and the invariant between status and unresolved
 dimensions. Its evidence digest covers a versioned canonical binding of the
-commercial profile, exact UTF-8 source and target hashes, and complete review
-evidence. Quality-evidence request v5 and receipt-binding v2 carry that exact
-summary, so adapters can reject unknown, reordered, contradictory, or
-transplanted review scope without reconstructing it from prose.
+commercial profile, exact advertised review-evidence-contract SHA-256, exact
+UTF-8 source and target hashes, and complete review evidence. Quality-evidence
+request v13 and receipt-binding v9 carry that exact summary. Every commercial
+evidence request now also carries the exact public routing-contract SHA-256,
+including verified results without a private route, so the evidence provider
+can issue a receipt for the same binding later enforced by the verifier and
+signed release. The digest participates in the deterministic request identity;
+non-commercial requests require `null`. When review is
+required, they additionally carry a private
+`translate-native.commercial-review-routing.v2` context that maps each opaque
+offer index to its exact ordered source and target regions. It contains no
+configured offer IDs, text, prices, brands, or reviewer prose, is validated
+against both complete texts before network access, and participates in request
+and receipt identity. Its required `contract_sha256` must match the separately
+advertised machine-readable routing contract, whose public shape fixes Unicode
+offset, exclusive-end, length, order, overlap, privacy, and trust-boundary
+semantics without exposing an actual route. The route itself is deliberately
+absent from CMS release evidence.
+The unresolved quality-evidence request carries the complete content-free
+routing contract beside the route. Its deterministic identity covers both, and
+the HTTPS adapter reconstructs the canonical contract before authentication or
+transport so an external reviewer need not rely on separate discovery.
+Adapters can therefore route a reviewer to the affected offer without exposing
+project configuration publicly, while rejecting unknown, reordered,
+contradictory, or transplanted scope.
 As before, the host must verify an independent quality receipt before signing.
 Schema validation does not prove that a model's semantic findings are true or
 complete. The receipt verifier must validate evidence held by the trusted host;

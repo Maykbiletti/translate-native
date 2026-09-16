@@ -4,20 +4,23 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import re
 import socket
+import sys
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
 REQUEST_SCHEMA = "blun.localization-receipt-verification-http-request.v1"
 RESPONSE_SCHEMA = "blun.localization-receipt-verification-http-response.v1"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v3"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v9"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_HEADER_VALUE_LENGTH = 4096
 MAX_TEXT_BYTES = 2_000_000
@@ -28,19 +31,23 @@ HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
+EVIDENCE_REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
+COMMERCIAL_REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v6"
 COMMERCIAL_DIMENSIONS = (
     "amount_currency", "discount_basis", "qualifiers", "tax_status",
     "billing_interval", "commitment", "renewal", "cancellation",
     "conditions", "offer_assignment",
 )
 BINDING_FIELDS = {
-    "schema", "review_kind", "job_id", "result_sha256", "source_text",
+    "schema", "review_kind", "evidence_request_id", "evidence_revision",
+    "job_id", "result_sha256", "source_text",
     "target_text", "source_sha256", "target_sha256", "source_locale",
     "target_locale", "content_type", "glossary_version", "policy_version",
     "primary_provider", "review_provider", "software_version",
     "review_confidence", "quality_profile", "commercial_profile",
-    "commercial_review",
+    "commercial_review", "commercial_review_routing",
+    "commercial_review_routing_contract_sha256",
+    "commercial_review_resolution_contract_sha256",
     "human_review_required", "independent_review_required",
 }
 RESERVED_HEADERS = {
@@ -49,6 +56,40 @@ RESERVED_HEADERS = {
     "x-localization-receipt-request-id",
     "x-localization-receipt-request-sha256",
 }
+
+
+def _commercial_offer_scope(
+    value: Any,
+    dimensions: list[str],
+    offer_count: Any,
+) -> bool:
+    if type(offer_count) is not int or not 0 <= offer_count <= 1000:
+        return False
+    if not isinstance(value, list) or len(value) > len(COMMERCIAL_DIMENSIONS):
+        return False
+    previous = -1
+    seen: set[str] = set()
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"dimension", "offer_indexes"}
+            or item.get("dimension") not in dimensions
+            or item["dimension"] in seen
+            or not isinstance(item.get("offer_indexes"), list)
+            or not item["offer_indexes"]
+            or any(
+                type(index) is not int or not 0 <= index < offer_count
+                for index in item["offer_indexes"]
+            )
+            or item["offer_indexes"] != sorted(set(item["offer_indexes"]))
+        ):
+            return False
+        position = COMMERCIAL_DIMENSIONS.index(item["dimension"])
+        if position <= previous:
+            return False
+        previous = position
+        seen.add(item["dimension"])
+    return True
 
 
 class HTTPReceiptVerifierFailed(RuntimeError):
@@ -64,6 +105,23 @@ class HTTPReceiptVerifierFailed(RuntimeError):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load receipt dependency: {path.name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+_COMMERCIAL = _load_module(
+    "blun_website_localization_receipt_http_commercial",
+    _ROOT / "integrations" / "commercial_localization_profile.py",
+)
 
 
 @dataclass(frozen=True)
@@ -301,11 +359,18 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         value, code="binding_invalid", maximum=MAX_REQUEST_BYTES,
     ))
     for field in (
-        "job_id", "source_locale", "target_locale", "content_type",
+        "evidence_revision", "job_id", "source_locale", "target_locale", "content_type",
         "glossary_version", "policy_version", "software_version",
     ):
         if not _token(binding[field]):
             _fail("binding_invalid")
+    if (
+        not isinstance(binding["evidence_request_id"], str)
+        or EVIDENCE_REQUEST_ID.fullmatch(
+            binding["evidence_request_id"]
+        ) is None
+    ):
+        _fail("binding_invalid")
     for field in ("result_sha256", "source_sha256", "target_sha256"):
         if not isinstance(binding[field], str) or SHA256.fullmatch(binding[field]) is None:
             _fail("binding_invalid")
@@ -333,6 +398,7 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
     confidence = binding["review_confidence"]
     profile = binding["quality_profile"]
     commercial_review = binding["commercial_review"]
+    commercial_review_routing = binding["commercial_review_routing"]
     if (
         not isinstance(confidence, dict)
         or set(confidence) != {"target_native", "source_fidelity"}
@@ -354,10 +420,16 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
                 not isinstance(commercial_review, dict)
                 or set(commercial_review) != {
                     "schema", "profile", "status",
-                    "review_required_dimensions", "evidence_sha256",
+                    "review_required_dimensions",
+                    "offer_count", "review_required_offers",
+                    "review_evidence_contract_sha256", "evidence_sha256",
                 }
                 or commercial_review["schema"] != COMMERCIAL_REVIEW_SUMMARY_SCHEMA
                 or commercial_review["profile"] != binding["commercial_profile"]
+                or commercial_review["review_evidence_contract_sha256"]
+                != _COMMERCIAL.public_review_evidence_contract(
+                    binding["commercial_profile"],
+                )["sha256"]
                 or commercial_review["status"] not in {
                     "verified", "review_required",
                 }
@@ -370,9 +442,17 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
                 ]
                 or len(commercial_review["review_required_dimensions"])
                 != len(set(commercial_review["review_required_dimensions"]))
+                or not _commercial_offer_scope(
+                    commercial_review["review_required_offers"],
+                    commercial_review["review_required_dimensions"],
+                    commercial_review["offer_count"],
+                )
                 or (
                     commercial_review["status"] == "verified"
-                    and commercial_review["review_required_dimensions"]
+                    and (
+                        commercial_review["review_required_dimensions"]
+                        or commercial_review["review_required_offers"]
+                    )
                 )
                 or (
                     commercial_review["status"] == "review_required"
@@ -387,6 +467,45 @@ def _binding(value: Any) -> tuple[dict[str, Any], bytes]:
         )
         or type(binding["human_review_required"]) is not bool
         or type(binding["independent_review_required"]) is not bool
+    ):
+        _fail("binding_invalid")
+    try:
+        if (
+            commercial_review is not None
+            and commercial_review["status"] == "review_required"
+        ):
+            _COMMERCIAL.validate_review_routing_context(
+                commercial_review_routing,
+                binding["source_text"],
+                binding["target_text"],
+                commercial_review,
+                binding["commercial_profile"],
+            )
+        elif commercial_review_routing is not None:
+            raise _COMMERCIAL.CommercialReviewBlocked(
+                "review.commercial.routing_invalid",
+            )
+    except _COMMERCIAL.CommercialReviewBlocked:
+        _fail("binding_invalid")
+    expected_resolution_contract_sha256 = (
+        _COMMERCIAL.public_review_resolution_contract(
+            binding["commercial_profile"],
+        )["sha256"]
+        if commercial_review is not None
+        and commercial_review["status"] == "review_required"
+        else None
+    )
+    if (
+        binding["commercial_review_routing_contract_sha256"]
+        != (
+            _COMMERCIAL.public_review_routing_contract(
+                binding["commercial_profile"]
+            )["sha256"]
+            if commercial_review is not None
+            else None
+        )
+        or binding["commercial_review_resolution_contract_sha256"]
+        != expected_resolution_contract_sha256
     ):
         _fail("binding_invalid")
     return binding, _canonical_json(

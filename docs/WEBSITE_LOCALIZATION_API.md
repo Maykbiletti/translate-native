@@ -300,11 +300,13 @@ polling contract and does not create notification state.
 For a remote backend, pass an
 `HTTPTerminalNotifierAdapter` from
 `integrations/website_localization_cms_terminal_notification_http.py` as the
-`terminal_notifier`. It sends the canonical notification object itself as the
-request body to one configured HTTPS URL. Loopback HTTP is available only by
-explicit test/development opt-in. Redirects are never followed, and the adapter
-performs exactly one transport attempt; the durable notification outbox alone
-decides whether and when to retry.
+`terminal_notifier`. Construct it with the exact deployment-approved receiver
+capability SHA-256 as well as its endpoint and authentication callback. It
+sends the canonical notification object itself as the request body to one
+configured HTTPS URL. Loopback HTTP is available only by explicit
+test/development opt-in. Redirects are never followed, and the adapter performs
+exactly one transport attempt; the durable notification outbox alone decides
+whether and when to retry.
 
 Each request reserves these exact transport headers:
 
@@ -312,7 +314,8 @@ Each request reserves these exact transport headers:
 - `Accept: application/json`;
 - `Idempotency-Key: <notification_id>`;
 - `X-Localization-Terminal-Notification-Id: <notification_id>`;
-- `X-Localization-Terminal-Notification-Sha256: <body_sha256>`.
+- `X-Localization-Terminal-Notification-Sha256: <body_sha256>`;
+- `X-Localization-Capabilities-SHA256: <receiver_capabilities_sha256>`.
 
 The host-supplied authentication callback receives a fresh copy of this
 content-free request before any network access:
@@ -326,7 +329,8 @@ content-free request before any network access:
   "notification_id": "terminal-<sha256>",
   "event_id": "cms-event-184",
   "site_id": "public-site",
-  "body_sha256": "<sha256 of exact canonical request bytes>"
+  "body_sha256": "<sha256 of exact canonical request bytes>",
+  "capabilities_sha256": "<receiver_capabilities_sha256>"
 }
 ```
 
@@ -339,6 +343,22 @@ permanent redirect failure; `408`, `425`, `429`, and `5xx` statuses plus network
 failures are retryable by the outbox. Other statuses and malformed or
 cross-bound successful responses are permanent protocol failures. Response
 bodies and private exceptions are never copied into durable error state.
+
+When terminal-status observation is enabled, the source service derives the
+receiver's exact `expected_capabilities_sha256` from the full terminal receiver
+client. A custom notifier/status-reader pair must instead provide the same
+digest explicitly as `terminal_receiver_capabilities_sha256`; missing or
+conflicting pins block configuration before the processing-monitor schema is
+created. The source service rechecks an exposed client pin before status,
+health, or worker progress, while every returned receiver status must carry the
+same exact capability SHA-256.
+
+The terminal-processing monitor stores this expected digest in its v2 metadata
+and returns it in content-free health. Restarts may therefore reuse durable
+monitoring work only under the same receiver contract. An empty v1 monitor is
+upgraded transactionally. A v1 monitor containing unbound work is deliberately
+not assigned a guessed generation and remains fail-closed; operators must
+resolve that legacy work with independently verified deployment evidence.
 
 #### Reference terminal-notification receiver
 
@@ -449,9 +469,9 @@ If the configured join timeout expires, close fails while durable state remains
 open; the supervisor must resolve or terminate the stuck callback before trying
 again. Construct the hosted runtime after every process fork.
 
-#### Terminal-receiver status, health, readiness, and capabilities
+#### Terminal-receiver status, health, readiness, capabilities, and OpenAPI
 
-The durable runtime also serves four authenticated, content-free control routes
+The durable runtime also serves five authenticated, content-free control routes
 on the same exact HTTPS origin:
 
 | Method | Path | Required scope | Purpose |
@@ -460,6 +480,7 @@ on the same exact HTTPS origin:
 | `GET` | `/v1/localization/terminal-notifications/health` | `terminal-notification-health:read` | Inspect aggregate runtime, worker, and durable inbox health |
 | `GET` | `/v1/localization/terminal-notifications/readiness` | `terminal-notification-readiness:read` | Check the managed worker and verified inbox |
 | `GET` | `/v1/localization/terminal-notifications/capabilities` | `terminal-notification-capabilities:read` | Discover the exact active receiver contract |
+| `GET` | `/v1/localization/terminal-notifications/openapi` | `terminal-notification-openapi:read` | Read the capability-bound OpenAPI 3.1 profile |
 
 Status accepts only canonical UTF-8 JSON and requires
 `X-Localization-Terminal-Status-SHA256` to equal the exact body hash:
@@ -498,19 +519,35 @@ inspection, and the read does not claim, retry, complete, or otherwise mutate
 processing state.
 
 Discovery is also strictly `GET`, body-free, query-free, and separately scoped.
-Its `blun.cms-terminal-receiver-capabilities-response.v1` envelope contains a
-`blun.cms-terminal-receiver-capabilities.v1` contract and canonical SHA-256.
+Its `blun.cms-terminal-receiver-capabilities-response.v3` envelope contains a
+`blun.cms-terminal-receiver-capabilities.v3` contract and canonical SHA-256.
 The digest covers all active operations, including the runtime's configured
 notification intake path, plus methods, scopes, request and response schemas,
 required fields, success statuses, transport limits, processing states, and
 terminal outcomes. It contains no site, endpoint origin, notification,
 credential, website text, provider response, or private error detail. The
 contract includes the health operation's exact method, path, distinct scope,
-schema, fields, and success status.
+schema, fields, and success status. Every non-discovery operation also names
+the required `X-Localization-Capabilities-SHA256` precondition header; the
+contract semantics require its exact active digest.
+
+The separately scoped OpenAPI route returns
+`blun.cms-terminal-receiver-openapi-response.v1`. Its canonical OpenAPI 3.1
+document covers all six receiver operations, including a custom notification
+intake path, and recursively closes the notification, acknowledgement, status,
+health, readiness, capability, and error shapes. It declares the exact required
+idempotency, notification-identity, payload-hash, and status-hash headers. Both
+the envelope and document carry the active capability SHA-256; the envelope
+also carries the canonical document SHA-256. Servers are deliberately omitted
+because the deployment owns the HTTPS origin.
 
 The capability request authenticates the exact empty-body hash before the
 contract is built. It never reads the inbox, checks worker readiness, claims a
-lease, or calls a handler. A custom intake path that collides with any control
+lease, or calls a handler. Every other route includes the supplied capability
+digest in its authentication context and then requires it to equal the active
+complete generation. Absence returns content-free `428`; drift returns `412`
+before notification persistence, inbox inspection, worker-state reporting, or
+OpenAPI construction. A custom intake path that collides with any control
 route is rejected before SQLite is created. Missing or altered notification
 schema fields, reused scopes, a request body, content type, query, wrong method,
 or private authenticator failure returns a content-free fail-closed response.
@@ -526,12 +563,28 @@ provided canonical request context. Do not learn and trust the digest from the
 same untrusted connection that it is intended to authenticate.
 
 `capabilities()` verifies the response envelope, the canonical digest, every
-schema and limit, all five operation definitions, distinct scopes, and the
-configured notification path. `health()`, `readiness()`, and `status()` first
-repeat that live contract verification; a contract change therefore blocks the
-operational read until the deployment deliberately updates its pin. Every HTTP
-request is separately authenticated and uses exactly one bounded transport
-attempt with no redirects.
+schema and limit, all six operation definitions, distinct scopes, and the
+configured notification path. `health()`, `readiness()`, `status()`, and
+`openapi()` first repeat that live contract verification; a contract change
+therefore blocks the operational read until the deployment deliberately
+updates its pin. Every HTTP request is separately authenticated and uses
+exactly one bounded transport attempt with no redirects.
+
+After discovery, the client reserves and sends
+`X-Localization-Capabilities-SHA256` on every operational request and binds the
+same digest into the host authentication context. The receiver checks it after
+authentication but before durable or operational state access. This prevents a
+generation change from accepting a notification under a contract the caller
+did not verify.
+
+`openapi()` then reconstructs the complete origin-free OpenAPI 3.1 document
+from the freshly verified capability object and requires the remote document,
+its canonical SHA-256, and its capability binding to match exactly. Rehashing
+a substituted schema, changing the custom notification path between requests,
+or returning another capability generation cannot produce trusted evidence.
+The transport retains the 16,384-byte request limit while accepting at most
+the receiver contract's advertised 1,000,000-byte response limit. The read
+does not touch the inbox or worker state.
 
 `notify()` validates the complete immutable terminal notification before any
 network call, repeats the pinned discovery, and sends the canonical bytes to
@@ -558,7 +611,7 @@ response between the two requests from passing as current evidence.
 Malformed JSON, duplicate keys, unexpected fields, inconsistent counts,
 rehashed semantic contract drift, redirects, and private transport failures
 raise `TerminalReceiverClientBlocked` with only a stable code and retryability.
-The three read methods never claim work, mutate receiver state, process a
+The four read methods never claim work, mutate receiver state, process a
 notification, or contain website text. `notify()` performs only the documented
 durable intake operation and returns its content-free acknowledgement.
 
@@ -592,8 +645,8 @@ The exact routes are:
 
 Authenticated startup requires `capability_preflight=True`; omission blocks
 before any database is created. The capabilities route accepts no body or query. Its
-`blun.cms-source-capabilities-response.v1` response contains one
-`blun.cms-source-runtime-capabilities.v1` contract with the exact active
+`blun.cms-source-capabilities-response.v2` response contains one
+`blun.cms-source-runtime-capabilities.v2` contract with the exact active
 methods, paths, scopes, principal schemas, request and response schemas,
 required top-level fields, success statuses, retry limits, and transport
 bounds. The nested `sha256` is calculated over the canonical capability object
@@ -637,8 +690,8 @@ The status request is exact, query-free JSON and uses
 }
 ```
 
-Its `blun.cms-source-status-response.v5` response contains one nested
-`blun.cms-source-service-status.v3` snapshot. It binds the stored
+Its `blun.cms-source-status-response.v6` response contains one nested
+`blun.cms-source-service-status.v4` snapshot. It binds the stored
 `website_version`, `source_sequence`, canonical change hash, dispatch state and
 attempts, remote plan and job count, local lifecycle state, remote lifecycle
 status, lifecycle hash, required and approved locales, blocked locale reason
@@ -649,17 +702,22 @@ write. A caller can therefore distinguish queued work, a pending local
 registration, active localization, approval, publication, cancellation, and a
 terminal failure without accidentally advancing the worker.
 
-Version 2 additionally exposes only the terminal notification state, its
+The status projection additionally exposes only the terminal notification state, its
 content-free identity and hash, bounded attempt counters, and a public error
 code. When the terminal notifier exposes the pinned receiver `status` method,
 the snapshot also reports the independently durable processing observation,
-poll failures, receiver attempts, and stable local and receiver error codes.
-An intake acknowledgement is never presented as completed CMS processing.
+poll failures, receiver attempts, stable local and receiver error codes, and
+the exact terminal receiver capability SHA-256. Disabled observation uses an
+explicit `null` binding. An intake acknowledgement is never presented as
+completed CMS processing.
 
-The corresponding `blun.cms-source-health-response.v5` and nested
-`blun.cms-source-service-health.v3` report notification and processing-observer
-backlog plus component
-health without revealing website content or callback responses.
+The corresponding `blun.cms-source-health-response.v6` and nested
+`blun.cms-source-service-health.v4` report notification and processing-observer
+backlog plus component health without revealing website content or callback
+responses. The service-level receiver digest must exactly match the monitor
+component's stored digest. Missing, malformed, substituted, or contradictory
+bindings fail closed through the reference client and every outer lifecycle
+projection.
 
 Before parsing JSON or touching SQLite, the application calls the host-supplied
 authenticator with this content-free request:
@@ -699,7 +757,11 @@ credential, exception, source string, or target string.
 client for this complete ingress. Construct `CMSLocalizationSourceHTTPClient`
 with one exact HTTPS origin, the HTTP contract pin, and the source runtime's
 commercial capability and rendering-registry pins supplied through trusted
-deployment configuration. A callback provides authentication headers for the
+deployment configuration. When terminal observation is enabled, also supply
+the exact receiver generation as
+`expected_terminal_receiver_capabilities_sha256`; leaving it unset pins the
+client to the explicitly disabled `null` state. A callback provides
+authentication headers for the
 canonical request context and receives the method,
 origin, verified path and scope, body SHA-256, and the applicable event, site,
 or request identity; it cannot replace framing, idempotency, or binding headers.
@@ -716,8 +778,10 @@ runtime binding.
 
 `status()`, `health()`, and `readiness()` repeat discovery independently and
 then validate every returned field and cross-field invariant. Status is bound
-to the requested event and site. Health and readiness accept their documented
-`200` and `503` states only when the HTTP status agrees with the nested state.
+to the requested event, site, and configured terminal receiver generation.
+Health requires the same generation at service and monitor-component level;
+health and readiness accept their documented `200` and `503` states only when
+the HTTP status agrees with the nested state.
 All five operational response schemas carry `capabilities_sha256` and the
 runtime binding. A missing, malformed, substituted, or stale binding blocks
 even when the static HTTP schema still matches its separate contract pin.
@@ -799,20 +863,21 @@ keeps the database connection open; close it only after the worker finishes.
 Worker exceptions are reduced to `source_delivery_runtime.worker_blocked`, and
 the failed runtime cannot accept more managed source events.
 
-When the source client supplies the verified runtime-capability and commercial
-rendering-registry pins, the durable outbox also creates one canonical
-`source_delivery` binding record. It binds those two generations together with
-the source-delivery contract hash and validates the table shape, exact row, and
-derived digest before every queue operation. A same-generation restart resumes
-pending work. Only an empty unbound legacy database may be bound automatically;
-a non-empty legacy queue, changed generation, altered metadata, or unpinned
-reopen of an already bound database blocks before queue or network access. The
-production HMAC website-to-sidecar composition binds its separate outer database
-to the same verified runtime and rendering generations. On restart it checks the
-existing file and canonical binding read-only before any capability request. A
-local schema, file-safety, or generation failure therefore makes no network
-request; a new database or empty unbound legacy database proceeds to the
-authenticated downstream preflight before creation or migration.
+When the source client supplies the verified runtime-capability, commercial
+rendering-registry, and terminal-receiver pins, the durable outbox also creates
+one canonical `source_delivery` binding record. It binds all three generations
+together with the source-delivery contract hash and validates the table shape,
+exact row, and derived digest before every queue operation. A same-generation
+restart resumes pending work. Only an empty unbound database, or an exact empty
+v1 binding whose historical adapter digest can be reconstructed, may be bound
+or migrated automatically. A non-empty legacy queue, changed generation,
+altered metadata, or unpinned reopen of an already bound database blocks before
+queue or network access. The production HMAC website-to-sidecar composition
+binds its separate outer database to the same three verified generations. On
+restart it checks the existing file and canonical binding read-only before any
+capability request. A local schema, file-safety, or generation failure therefore
+makes no network request; a new database or safely migratable empty database
+proceeds to the authenticated downstream preflight before creation or migration.
 
 #### Website-source delivery HTTP sidecar
 
@@ -936,23 +1001,26 @@ one `CMSSourceDeliverySidecarOutboxAdapter`, and one guarded SQLite runtime.
 
 Supply the initial `HMACCredential`, exact HTTPS origin, trusted sidecar and
 downstream capability hashes, the expected source-runtime capability SHA-256,
-the expected commercial rendering-registry SHA-256, worker identity, and the
-middle `sidecar_delivery_max_attempts` once. Before opening the website SQLite
-file, the composition reads source readiness through the authenticated sidecar
-and requires its verified capability binding to match both generation pins.
+the expected commercial rendering-registry SHA-256, the expected terminal-
+receiver capability SHA-256, worker identity, and the middle
+`sidecar_delivery_max_attempts` once. Before opening the website SQLite file,
+the composition reads source readiness through the authenticated sidecar and
+requires its verified capability binding to match all three generation pins.
 Unavailable, missing, partial, malformed, or substituted evidence blocks with
 a stable content-free error before database creation. The hosted factory still
 validates all loop delays before that preflight.
 
-Both verified generation values become part of the adapter capability digest
-and the outer outbox's role-specific durable binding. A restart therefore
-resumes pending website work only under the exact same sidecar adapter,
-source-runtime, and commercial rendering generation. The SQLite file retains
-the existing owner-only, process-bound, inode-guarded lifecycle.
+All three verified generation values become part of the v3 adapter capability
+digest and the outer outbox's v2 role-specific durable binding. A restart
+therefore resumes pending website work only under the exact same sidecar
+adapter, source-runtime, commercial-rendering, and terminal-receiver
+generation. The SQLite file retains the existing owner-only, process-bound,
+inode-guarded lifecycle. Only an exact empty v1 binding can migrate, using the
+reconstructed v2 adapter digest; existing legacy work is never relabelled.
 
 Call `submission_capabilities()` to discover the exact live contract of this
 complete website edge. The content-free
-`blun.cms-source-delivery-submission-capabilities.v5` snapshot advertises the
+`blun.cms-source-delivery-submission-capabilities.v7` snapshot advertises the
 public change, removal, acceptance-status, and lifecycle HTTPS contracts, all
 six composed operational
 projection schemas, the separately owned website, sidecar and source retry
@@ -1110,11 +1178,16 @@ stored request; the website edge's idempotency remains authoritative.
 
 `status()` and `health()` expose content-free identities, counters, stable
 failure codes, capability hashes, and response hashes. They never expose the
-stored payload. Every read revalidates the complete row; altered source text,
-hashes, retry limits, leases, response evidence, schema, or generation metadata
-block fail-closed. Local `accepted` records only durable website intake and
-does not mean source acceptance, quality approval, translation completion, or
-publication readiness.
+stored payload. Once—and only once—a record is locally `accepted`, `status()`
+also returns the complete verified website capability binding from the
+canonical stored intake response. This identifies the exact delivery, runtime,
+commercial-rendering registry, and terminal-receiver generations without
+revealing website content. The binding's own hash and delivery capability pin
+are rechecked at every projection. Every read revalidates the complete row;
+altered source text, hashes, retry limits, leases, response evidence, schema,
+or generation metadata block fail-closed. Local `accepted` records only durable
+website intake and do not mean source acceptance, quality approval,
+translation completion, or publication readiness.
 
 #### Owned public-submission runtime
 
@@ -1161,14 +1234,151 @@ readiness use separate body-free operator scopes. Health describes durable
 outbox integrity; readiness additionally requires the supervised worker to be
 alive and the outbox to be healthy.
 
+Queue and status responses share a closed status shape. A pending, leased,
+retrying, or failed row has a null `remote_website_capability_binding`; an
+accepted row must contain the exact complete binding and matching
+`remote_binding_sha256` and `remote_capabilities_sha256` values. The HTTP
+server and reference client independently enforce this invariant, so a stale,
+partial, or substituted generation is not treated as a valid status.
+
 `GET /v1/localization/cms-submission-dispatch/openapi` uses its own body-free
 operator scope and returns an origin-free OpenAPI 3.1 document generated from
-that exact capability object. It describes all six routes with their methods,
+that exact capability object. It describes all eight routes with their methods,
 scopes, principal schemas, request and response schemas, required idempotency
 and payload-hash headers, transport limits, retry ownership, and fail-closed
 publication semantics. The response binds the canonical document hash to the
 active capability hash and contains no server URL, tenant identity, website
 content, model provider, or credential value.
+
+The enqueue payload is a closed discriminated union keyed by `schema` for
+`blun.cms-content-change.v2`, `blun.cms-content-cancellation.v1`, and
+`blun.cms-content-tombstone.v1`. Changes carry the complete closed localization
+request, including NFC source text, canonical BCP-47 source locale, content
+type, glossary/policy/model/software versions, and an optional unique target
+array restricted to the 24 exact EU locale profiles. Cancellation and
+tombstone shapes contain only their immutable request and source identities.
+The v3 capability document binds all three payload schema IDs. JSON Schema
+metadata records the UTF-8 source byte ceiling and source-language exclusion;
+the runtime remains authoritative for checks JSON Schema cannot express
+portably, including NFC bytes, canonical locale casing, and language-family
+exclusion.
+
+The capability response is also fully machine-readable rather than an open
+placeholder. Its OpenAPI component recursively closes every nested object and
+fixes each route, method, scope, principal, request and response schema, limit,
+retry owner, source-event schema, downstream capability pin, and fail-closed
+semantic to the active generation. The v4 capability document additionally
+binds `openapi_document_schema`; therefore an older or replaced description
+cannot keep the same capability SHA-256 even if its routes appear compatible.
+
+The v5 capability generation additionally publishes the exact ordered
+`error_statuses` for every operation. The v4 OpenAPI document renders those as
+concrete responses and has no catch-all `default` response. Enqueue exposes
+conflict and body-framing outcomes, status exposes its tenant-safe not-found
+outcome, and all routes expose their authentication and availability failures.
+For health and readiness only, `503` is a `oneOf` between the route's normal
+content-free monitor envelope and the standard fail-closed error envelope;
+this matches the runtime distinction between a valid degraded state and an
+inability to produce trustworthy monitoring evidence.
+
+The v6 capability generation and v5 OpenAPI document also bind semantic
+response invariants. `SubmissionStatus` uses JSON Schema 2020-12 conditionals
+to require a lease expiry exactly for `leased`, and complete remote status,
+attempt and digest evidence exactly for `accepted`. Health permits `ok` only
+with zero failures and expired leases, while `blocked` requires at least one
+of those signals. Readiness is a closed union between a running, healthy,
+error-free `ready` state and a `not_ready` state with a stable error code.
+Each operation carries the same ordered `x-response-invariants` list as its
+capability record. Stable identifiers retain rules that portable JSON Schema
+cannot encode, including attempt-count comparisons, request-identity equality
+and queue-count sums; runtime and the pinned reference client remain
+authoritative for those relationships.
+
+The v7 capability generation and v6 OpenAPI document bind every fail-closed
+error code to its exact route and HTTP status. Each concrete non-success
+response carries a closed `x-error-codes` list and an identical schema enum;
+the complete per-operation map is part of the capability SHA-256. Bodyless
+discovery and monitor routes include `411` for an invalid declared length and
+`413` for an oversized body, matching the shared framing parser rather than an
+idealized GET-only path.
+
+The reference client validates a remote error as a three-field closed envelope
+before exposing `http_status` and `remote_error_code` on its content-free
+exception. Codes outside the pinned status-specific set, extra fields,
+mismatched schemas, malformed JSON, and undeclared statuses never become
+trusted reasons. Verified `503` errors remain retryable and a verified `409`
+idempotency collision remains terminal; the exception message itself contains
+only the stable local failure code.
+
+The v8 capability generation and v7 OpenAPI document additionally require
+`X-Localization-Capabilities-SHA256` on every route except authenticated
+capability discovery. The header must equal the complete active sidecar
+capability SHA-256 and participates in the host authentication context. A
+missing header returns the advertised content-free `428`; a stale or replaced
+generation returns `412`. Both failures occur before enqueue, status lookup,
+health/readiness access, or OpenAPI generation, so a capability change between
+discovery and operation cannot persist or expose work under an unexpected
+contract. Discovery itself remains the bootstrap and therefore requires no
+self-referential precondition.
+
+The v12 capability generation and v11 OpenAPI document bind commercial-profile
+discovery to the actual enqueue operation. Every enqueue request includes
+`commercial_contract_binding`. For a `commercial` change it must exactly match
+the active profile identifier, profile SHA-256, and complete 24-locale
+rendering-registry SHA-256 advertised by the same capability generation. For
+all other content types, cancellations, and tombstones it must be `null`.
+
+The binding is part of the body authenticated before JSON parsing. The runtime
+then compares it with the freshly reconstructed capability before durable
+enqueue. The OpenAPI schema expresses the same content-type conditional, and
+the reference client derives the value only from its independently pinned
+capability. The binding is content-free and carries no price, currency, tax,
+term, brand, product, source text, target text, credential, or publication
+authority.
+
+The v13 capability generation and v12 OpenAPI document make that
+acknowledgement durable. The caller-owned outbox stores its canonical closed
+binding beside the immutable payload hash and returns it through queue, status,
+and lifecycle state. Claims and retries carry the same value, and every row is
+revalidated against both its source payload and the installed commercial
+profile before a network call or status response. Cancellation, tombstone, and
+non-commercial rows retain an exact `null` binding.
+
+Schema v2 migrates only an exact, empty schema-v1 outbox under a transaction.
+A populated legacy outbox remains byte-for-byte untouched and blocks startup:
+the service cannot truthfully infer which historic commercial contract its
+rows acknowledged. Missing, modified, non-canonical, stale, or cross-content
+bindings likewise block fail-closed rather than being repaired automatically.
+
+The v14 capability generation and v13 OpenAPI document bind that durable CMS
+acknowledgement to the website generation that actually accepts the work. For
+an accepted commercial change, the downstream
+`commercial_rendering_registry_sha256` must equal the same field in the stored
+`commercial_contract_binding`. A different website binding is rejected even
+when all of its fields and its own `binding_sha256` are internally consistent.
+
+This cross-generation invariant is checked before the acceptance transaction,
+again whenever the stored row is read after a restart or by health, and once
+more at both the HTTP serialization boundary and the reference client. The
+status and lifecycle remain content-free and grant no publication authority;
+an unresolved generation mismatch cannot be reported as accepted.
+
+The v11 capability generation and v10 OpenAPI document add
+`GET /v1/localization/cms-submission-dispatch/commercial-profile` with a
+separate body-free operator scope. It returns the exact public
+`translate-native.commercial.v13` profile, its ten ordered preservation and
+review dimensions, and the complete 24-locale rendering registry. The payload
+contains only policy, version, authority, locale, Unicode rendering, and hash
+data; project prices, brands, products, credentials, source text, and target
+text are excluded by the closed contract. It is explicitly content-free and
+grants no publication authority.
+
+Before producing that response, the dispatcher fetches and revalidates the
+live downstream website capability generation. The website binding's
+commercial-rendering SHA-256 must equal the canonical registry returned by the
+route. Missing capability preconditions, stale website generations, registry
+drift, malformed locale sets, or substituted profile fields block before any
+response is serialized.
 
 `POST /v1/localization/cms-submission-dispatch/requests` authenticates the
 method, path, headers, and exact raw-body SHA-256 before decoding JSON. Its
@@ -1189,6 +1399,17 @@ serialization. Invalid framing, authentication outage, capability or storage
 drift, a malformed runtime result, and a dead worker therefore block without
 returning stored source content or invoking the downstream public client.
 
+`POST /v1/localization/cms-submission-dispatch/lifecycle` extends that exact
+tenant identity into the downstream source lifecycle. It is available only
+after the caller-owned outbox has durably recorded website acceptance; every
+earlier outer state returns the advertised non-retryable conflict and performs
+no downstream request. The runtime validates the stored acceptance binding,
+then the pinned public-submission client performs one read and verifies the
+complete nested website, sidecar, source, and source-processing generations.
+The outer HTTP edge validates the lifecycle again before serialization.
+Acceptance at either boundary remains explicitly distinct from linguistic
+approval and publication.
+
 #### Public submission sidecar reference client
 
 `integrations/website_localization_cms_source_delivery_submission_dispatch_client.py`
@@ -1202,7 +1423,9 @@ interchangeable.
 `enqueue()` accepts one complete change, cancellation, or tombstone and keeps
 the source-, delivery-, and client-stage retry ceilings distinct. `status()`
 requires the complete previously known operation, request, event, site, and
-source-payload identity. `health()`, `readiness()`, `capabilities()`, and
+source-payload identity. `lifecycle()` uses the same identity and refuses to
+contact the downstream service until the local status is accepted. `health()`,
+`readiness()`, `capabilities()`, `commercial_profile()`, and
 `openapi()` use their separate operator scopes. Each operational method first
 fetches the live capability document, accepts only the exact current closed
 shape, then makes one bounded request without following redirects or retrying
@@ -1262,13 +1485,13 @@ quality review, release approval, or publication succeeded.
 The `website_capability_binding` field is independently recomputed from the
 validated, role-specific SQLite generation before the status is projected. It
 contains only the outer adapter capability hash, source-runtime hash,
-commercial rendering-registry hash, database role, and their canonical binding
-hash. A missing, changed, or malformed binding blocks locally before a sidecar
-status request.
+commercial rendering-registry hash, terminal-receiver capability hash,
+database role, and their canonical binding hash. A missing, changed, or
+malformed binding blocks locally before a sidecar status request.
 
 `submission_lifecycle()` extends that accepted state with the independently
 validated source lifecycle. Its
-`blun.cms-source-delivery-submission-lifecycle.v3` projection keeps submission,
+`blun.cms-source-delivery-submission-lifecycle.v4` projection keeps submission,
 source status, the verified website generation, and the verified source runtime
 binding separate. Missing or changed binding evidence blocks instead of
 returning a processing state.
@@ -1710,8 +1933,11 @@ text out of access logs.
 `DurableCMSReceiverStore` in
 `integrations/website_localization_cms_receiver_store.py` supplies a complete
 SQLite reference implementation for the five stateful host callbacks. It uses
-one dedicated host-owned connection. The CMS registers each monotonic current
-source before delivery and explicitly pre-registers a tombstone against the
+one dedicated host-owned connection and requires both the canonical
+`release_evidence_is_current` validator and the configured publisher authority
+through a closed signature-validation callback supplied by the receiver. The CMS
+registers each monotonic current source before delivery and explicitly
+pre-registers a tombstone against the
 exact active publication before deletion. Commit and delete recheck those
 bindings inside `BEGIN IMMEDIATE`, so the earlier resolver lookup cannot race a
 source change. Replays are bound to immutable delivery and payload hashes, a
@@ -1719,9 +1945,18 @@ replacement preserves the last-known-good bundle until its complete locale set
 commits. The successful replacement transaction then securely deletes the
 superseded payload and locale rows while retaining only content-free replay
 evidence; any cleanup failure rolls the switch back to the previous active
-bundle. Explicit deletion follows the same content-minimizing rule. The store's
-health callback validates schema, SQLite integrity, canonical payloads, locale rows, active pointers, and
-tombstone state before confirming the probe. Source and tombstone expectations
+bundle. Explicit deletion follows the same content-minimizing rule. The store
+retains the exact canonical publisher signature with each active payload. Its
+health callback validates schema, SQLite integrity, canonical payloads,
+publisher signatures, locale rows, active pointers, the current release-evidence
+contract, approval expiry, and tombstone state before confirming the probe.
+Active reads and idempotent publication replay run the same authorization checks
+after restart. A v1 database migrates to v2 without inventing missing
+signatures: signatureless active legacy rows remain blocked and unhealthy but
+can still be structurally tombstoned. Tombstone
+registration and deletion retain a structural-only path so an expired or
+contract-stale active bundle can always be removed without becoming publishable.
+Source and tombstone expectations
 carry separate canonical hashes, so a syntactically valid field substitution
 also blocks. `read_active_bundle` is for trusted
 CMS rendering code only. It requires the complete trusted publication
@@ -1773,7 +2008,7 @@ disabled, so a CMS can fail closed before submitting work. The object uses
 over every other canonical field. Paths and schemas come from the same runtime
 constants used for routing; they are not copied into a second configuration.
 
-The nested `blun.website-localization-capabilities.v5` object carries a
+The nested `blun.website-localization-capabilities.v9` object carries a
 `sha256` value over all its other canonical fields. Consumers can pin that
 digest for a deployment and deliberately reconfigure when it changes. The
 runtime rebuilds and validates the complete registry on every read; duplicate,
@@ -1781,15 +2016,71 @@ missing, noncanonical, or profile-mismatched entries return a fail-closed `503`
 without a partial locale list.
 
 Within it, `commercial_profile` is a separately hashed
-`translate-native.commercial-capabilities.v5` object. Its nested and separately
-hashed `review_summary_contract` defines the exact content-free result schema,
+`translate-native.commercial-capabilities.v15` object. Its nested and separately
+hashed `review_evidence_contract` defines the exact private report fields,
+coverage values, offer registry, Unicode code-point spans, item relations,
+ten-dimension order, limits, per-offer verdict matrix, aggregate-status
+derivation, and structural-only trust
+boundary without publishing any project content. Source-fidelity providers,
+CMS backends and the portable checker can therefore consume one canonical
+shape rather than inferring it from examples or prompt prose. The sibling
+`review_summary_contract` defines the exact content-free result schema,
 field set, verified/review-required state invariant, ten allowed ordered
-review dimensions, exact source/target/profile/evidence hash semantics, and
-excluded sensitive content. A CMS or independent-review adapter can validate
-targeted commercial
-escalation without receiving project prices, brands, source/target text, spans,
-or reviewer prose. Any registry or digest drift blocks the whole discovery
+review dimensions, exact review-evidence-contract/source/target/profile/
+locale-quality/evidence hash semantics, and excluded sensitive content. A CMS or independent-review adapter
+can validate targeted commercial escalation without receiving project prices,
+brands, source/target text, spans,
+or reviewer prose. The evidence contract now requires a canonical registry of
+unique offer IDs with ordered, non-overlapping source and target regions.
+Every proposition span must remain inside its named offer, and equivalent
+offer-assignment evidence must cover every registry entry exactly once.
+Every dimension must also acknowledge every registered offer exactly once in
+registry order. Equivalent, changed, and uncertain offer verdicts require
+their own offer-bound evidence; the validator derives and checks the global
+dimension status so a report cannot hide an omitted second offer behind a
+first offer's global pass.
+Discontiguous regions remain available for linked conditions and footnotes;
+uncertain semantic boundaries still route to independent review. Any registry
+or digest drift blocks the whole discovery
 response rather than advertising a partial contract.
+
+Commercial plan v5 and job v5 identities bind the exact review-evidence,
+content-free review-routing, and content-free review-resolution contract
+SHA-256 values. Changing any contract produces new job, idempotency, and plan identities;
+the worker, queue health monitor, and pre-lease validator reconstruct the
+current contracts and reject stale jobs before provider access. Non-commercial
+jobs carry none of the commercial digests.
+
+The sibling `review_routing_contract` defines the private actionable route as
+a separately hashed machine contract. It fixes exact Unicode code-point
+offsets with exclusive ends, complete source and target lengths, one ordered
+entry per opaque registry position, non-overlap, private-value exclusions, and
+the non-authoritative trust boundary. Every private route carries this exact
+digest. The runtime reconstructs it before evidence or receipt network access;
+the public capability exposes only the contract, never actual route spans.
+
+The `publication_http.release_evidence_contract` is independently hashed and
+fixes the complete public evidence field set, its target, digest, and evidence
+lineage bindings, commercial nullability, signed publication container, and
+excluded private content. The runtime compares the whole object with its
+canonical registry, so removing or reordering a field and recomputing both
+public hashes still blocks capability discovery before publication.
+
+The separately hashed `review_resolution_contract` makes the escalation result
+fully machine-readable. It requires the exact ordered unresolved dimensions,
+one resolved status and either a qualified-human route with a null provider or
+an independent-model route with the exact provider ID, model ID and model
+version distinct from the primary provider. The result binds the exact
+commercial profile and advertised resolution-contract SHA-256, and carries the
+primary provider identity so the CMS can verify that distinction itself. Only
+the verified receipt SHA-256 crosses the publication boundary. Raw receipts,
+credentials, qualified-human identity, reviewer prose, project prices, brands,
+source text and target text are excluded.
+Its digest is already fixed by the commercial plan and per-locale job, then
+carried unchanged through the worker result and evidence request. A later
+resolution-policy revision cannot reinterpret queued or completed work: stale
+bindings block before lease, provider access, receipt verification, or signed
+approval.
 
 The commercial capability additionally requires schema
 `translate-native.commercial-locale-quality-profile.v2` in every commercial
@@ -1819,19 +2110,43 @@ rehashed entry returns `503` without a partial registry. Consumers must still
 treat these values as display guidance and route uncertain semantic equality to
 the configured independent review path.
 
-For publication, `blun.website-localization-release-evidence.v3` carries the
-compact `commercial_quality_profile` binding `{profile, version, sha256}` for
-commercial content and requires all three fields to be null for every other
-content type. The reference CMS receiver recomputes the canonical version and
-digest for each exact target locale before calling host code. A syntactically
-valid digest, a binding from another EU locale, or a prior profile generation
-is therefore not accepted merely because the generic commercial profile still
-matches. An unresolved commercial summary additionally requires
+For publication, `blun.website-localization-release-evidence.v14` carries the
+canonical release-evidence-contract SHA-256, content-free
+`evidence_request_id` and `evidence_revision` plus the compact universal
+`quality_profile` binding `{locale, version, sha256}`. The receiver recomputes
+that exact current target-locale binding for every content type before host
+code, and the durable store repeats the lookup on active reads, health checks,
+and idempotent replay while keeping stale bundles safely tombstonable.
+
+Commercial content additionally carries its separate compact
+`commercial_quality_profile` binding `{profile, version, sha256}` and the exact
+current routing and resolution-contract SHA-256 values. The resolution-contract
+digest is present for every commercial result, including `verified` results,
+so downstream systems can prove the escalation policy that governed the
+approval. All commercial fields must be null for every other content type. The
+release service and reference CMS receiver recompute the canonical contract
+digest before publication and host code; a prior signed approval cannot be
+rewrapped under a newer contract. A syntactically valid digest, a binding from
+another EU locale, or a prior profile generation is not accepted. An unresolved
+commercial summary additionally requires
 `commercial_review_resolution` with the exact ordered dimensions, a
-`qualified_human` or `independent_model` method, the verified receipt hash, and
-the independent provider binding only for the model route. Verified commercial
-summaries and non-commercial content require this field to be `null`. Raw
+commercial profile and resolution-contract SHA-256, a `qualified_human` or
+`independent_model` method, the verified receipt hash, the primary provider
+binding, and the independent provider binding only for the model route. The CMS
+requires the two provider IDs to differ. Verified commercial summaries and
+non-commercial content require this field to be `null`. Raw
 receipts, qualified-human identities and reviewer prose are never published.
+
+The commercial summary exposes unresolved offers only as zero-based positions
+in the private offer registry, grouped by ordered review dimension. It does not
+publish configured offer identifiers. The resolution must echo the exact
+ordered position scope; malformed, stale, or substituted scope blocks before
+CMS persistence. A dimension may remain review-required with no position when
+global uncertainty or an empty registry prevents safe offer identification.
+The quality-evidence request and receipt verifier privately receive a separate
+text-free routing object that maps those positions to exact source and target
+Unicode code-point spans. It is bound into request and receipt identities but
+is never included in the public capability or CMS release-evidence value.
 
 ```json
 {
@@ -1839,7 +2154,7 @@ receipts, qualified-human identities and reviewer prose are never published.
     "change_schema": "blun.cms-content-change.v2",
     "cancellation_schema": "blun.cms-content-cancellation.v1",
     "commercial_profile": {
-      "profile": "translate-native.commercial.v5",
+      "profile": "translate-native.commercial.v13",
       "locale_quality_profile": {
         "schema": "translate-native.commercial-locale-quality-profile.v2",
         "required": true,
@@ -1849,22 +2164,104 @@ receipts, qualified-human identities and reviewer prose are never published.
         "provider_phases": ["transcreation", "target_native", "source_fidelity"],
         "tamper_policy": "block-before-provider"
       },
+      "review_evidence_contract": {
+        "checks": {
+          "exact_dimension_set": true,
+          "item": {
+            "duplicates": "forbidden-per-dimension",
+            "explanation": "non-empty-maximum-2000-code-points",
+            "matched_requires": "source-and-target-spans",
+            "offer": "registered-offer-id",
+            "relations": ["matched", "source_only", "target_only"],
+            "required_fields": ["offer", "relation", "source_span", "target_span", "explanation"],
+            "source_only_requires": "source-span-and-null-target-span",
+            "span_containment": "inside-named-offer-region",
+            "target_only_requires": "null-source-span-and-target-span"
+          },
+          "max_items_per_dimension": 1000,
+          "offer_assignment": {
+            "equivalent": "exactly-one-matched-item-per-registered-offer",
+            "other_equivalent_checks_require_equivalent_assignment": true
+          },
+          "offer_statuses": {
+            "coverage": "exactly-one-per-registered-offer",
+            "field": "offer_statuses",
+            "global_status": "changed-then-uncertain-then-equivalent-then-not_present",
+            "item_required_fields": ["offer", "status"],
+            "items_must_match_offer_status": true,
+            "order": "offer-registry-order",
+            "statuses": ["equivalent", "not_present", "changed", "uncertain"]
+          },
+          "required_dimensions": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"],
+          "status_items": {"changed": "one-or-more-specific", "equivalent": "one-or-more-matched", "not_present": "empty", "uncertain": "one-or-more-specific"},
+          "statuses": ["equivalent", "not_present", "changed", "uncertain"]
+        },
+        "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
+        "coverage": {"allowed": ["complete", "uncertain"], "complete": "every-proposition-and-offer-association-reviewed", "uncertain": "independent-review-required"},
+        "offer_registry": {
+          "field": "offers",
+          "identifier": {"pattern": "^[A-Za-z0-9_.:-]{1,256}$", "unique": true},
+          "item_required_fields": ["id", "source_spans", "target_spans"],
+          "max_items": 1000,
+          "regions": {"at_least_one_side_non_empty": true, "discontiguous": true, "fields": ["source_spans", "target_spans"], "non_empty_text": true, "ordered": true, "overlap": "forbidden-within-and-across-offers", "span_format": "zero-based-unicode-code-points-exclusive-end"}
+        },
+        "profile": "translate-native.commercial.v13",
+        "required_fields": ["schema", "coverage", "offers", "checks"],
+        "result_schema": "translate-native.commercial.v13",
+        "schema": "translate-native.commercial-review-evidence-capabilities.v2",
+        "sha256": "<sha256>",
+        "trust_boundary": {"numeric_regex_semantic_proof": false, "publication_authority": false, "semantic_truth": false, "unresolved_route": "independent-model-or-qualified-native-domain-review", "validates": "structure-offsets-and-verdict-consistency"}
+      },
+      "review_evidence_schema": "translate-native.commercial.v13",
       "review_summary_contract": {
         "content_policy": {"project_brands": false, "project_prices": false, "reviewer_prose": false, "source_spans": false, "source_text": false, "target_spans": false, "target_text": false},
-        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v1", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-source-sha256", "exact-target-sha256", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
-        "profile": "translate-native.commercial.v5",
-        "required_fields": ["schema", "profile", "status", "review_required_dimensions", "evidence_sha256"],
-        "result_schema": "translate-native.commercial-review-summary.v2",
+        "evidence_sha256": {"algorithm": "sha-256", "binding_fields": ["schema", "profile", "review_evidence_contract_sha256", "target_locale", "commercial_quality_profile_version", "commercial_quality_profile_sha256", "source_sha256", "target_sha256", "evidence"], "binding_schema": "translate-native.commercial-review-evidence-binding.v5", "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace", "covers": ["commercial-profile", "exact-review-evidence-contract", "exact-target-locale", "commercial-quality-profile-generation", "exact-source-sha256", "exact-target-sha256", "offer-registry-and-proposition-assignment", "complete-commercial-review-evidence"], "text_hashing": "exact-utf-8"},
+        "profile": "translate-native.commercial.v13",
+        "required_fields": ["schema", "profile", "status", "review_required_dimensions", "offer_count", "review_required_offers", "review_evidence_contract_sha256", "evidence_sha256"],
+        "result_schema": "translate-native.commercial-review-summary.v6",
+        "review_evidence_contract_sha256": {"algorithm": "sha-256", "equals": "<review-evidence-contract-sha256>", "purpose": "reject-stale-or-reinterpreted-private-evidence"},
+        "offer_count": {"maximum": 1000, "meaning": "opaque-offer-registry-size", "minimum": 0},
         "review_required_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true},
-        "schema": "translate-native.commercial-review-summary-capabilities.v2",
+        "review_required_offers": {"configured_offer_identifiers_published": false, "dimension_must_be_review_required": true, "dimension_order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "item_required_fields": ["dimension", "offer_indexes"], "offer_indexes": {"maximum_exclusive": 1000, "meaning": "zero-based-opaque-offer-registry-position", "minimum": 0, "order": "ascending", "unique": true}},
+        "schema": "translate-native.commercial-review-summary-capabilities.v7",
         "sha256": "<sha256>",
-        "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more"}, "verified": {"review_required_dimensions": "empty"}}
+        "statuses": {"review_required": {"requires_independent_review": true, "review_required_dimensions": "one-or-more", "review_required_offers": "zero-or-more"}, "verified": {"review_required_dimensions": "empty", "review_required_offers": "empty"}}
       },
-      "schema": "translate-native.commercial-capabilities.v5",
+      "review_routing_contract": {
+        "applies_when": {"offer_count": "exact-review-summary-offer-count", "review_summary_status": "review_required"},
+        "content_policy": {"configured_offer_identifiers": false, "project_brands": false, "project_prices": false, "reviewer_prose": false, "source_text": false, "target_text": false},
+        "offers": {"coverage": "exactly-one-per-registered-offer", "item_required_fields": ["offer_index", "source_spans", "target_spans"], "offer_index": {"maximum_exclusive": 1000, "meaning": "zero-based-opaque-offer-registry-position", "minimum": 0, "order": "ascending", "unique": true}, "order": "offer-registry-order", "regions": {"at_least_one_side_non_empty": true, "discontiguous": true, "fields": ["source_spans", "target_spans"], "non_empty_text": true, "ordered": true, "overlap": "forbidden-within-and-across-offers", "span_format": "zero-based-unicode-code-points-exclusive-end"}},
+        "profile": "translate-native.commercial.v13",
+        "required_fields": ["schema", "profile", "contract_sha256", "offer_count", "source_length", "target_length", "offers"],
+        "result_schema": "translate-native.commercial-review-routing.v2",
+        "schema": "translate-native.commercial-review-routing-capabilities.v1",
+        "sha256": "<sha256>",
+        "text_lengths": {"fields": ["source_length", "target_length"], "must_equal_complete_texts": true, "unit": "unicode-code-points"},
+        "trust_boundary": {"public_release_evidence": false, "publication_authority": false, "route_values": "private-evidence-and-receipt-boundary-only", "semantic_truth": false, "validates": "shape-offsets-order-count-and-text-lengths"}
+      },
+      "review_routing_schema": "translate-native.commercial-review-routing.v2",
+      "review_resolution_contract": {
+        "applies_when": {"review_summary_status": "review_required", "reviewed_dimensions": "exact-ordered-review-summary-dimensions", "reviewed_offer_count": "exact-review-summary-offer-count", "reviewed_offers": "exact-ordered-review-summary-offer-scope"},
+        "content_policy": {"project_brands": false, "project_prices": false, "qualified_human_identity": false, "raw_receipt": false, "reviewer_prose": false, "source_text": false, "target_text": false},
+        "methods": {"independent_model": {"primary_provider": "required", "provider": "required", "provider_id_must_differ_from_primary_provider": true, "receipt": "verified-independent-model-review"}, "qualified_human": {"primary_provider": "required", "provider": "null", "receipt": "verified-qualified-human-review"}},
+        "profile": "translate-native.commercial.v13",
+        "provider_identity": {"credentials_published": false, "fields": ["id", "model_id", "model_version"], "primary_provider": "required"},
+        "receipt_sha256": {"algorithm": "sha-256", "covers": "exact-verified-review-receipt", "raw_receipt_published": false},
+        "required_fields": ["schema", "profile", "contract_sha256", "status", "reviewed_dimensions", "reviewed_offer_count", "reviewed_offers", "method", "receipt_sha256", "primary_provider", "provider"],
+        "result_schema": "translate-native.commercial-review-resolution.v4",
+        "reviewed_dimensions": {"allowed": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "order": ["amount_currency", "discount_basis", "qualifiers", "tax_status", "billing_interval", "commitment", "renewal", "cancellation", "conditions", "offer_assignment"], "unique": true, "must_equal_review_summary": true},
+        "reviewed_offer_count": {"must_equal_review_summary": true},
+        "reviewed_offers": {"configured_offer_identifiers_published": false, "must_equal_review_summary": true},
+        "schema": "translate-native.commercial-review-resolution-capabilities.v4",
+        "sha256": "<sha256>",
+        "status": "resolved"
+      },
+      "review_resolution_schema": "translate-native.commercial-review-resolution.v4",
+      "schema": "translate-native.commercial-capabilities.v15",
       "sha256": "<sha256>"
     },
     "commercial_rendering_registry": {
-      "commercial_profile": "translate-native.commercial.v5",
+      "commercial_profile": "translate-native.commercial.v13",
       "content_policy": {"credentials": false, "project_brands": false, "project_prices": false, "source_text": false, "target_text": false},
       "locales": [{
         "commercial_quality_profile": {"sha256": "<sha256>", "version": "commercial-eu-mt-MT-2026-09-2"},
@@ -1887,7 +2284,7 @@ receipts, qualified-human identities and reviewer prose are never published.
     "content_types": ["commercial", "cta", "documentation", "headline", "legal", "marketing", "seo", "ui"],
     "default_target_policy": "all-eu-official-locales-except-source-language",
     "eu_language_source": "https://european-union.europa.eu/principles-countries-history/languages_en",
-    "job_schema": "blun.website-localization-job.v2",
+    "job_schema": "blun.website-localization-job.v5",
     "locales": [{
       "direction": "ltr",
       "eu_code": "MT",
@@ -1900,7 +2297,7 @@ receipts, qualified-human identities and reviewer prose are never published.
       "commercial_quality_profile_version": "commercial-eu-mt-MT-2026-09-2",
       "script": "Latn"
     }],
-    "plan_schema": "blun.website-localization-plan.v2",
+    "plan_schema": "blun.website-localization-plan.v5",
     "publication_http": {
       "binding_headers": [
         {"binding": "delivery_id", "name": "Idempotency-Key"},
@@ -1923,14 +2320,48 @@ receipts, qualified-human identities and reviewer prose are never published.
         "response_schema": "blun.cms-localization-publication-http-ack.v1"
       }],
       "request_content_type": "application/json; charset=utf-8",
-      "release_evidence_schema": "blun.website-localization-release-evidence.v3",
+      "release_evidence_contract": {
+        "bindings": {
+          "lineage_fields": ["evidence_request_id", "evidence_revision"],
+          "quality_profile": "exact-current-target-locale-quality-profile",
+          "sha256_fields": ["release_evidence_contract_sha256", "target_sha256", "result_sha256", "approval_sha256", "quality_receipt_sha256", "commercial_review_routing_contract_sha256", "commercial_review_resolution_contract_sha256"],
+          "signed_container": "blun.cms-localization-publication.v3",
+          "target_identity_fields": ["job_id", "target_locale", "target_sha256", "approval_id"]
+        },
+        "commercial_scope": {
+          "content_type": "commercial",
+          "non_commercial_fields": "all-null",
+          "quality_profile": "exact-current-target-locale-commercial-quality-profile",
+          "required_non_null": ["commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_routing_contract_sha256", "commercial_review_resolution_contract_sha256"],
+          "review_evidence_contract_sha256": "exact-current-public-commercial-evidence-contract",
+          "review_resolution_contract_sha256": "exact-current-public-commercial-resolution-contract",
+          "resolution": "required-only-when-review-required"
+        },
+        "content_policy": {
+          "authentication_material": false,
+          "project_brands": false,
+          "project_prices": false,
+          "raw_receipt": false,
+          "commercial_review_routing": false,
+          "reviewer_identity": false,
+          "reviewer_prose": false,
+          "source_text": false,
+          "target_text": false
+        },
+        "release_evidence_schema": "blun.website-localization-release-evidence.v14",
+        "required_fields": ["schema", "release_evidence_contract_sha256", "job_id", "target_locale", "target_sha256", "approval_id", "content_type", "result_sha256", "approval_sha256", "quality_receipt_sha256", "evidence_request_id", "evidence_revision", "quality_profile", "commercial_profile", "commercial_quality_profile", "commercial_review", "commercial_review_routing_contract_sha256", "commercial_review_resolution_contract_sha256", "commercial_review_resolution"],
+        "schema": "blun.website-localization-release-evidence-capabilities.v8",
+        "sha256": "<sha256>",
+        "tamper_policy": "reject-complete-publication-before-host-commit"
+      },
+      "release_evidence_schema": "blun.website-localization-release-evidence.v14",
       "response_content_types": ["application/json", "application/json; charset=utf-8"],
-      "schema": "blun.cms-localization-publication-http-capabilities.v2",
+      "schema": "blun.cms-localization-publication-http-capabilities.v5",
       "sha256": "<sha256>"
     },
     "publication_schema": "blun.cms-localization-publication.v3",
     "quality_passes": ["target_native", "source_fidelity"],
-    "schema": "blun.website-localization-capabilities.v5",
+    "schema": "blun.website-localization-capabilities.v9",
     "sha256": "<sha256>"
   },
   "api_contract": {
@@ -2061,6 +2492,25 @@ repair, or publish anything. A published acknowledgement stays published after
 its former approval validity window ends; expiration before acknowledgement is
 reported as `publication_blocked`.
 
+If the current target-locale policy cannot temporarily be resolved, the route
+returns `503` with `cms.release.policy_unavailable`. The reference client marks
+this policy-resolution outcome as retryable, and the durable lifecycle
+monitor applies its configured attempt ceiling and backoff. Proven policy
+drift, malformed evidence, or invalid bindings return `409` with
+`cms.release.integrity_failed`; a simultaneous integrity defect takes
+precedence over resolver unavailability and is never retried.
+
+The general website-localization health monitor performs the same current
+locale-policy revalidation independently of lifecycle polling. It marks the
+release component and overall service health `blocked` with
+`release.policy_unavailable` for a temporary resolver outage,
+`release.policy_stale` for verified policy drift, or
+`release.integrity_failed` for malformed and otherwise unexpected release
+evidence. Verified drift or integrity failure takes precedence over a
+simultaneous outage. Per-locale evidence codes remain available in the
+content-free website-version record, and this health pass is strictly
+read-only.
+
 ```json
 {"approved_locales":["fi-FI"],"blocked_locales":[],"delivery":{"attempts":0,"delivery_id":"blun-cms-delivery-…","last_error_code":null,"last_error_detail_hash":null,"lease_expired":false,"lease_expires_at":null,"max_attempts":5,"next_attempt_at":1788955201.0,"status":"pending"},"event_id":"cms-event-184","plan_id":"blun-l10n-plan-…","queue_counts":{"failed":0,"leased":0,"pending":0,"retry_wait":0,"succeeded":1},"request_id":"lifecycle-8","required_locales":["fi-FI"],"schema":"blun.cms-localization-lifecycle.v3","site_id":"public-site","source_sequence":42,"status":"publishing","website_version":"release-42"}
 ```
@@ -2076,10 +2526,11 @@ prose:
 
 `401` covers invalid, expired, or wrong-scope signed requests; `409` covers
 identity, source-sequence, supersession, cancellation, in-flight publication,
-and legacy-ingress conflicts;
+legacy-ingress conflicts, and proven release-integrity failures;
 `413` and `415` cover body size and media type; `503` covers inconsistent or
-unavailable durable state, including missing lifecycle authorities and invalid
-release or delivery evidence, or an inconsistent capability registry. Other
+unavailable durable state, including missing lifecycle authorities, temporary
+policy-resolution failure, invalid delivery evidence, or an inconsistent
+capability registry. Other
 invalid input returns `400`, and unexpected failures reduce to `api.internal`
 with `500`. Clients may retry a transport failure or the exact signed change;
 they must never modify a request under the same event identity.

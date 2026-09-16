@@ -84,6 +84,9 @@ def publication_request(authority=None):
             "approval_expires_at": 2000,
             "release_evidence": {
                 "schema": CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+                "release_evidence_contract_sha256": (
+                    CMS._RELEASE.publication_evidence_contract()["sha256"]
+                ),
                 "job_id": "blun-l10n-job-" + "4" * 64,
                 "target_locale": "fi-FI",
                 "target_sha256": hashlib.sha256(target.encode("utf-8")).hexdigest(),
@@ -92,9 +95,22 @@ def publication_request(authority=None):
                 "result_sha256": "1" * 64,
                 "approval_sha256": "2" * 64,
                 "quality_receipt_sha256": "3" * 64,
+                "evidence_request_id": "blun-l10n-evidence-" + "5" * 64,
+                "evidence_revision": "native-evidence-1",
+                "quality_profile": {
+                    "locale": "fi-FI",
+                    "version": CMS._PLANNER.quality_profile_for("fi-FI")[
+                        "version"
+                    ],
+                    "sha256": CMS._PLANNER.quality_profile_for("fi-FI")[
+                        "sha256"
+                    ],
+                },
                 "commercial_profile": None,
                 "commercial_quality_profile": None,
                 "commercial_review": None,
+                "commercial_review_routing_contract_sha256": None,
+                "commercial_review_resolution_contract_sha256": None,
                 "commercial_review_resolution": None,
             },
         }],

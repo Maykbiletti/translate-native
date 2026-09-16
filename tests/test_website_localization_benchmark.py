@@ -179,9 +179,23 @@ def candidate_result(payload, text=None):
                 "profile": payload["commercial_profile"],
                 "status": "verified",
                 "review_required_dimensions": [],
+                "offer_count": 1,
+                "review_required_offers": [],
+                "review_evidence_contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_evidence_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
                 "evidence_sha256": "c" * 64,
             }
             if payload["content_type"] == "commercial" else None
+        ),
+        "commercial_review_routing": None,
+        "commercial_review_routing_contract_sha256": (
+            payload.get("commercial_review_routing_contract_sha256")
+        ),
+        "commercial_review_resolution_contract_sha256": (
+            payload.get("commercial_review_resolution_contract_sha256")
         ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": False,
@@ -248,13 +262,44 @@ def review_response(request, preference, defects=None):
     }
     contract = request.input["response_schema"].get("commercial_evaluation")
     if contract is not None:
+        texts = {
+            item["label"]: item["text"] for item in request.input["variants"]
+        }
+        count = contract["offer_count"]
+        target_offer_registries = {
+            label: BENCHMARK._commercial_target_offer_registry(
+                text,
+                [
+                    [(len(text) * index // count,
+                      len(text) * (index + 1) // count)]
+                    for index in range(count)
+                ],
+                [],
+            )
+            for label, text in texts.items()
+        }
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
+            "offer_count": count,
+            "target_offer_registries": target_offer_registries,
             "dimensions": [
                 {
                     "dimension": item["dimension"],
                     "variants": {
-                        label: {"status": "equivalent", "defect_index": None}
+                        label: {
+                            "target_offer_registry_sha256": (
+                                target_offer_registries[label]["sha256"]
+                            ),
+                            "status": "equivalent",
+                            "offers": [
+                                {
+                                    "offer_index": offer["offer_index"],
+                                    "status": "equivalent",
+                                    "defect_index": None,
+                                }
+                                for offer in item["variants"][label]["offers"]
+                            ],
+                        }
                         for label in ("A", "B")
                     },
                 }
@@ -597,6 +642,9 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         native, fidelity = reviewer.requests
         self.assertNotIn("commercial_dimensions", native.input["benchmark_suite"])
         self.assertNotIn(
+            "commercial_offer_registry", native.input["benchmark_suite"],
+        )
+        self.assertNotIn(
             "commercial_evaluation", native.input["response_schema"],
         )
         self.assertEqual(
@@ -605,14 +653,186 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         )
         contract = fidelity.input["response_schema"]["commercial_evaluation"]
         self.assertEqual(contract["schema"], BENCHMARK.COMMERCIAL_REVIEW_SCHEMA)
+        self.assertEqual(contract["offer_count"], 2)
+        self.assertEqual(
+            fidelity.input["benchmark_suite"]["commercial_offer_count"], 2,
+        )
+        registry = fidelity.input["benchmark_suite"]["commercial_offer_registry"]
+        self.assertEqual(
+            registry,
+            next(
+                case["commercial_offer_registry"]
+                for case in SUITE_MANIFEST["cases"]
+                if case["key"] == "offer-commercial-long"
+            ),
+        )
+        self.assertEqual(registry["offset_unit"], "unicode-code-point")
         self.assertEqual(
             [item["dimension"] for item in contract["dimensions"]],
             list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS),
+        )
+        self.assertEqual(
+            [
+                offer["offer_index"]
+                for offer in contract["dimensions"][0]["variants"]["A"][
+                    "offers"
+                ]
+            ],
+            [0, 1],
         )
         self.assertIn(
             "not digit strings", fidelity.system_instruction,
         )
         self.assertEqual(outcome["winner"], "candidate")
+
+    def test_commercial_target_offer_registries_bind_exact_anonymous_variants(self):
+        payload = job("mt-MT", "target-registry-7")
+        result = candidate_result(payload)
+        reviewer = PreferenceReviewer(result["candidate"])
+        outcome = self.run_benchmark(
+            payload, result, baseline(payload), assets(), policy(), reviewer,
+            blinding_key=self.key,
+        )
+        native, fidelity = reviewer.requests
+        self.assertNotIn(
+            "commercial_evaluation", native.input["response_schema"],
+        )
+        contract = fidelity.input["response_schema"]["commercial_evaluation"]
+        self.assertEqual(
+            set(contract["target_offer_registries"]), {"A", "B"},
+        )
+        response = review_response(fidelity, "tie")
+        registries = response["commercial_evaluation"][
+            "target_offer_registries"
+        ]
+        texts = {
+            item["label"]: item["text"] for item in fidelity.input["variants"]
+        }
+        for label, registry in registries.items():
+            self.assertEqual(registry["target_length"], len(texts[label]))
+            self.assertEqual(
+                registry["target_sha256"],
+                hashlib.sha256(texts[label].encode("utf-8")).hexdigest(),
+            )
+            self.assertEqual(
+                registry,
+                BENCHMARK.validate_commercial_target_offer_registry(
+                    registry, target_text=texts[label], offer_count=2,
+                ),
+            )
+        candidate_label = next(
+            label for label, text in texts.items()
+            if text == result["candidate"]
+        )
+        baseline_label = "B" if candidate_label == "A" else "A"
+        evaluation = outcome["commercial_evaluation"]
+        self.assertEqual(
+            evaluation["candidate_target_offer_registry_sha256"],
+            registries[candidate_label]["sha256"],
+        )
+        self.assertEqual(
+            evaluation["baseline_target_offer_registry_sha256"],
+            registries[baseline_label]["sha256"],
+        )
+        for item in evaluation["dimensions"]:
+            self.assertEqual(
+                item["candidate_target_offer_registry_sha256"],
+                evaluation["candidate_target_offer_registry_sha256"],
+            )
+            self.assertEqual(
+                item["baseline_target_offer_registry_sha256"],
+                evaluation["baseline_target_offer_registry_sha256"],
+            )
+
+        def validate(value):
+            return BENCHMARK._validate_review(
+                value, phase="source_fidelity", locale="mt-MT",
+                blind_id=fidelity.input["blind_id"],
+                commercial_dimensions=list(
+                    BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS
+                ),
+                commercial_offer_count=2,
+                commercial_variant_texts=texts,
+            )
+
+        validate(response)
+        mutations = {
+            "gap": lambda value: value["commercial_evaluation"][
+                "target_offer_registries"
+            ]["A"]["offers"][0]["target_spans"][0].__setitem__(
+                "end", registries["A"]["offers"][0]["target_spans"][0]["end"] - 1,
+            ),
+            "overlap": lambda value: value["commercial_evaluation"][
+                "target_offer_registries"
+            ]["A"]["offers"][1]["target_spans"][0].__setitem__(
+                "start", registries["A"]["offers"][1]["target_spans"][0]["start"] - 1,
+            ),
+            "boolean_index": lambda value: value["commercial_evaluation"][
+                "target_offer_registries"
+            ]["A"]["offers"][0].__setitem__("offer_index", False),
+            "bad_digest": lambda value: value["commercial_evaluation"][
+                "target_offer_registries"
+            ]["A"].__setitem__("sha256", "0" * 64),
+            "swapped_variants": lambda value: value["commercial_evaluation"].__setitem__(
+                "target_offer_registries",
+                {
+                    "A": registries["B"],
+                    "B": registries["A"],
+                },
+            ),
+            "missing_decision_binding": lambda value: value[
+                "commercial_evaluation"
+            ]["dimensions"][0]["variants"]["A"].pop(
+                "target_offer_registry_sha256"
+            ),
+            "foreign_decision_binding": lambda value: value[
+                "commercial_evaluation"
+            ]["dimensions"][0]["variants"]["A"].__setitem__(
+                "target_offer_registry_sha256", registries["B"]["sha256"],
+            ),
+            "swapped_decision_bindings": lambda value: (
+                value["commercial_evaluation"]["dimensions"][0]["variants"][
+                    "A"
+                ].__setitem__(
+                    "target_offer_registry_sha256", registries["B"]["sha256"],
+                ),
+                value["commercial_evaluation"]["dimensions"][0]["variants"][
+                    "B"
+                ].__setitem__(
+                    "target_offer_registry_sha256", registries["A"]["sha256"],
+                ),
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                invalid = copy.deepcopy(response)
+                mutate(invalid)
+                with self.assertRaises(BENCHMARK.BenchmarkBlocked):
+                    validate(invalid)
+
+        rebound = copy.deepcopy(response)
+        split = len(texts["A"]) // 2 + 1
+        replacement = BENCHMARK._commercial_target_offer_registry(
+            texts["A"], [[(0, split)], [(split, len(texts["A"]))]], [],
+        )
+        rebound["commercial_evaluation"]["target_offer_registries"][
+            "A"
+        ] = replacement
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked):
+            validate(rebound)
+        for item in rebound["commercial_evaluation"]["dimensions"]:
+            item["variants"]["A"][
+                "target_offer_registry_sha256"
+            ] = replacement["sha256"]
+        validate(rebound)
+
+        unicode_registry = BENCHMARK._commercial_target_offer_registry(
+            "ċ€ż", [[(0, 1)], [(1, 2)]], [(2, 3)],
+        )
+        self.assertEqual(unicode_registry["target_length"], 3)
+        self.assertEqual(
+            unicode_registry["shared_target_spans"], [{"start": 2, "end": 3}],
+        )
 
     def test_commercial_review_requires_exact_ordered_dimension_acknowledgement(self):
         mutations = {
@@ -644,15 +864,24 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             self.assertEqual(len(reviewer.requests), 2)
 
     def test_commercial_uncertainty_and_unbound_defects_fail_closed(self):
+        def mutate_offer(evaluation, *, status, defect_index):
+            decision = evaluation["dimensions"][0]["variants"]["A"]
+            decision["status"] = status
+            decision["offers"][0].update(
+                status=status, defect_index=defect_index,
+            )
+
         cases = {
             "uncertain": (
-                lambda evaluation, response: evaluation["dimensions"][0]
-                ["variants"]["A"].update(status="uncertain"),
+                lambda evaluation, response: mutate_offer(
+                    evaluation, status="uncertain", defect_index=None,
+                ),
                 "benchmark.review.commercial_uncertain",
             ),
             "unbound-major": (
-                lambda evaluation, response: evaluation["dimensions"][0]
-                ["variants"]["A"].update(status="major", defect_index=0),
+                lambda evaluation, response: mutate_offer(
+                    evaluation, status="major", defect_index=0,
+                ),
                 "benchmark.review.invalid",
             ),
         }
@@ -676,6 +905,74 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.code, expected)
 
+    def test_commercial_review_requires_every_offer_once_in_registry_order(self):
+        mutations = {
+            "missing": lambda offers: offers.pop(),
+            "duplicate-index": lambda offers: offers[1].update(offer_index=0),
+            "boolean-index": lambda offers: offers[1].update(offer_index=True),
+            "reordered": lambda offers: offers.reverse(),
+            "additional": lambda offers: offers.append(copy.deepcopy(offers[0])),
+        }
+        for label, mutation in mutations.items():
+            class MutatingReviewer(PreferenceReviewer):
+                def review(self, request):
+                    value = super().review(request)
+                    if request.phase == "source_fidelity":
+                        offers = value["commercial_evaluation"]["dimensions"][0][
+                            "variants"
+                        ]["A"]["offers"]
+                        mutation(offers)
+                    return value
+
+            payload = job(suffix="commercial-7")
+            result = candidate_result(payload)
+            reviewer = MutatingReviewer(result["candidate"])
+            with self.subTest(label=label), self.assertRaises(
+                BENCHMARK.BenchmarkBlocked,
+            ) as caught:
+                self.run_benchmark(
+                    payload, result, baseline(payload), assets(), policy(),
+                    reviewer, blinding_key=self.key,
+                )
+            self.assertEqual(caught.exception.code, "benchmark.review.invalid")
+
+        class BooleanCountReviewer(PreferenceReviewer):
+            def review(self, request):
+                value = super().review(request)
+                if request.phase == "source_fidelity":
+                    value["commercial_evaluation"]["offer_count"] = True
+                return value
+
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline(payload), assets(), policy(),
+                BooleanCountReviewer(result["candidate"]),
+                blinding_key=self.key,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.review.invalid")
+
+    def test_commercial_dimension_aggregate_cannot_hide_offer_status(self):
+        class InconsistentReviewer(PreferenceReviewer):
+            def review(self, request):
+                value = super().review(request)
+                if request.phase == "source_fidelity":
+                    value["commercial_evaluation"]["dimensions"][0][
+                        "variants"
+                    ]["A"]["status"] = "not_present"
+                return value
+
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+        reviewer = InconsistentReviewer(result["candidate"])
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline(payload), assets(), policy(),
+                reviewer, blinding_key=self.key,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.review.invalid")
+
     def test_commercial_dimension_defect_references_nonpreferred_finding(self):
         payload = job(suffix="commercial-7")
         result = candidate_result(payload)
@@ -692,9 +989,13 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                     "excerpt": "offer condition",
                     "reason": "The condition is attached to the wrong offer.",
                 }]
-                value["commercial_evaluation"]["dimensions"][-1]["variants"][
-                    other
-                ] = {"status": "major", "defect_index": 0}
+                decision = value["commercial_evaluation"]["dimensions"][-1][
+                    "variants"
+                ][other]
+                decision["status"] = "major"
+                decision["offers"][1].update(
+                    status="major", defect_index=0,
+                )
                 return value
 
         reviewer = DimensionDefectReviewer(result["candidate"])
@@ -717,11 +1018,56 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
+            evaluation["offer_registry_sha256"],
+            next(
+                case["commercial_offer_registry"]["sha256"]
+                for case in SUITE_MANIFEST["cases"]
+                if case["key"] == "offer-commercial-long"
+            ),
+        )
+        baseline_finding_sha256 = evaluation["baseline_finding_hashes"][
+            "major"
+        ][0]
+        self.assertEqual(
+            evaluation["candidate_finding_hashes"],
+            {"blocking": [], "major": []},
+        )
+        self.assertEqual(
             evaluation["dimensions"][-1],
             {
                 "dimension": list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)[-1],
                 "candidate_status": "equivalent",
+                "candidate_offers": [
+                    {
+                        "offer_index": 0,
+                        "status": "equivalent",
+                        "finding_sha256": None,
+                    },
+                    {
+                        "offer_index": 1,
+                        "status": "equivalent",
+                        "finding_sha256": None,
+                    },
+                ],
+                "candidate_target_offer_registry_sha256": evaluation[
+                    "candidate_target_offer_registry_sha256"
+                ],
                 "baseline_status": "major",
+                "baseline_offers": [
+                    {
+                        "offer_index": 0,
+                        "status": "equivalent",
+                        "finding_sha256": None,
+                    },
+                    {
+                        "offer_index": 1,
+                        "status": "major",
+                        "finding_sha256": baseline_finding_sha256,
+                    },
+                ],
+                "baseline_target_offer_registry_sha256": evaluation[
+                    "baseline_target_offer_registry_sha256"
+                ],
             },
         )
 
@@ -750,9 +1096,13 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                         "excerpt": "cancellation condition",
                         "reason": "The cancellation condition changed.",
                     }]
-                    value["commercial_evaluation"]["dimensions"][-1][
+                    decision = value["commercial_evaluation"]["dimensions"][-1][
                         "variants"
-                    ][candidate_label] = {"status": "major", "defect_index": 0}
+                    ][candidate_label]
+                    decision["status"] = "major"
+                    decision["offers"][0].update(
+                        status="major", defect_index=0,
+                    )
                     return value
 
             reviewer = AuditedReviewer(
@@ -786,9 +1136,40 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         self.assertEqual(audit["baseline"], {
             "equivalent": 8, "not_present": 0, "major": 0, "blocking": 0,
         })
+        self.assertEqual(audit["offer_count"], 13)
+        self.assertEqual(audit["candidate_offers"], {
+            "equivalent": 12, "not_present": 0, "major": 1, "blocking": 0,
+        })
+        self.assertEqual(audit["baseline_offers"], {
+            "equivalent": 13, "not_present": 0, "major": 0, "blocking": 0,
+        })
         self.assertEqual(lane["status"], "BLOCK")
         self.assertEqual(locale_report["status"], "BLOCK")
         self.assertFalse(report["superiority_claim_allowed"])
+
+        finding_bound = results[0]["commercial_evaluation"]
+        candidate_major_hashes = finding_bound["candidate_finding_hashes"][
+            "major"
+        ]
+        self.assertEqual(len(candidate_major_hashes), 1)
+        pass_findings = {
+            item["phase"]: item["finding_hashes"] for item in results[0]["passes"]
+        }
+        self.assertEqual(pass_findings["target_native"]["candidate"], {
+            "blocking": [], "major": [],
+        })
+        self.assertEqual(
+            pass_findings["source_fidelity"]["candidate"]["major"],
+            candidate_major_hashes,
+        )
+        self.assertEqual(
+            finding_bound["dimensions"][-1]["candidate_offers"][0],
+            {
+                "offer_index": 0,
+                "status": "major",
+                "finding_sha256": candidate_major_hashes[0],
+            },
+        )
 
         unsigned = copy.deepcopy(results[-1])
         unsigned.pop("attestation")
@@ -799,6 +1180,131 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
         with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
             self.summarize(benchmark_policy, [*results[:-1], rebound])
         self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][-1][
+            "candidate_offers"
+        ][0]["finding_sha256"] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["passes"][0]["finding_hashes"], unsigned["passes"][1][
+            "finding_hashes"
+        ] = (
+            unsigned["passes"][1]["finding_hashes"],
+            unsigned["passes"][0]["finding_hashes"],
+        )
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["defect_counts"]["candidate"]["major"] = 0
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][-1][
+            "candidate_offers"
+        ][1]["finding_sha256"] = unsigned["commercial_evaluation"][
+            "candidate_finding_hashes"
+        ]["major"][0]
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[0])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][-1][
+            "candidate_offers"
+        ][0]["status"] = []
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [rebound, *results[1:]])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[-1])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][0][
+            "candidate_target_offer_registry_sha256"
+        ] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [*results[:-1], rebound])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[-1])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["offer_registry_sha256"] = "0" * 64
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [*results[:-1], rebound])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+        unsigned = copy.deepcopy(results[-1])
+        unsigned.pop("attestation")
+        unsigned["commercial_evaluation"]["dimensions"][0][
+            "candidate_offers"
+        ].pop()
+        rebound = BENCHMARK._attest(
+            unsigned, benchmark_policy, self.authority,
+        )
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.summarize(benchmark_policy, [*results[:-1], rebound])
+        self.assertEqual(caught.exception.code, "benchmark.results.invalid")
+
+    def test_duplicate_phase_findings_fail_before_signed_evidence(self):
+        finding = {
+            "class": "commercial_fidelity",
+            "excerpt": "renewal condition",
+            "reason": "The renewal condition changed.",
+        }
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+
+        class DuplicateFindingReviewer(PreferenceReviewer):
+            def review(self, request):
+                value = super().review(request)
+                if request.phase == "source_fidelity":
+                    preferred = value["preference"]
+                    other = "B" if preferred == "A" else "A"
+                    value["variants"][other]["major_defects"] = [
+                        finding, copy.deepcopy(finding),
+                    ]
+                return value
+
+        with self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline(payload), assets(), policy(),
+                DuplicateFindingReviewer(result["candidate"]),
+                blinding_key=self.key,
+            )
+        self.assertEqual(caught.exception.code, "benchmark.review.invalid")
 
     def test_commercial_scope_drift_blocks_before_benchmark_review(self):
         payload = job(suffix="commercial-7")
@@ -831,6 +1337,59 @@ class WebsiteLocalizationBenchmarkTests(unittest.TestCase):
                 "benchmark.suite.commercial_scope_mismatch",
             )
             self.assertEqual(reviewer.requests, [])
+
+    def test_commercial_offer_registry_drift_blocks_before_benchmark_review(self):
+        payload = job(suffix="commercial-7")
+        result = candidate_result(payload)
+        benchmark_policy = policy()
+        baseline_artifact = baseline(payload, benchmark_policy=benchmark_policy)
+        original = BENCHMARK._SUITE.case_for_job
+
+        for label, replacement in (
+            ("missing", None), ("boolean", True), ("zero", 0), ("changed", 1),
+        ):
+            def drifted(value, replacement=replacement):
+                case = original(value)
+                if replacement is None:
+                    case.pop("commercial_offer_count")
+                else:
+                    case["commercial_offer_count"] = replacement
+                return case
+
+            reviewer = PreferenceReviewer(result["candidate"])
+            with self.subTest(label=label), mock.patch.object(
+                BENCHMARK._SUITE, "case_for_job", drifted,
+            ), self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+                self.run_benchmark(
+                    payload, result, baseline_artifact, assets(),
+                    benchmark_policy, reviewer, blinding_key=self.key,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "benchmark.suite.commercial_scope_mismatch",
+            )
+            self.assertEqual(reviewer.requests, [])
+
+        def drifted_registry(value):
+            case = original(value)
+            case["commercial_offer_registry"]["offers"][0][
+                "source_spans"
+            ][0]["end"] -= 1
+            return case
+
+        reviewer = PreferenceReviewer(result["candidate"])
+        with mock.patch.object(
+            BENCHMARK._SUITE, "case_for_job", drifted_registry,
+        ), self.assertRaises(BENCHMARK.BenchmarkBlocked) as caught:
+            self.run_benchmark(
+                payload, result, baseline_artifact, assets(),
+                benchmark_policy, reviewer, blinding_key=self.key,
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "benchmark.suite.commercial_scope_mismatch",
+        )
+        self.assertEqual(reviewer.requests, [])
 
     def test_qualified_native_reference_is_verified_bound_and_text_free(self):
         payload = job()

@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,8 @@ RELEASE = load(
     "blun_test_website_localization_release",
     ROOT / "integrations" / "website_localization_release.py",
 )
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 QUEUE = RELEASE._QUEUE
 WORKER = RELEASE._WORKER
 
@@ -117,8 +120,47 @@ def completed_result(
                 "review_required_dimensions": (
                     commercial_review_required_dimensions or []
                 ),
+                "offer_count": 1,
+                "review_required_offers": [
+                    {"dimension": name, "offer_indexes": [0]}
+                    for name in (commercial_review_required_dimensions or [])
+                ],
+                "review_evidence_contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_evidence_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
                 "evidence_sha256": "c" * 64,
             }
+            if payload["content_type"] == "commercial" else None
+        ),
+        "commercial_review_routing": (
+            {
+                "schema": WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+                "profile": payload["commercial_profile"],
+                "contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_routing_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
+                "offer_count": 1,
+                "source_length": len(payload["source"]["text"]),
+                "target_length": len(candidate),
+                "offers": [{
+                    "offer_index": 0,
+                    "source_spans": [[0, len(payload["source"]["text"])]],
+                    "target_spans": [[0, len(candidate)]],
+                }],
+            }
+            if payload["content_type"] == "commercial"
+            and commercial_review_required_dimensions else None
+        ),
+        "commercial_review_routing_contract_sha256": (
+            payload["commercial_review_routing_contract_sha256"]
+            if payload["content_type"] == "commercial" else None
+        ),
+        "commercial_review_resolution_contract_sha256": (
+            payload["commercial_review_resolution_contract_sha256"]
             if payload["content_type"] == "commercial" else None
         ),
         "human_review_required": payload["content_type"] == "legal",
@@ -238,6 +280,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
 
     def approve(self, plan, job, **overrides):
         values = {
+            "evidence_request_id": EVIDENCE_REQUEST_ID,
+            "evidence_revision": EVIDENCE_REVISION,
             "now": 200,
             "ttl_seconds": 100,
         }
@@ -260,12 +304,26 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             "SELECT approval_json FROM localization_approvals"
         ).fetchone()
         payload = json.loads(row[0])
+        self.assertEqual(payload["evidence_request_id"], EVIDENCE_REQUEST_ID)
+        self.assertEqual(payload["evidence_revision"], EVIDENCE_REVISION)
+        self.assertEqual(
+            payload["release_evidence_contract_sha256"],
+            RELEASE.publication_evidence_contract()["sha256"],
+        )
         self.assertEqual(payload["source_sha256"], plan.jobs[0].as_payload()["source"]["sha256"])
         self.assertEqual(payload["target_sha256"], approved.target_sha256)
         self.assertEqual(payload["glossary_version"], "blun-glossary-3")
         self.assertEqual(payload["policy_version"], "native-web-1")
         self.assertEqual(payload["provider"]["model_id"], "king")
         self.assertEqual(payload["software_version"], "6.43.0-dev")
+        self.assertIsNone(
+            payload["commercial_review_resolution_contract_sha256"],
+        )
+        self.assertIsNone(
+            approved.release_evidence[
+                "commercial_review_resolution_contract_sha256"
+            ],
+        )
         self.assertEqual(payload["quality_profile"], {
             "locale": "sv-SE",
             "version": plan.jobs[0].target.quality_profile_version,
@@ -276,6 +334,12 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertEqual(receipt_binding["target_text"], approved.candidate)
         self.assertEqual(receipt_binding["schema"], RELEASE.RECEIPT_BINDING_SCHEMA)
         self.assertEqual(receipt_binding["review_kind"], "quality")
+        self.assertEqual(
+            receipt_binding["evidence_request_id"], EVIDENCE_REQUEST_ID,
+        )
+        self.assertEqual(
+            receipt_binding["evidence_revision"], EVIDENCE_REVISION,
+        )
         self.assertEqual(receipt_binding["job_id"], plan.jobs[0].job_id)
         self.assertEqual(receipt_binding["result_sha256"], payload["result_sha256"])
         self.assertEqual(receipt_binding["source_sha256"], payload["source_sha256"])
@@ -289,6 +353,19 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         self.assertEqual(receipt_binding["software_version"], "6.43.0-dev")
         self.assertEqual(receipt_binding["quality_profile"], payload["quality_profile"])
         self.assertIsNone(receipt_binding["review_provider"])
+        self.assertIsNone(
+            receipt_binding["commercial_review_resolution_contract_sha256"],
+        )
+        with patch.object(
+            RELEASE,
+            "publication_evidence_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                self.store.lookup(
+                    plan, plan.jobs[0].job_id, self.authority, now=201,
+                )
+        self.assertEqual(caught.exception.code, "approval.binding_mismatch")
 
     def test_translation_memory_reuses_one_job_across_plan_compositions(self):
         single = make_plan(("sv-SE",))
@@ -348,6 +425,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             original.jobs[0].as_payload(),
             original_result,
             original_result_sha256,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
             review_kind="quality",
         ))
         self.store.approve(
@@ -356,6 +435,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             receipt,
             verifier,
             self.authority,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
             now=200,
         )
 
@@ -368,10 +449,80 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 receipt,
                 verifier,
                 self.authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=201,
             )
         self.assertEqual(caught.exception.code, "quality.receipt.rejected")
         self.assertEqual(self.authority.sign_calls, 1)
+
+    def test_quality_receipt_cannot_be_relabelled_for_new_evidence_context(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan)
+        result = self.store.validated_result(plan, plan.jobs[0].job_id)
+        result_sha256 = hashlib.sha256(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        verifier = BoundReceiptVerifier()
+        receipt = verifier.issue(RELEASE._receipt_binding(
+            plan.jobs[0].job_id,
+            plan.jobs[0].as_payload(),
+            result,
+            result_sha256,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
+            review_kind="quality",
+        ))
+
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            self.store.approve(
+                plan,
+                plan.jobs[0].job_id,
+                receipt,
+                verifier,
+                self.authority,
+                evidence_request_id="blun-l10n-evidence-" + "b" * 64,
+                evidence_revision="native-evidence-2",
+                now=200,
+            )
+
+        self.assertEqual(caught.exception.code, "quality.receipt.rejected")
+        self.assertEqual(self.authority.sign_calls, 0)
+
+    def test_invalid_evidence_context_blocks_before_verifier_and_signer(self):
+        plan = make_plan(("sv-SE",))
+        self.complete(plan)
+        for request_id, revision in (
+            ("blun-l10n-evidence-" + "g" * 64, EVIDENCE_REVISION),
+            (EVIDENCE_REQUEST_ID, " stale "),
+        ):
+            with self.subTest(request_id=request_id, revision=revision):
+                verifier = ExactReceiptVerifier()
+                with self.assertRaises(
+                    RELEASE.LocalizationReleaseBlocked,
+                ) as caught:
+                    self.store.approve(
+                        plan,
+                        plan.jobs[0].job_id,
+                        "quality-receipt",
+                        verifier,
+                        self.authority,
+                        evidence_request_id=request_id,
+                        evidence_revision=revision,
+                        now=200,
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "review.evidence_context.invalid",
+                )
+                self.assertEqual(verifier.calls, [])
+        self.assertEqual(self.authority.sign_calls, 0)
 
     def test_quality_receipt_cannot_satisfy_qualified_human_review(self):
         plan = make_plan(
@@ -398,6 +549,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             plan.jobs[0].as_payload(),
             result,
             result_sha256,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
             review_kind="quality",
         ))
 
@@ -408,6 +561,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 quality_receipt,
                 verifier,
                 self.authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
                 human_review_receipt=quality_receipt,
                 human_review_verifier=verifier,
@@ -468,6 +623,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 "wrong-receipt",
                 self.verifier,
                 self.authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
             )
         self.assertEqual(caught.exception.code, "quality.receipt.rejected")
@@ -491,6 +648,8 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
                 "quality-receipt",
                 UnavailableVerifier(),
                 self.authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
             )
         self.assertEqual(caught.exception.code, "quality.verifier.network")
@@ -610,24 +769,41 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             "receipt": "commercial-independent-receipt",
         }
 
+        independent_verifier = ExactReceiptVerifier(
+            "commercial-independent-receipt",
+        )
         approved = self.approve(
             plan,
             plan.jobs[0],
             independent_model_review=reviewer,
-            independent_model_review_verifier=ExactReceiptVerifier(
-                "commercial-independent-receipt",
-            ),
+            independent_model_review_verifier=independent_verifier,
         )
 
         resolution = approved.release_evidence["commercial_review_resolution"]
         self.assertEqual(resolution, {
             "schema": RELEASE.COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
+            "profile": PLANNER.COMMERCIAL_PROFILE,
+            "contract_sha256": (
+                WORKER._COMMERCIAL.public_review_resolution_contract(
+                    PLANNER.COMMERCIAL_PROFILE,
+                )["sha256"]
+            ),
             "status": "resolved",
             "reviewed_dimensions": dimensions,
+            "reviewed_offer_count": 1,
+            "reviewed_offers": [
+                {"dimension": name, "offer_indexes": [0]}
+                for name in dimensions
+            ],
             "method": "independent_model",
             "receipt_sha256": hashlib.sha256(
                 b"commercial-independent-receipt"
             ).hexdigest(),
+            "primary_provider": {
+                "id": "customer-llm",
+                "model_id": "king",
+                "model_version": "2026-08-29",
+            },
             "provider": reviewer["provider"],
         })
         self.assertEqual(
@@ -635,6 +811,237 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
             ["review_required_dimensions"],
             dimensions,
         )
+        expected_evidence_contract_sha256 = (
+            WORKER._COMMERCIAL.public_review_evidence_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"]
+        )
+        self.assertEqual(
+            approved.release_evidence["commercial_review"]
+            ["review_evidence_contract_sha256"],
+            expected_evidence_contract_sha256,
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]["commercial_review"]
+            ["review_evidence_contract_sha256"],
+            expected_evidence_contract_sha256,
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]
+            ["commercial_review_routing"]["offers"][0]["offer_index"],
+            0,
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]
+            ["commercial_review_routing"]["contract_sha256"],
+            WORKER._COMMERCIAL.public_review_routing_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"],
+        )
+        expected_routing_contract_sha256 = (
+            WORKER._COMMERCIAL.public_review_routing_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"]
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]
+            ["commercial_review_routing_contract_sha256"],
+            expected_routing_contract_sha256,
+        )
+        self.assertEqual(
+            approved.release_evidence[
+                "commercial_review_routing_contract_sha256"
+            ],
+            expected_routing_contract_sha256,
+        )
+        self.assertNotIn(
+            "commercial_review_routing", approved.release_evidence,
+        )
+        expected_contract_sha256 = (
+            WORKER._COMMERCIAL.public_review_resolution_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"]
+        )
+        self.assertEqual(
+            approved.release_evidence[
+                "commercial_review_resolution_contract_sha256"
+            ],
+            expected_contract_sha256,
+        )
+        self.assertEqual(
+            independent_verifier.calls[0]["binding"]
+            ["commercial_review_resolution_contract_sha256"],
+            expected_contract_sha256,
+        )
+
+        approval_payload = json.loads(self.release_connection.execute(
+            "SELECT approval_json FROM localization_approvals",
+        ).fetchone()[0])
+        self.assertEqual(
+            approval_payload[
+                "commercial_review_resolution_contract_sha256"
+            ],
+            expected_contract_sha256,
+        )
+        self.assertEqual(
+            approval_payload[
+                "commercial_review_routing_contract_sha256"
+            ],
+            expected_routing_contract_sha256,
+        )
+        with patch.object(
+            WORKER._COMMERCIAL,
+            "public_review_resolution_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                self.store.lookup(
+                    plan, plan.jobs[0].job_id, self.authority, now=201,
+                )
+        self.assertEqual(caught.exception.code, "approval.binding_mismatch")
+
+        with patch.dict(
+            RELEASE._WORKER._COMMERCIAL.validate_summary.__globals__,
+            {
+                "public_review_evidence_contract": (
+                    lambda _profile: {"sha256": "0" * 64}
+                ),
+            },
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                self.store.lookup(
+                    plan, plan.jobs[0].job_id, self.authority, now=201,
+                )
+        self.assertEqual(caught.exception.code, "result.commercial_review.invalid")
+
+    def test_release_evidence_requires_current_locale_quality_profile(self):
+        plan = make_plan(("fi-FI",))
+        self.complete(plan, {"fi-FI": "Rakenna yrityksesi BLUNin avulla."})
+        evidence = self.approve(plan, plan.jobs[0]).release_evidence
+
+        for field, value in (
+            ("locale", "sv-SE"),
+            ("version", "eu-fi-FI-stale"),
+            ("sha256", "0" * 64),
+        ):
+            changed = json.loads(json.dumps(evidence))
+            changed["quality_profile"][field] = value
+            with self.subTest(field=field), self.assertRaises(
+                RELEASE.LocalizationReleaseBlocked,
+            ) as caught:
+                RELEASE.validate_publication_evidence(changed)
+            self.assertEqual(
+                caught.exception.code, "publication.evidence.invalid",
+            )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("resolver unavailable"),
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                RELEASE.validate_publication_evidence(evidence)
+        self.assertEqual(caught.exception.code, "publication.evidence.invalid")
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=AssertionError("commercial resolver called"),
+        ):
+            self.assertEqual(
+                RELEASE.validate_publication_evidence(evidence), evidence,
+            )
+
+    def test_current_publication_policy_distinguishes_drift_from_outage(self):
+        plan = make_plan(("fi-FI",))
+        self.complete(plan, {"fi-FI": "Rakenna yrityksesi BLUNin avulla."})
+        evidence = self.approve(plan, plan.jobs[0]).release_evidence
+
+        stale = json.loads(json.dumps(evidence))
+        stale["quality_profile"]["version"] += ".changed"
+        stale["quality_profile"]["sha256"] = "0" * 64
+        with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+            RELEASE.validate_current_publication_policy(stale)
+        self.assertEqual(
+            (caught.exception.code, caught.exception.retryable),
+            ("publication.evidence.policy_stale", False),
+        )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                RELEASE.validate_current_publication_policy(evidence)
+        self.assertEqual(
+            (caught.exception.code, caught.exception.retryable),
+            ("publication.evidence.policy_unavailable", True),
+        )
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_commercial_release_evidence_requires_current_locale_policy(self):
+        plan = make_plan(
+            ("fi-FI",), content_type="commercial",
+            source_text="From €40 per month, billed yearly. Tax excluded.",
+        )
+        self.complete(plan, {
+            "fi-FI": (
+                "Alkaen 40 € kuukaudessa, laskutus vuosittain. "
+                "Ei sisällä veroa."
+            ),
+        })
+        approved = self.approve(plan, plan.jobs[0])
+        evidence = approved.release_evidence
+
+        for field, value in (
+            ("version", "commercial-eu-fi-FI-stale"),
+            ("sha256", "0" * 64),
+            ("profile", "translate-native.commercial.stale"),
+        ):
+            changed = json.loads(json.dumps(evidence))
+            changed["commercial_quality_profile"][field] = value
+            with self.subTest(field=field), self.assertRaises(
+                RELEASE.LocalizationReleaseBlocked,
+            ) as caught:
+                RELEASE.validate_publication_evidence(changed)
+            self.assertEqual(caught.exception.code, "publication.evidence.invalid")
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=RuntimeError("resolver unavailable"),
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                RELEASE.validate_publication_evidence(evidence)
+        self.assertEqual(caught.exception.code, "publication.evidence.invalid")
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            with self.assertRaises(RELEASE.LocalizationReleaseBlocked) as caught:
+                RELEASE.validate_current_publication_policy(evidence)
+        self.assertEqual(
+            (caught.exception.code, caught.exception.retryable),
+            ("publication.evidence.policy_unavailable", True),
+        )
+
+        ordinary = make_plan(("sv-SE",))
+        self.complete(ordinary, {"sv-SE": "Bygg ditt företag med BLUN."})
+        ordinary_evidence = self.approve(
+            ordinary, ordinary.jobs[0], now=210,
+        ).release_evidence
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "commercial_quality_profile_for",
+            side_effect=AssertionError("commercial resolver called"),
+        ):
+            self.assertEqual(
+                RELEASE.validate_publication_evidence(ordinary_evidence),
+                ordinary_evidence,
+            )
 
     def test_commercial_human_resolution_is_bound_without_identity_leak(self):
         plan = make_plan(
@@ -664,6 +1071,17 @@ class WebsiteLocalizationReleaseTests(unittest.TestCase):
         resolution = approved.release_evidence["commercial_review_resolution"]
         self.assertEqual(resolution["method"], "qualified_human")
         self.assertEqual(resolution["reviewed_dimensions"], ["cancellation"])
+        self.assertEqual(resolution["reviewed_offers"], [{
+            "dimension": "cancellation", "offer_indexes": [0],
+        }])
+        self.assertEqual(resolution["profile"], PLANNER.COMMERCIAL_PROFILE)
+        self.assertEqual(
+            resolution["contract_sha256"],
+            WORKER._COMMERCIAL.public_review_resolution_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"],
+        )
+        self.assertEqual(resolution["primary_provider"]["id"], "customer-llm")
         self.assertIsNone(resolution["provider"])
         self.assertNotIn("qualified-commercial-review", json.dumps(resolution))
 

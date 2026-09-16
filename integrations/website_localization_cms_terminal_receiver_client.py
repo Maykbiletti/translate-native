@@ -4,23 +4,28 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import re
 import socket
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
 AUTH_SCHEMA = "blun.cms-source-terminal-notification-http-auth.v1"
-API_SCHEMA = "blun.cms-terminal-receiver-api.v1"
-CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v1"
+API_SCHEMA = "blun.cms-terminal-receiver-api.v3"
+CAPABILITIES_SCHEMA = "blun.cms-terminal-receiver-capabilities.v3"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-terminal-receiver-capabilities-response.v1"
+    "blun.cms-terminal-receiver-capabilities-response.v3"
 )
+OPENAPI_DOCUMENT_SCHEMA = "blun.cms-terminal-receiver-openapi.v2"
+OPENAPI_RESPONSE_SCHEMA = "blun.cms-terminal-receiver-openapi-response.v1"
 HEALTH_SCHEMA = "blun.cms-terminal-receiver-health.v1"
 READINESS_SCHEMA = "blun.cms-terminal-receiver-readiness.v1"
 STATUS_REQUEST_SCHEMA = "blun.cms-terminal-receiver-status-request.v1"
@@ -31,10 +36,13 @@ NOTIFICATION_SCHEMA = "blun.cms-source-terminal-notification.v1"
 ACK_SCHEMA = "blun.cms-source-terminal-notification-ack.v1"
 BASE_PATH = "/v1/localization/terminal-notifications"
 CAPABILITIES_PATH = BASE_PATH + "/capabilities"
+OPENAPI_PATH = BASE_PATH + "/openapi"
 HEALTH_PATH = BASE_PATH + "/health"
 READINESS_PATH = BASE_PATH + "/readiness"
 STATUS_PATH = BASE_PATH + "/status"
-MAX_RESPONSE_BYTES = 16_384
+CAPABILITIES_PRECONDITION_HEADER = "X-Localization-Capabilities-SHA256"
+MAX_REQUEST_BYTES = 16_384
+MAX_RESPONSE_BYTES = 1_000_000
 MAX_ENDPOINT_LENGTH = 2_048
 MAX_HEADER_VALUE_LENGTH = 4_096
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -57,6 +65,7 @@ RESERVED_HEADERS = {
     "x-localization-terminal-notification-id",
     "x-localization-terminal-notification-sha256",
     "x-localization-terminal-status-sha256",
+    "x-localization-capabilities-sha256",
 }
 NOTIFICATION_FIELDS = {
     "schema", "notification_id", "event_id", "site_id", "plan_id",
@@ -67,6 +76,26 @@ ACK_FIELDS = {
     "schema", "notification_id", "event_id", "site_id", "status",
     "notification_sha256",
 }
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            "cannot load terminal receiver client dependency: " + path.name
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_OPENAPI = _load_module(
+    "blun_website_localization_terminal_receiver_client_openapi",
+    Path(__file__).resolve().with_name(
+        "website_localization_cms_terminal_notification_receiver_openapi.py"
+    ),
+)
 
 
 class TerminalReceiverClientBlocked(RuntimeError):
@@ -147,7 +176,7 @@ def _canonical(value: Any) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError, RecursionError):
         _fail("request_invalid")
-    if not raw or len(raw) > MAX_RESPONSE_BYTES:
+    if not raw or len(raw) > MAX_REQUEST_BYTES:
         _fail("request_invalid")
     return raw
 
@@ -373,6 +402,10 @@ def _operation(name, method, path, scope, request_schema, request_fields,
         "request_fields": request_fields,
         "response_schema": response_schema,
         "response_fields": response_fields,
+        "capabilities_precondition_header": (
+            None if name == "capabilities"
+            else CAPABILITIES_PRECONDITION_HEADER
+        ),
         "success_status": 200,
     }
 
@@ -381,7 +414,8 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
     if not isinstance(value, dict) or set(value) != {
         "schema", "api_schema", "authentication_request_schema",
         "principal_schema", "error_schema", "limits", "processing_statuses",
-        "terminal_statuses", "operations", "sha256",
+        "terminal_statuses", "operations", "openapi_document_schema", "sha256",
+        "semantics",
     }:
         return False
     digest = value.get("sha256")
@@ -395,8 +429,12 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         or value.get("authentication_request_schema") != AUTH_SCHEMA
         or value.get("principal_schema") != PRINCIPAL_SCHEMA
         or value.get("error_schema") != ERROR_SCHEMA
+        or value.get("openapi_document_schema") != OPENAPI_DOCUMENT_SCHEMA
         or value.get("processing_statuses") != list(PROCESSING_STATUSES)
         or value.get("terminal_statuses") != sorted(TERMINAL_STATUSES)
+        or value.get("semantics") != {
+            "non_discovery_operations_require_exact_capability_precondition": True,
+        }
     ):
         return False
     limits = value.get("limits")
@@ -404,12 +442,14 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         not isinstance(limits, dict)
         or set(limits) != {
             "max_body_bytes", "max_headers", "max_header_value_bytes",
-            "processing_max_attempts_min", "processing_max_attempts_max",
+            "max_response_bytes", "processing_max_attempts_min",
+            "processing_max_attempts_max",
         }
         or limits != {
             "max_body_bytes": 16_384,
             "max_headers": 64,
             "max_header_value_bytes": 4_096,
+            "max_response_bytes": 1_000_000,
             "processing_max_attempts_min": 1,
             "processing_max_attempts_max": 20,
         }
@@ -417,7 +457,8 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         return False
     operations = value.get("operations")
     if not isinstance(operations, dict) or set(operations) != {
-        "capabilities", "health", "notification", "readiness", "status",
+        "capabilities", "health", "notification", "openapi", "readiness",
+        "status",
     }:
         return False
     expected = {
@@ -435,6 +476,11 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
                 "processing_due", "expired_leases", "failed", "error_code",
                 "capabilities_sha256",
             ],
+        ),
+        "openapi": _operation(
+            "openapi", "GET", OPENAPI_PATH, "terminal-notification-openapi:read",
+            None, [], OPENAPI_RESPONSE_SCHEMA,
+            ["schema", "openapi", "openapi_sha256", "capabilities_sha256"],
         ),
         "readiness": _operation(
             "readiness", "GET", READINESS_PATH,
@@ -466,7 +512,10 @@ def _valid_capabilities(value: Any, expected_sha256: str) -> bool:
         not isinstance(path, str)
         or not path.startswith("/")
         or path.startswith("//")
-        or path in {CAPABILITIES_PATH, HEALTH_PATH, READINESS_PATH, STATUS_PATH}
+        or path in {
+            CAPABILITIES_PATH, HEALTH_PATH, OPENAPI_PATH, READINESS_PATH,
+            STATUS_PATH,
+        }
     ):
         return False
     expected["notification"] = _operation(
@@ -536,10 +585,18 @@ class HTTPTerminalReceiverClient:
             "body_sha256": body_sha256,
             **context,
         }
+        if path != CAPABILITIES_PATH:
+            authentication["capabilities_sha256"] = (
+                self.expected_capabilities_sha256
+            )
         headers = _authentication_headers(
             self.authentication_headers, authentication,
         )
         headers["Accept"] = "application/json"
+        if path != CAPABILITIES_PATH:
+            headers[CAPABILITIES_PRECONDITION_HEADER] = (
+                self.expected_capabilities_sha256
+            )
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
             headers["X-Localization-Terminal-Status-SHA256"] = body_sha256
@@ -572,6 +629,29 @@ class HTTPTerminalReceiverClient:
     def _verify_contract(self) -> None:
         self.capabilities()
 
+    def openapi(self) -> Mapping[str, Any]:
+        """Return only the exact API document for the freshly pinned contract."""
+
+        capabilities = self.capabilities()["capabilities"]
+        _result, response = self._request(
+            "GET", OPENAPI_PATH, None, {200}, {},
+        )
+        expected = _OPENAPI.build_document(capabilities)
+        if (
+            set(response) != {
+                "schema", "openapi", "openapi_sha256",
+                "capabilities_sha256",
+            }
+            or response.get("schema") != OPENAPI_RESPONSE_SCHEMA
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("openapi") != expected
+            or response.get("openapi_sha256")
+            != _OPENAPI.document_sha256(expected)
+        ):
+            _fail("openapi_binding")
+        return response
+
     def notify(self, notification: Mapping[str, Any]) -> Mapping[str, Any]:
         """Send one immutable notification through its freshly pinned route."""
 
@@ -590,6 +670,7 @@ class HTTPTerminalReceiverClient:
             "path": path,
             "body_sha256": body_sha256,
             **context,
+            "capabilities_sha256": self.expected_capabilities_sha256,
         }
         headers = _authentication_headers(
             self.authentication_headers, authentication,
@@ -602,6 +683,9 @@ class HTTPTerminalReceiverClient:
                 payload["notification_id"]
             ),
             "X-Localization-Terminal-Notification-Sha256": body_sha256,
+            CAPABILITIES_PRECONDITION_HEADER: (
+                self.expected_capabilities_sha256
+            ),
         })
         try:
             result = self.transport.request(

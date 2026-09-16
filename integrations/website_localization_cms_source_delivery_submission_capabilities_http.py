@@ -162,19 +162,30 @@ def _binding(value: Any) -> dict[str, Any]:
     fields = {
         "schema", "status", "database_role",
         "delivery_capabilities_sha256", "runtime_capabilities_sha256",
-        "commercial_rendering_registry_sha256", "binding_sha256",
+        "commercial_rendering_registry_sha256",
+        "terminal_receiver_capabilities_sha256", "binding_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ValueError
     if (
         value["schema"]
-        != "blun.cms-source-delivery-runtime-capability-binding.v1"
+        != "blun.cms-source-delivery-runtime-capability-binding.v2"
         or value["status"] != "verified"
         or value["database_role"] != "source_delivery"
     ):
         raise ValueError
     for name in fields - {"schema", "status", "database_role"}:
         _sha256(value[name])
+    expected_binding_sha256 = hashlib.sha256("\x00".join((
+        value["schema"],
+        value["database_role"],
+        value["delivery_capabilities_sha256"],
+        value["runtime_capabilities_sha256"],
+        value["commercial_rendering_registry_sha256"],
+        value["terminal_receiver_capabilities_sha256"],
+    )).encode("utf-8")).hexdigest()
+    if value["binding_sha256"] != expected_binding_sha256:
+        raise ValueError
     return dict(value)
 
 

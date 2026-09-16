@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,8 @@ RELEASE = CMS._RELEASE
 QUEUE = CMS._QUEUE
 WORKER = RELEASE._WORKER
 COORDINATOR = HEALTH._COORDINATOR
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 
 
 class CMSAuthority:
@@ -223,6 +226,9 @@ def completed_result(job, candidate):
             "sha256": payload["target"]["quality_profile_sha256"],
         },
         "commercial_review": None,
+        "commercial_review_routing": None,
+        "commercial_review_routing_contract_sha256": None,
+        "commercial_review_resolution_contract_sha256": None,
         "human_review_required": False,
         "independent_review_required": False,
         "release_required": True,
@@ -324,6 +330,8 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
                 "quality-receipt",
                 self.receipt_verifier,
                 self.approval_authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
                 ttl_seconds=ttl,
             )
@@ -377,6 +385,53 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             dict(self.component(report, "evidence").counts),
             {status: 0 for status in HEALTH.EVIDENCE_STATUSES},
         )
+
+    def test_commercial_contract_stale_queue_job_blocks_read_only_health(self):
+        plan = PLANNER.plan_website_localization(
+            source_id="pricing", source_revision="1",
+            source_text="Save up to €480 a year. All prices exclude VAT.",
+            source_locale="en-IE", content_type="commercial",
+            glossary_version="g1", policy_version="p1",
+            provider_id="customer-llm", model_id="king",
+            model_version="2026-09-14", software_version="6.140.0",
+            target_locales=["sv-SE"],
+        )
+        self.queue.enqueue_plan(plan, now=100)
+        self.assertEqual(self.report().status, "healthy")
+        planner = WORKER._PLANNER
+        commercial = planner._COMMERCIAL
+        contract = commercial.public_review_evidence_contract(
+            planner.COMMERCIAL_PROFILE,
+        )
+        altered = json.loads(json.dumps(contract))
+        altered["trust_boundary"]["publication_authority"] = True
+        unsigned = dict(altered)
+        unsigned.pop("sha256")
+        altered["sha256"] = planner._digest(unsigned)
+        public_profile = commercial.public_profile(
+            planner.COMMERCIAL_PROFILE,
+        )
+        public_profile = json.loads(json.dumps(public_profile))
+        public_profile["review_evidence_contract"] = altered
+        changes_before = self.queue_connection.total_changes
+        with patch.object(
+            commercial,
+            "public_review_evidence_contract",
+            return_value=altered,
+        ), patch.object(
+            commercial,
+            "public_profile",
+            return_value=public_profile,
+        ):
+            report = self.report()
+        self.assertEqual(report.status, "blocked")
+        self.assertEqual(
+            self.component(report, "queue").reasons,
+            ("queue.job_binding_invalid",),
+        )
+        self.assertEqual(self.queue_connection.total_changes, changes_before)
+        self.assertEqual(self.probe.calls, [])
+        self.assertEqual(self.report().status, "healthy")
 
     def test_supervisor_liveness_is_part_of_read_only_health(self):
         probe = SupervisorProbe(status="leased")
@@ -694,6 +749,8 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             "quality-receipt",
             self.receipt_verifier,
             self.approval_authority,
+            evidence_request_id=request.request_id,
+            evidence_revision=request.evidence_revision,
             now=201,
             ttl_seconds=1000,
         )
@@ -808,6 +865,135 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             ("release.approval_expired",),
         )
 
+    def test_locale_policy_outage_blocks_health_without_writes_or_detail(self):
+        plan = self.ingest()
+        self.complete(plan)
+        changes_before = (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        release = self.component(report, "release")
+        self.assertEqual(release.status, "blocked")
+        self.assertEqual(release.reasons, ("release.policy_unavailable",))
+        version = report.website_versions[0]
+        self.assertEqual(version.status, "awaiting_approval")
+        self.assertEqual(version.approved_locales, 0)
+        self.assertEqual(
+            {code for _, code in version.blocked_locales},
+            {"publication.evidence.policy_unavailable"},
+        )
+        self.assertNotIn(
+            "private resolver diagnostic",
+            json.dumps(report.as_payload(), ensure_ascii=False),
+        )
+        self.assertEqual(changes_before, (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        ))
+
+    def test_verified_policy_drift_precedes_simultaneous_resolver_outage(self):
+        plan = self.ingest()
+        self.complete(plan)
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def stale_or_unavailable(locale):
+            if locale == "de-AT":
+                current = dict(original(locale))
+                current["version"] += ".changed"
+                current["sha256"] = "0" * 64
+                return current
+            raise RuntimeError("private resolver diagnostic")
+
+        with patch.object(
+            planner, "quality_profile_for", side_effect=stale_or_unavailable,
+        ):
+            report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        release = self.component(report, "release")
+        self.assertEqual(release.reasons, ("release.policy_stale",))
+        self.assertNotIn("release.policy_unavailable", release.reasons)
+        self.assertEqual(
+            {code for _, code in report.website_versions[0].blocked_locales},
+            {
+                "publication.evidence.policy_stale",
+                "publication.evidence.policy_unavailable",
+            },
+        )
+        self.assertNotIn(
+            "private resolver diagnostic",
+            json.dumps(report.as_payload(), ensure_ascii=False),
+        )
+
+    def test_release_integrity_precedes_simultaneous_policy_outage(self):
+        plan = self.ingest()
+        self.complete(plan)
+        row = self.release_connection.execute("""
+            SELECT job_id, approval_json FROM localization_approvals
+            WHERE target_locale = 'de-AT'
+        """).fetchone()
+        payload = json.loads(row["approval_json"])
+        payload["quality_receipt_sha256"] = "0" * 64
+        approval_json = RELEASE._canonical_json(payload)
+        signature = self.approval_authority.sign(
+            approval_json.encode("utf-8")
+        )
+        self.release_connection.execute("""
+            UPDATE localization_approvals
+            SET approval_json = ?, approval_sha256 = ?, signature = ?
+            WHERE job_id = ?
+        """, (
+            approval_json,
+            RELEASE._hash_text(approval_json),
+            signature.signature,
+            row["job_id"],
+        ))
+        self.release_connection.commit()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def available_or_unavailable(locale):
+            if locale == "de-AT":
+                return original(locale)
+            raise RuntimeError("private resolver diagnostic")
+
+        with patch.object(
+            planner,
+            "quality_profile_for",
+            side_effect=available_or_unavailable,
+        ):
+            report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        release = self.component(report, "release")
+        self.assertEqual(release.reasons, (
+            "release.approval_invalid", "release.integrity_failed",
+        ))
+        self.assertNotIn("release.policy_unavailable", release.reasons)
+        self.assertEqual(
+            {code for _, code in report.website_versions[0].blocked_locales},
+            {
+                "approval.binding_mismatch",
+                "publication.evidence.policy_unavailable",
+            },
+        )
+        self.assertNotIn(
+            "private resolver diagnostic",
+            json.dumps(report.as_payload(), ensure_ascii=False),
+        )
+
     def test_queue_tamper_blocks_and_never_discloses_payload(self):
         self.ingest()
         self.queue_connection.execute(
@@ -876,6 +1062,30 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         published = self.report(now=261)
         self.assertEqual(published.website_versions[0].status, "published")
         self.assertEqual(dict(self.component(published, "cms").counts)["succeeded"], 1)
+
+    def test_policy_resolver_outage_has_a_stable_cms_health_reason(self):
+        plan = self.ingest()
+        self.complete(plan)
+        self.bridge.prepare_delivery(
+            event()["event_id"],
+            self.event_authority,
+            self.approval_authority,
+            self.publication_authority,
+            now=250,
+        )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            report = self.report(now=251)
+
+        cms = self.component(report, "cms")
+        self.assertIn("cms.delivery.policy_unavailable", cms.reasons)
+        self.assertNotIn("cms.delivery.invalid", cms.reasons)
+        encoded = json.dumps(report.as_payload(), ensure_ascii=False)
+        self.assertNotIn("private resolver diagnostic", encoded)
 
     def test_tombstone_state_is_verified_visible_and_needs_no_model_probe(self):
         plan = self.ingest()

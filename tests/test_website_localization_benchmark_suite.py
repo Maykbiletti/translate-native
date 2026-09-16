@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -75,6 +76,21 @@ class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
             commercial_evaluation["cases_per_dimension"], len(commercial),
         )
         self.assertEqual(
+            commercial_evaluation["offer_status_scope"],
+            "all-registered-offers-per-dimension",
+        )
+        self.assertEqual(
+            commercial_evaluation["offer_registry_scope"],
+            "complete-source-partition-with-explicit-shared-spans",
+        )
+        self.assertEqual(
+            commercial_evaluation["offer_registry_schema"],
+            SUITE.COMMERCIAL_OFFER_REGISTRY_SCHEMA,
+        )
+        self.assertEqual(
+            commercial_evaluation["registered_offer_count"], 13,
+        )
+        self.assertEqual(
             commercial_evaluation["source_blind_native_exposure"], "none",
         )
         self.assertEqual(
@@ -86,11 +102,64 @@ class WebsiteLocalizationBenchmarkSuiteTests(unittest.TestCase):
                 self.assertEqual(
                     case["commercial_dimensions"], list(COMMERCIAL.DIMENSIONS),
                 )
+                self.assertIs(type(case["commercial_offer_count"]), int)
+                self.assertGreaterEqual(case["commercial_offer_count"], 1)
+                registry = case["commercial_offer_registry"]
+                self.assertEqual(
+                    SUITE.validate_commercial_offer_registry(
+                        registry, source_text=case["source_text"],
+                    ),
+                    registry,
+                )
+                self.assertEqual(
+                    [offer["offer_index"] for offer in registry["offers"]],
+                    list(range(case["commercial_offer_count"])),
+                )
             else:
                 self.assertNotIn("commercial_dimensions", case)
+                self.assertNotIn("commercial_offer_count", case)
+                self.assertNotIn("commercial_offer_registry", case)
         serialized = json.dumps(manifest, ensure_ascii=False).lower()
         for forbidden in ("target_text", "candidate_text", "baseline_text", "reference_translation"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_commercial_offer_registry_rejects_partition_and_binding_drift(self):
+        case = next(
+            item for item in SUITE.manifest()["cases"]
+            if item["key"] == "offer-commercial-long"
+        )
+        registry = case["commercial_offer_registry"]
+        mutations = {
+            "gap": lambda value: value["offers"][0]["source_spans"][0].update(
+                end=426,
+            ),
+            "overlap": lambda value: value["offers"][1]["source_spans"][0].update(
+                start=426,
+            ),
+            "reordered-index": lambda value: value["offers"][1].update(
+                offer_index=0,
+            ),
+            "byte-length": lambda value: value.update(source_length=635),
+            "oversized-length": lambda value: value.update(
+                source_length=SUITE.MAX_SOURCE_CODE_POINTS + 1,
+            ),
+            "stale-hash": lambda value: value.update(sha256="0" * 64),
+        }
+        for label, mutation in mutations.items():
+            changed = copy.deepcopy(registry)
+            mutation(changed)
+            with self.subTest(label=label), self.assertRaises(RuntimeError):
+                SUITE.validate_commercial_offer_registry(
+                    changed, source_text=case["source_text"],
+                )
+
+        unicode_registry = SUITE._commercial_offer_registry(
+            "Aċ B", (((0, 2),), ((2, 4),)), (),
+        )
+        self.assertEqual(unicode_registry["source_length"], 4)
+        self.assertNotEqual(
+            unicode_registry["source_length"], len("Aċ B".encode("utf-8")),
+        )
 
     def test_sources_are_nfc_hash_bound_and_adversarial(self):
         cases = SUITE.manifest()["cases"]

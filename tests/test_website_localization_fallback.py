@@ -33,6 +33,8 @@ RELEASE = load(
     "blun_test_fallback_release",
     ROOT / "integrations" / "website_localization_release.py",
 )
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 
 
 def make_plan(**overrides):
@@ -91,6 +93,9 @@ def completed_result(job, candidate="Bygg ditt företag med BLUN."):
             "sha256": payload["target"]["quality_profile_sha256"],
         },
         "commercial_review": None,
+        "commercial_review_routing": None,
+        "commercial_review_routing_contract_sha256": None,
+        "commercial_review_resolution_contract_sha256": None,
         "human_review_required": False,
         "independent_review_required": False,
         "release_required": True,
@@ -163,6 +168,8 @@ class WebsiteLocalizationFallbackTests(unittest.TestCase):
             "quality-receipt",
             ReceiptVerifier(),
             self.authority,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
             now=100,
             ttl_seconds=ttl_seconds,
         )

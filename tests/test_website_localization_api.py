@@ -437,6 +437,41 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         commercial = capabilities["commercial_profile"]
         self.assertEqual(commercial["profile"], CMS._PLANNER.COMMERCIAL_PROFILE)
         self.assertEqual(
+            commercial["review_evidence_schema"],
+            CMS._PLANNER.COMMERCIAL_PROFILE,
+        )
+        review_evidence_contract = commercial["review_evidence_contract"]
+        self.assertEqual(
+            review_evidence_contract["schema"],
+            CMS._COMMERCIAL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            review_evidence_contract["required_fields"],
+            ["schema", "coverage", "offers", "checks"],
+        )
+        self.assertEqual(
+            review_evidence_contract["checks"]["required_dimensions"],
+            list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
+        )
+        self.assertEqual(
+            review_evidence_contract["offer_registry"]["regions"]["overlap"],
+            "forbidden-within-and-across-offers",
+        )
+        self.assertEqual(
+            review_evidence_contract["checks"]["offer_assignment"]
+            ["equivalent"],
+            "exactly-one-matched-item-per-registered-offer",
+        )
+        self.assertFalse(
+            review_evidence_contract["trust_boundary"]["semantic_truth"],
+        )
+        unsigned_review_evidence = dict(review_evidence_contract)
+        review_evidence_digest = unsigned_review_evidence.pop("sha256")
+        self.assertEqual(
+            review_evidence_digest,
+            CMS._hash(CMS._canonical_json(unsigned_review_evidence)),
+        )
+        self.assertEqual(
             commercial["review_summary_schema"],
             CMS._COMMERCIAL.REVIEW_SUMMARY_SCHEMA,
         )
@@ -457,8 +492,16 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             review_summary_contract["required_fields"],
             [
                 "schema", "profile", "status",
-                "review_required_dimensions", "evidence_sha256",
+                "review_required_dimensions",
+                "offer_count",
+                "review_required_offers",
+                "review_evidence_contract_sha256", "evidence_sha256",
             ],
+        )
+        self.assertEqual(
+            review_summary_contract["review_evidence_contract_sha256"]
+            ["equals"],
+            review_evidence_contract["sha256"],
         )
         self.assertEqual(
             review_summary_contract["review_required_dimensions"]["allowed"],
@@ -470,6 +513,13 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         )
         self.assertTrue(
             review_summary_contract["review_required_dimensions"]["unique"],
+        )
+        self.assertFalse(
+            review_summary_contract["review_required_offers"]
+            ["configured_offer_identifiers_published"],
+        )
+        self.assertEqual(
+            review_summary_contract["offer_count"]["maximum"], 1000,
         )
         self.assertEqual(
             review_summary_contract["statuses"]["verified"]
@@ -489,6 +539,99 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(
             review_summary_digest,
             CMS._hash(CMS._canonical_json(unsigned_review_summary)),
+        )
+        self.assertEqual(
+            commercial["review_routing_schema"],
+            CMS._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+        )
+        review_routing_contract = commercial["review_routing_contract"]
+        self.assertEqual(
+            review_routing_contract["schema"],
+            CMS._COMMERCIAL.REVIEW_ROUTING_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            review_routing_contract["result_schema"],
+            CMS._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+        )
+        self.assertEqual(
+            review_routing_contract["offers"]["coverage"],
+            "exactly-one-per-registered-offer",
+        )
+        self.assertEqual(
+            review_routing_contract["offers"]["regions"]["span_format"],
+            "zero-based-unicode-code-points-exclusive-end",
+        )
+        self.assertFalse(
+            review_routing_contract["trust_boundary"]
+            ["public_release_evidence"],
+        )
+        self.assertTrue(all(
+            value is False
+            for value in review_routing_contract["content_policy"].values()
+        ))
+        unsigned_review_routing = dict(review_routing_contract)
+        review_routing_digest = unsigned_review_routing.pop("sha256")
+        self.assertEqual(
+            review_routing_digest,
+            CMS._hash(CMS._canonical_json(unsigned_review_routing)),
+        )
+        self.assertEqual(
+            commercial["review_resolution_schema"],
+            CMS._COMMERCIAL.REVIEW_RESOLUTION_SCHEMA,
+        )
+        review_resolution_contract = commercial[
+            "review_resolution_contract"
+        ]
+        self.assertEqual(
+            review_resolution_contract["schema"],
+            CMS._COMMERCIAL.REVIEW_RESOLUTION_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            review_resolution_contract["result_schema"],
+            CMS._COMMERCIAL.REVIEW_RESOLUTION_SCHEMA,
+        )
+        self.assertEqual(
+            review_resolution_contract["reviewed_dimensions"]["order"],
+            list(CMS._EXPECTED_COMMERCIAL_DIMENSIONS),
+        )
+        self.assertTrue(
+            review_resolution_contract["reviewed_dimensions"]
+            ["must_equal_review_summary"],
+        )
+        self.assertTrue(
+            review_resolution_contract["reviewed_offers"]
+            ["must_equal_review_summary"],
+        )
+        self.assertTrue(
+            review_resolution_contract["reviewed_offer_count"]
+            ["must_equal_review_summary"],
+        )
+        self.assertEqual(
+            review_resolution_contract["methods"]["qualified_human"]
+            ["provider"],
+            "null",
+        )
+        self.assertTrue(
+            review_resolution_contract["methods"]["independent_model"]
+            ["provider_id_must_differ_from_primary_provider"],
+        )
+        self.assertEqual(
+            review_resolution_contract["provider_identity"]["fields"],
+            ["id", "model_id", "model_version"],
+        )
+        self.assertFalse(
+            review_resolution_contract["provider_identity"]
+            ["credentials_published"],
+        )
+        self.assertTrue(all(
+            value is False
+            for value in review_resolution_contract["content_policy"].values()
+        ))
+        unsigned_review_resolution = dict(review_resolution_contract)
+        review_resolution_digest = unsigned_review_resolution.pop("sha256")
+        self.assertEqual(
+            review_resolution_digest,
+            CMS._hash(CMS._canonical_json(unsigned_review_resolution)),
         )
         self.assertEqual(
             [item["name"] for item in commercial["dimensions"]],
@@ -647,7 +790,8 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(set(publication_http), {
             "schema", "method", "request_content_type", "response_content_types",
             "delivery_semantics", "binding_headers", "health_binding_headers",
-            "release_evidence_schema", "operations", "sha256",
+            "release_evidence_schema", "release_evidence_contract",
+            "operations", "sha256",
         })
         unsigned_publication_http = dict(publication_http)
         publication_http_digest = unsigned_publication_http.pop("sha256")
@@ -677,6 +821,67 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
         self.assertEqual(
             publication_http["release_evidence_schema"],
             CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+        )
+        release_contract = publication_http["release_evidence_contract"]
+        self.assertEqual(
+            release_contract["schema"],
+            CMS._RELEASE.PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA,
+        )
+        self.assertEqual(
+            release_contract["release_evidence_schema"],
+            CMS._RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
+        )
+        self.assertEqual(release_contract["required_fields"], [
+            "schema", "release_evidence_contract_sha256", "job_id",
+            "target_locale", "target_sha256",
+            "approval_id", "content_type", "result_sha256",
+            "approval_sha256", "quality_receipt_sha256",
+            "evidence_request_id", "evidence_revision",
+            "quality_profile",
+            "commercial_profile", "commercial_quality_profile",
+            "commercial_review", "commercial_review_routing_contract_sha256",
+            "commercial_review_resolution_contract_sha256",
+            "commercial_review_resolution",
+        ])
+        self.assertEqual(
+            release_contract["bindings"]["sha256_fields"],
+            [
+                "release_evidence_contract_sha256", "target_sha256",
+                "result_sha256", "approval_sha256",
+                "quality_receipt_sha256",
+                "commercial_review_routing_contract_sha256",
+                "commercial_review_resolution_contract_sha256",
+            ],
+        )
+        self.assertEqual(
+            release_contract["bindings"]["lineage_fields"],
+            ["evidence_request_id", "evidence_revision"],
+        )
+        self.assertEqual(
+            release_contract["bindings"]["quality_profile"],
+            "exact-current-target-locale-quality-profile",
+        )
+        self.assertEqual(
+            release_contract["commercial_scope"]["non_commercial_fields"],
+            "all-null",
+        )
+        self.assertEqual(
+            release_contract["commercial_scope"]["quality_profile"],
+            "exact-current-target-locale-commercial-quality-profile",
+        )
+        self.assertIn(
+            "commercial_review_resolution_contract_sha256",
+            release_contract["commercial_scope"]["required_non_null"],
+        )
+        self.assertTrue(all(
+            value is False
+            for value in release_contract["content_policy"].values()
+        ))
+        unsigned_release_contract = dict(release_contract)
+        release_contract_digest = unsigned_release_contract.pop("sha256")
+        self.assertEqual(
+            release_contract_digest,
+            CMS._hash(CMS._canonical_json(unsigned_release_contract)),
         )
         self.assertEqual(
             publication_operations["publication"]["acknowledgement_schema"],
@@ -957,6 +1162,140 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             self.assertNotIn("capabilities", payload)
             self.assertNotIn("locales", payload)
 
+    def test_capabilities_block_commercial_evidence_contract_drift(self):
+        current = CMS._COMMERCIAL.public_review_evidence_contract
+
+        def rehashed(profile, mutation):
+            value = current(profile)
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "overlap": lambda value: value["offer_registry"]["regions"].update(
+                overlap="allowed",
+            ),
+            "partial-dimensions": lambda value: value["checks"]
+            ["required_dimensions"].pop(),
+            "semantic-claim": lambda value: value["trust_boundary"].update(
+                semantic_truth=True,
+            ),
+            "publication-authority": lambda value: value[
+                "trust_boundary"
+            ].update(publication_authority=True),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._COMMERCIAL,
+                "public_review_evidence_contract",
+                lambda profile, mutation=mutation: rehashed(
+                    profile, mutation,
+                ),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-commercial-evidence-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
+            self.assertNotIn("locales", payload)
+
+    def test_capabilities_block_commercial_resolution_contract_drift(self):
+        current = CMS._COMMERCIAL.public_review_resolution_contract
+
+        def rehashed(profile, mutation):
+            value = current(profile)
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "partial-dimensions": lambda value: value[
+                "reviewed_dimensions"
+            ].update(must_equal_review_summary=False),
+            "partial-offers": lambda value: value[
+                "reviewed_offers"
+            ].update(must_equal_review_summary=False),
+            "human-provider": lambda value: value["methods"]
+            ["qualified_human"].update(provider="required"),
+            "model-not-independent": lambda value: value["methods"]
+            ["independent_model"].update(
+                provider_id_must_differ_from_primary_provider=False,
+            ),
+            "missing-primary-provider": lambda value: value[
+                "provider_identity"
+            ].update(primary_provider="optional"),
+            "raw-receipt": lambda value: value["content_policy"].update(
+                raw_receipt=True,
+            ),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._COMMERCIAL,
+                "public_review_resolution_contract",
+                lambda profile, mutation=mutation: rehashed(
+                    profile, mutation,
+                ),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-commercial-resolution-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
+            self.assertNotIn("locales", payload)
+
+    def test_capabilities_block_commercial_routing_contract_drift(self):
+        current = CMS._COMMERCIAL.public_review_routing_contract
+
+        def rehashed(profile, mutation):
+            value = current(profile)
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "byte-offsets": lambda value: value["offers"]["regions"].update(
+                span_format="zero-based-utf-8-bytes-exclusive-end",
+            ),
+            "overlap": lambda value: value["offers"]["regions"].update(
+                overlap="allowed",
+            ),
+            "partial-offers": lambda value: value["offers"].update(
+                coverage="selected-offers-only",
+            ),
+            "public-route": lambda value: value["trust_boundary"].update(
+                public_release_evidence=True,
+            ),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._COMMERCIAL,
+                "public_review_routing_contract",
+                lambda profile, mutation=mutation: rehashed(
+                    profile, mutation,
+                ),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-commercial-routing-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
+            self.assertNotIn("locales", payload)
+
     def test_capabilities_block_an_incomplete_http_schema_registry(self):
         current = self.bridge.localization_capabilities
 
@@ -1023,6 +1362,40 @@ class WebsiteLocalizationAPITests(unittest.TestCase):
             ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
         )
         self.assertNotIn("capabilities", payload)
+
+    def test_capabilities_block_release_evidence_contract_drift(self):
+        current = CMS._RELEASE.publication_evidence_contract
+
+        def rehashed(mutation):
+            value = current()
+            mutation(value)
+            unsigned = dict(value)
+            unsigned.pop("sha256")
+            value["sha256"] = CMS._hash(CMS._canonical_json(unsigned))
+            return value
+
+        mutations = {
+            "missing-lineage": lambda value: value["bindings"]
+            ["lineage_fields"].pop(),
+            "reordered-fields": lambda value: value["required_fields"].reverse(),
+            "private-target": lambda value: value["content_policy"].update(
+                target_text=True,
+            ),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label), patch.object(
+                CMS._RELEASE,
+                "publication_evidence_contract",
+                lambda mutation=mutation: rehashed(mutation),
+            ):
+                status, _, payload = self.capabilities_request(
+                    request_id=f"capabilities-release-evidence-{label}",
+                )
+            self.assertEqual(
+                (status, payload["error"]),
+                ("503 Service Unavailable", "cms.capabilities.registry_invalid"),
+            )
+            self.assertNotIn("capabilities", payload)
 
     def test_signature_idempotency_and_source_sequence_collisions_fail_closed(self):
         value = event()

@@ -27,9 +27,20 @@ _SPEC.loader.exec_module(_IMPL)
 
 hashlib = _IMPL.hashlib
 PUBLIC_PROFILE_SCHEMA = _IMPL.PUBLIC_PROFILE_SCHEMA
+REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
+    _IMPL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA
+)
 REVIEW_SUMMARY_CAPABILITIES_SCHEMA = _IMPL.REVIEW_SUMMARY_CAPABILITIES_SCHEMA
 REVIEW_SUMMARY_SCHEMA = _IMPL.REVIEW_SUMMARY_SCHEMA
+REVIEW_ROUTING_CAPABILITIES_SCHEMA = (
+    _IMPL.REVIEW_ROUTING_CAPABILITIES_SCHEMA
+)
+REVIEW_ROUTING_SCHEMA = _IMPL.REVIEW_ROUTING_SCHEMA
 EVIDENCE_BINDING_SCHEMA = _IMPL.EVIDENCE_BINDING_SCHEMA
+REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
+    _IMPL.REVIEW_RESOLUTION_CAPABILITIES_SCHEMA
+)
+REVIEW_RESOLUTION_SCHEMA = _IMPL.REVIEW_RESOLUTION_SCHEMA
 COMMERCIAL_LOCALE_PROFILE_SCHEMA = _IMPL.COMMERCIAL_LOCALE_PROFILE_SCHEMA
 COMMERCIAL_RENDERING_REFERENCE_SCHEMA = (
     _IMPL.COMMERCIAL_RENDERING_REFERENCE_SCHEMA
@@ -37,7 +48,11 @@ COMMERCIAL_RENDERING_REFERENCE_SCHEMA = (
 DIMENSIONS = _IMPL.DIMENSIONS
 _canonical_json = _IMPL._canonical_json
 evidence_sha256 = _IMPL.evidence_sha256
+public_review_evidence_contract = _IMPL.public_review_evidence_contract
 public_review_summary_contract = _IMPL.public_review_summary_contract
+public_review_routing_contract = _IMPL.public_review_routing_contract
+public_review_resolution_contract = _IMPL.public_review_resolution_contract
+validate_review_resolution = _IMPL.validate_review_resolution
 public_profile = _IMPL.public_profile
 CREATION_GUIDANCE = _IMPL.CREATION_GUIDANCE
 NATIVE_GUIDANCE = _IMPL.NATIVE_GUIDANCE
@@ -46,3 +61,5 @@ CommercialReviewBlocked = _IMPL.CommercialReviewBlocked
 review_contract = _IMPL.review_contract
 validate_review = _IMPL.validate_review
 validate_summary = _IMPL.validate_summary
+validate_review_routing_context = _IMPL.validate_review_routing_context
+review_routing_context = _IMPL.review_routing_context

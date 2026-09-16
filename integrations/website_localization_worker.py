@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
-WORKER_SCHEMA = "blun.website-localization-worker.v4"
+WORKER_SCHEMA = "blun.website-localization-worker.v9"
 CANDIDATE_SCHEMA = "blun.website-localization-candidate.v1"
 REVIEW_SCHEMA = "blun.website-localization-review.v2"
-RESULT_SCHEMA = "blun.website-localization-result.v5"
+RESULT_SCHEMA = "blun.website-localization-result.v10"
 MAX_TEXT_BYTES = 2_000_000
 MAX_FIELD_LENGTH = 2_000
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -481,6 +481,111 @@ def _base_context(job: dict[str, Any], assets: LocalizationAssets) -> dict[str, 
     return context
 
 
+def _commercial_review_evidence_contract(profile: str) -> dict[str, Any]:
+    """Resolve the exact public evidence contract before any provider access."""
+    try:
+        contract = _COMMERCIAL.public_review_evidence_contract(profile)
+        public_contract = _COMMERCIAL.public_profile(profile)[
+            "review_evidence_contract"
+        ]
+        if not isinstance(contract, dict) or not isinstance(
+            public_contract, dict
+        ):
+            raise TypeError
+        unsigned = dict(contract)
+        digest = unsigned.pop("sha256")
+    except (KeyError, TypeError, ValueError) as error:
+        raise LocalizationWorkerBlocked(
+            "commercial_review_evidence_contract.binding_mismatch",
+            retryable=False,
+        ) from error
+    if (
+        contract != public_contract
+        or contract.get("schema")
+        != _COMMERCIAL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA
+        or contract.get("result_schema") != profile
+        or contract.get("profile") != profile
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != _hash_json(unsigned)
+    ):
+        raise LocalizationWorkerBlocked(
+            "commercial_review_evidence_contract.binding_mismatch",
+            retryable=False,
+        )
+    return json.loads(_canonical_json(contract))
+
+
+def _commercial_review_routing_contract(profile: str) -> dict[str, Any]:
+    """Resolve the exact private-routing contract before provider access."""
+    try:
+        contract = _COMMERCIAL.public_review_routing_contract(profile)
+        public_contract = _COMMERCIAL.public_profile(profile)[
+            "review_routing_contract"
+        ]
+        if not isinstance(contract, dict) or not isinstance(
+            public_contract, dict
+        ):
+            raise TypeError
+        unsigned = dict(contract)
+        digest = unsigned.pop("sha256")
+    except (KeyError, TypeError, ValueError) as error:
+        raise LocalizationWorkerBlocked(
+            "commercial_review_routing_contract.binding_mismatch",
+            retryable=False,
+        ) from error
+    if (
+        contract != public_contract
+        or contract.get("schema")
+        != _COMMERCIAL.REVIEW_ROUTING_CAPABILITIES_SCHEMA
+        or contract.get("result_schema") != _COMMERCIAL.REVIEW_ROUTING_SCHEMA
+        or contract.get("profile") != profile
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != _hash_json(unsigned)
+    ):
+        raise LocalizationWorkerBlocked(
+            "commercial_review_routing_contract.binding_mismatch",
+            retryable=False,
+        )
+    return json.loads(_canonical_json(contract))
+
+
+def _commercial_review_resolution_contract(profile: str) -> dict[str, Any]:
+    """Resolve the exact public resolution contract before provider access."""
+    try:
+        contract = _COMMERCIAL.public_review_resolution_contract(profile)
+        public_contract = _COMMERCIAL.public_profile(profile)[
+            "review_resolution_contract"
+        ]
+        if not isinstance(contract, dict) or not isinstance(
+            public_contract, dict
+        ):
+            raise TypeError
+        unsigned = dict(contract)
+        digest = unsigned.pop("sha256")
+    except (KeyError, TypeError, ValueError) as error:
+        raise LocalizationWorkerBlocked(
+            "commercial_review_resolution_contract.binding_mismatch",
+            retryable=False,
+        ) from error
+    if (
+        contract != public_contract
+        or contract.get("schema")
+        != _COMMERCIAL.REVIEW_RESOLUTION_CAPABILITIES_SCHEMA
+        or contract.get("result_schema") != _COMMERCIAL.REVIEW_RESOLUTION_SCHEMA
+        or contract.get("profile") != profile
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != _hash_json(unsigned)
+    ):
+        raise LocalizationWorkerBlocked(
+            "commercial_review_resolution_contract.binding_mismatch",
+            retryable=False,
+        )
+    return json.loads(_canonical_json(contract))
+
+
 def run_localization_job(
     job_payload: Any,
     assets: LocalizationAssets,
@@ -501,8 +606,44 @@ def run_localization_job(
     locale = job["target"]["locale"]
     base = _base_context(job, assets)
     commercial = job["content_type"] == "commercial"
+    commercial_evidence_contract = None
+    commercial_routing_contract = None
+    commercial_resolution_contract = None
     if commercial:
         base["commercial_profile"] = job["commercial_profile"]
+        commercial_evidence_contract = _commercial_review_evidence_contract(
+            job["commercial_profile"]
+        )
+        if (
+            job["commercial_review_evidence_contract_sha256"]
+            != commercial_evidence_contract["sha256"]
+        ):
+            raise LocalizationWorkerBlocked(
+                "commercial_review_evidence_contract.binding_mismatch",
+                retryable=False,
+            )
+        commercial_routing_contract = _commercial_review_routing_contract(
+            job["commercial_profile"]
+        )
+        if (
+            job["commercial_review_routing_contract_sha256"]
+            != commercial_routing_contract["sha256"]
+        ):
+            raise LocalizationWorkerBlocked(
+                "commercial_review_routing_contract.binding_mismatch",
+                retryable=False,
+            )
+        commercial_resolution_contract = _commercial_review_resolution_contract(
+            job["commercial_profile"]
+        )
+        if (
+            job["commercial_review_resolution_contract_sha256"]
+            != commercial_resolution_contract["sha256"]
+        ):
+            raise LocalizationWorkerBlocked(
+                "commercial_review_resolution_contract.binding_mismatch",
+                retryable=False,
+            )
     full_glossary = [asdict(term) for term in assets.glossary]
     target_terms = [
         {"target": term.target}
@@ -574,6 +715,15 @@ def run_localization_job(
         "source": job["source"],
         "candidate": candidate,
         "glossary": full_glossary,
+        **(
+            {
+                "commercial_review_evidence_contract": (
+                    commercial_evidence_contract
+                ),
+            }
+            if commercial
+            else {}
+        ),
         "response_schema": {
             "schema": REVIEW_SCHEMA,
             "phase": "source_fidelity",
@@ -587,6 +737,7 @@ def run_localization_job(
     })
     fidelity_response, request_hash, response_hash = _invoke(provider, fidelity_request)
     commercial_summary = None
+    commercial_review_routing = None
     commercial_escalation_required = False
     if commercial:
         # Hash above binds the complete evidence, even though the ordinary
@@ -596,13 +747,36 @@ def run_localization_job(
         try:
             commercial_summary = _COMMERCIAL.validate_review(
                 commercial_review, job["source"]["text"], candidate,
-                job["commercial_profile"], allow_uncertain=True,
+                job["commercial_profile"],
+                target_locale=locale,
+                commercial_quality_profile_version=(
+                    job["commercial_quality_profile"]["version"]
+                ),
+                commercial_quality_profile_sha256=(
+                    job["commercial_quality_profile"]["sha256"]
+                ),
+                allow_uncertain=True,
             )
         except _COMMERCIAL.CommercialReviewBlocked as error:
             raise LocalizationWorkerBlocked(error.code, retryable=False) from None
         commercial_escalation_required = (
             commercial_summary["status"] == "review_required"
         )
+        if commercial_escalation_required:
+            try:
+                commercial_review_routing = (
+                    _COMMERCIAL.review_routing_context(
+                        commercial_review,
+                        job["source"]["text"],
+                        candidate,
+                        commercial_summary,
+                        job["commercial_profile"],
+                    )
+                )
+            except _COMMERCIAL.CommercialReviewBlocked as error:
+                raise LocalizationWorkerBlocked(
+                    error.code, retryable=False,
+                ) from None
     findings, fidelity_confidence = _review(
         fidelity_response,
         "source_fidelity",
@@ -673,6 +847,17 @@ def run_localization_job(
         },
         "quality_profile": quality_result,
         "commercial_review": commercial_summary,
+        "commercial_review_routing": commercial_review_routing,
+        "commercial_review_routing_contract_sha256": (
+            commercial_routing_contract["sha256"]
+            if commercial_routing_contract is not None
+            else None
+        ),
+        "commercial_review_resolution_contract_sha256": (
+            commercial_resolution_contract["sha256"]
+            if commercial_resolution_contract is not None
+            else None
+        ),
         "human_review_required": job["content_type"] == "legal",
         "independent_review_required": (
             job["content_type"] != "legal"

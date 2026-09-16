@@ -107,6 +107,911 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.168.0: phase-bound benchmark findings
+
+Version 6.168.0 preserves separate, content-free finding registries for the
+source-blind native review and the later source-fidelity review. Each signed
+pass records the exact candidate and baseline hashes by severity; aggregate
+defect counts are accepted only when they can be reconstructed from both
+ordered phases.
+
+Commercial offer verdicts must now reference the exact source-fidelity
+registry rather than any finding from the case. Swapped phases, omitted or
+duplicated hashes, stale totals, and target-native findings relabelled as
+commercial fidelity all fail closed. Reviewer excerpts and reasons remain
+absent from signed evidence and reports.
+
+### Version 6.167.0: finding-bound commercial offer verdicts
+
+Version 6.167.0 retains the exact content-free finding hash behind every
+commercial Major or Blocking offer verdict. The reviewer still returns a
+zero-based defect reference, but the validated result resolves that reference
+before unblinding and stores each offer as one ordered record containing its
+index, status, and finding hash.
+
+Signed candidate and baseline evidence now also carries the corresponding
+source-fidelity finding registries by severity. Report validation rejects
+missing, invented, foreign, wrong-severity, or unexpected hashes; equivalent
+and absent offers require `null`. Reviewer excerpts and reasons are discarded,
+and the target-native pass remains unchanged and source-blind.
+
+### Version 6.166.0: decision-bound commercial benchmark evidence
+
+Version 6.166.0 binds every commercial dimension decision to the exact
+validated target-offer registry for its anonymous variant. A decision with a
+missing, stale, foreign, or swapped registry digest now fails before benchmark
+acceptance, including across the provider-neutral HTTPS adapter and durable
+review store.
+
+Unblinding preserves the exact candidate or baseline registry digest on every
+signed dimension row and report validation compares each row with its
+corresponding top-level digest. A valid aggregate or a separately valid
+registry can therefore no longer authorize a decision about another target
+partition. The target-native pass remains unchanged and receives no commercial
+registry or decision binding.
+
+### Version 6.165.0: target-bound commercial benchmark offers
+
+Version 6.165.0 requires the source-fidelity reviewer to map every opaque
+offer index onto the exact text of each anonymous target variant. Each mapping
+is a complete semantic partition in Unicode code points, binds the target
+length and UTF-8 SHA-256 digest, distinguishes offer-owned from shared target
+spans, and carries its own canonical digest. The reviewer—not a regular
+expression—must identify semantically equivalent, reordered, inflected,
+spelled-out, or locale-formatted commercial claims.
+
+Gaps, overlaps, empty offers, wrong indexes, byte-offset assumptions, swapped
+variants, stale target hashes, and self-rehashed substitutions block at the
+runtime, HTTPS, and durable-review boundaries. After unblinding, only the
+candidate and baseline registry digests enter signed case evidence. The
+target-native pass remains free of source and commercial registry data.
+
+### Version 6.164.0: source-bound commercial benchmark offers
+
+Version 6.164.0 binds every opaque benchmark offer index to a manually
+versioned partition of the exact commercial source. Each registry uses ordered
+Unicode-code-point spans, distinguishes offer-owned text from explicitly
+shared conditions, covers the source without gaps or overlaps, and carries a
+canonical SHA-256 digest.
+
+Only the source-fidelity reviewer receives the registry. The HTTPS boundary,
+durable review store and signed case result validate its exact source length,
+partition and digest; the target-native pass remains source-blind. This makes
+per-offer price and condition verdicts reproducible without regex extraction,
+product names, live prices or provider-specific assumptions.
+
+### Version 6.163.0: offer-complete commercial benchmark verdicts
+
+Version 6.163.0 makes every commercial benchmark decision complete across all
+offers in the source fixture. The versioned suite registers an opaque offer
+count for each of its eight commercial cases. Source-fidelity review must now
+return one ordered status per offer, dimension and anonymous variant; missing,
+duplicated or reordered indexes fail closed.
+
+Each dimension aggregate is derived by fixed severity from its offer matrix, so
+a harmless tier cannot hide another tier's major or blocking defect. Signed
+case evidence retains the full text-free matrix, and locale/content reports
+publish both case-level and offer-level status counts. Native review remains a
+separate source-blind pass, and no provider, product catalogue, brand or live
+price is built into the contract.
+
+### Version 6.162.0: managed operator polling contract
+
+Version 6.162.0 completes the durable poller's host-facing runtime path. A
+synchronous `run_forever` loop now performs due work, waits interruptibly until
+the next lease or retry boundary, wakes at a bounded interval for external
+operator rearm, and exits without touching durable state when already stopped.
+
+The separate read-only poller-health contract distinguishes healthy,
+degraded, and blocked operation; reports due work, active or expired leases,
+attempt ceilings and the last stable error; and includes only the prior
+report's canonical digest, aggregate status, stable reason codes and counts.
+It contains no tenant, locale, provider or website-content identifiers.
+
+### Version 6.161.0: durable operator health polling
+
+Version 6.161.0 adds a crash-resumable SQLite scheduler around the strict
+operator health client. Multiple operator processes now share an atomic lease,
+an abandoned poll becomes eligible only after its lease expires, and each
+attempt still performs at most one authenticated network request.
+
+Retryable failures use capped exponential backoff and stop at an explicit
+ceiling; terminal failures require an explicit operator rearm. A valid blocked
+assessment is preserved as a successful observation. Durable state contains
+only the canonical report digest, aggregate status, stable reason codes and
+cardinalities—never report payloads, site/version IDs, locale names, provider
+identities, credentials or website content.
+
+### Version 6.160.0: provider-neutral operator health client
+
+Version 6.160.0 adds a bounded HTTPS client for the authenticated, read-only
+service health endpoint. Operators can now consume the full monitor contract
+without writing custom response parsing or collapsing a valid blocked report
+into a generic network failure.
+
+The client preserves policy outage, verified drift, and integrity reasons from
+valid `503` reports; independently rejects stale or future-dated assessments,
+duplicate JSON keys, status/schema mismatches, missing security headers,
+redirects, unsafe origins, oversized responses, and ambiguous authentication
+headers; and exposes only stable content-free failures with explicit retry
+decisions. Authentication remains host-configured and no provider is fixed.
+
+### Version 6.159.0: fail-closed policy-aware service health
+
+Version 6.159.0 revalidates every approved locale against its current quality
+policy during the general read-only health check. A temporary resolver outage
+now blocks service health with the stable, content-free
+`release.policy_unavailable` reason instead of leaving an unpublishable website
+version under a healthy release component.
+
+Verified policy drift reports `release.policy_stale`; malformed or otherwise
+unexpected release evidence reports `release.integrity_failed`. A proven stale
+or invalid locale takes precedence over a simultaneous resolver outage, while
+the per-locale evidence codes remain visible for diagnosis. The health pass
+does not mutate queue, release, or CMS state and never exposes resolver detail.
+
+### Version 6.158.0: retryable lifecycle-policy resolution
+
+Version 6.158.0 carries the publication-policy distinction across the public,
+authenticated lifecycle path. A temporary target-locale policy resolver outage
+now returns the content-free `cms.release.policy_unavailable` error as a
+retryable `503`; the durable source-CMS lifecycle monitor applies its existing
+bounded backoff and revalidates the policy on recovery.
+
+Policy drift, malformed release evidence, invalid signatures, and mixed
+outage-plus-integrity failures retain precedence as the terminal
+`cms.release.integrity_failed` conflict. Lifecycle reads remain read-only and
+cannot call the publisher, while the HTTP client no longer retries proven
+release-integrity failures.
+
+### Version 6.157.0: retryable publication-policy resolution
+
+Version 6.157.0 distinguishes an authenticated release whose locale policy is
+provably stale from a temporary failure to resolve the current policy. Stale
+evidence remains terminal and never reaches the publisher. Resolver outages
+remain fail-closed but now consume bounded delivery attempts with the existing
+exponential backoff instead of being misclassified and quarantined as drift.
+
+The dispatcher can defer an unavailable entry and continue to a valid following
+delivery in the same bounded transaction. It repeats the distinction after the
+outer operation guard immediately before network access, exposes only the stable
+`policy_unavailable` reason in delivery state and health, and never persists a
+private resolver diagnostic or calls the publisher while policy is unknown.
+
+### Version 6.156.0: fail-closed publication dispatch policy
+
+Version 6.156.0 revalidates every signed CMS publication against the current
+target-locale quality policy and approval lifetime immediately before leasing
+and again after the outer operation guard, directly before publisher access.
+Policy drift during an active lease therefore cannot reach the network.
+
+Authenticated deliveries whose release evidence is stale or whose approvals
+have expired are quarantined terminally with content-free reason codes, without
+consuming an attempt. A bounded transaction skips up to 24 such entries so one
+obsolete website version cannot block a valid following delivery. Structural,
+payload, and signature failures remain hard integrity errors; structural-only
+tombstone validation can still remove obsolete published content safely.
+
+### Version 6.155.0: durable general locale-policy invalidation
+
+Version 6.155.0 binds every signed CMS release proof to the exact current
+target-locale quality profile, including ordinary website copy. The compact
+`{locale, version, sha256}` binding makes the language-policy generation that
+governed translation and both review passes independently verifiable at the
+publication boundary.
+
+The release service and reference CMS receiver re-resolve that profile before
+approval lookup, host commit, active read, health, and idempotent replay. Locale
+substitution, profile drift, and resolver failure block fail-closed without
+overwriting the last known good content; obsolete content remains safely
+tombstonable. Commercial content keeps its separate commercial quality binding
+in addition to this universal language-profile proof.
+
+### Version 6.154.0: durable commercial locale-policy invalidation
+
+Version 6.154.0 revalidates the exact commercial quality-profile binding for
+the target locale whenever signed release evidence is consumed. A stored CMS
+bundle can no longer remain active after its CLDR, morphology, terminology, or
+evaluation generation has changed merely because its three-field binding is
+still structurally valid.
+
+The check applies before approval lookup, CMS commit, active read, health, and
+idempotent replay. Resolver failure and stale or substituted profile bindings
+block with the stable release-evidence error; non-commercial evidence remains
+strictly null and does not invoke the commercial resolver. The release-evidence
+capability contract advertises the exact-current-locale requirement.
+
+### Version 6.153.0: CMS-visible resolution policy
+
+Version 6.153.0 exposes the exact current public commercial-review resolution-
+contract SHA-256 in every commercial CMS release proof, including offers whose
+first-pass evidence was already `verified`. A CMS can therefore prove which
+human-review and independent-model escalation policy governed a signed approval
+without decoding opaque job identities or receiving private review data.
+
+Release evidence and its advertised capability contract advance together. The
+release service and reference receiver reconstruct the current content-free
+contract and reject missing, stale, substituted, or self-rehashed digests before
+host commit. Non-commercial evidence requires `null`; only unresolved offers
+continue to carry a separate resolution result.
+
+### Version 6.152.0: plan-bound resolution policy
+
+Version 6.152.0 binds the exact public commercial-review resolution-contract
+SHA-256 into every commercial plan, per-locale job, and idempotency identity.
+Resolution-policy changes therefore create new work identities instead of
+silently reinterpreting persisted jobs under newer human-review or independent-
+model rules.
+
+The queue revalidates the binding before leasing work, and the worker
+reconstructs the complete current content-free contract before loading assets
+or contacting the configured provider. The digest continues through the worker
+result, quality-evidence request, receipt verification, and signed approval.
+Missing, stale, substituted, or self-rehashed bindings fail closed; non-
+commercial jobs and results keep the field absent or `null` as their respective
+schemas require.
+
+### Version 6.151.0: reviewer-visible resolution contract
+
+Version 6.151.0 supplies unresolved commercial quality reviewers with the
+complete public, content-free resolution contract alongside its SHA-256. The
+contract declares the exact human and independent-model resolution methods,
+provider-separation rule, receipt binding, ordered offer scope, and excluded
+private content without exposing source text, target text, prices, brands,
+reviewer prose, or identities.
+
+The full contract and digest are bound into the deterministic evidence-request
+identity and canonical HTTP payload. The coordinator and transport adapter
+independently reconstruct the current contract before provider access, so a
+missing, stale, substituted, or merely self-rehashed object fails closed before
+authentication or network traffic. Verified commercial results and
+non-commercial requests require both fields to be `null`.
+
+### Version 6.150.0: reviewer-visible routing-contract lineage
+
+Version 6.150.0 supplies the exact public offer-routing-contract SHA-256 to
+the external quality-evidence provider for every commercial result, including
+already verified results that intentionally carry no private offer route. The
+digest is part of the deterministic evidence-request identity and the exact
+canonical HTTP payload. It therefore matches the field the provider must bind
+into its quality receipt without relying on separate capability discovery.
+
+The coordinator and HTTP adapter independently reconstruct the current public
+contract before provider access. A missing, stale, substituted, or merely
+self-rehashed digest fails closed; non-commercial evidence requests require
+`null`. The full routing contract and private Unicode spans remain conditional
+on targeted review, and no price, brand, source text, or target text becomes
+public evidence.
+
+### Version 6.149.0: signed routing-contract lineage
+
+Version 6.149.0 carries the exact public offer-routing-contract SHA-256 from
+each commercial locale job into the worker result, every quality-receipt
+binding, the immutable signed approval, and the content-free CMS release
+evidence. Each boundary reconstructs or compares the current contract before
+accepting the value. Missing, stale, substituted, or merely self-rehashed
+bindings therefore fail closed before signing or publication.
+
+Non-commercial results, receipts, approvals, and release evidence require the
+field to be `null`. The digest reveals no price, brand, source text, target
+text, offer identifier, or private route; the route itself remains confined to
+the authorized review path.
+
+### Version 6.148.0: routing-contract-bound job identity
+
+Version 6.148.0 binds the exact public offer-routing-contract SHA-256 into
+plan v4, every commercial locale job v4, and their deterministic job,
+idempotency, and plan identities. A change to Unicode offset, region coverage,
+privacy, or authority semantics therefore creates new work even when the
+commercial profile and review-evidence contract are otherwise unchanged.
+
+The worker reconstructs both installed contracts before the first provider
+call. Missing, stale, substituted, or merely self-rehashed routing bindings
+fail closed; queue health and lease validation inherit the same canonical job
+check. Non-commercial jobs omit both commercial digests, and private routes,
+prices, brands, source text, and target text remain outside queue metadata.
+
+### Version 6.147.0: exact routing contract for external review
+
+Version 6.147.0 sends the complete, content-free offer-routing contract with
+each unresolved commercial quality-evidence request. An independent reviewer
+therefore receives the exact Unicode code-point, exclusive-end, length,
+registry-order, overlap, privacy, and authority semantics together with the
+private route instead of relying on separate capability discovery.
+
+The coordinator and HTTPS adapter independently reconstruct the trusted
+contract before authentication or network access. The full contract enters the
+deterministic request ID; stale, substituted, or merely self-rehashed objects
+fail closed. Verified commercial and non-commercial requests require both the
+route and routing contract to be `null`, and no price, brand, offer ID, source
+text, target text, or reviewer prose enters the public contract.
+
+### Version 6.146.0: contract-bound private offer routing
+
+Version 6.146.0 publishes a separately versioned, content-free machine
+contract for the private offer-routing context. It defines exact Unicode
+code-point offsets, exclusive ends, complete text lengths, registry-order
+coverage, overlap rules, privacy, and the non-authoritative trust boundary.
+
+Every private route now carries the trusted contract SHA-256. The worker,
+evidence request, receipt verifier, release gate, benchmark boundary, and CMS
+capability reader independently reconstruct it; a stale, substituted, or merely
+self-rehashed contract blocks before provider access or approval. Only the
+contract is public. Actual spans, offer identifiers, texts, prices, brands, and
+reviewer prose remain private and are absent from CMS release evidence.
+
+### Version 6.145.0: actionable private offer review routing
+
+Version 6.145.0 turns each opaque review-required offer index into an
+actionable provider route without weakening the public CMS boundary. The
+worker derives a private context containing only ordered numeric indexes,
+exact source and target lengths, and validated Unicode code-point regions.
+
+The context is required only for unresolved commercial summaries. It is bound
+into the durable evidence request identity and every quality, independent-model,
+or qualified-human receipt verification, but is excluded from signed public
+release evidence. Missing, reordered, overlapping, empty, out-of-range, or
+extra-field routes block before provider access or approval; configured offer
+IDs, extracted text, prices, brands, and reviewer prose are never copied into
+the routing context.
+
+### Version 6.144.0: targeted per-offer commercial review
+
+Version 6.144.0 retains the exact unresolved offer scope after source-aware
+commercial review. The content-free summary identifies affected offers only by
+their zero-based registry positions for each dimension, and the independent
+model or qualified human resolution must echo that complete ordered scope.
+
+Configured offer identifiers, prices, brands, source text, target text, and
+reviewer prose remain private. Missing, reordered, duplicated, out-of-range, or
+cross-dimension scope fails closed through the provider-neutral HTTP adapters,
+signed release evidence, and CMS boundary. Dimension-level uncertainty without
+a registered offer remains routable without inventing an identity.
+
+### Version 6.143.0: complete per-offer commercial evidence
+
+Version 6.143.0 requires every commercial review dimension to carry exactly
+one verdict for every registered offer, in registry order. A dimension can no
+longer pass globally after reviewing only one price, discount, tax statement,
+term, or condition while silently omitting another offer.
+
+The validator derives the global dimension verdict from the per-offer matrix,
+requires equivalent, changed, and uncertain offer verdicts to have their own
+offer-bound evidence, and rejects duplicates, omissions, reordered offers, and
+inconsistent aggregate statuses. The separately hashed contract, commercial
+profile, evidence binding, and summary generation advance together, so queued
+or cached results under the previous shape fail closed without numeric regexes
+or source-locale formatting assumptions.
+
+### Version 6.142.0: stale-job quarantine without head-of-line blocking
+
+Version 6.142.0 quarantines a bounded batch of up to 24 consecutive obsolete
+queue jobs inside one claim transaction and continues to the first current job
+within that batch. A complete stale EU-locale plan therefore cannot consume 24
+service ticks or hold valid work behind it; every quarantined job remains
+content-free, terminal, and at zero attempts, with no cache, asset, or provider
+access.
+
+The batch decision remains fail-closed and atomic. If later validation is
+unavailable, raises unexpectedly, or mutates a decoded payload, all quarantine
+and lease changes roll back so recoverable work stays pending.
+
+### Version 6.141.0: current job bindings before lease
+
+Version 6.141.0 revalidates a durable queue job against the exact current
+planner and worker contract before granting a lease. A canonical but obsolete
+commercial job is marked terminal with the content-free
+`job_binding_invalid` reason without consuming an attempt, resolving assets,
+consulting translation memory, or reaching a provider.
+
+The queue uses its current local worker contract by default, while the runner
+injects the exact worker instance it will execute. Expected binding rejection
+is terminal; an unavailable, failing, or payload-mutating validator rolls back
+the transaction and leaves the job pending for safe operator recovery.
+
+### Version 6.140.0: current job bindings in read-only health
+
+Version 6.140.0 makes the content-free health monitor revalidate every durable
+queue job against the exact current planner and worker contract. A commercial
+job can no longer remain health-green after its review-evidence contract has
+changed merely because the stored JSON and its payload hash still agree.
+
+Stale or substituted bindings block overall health with
+`queue.job_binding_invalid` through local validation. The check is read-only,
+independent of provider health, keeps source and target text out of diagnostics,
+and leaves valid non-commercial and current commercial jobs unchanged.
+
+### Version 6.139.0: evidence-contract-bound commercial job identity
+
+Version 6.139.0 binds the exact public commercial review-evidence-contract
+SHA-256 into plan v3, every commercial job v3, its deterministic job and
+idempotency key, and the overall plan ID. A change to offer-registry, Unicode
+span, dimension, or verdict semantics now creates new work identity even when
+the parent commercial profile identifier remains stable.
+
+Before any provider access, the worker joins the job-bound digest to the
+separately verified full contract supplied to source-fidelity review. Missing,
+stale, or replaced bindings fail closed; non-commercial jobs remain free of
+commercial metadata and no provider is hardwired.
+
+### Version 6.138.0: exact provider-side commercial evidence contract
+
+Version 6.138.0 gives the source-aware commercial fidelity provider the exact,
+content-free, SHA-256-bound review-evidence contract rather than only an
+illustrative response object. The contract covers the offer registry, Unicode
+span semantics, ten commercial checks, limits, verdict invariants, and
+fail-closed trust boundary. It is part of the deterministic provider-request
+hash and remains absent from transcreation and source-blind native review.
+
+Before any provider call, the worker verifies the contract against the
+installed public commercial profile and rejects even a consistently rehashed
+substitute. This improves interoperability without hardwiring a provider,
+publishing project prices or brands, or treating structural validation as
+evidence of semantic truth.
+
+### Version 6.137.0: contract-bound commercial review lineage
+
+Version 6.137.0 binds the exact published commercial review-evidence-contract
+SHA-256 into the private evidence hash and content-free review summary. That
+closed summary now carries the same digest through worker results, durable
+quality-evidence requests and IDs, receipt verification, signed approvals,
+translation-memory lookups, and CMS release evidence.
+
+A prior report or summary cannot remain valid after the evidence structure,
+offer rules, Unicode span semantics, or verdict invariants change. Missing,
+stale, or substituted contract digests block fail-closed before network access,
+signing, cache reuse, or CMS publication; no private report content is exposed.
+
+### Version 6.136.0: public commercial evidence contract
+
+Version 6.136.0 publishes the complete commercial evidence shape as a
+separately versioned and SHA-256-bound machine contract. CMS backends,
+source-fidelity providers, and the portable checker now discover the same
+closed fields, limits, Unicode span semantics, offer-region rules, verdict
+invariants, and exact ten-dimension order from one provider-neutral source.
+
+The trusted CMS boundary rejects missing, altered, reordered, or merely
+self-rehashed evidence contracts before returning capabilities. The contract
+explicitly grants no publication authority and makes no semantic truth claim:
+uncertain amounts, conditions, or native interpretations still require an
+independent model or qualified native-domain reviewer.
+
+### Version 6.135.0: offer-bound commercial evidence
+
+Version 6.135.0 replaces free-form offer labels in commercial review evidence
+with a versioned registry of unique offer identifiers and their ordered,
+non-overlapping source and target regions. Every price, qualifier, interval,
+condition, and assignment span must be contained in the regions declared for
+that exact offer, so a reviewer cannot hide a cross-offer swap behind a valid
+but unrelated label.
+
+An offer may own multiple discontiguous regions for linked footnotes and
+conditions. Every declared offer still needs exactly one matched assignment
+item; unknown identifiers, overlapping ownership, missing assignments, and
+cross-offer spans block deterministically. The registry validates evidence
+ownership, not semantic truth: uncertain boundaries or equivalence continue to
+require an independent model or qualified native-domain review.
+
+### Version 6.134.0: durable CMS publisher authorization
+
+Version 6.134.0 retains the original canonical publisher signature beside
+every active CMS publication and revalidates it on commit, rendering, health,
+and idempotent replay. Rewriting stored payload and release evidence and then
+recomputing their unkeyed hashes can no longer create an apparently authorized
+bundle after receiver restart.
+
+The SQLite schema migrates from v1 to v2 without inventing missing authority.
+An active legacy row without its original signature remains stored but blocked
+and unhealthy until the trusted source replaces or tombstones it. Deletion uses
+the existing structural-only path, so unsafe legacy content cannot become
+undeletable. Superseded and deleted rows scrub the retained signature together
+with target prose.
+
+### Version 6.133.0: continuously authorized CMS bundles
+
+Version 6.133.0 closes the durable authorization gap after CMS acceptance.
+The reference receiver injects its canonical release-evidence validator into
+the SQLite store, which revalidates every active localization against the
+current contract and approval expiry on reads, health checks, and idempotent
+publication replay. Restarting or upgrading the receiver cannot silently keep
+serving a stale authorization.
+
+Expired or contract-stale target content remains blocked without replacing the
+last stored bytes. Tombstone registration and deletion use a structural-only
+path, so an invalidated bundle can still be removed atomically and cannot trap
+unsafe content behind the fail-closed gate.
+
+### Version 6.132.0: contract-bound release evidence
+
+Version 6.132.0 binds the exact SHA-256 of the machine-readable release-evidence
+contract into every signed approval and content-free CMS release proof. A delayed
+or archived approval therefore cannot be reinterpreted or rewrapped under a
+newer field, lineage, commercial-scope, or privacy contract.
+
+The v7 release-evidence validator rejects a missing, malformed, stale, or
+substituted contract digest before publication or receiver host commit. The
+durable receiver preserves the exact bound proof, and the same fail-closed rule
+applies to commercial and non-commercial localizations.
+
+### Version 6.131.0: machine-readable release-evidence contract
+
+Version 6.131.0 publishes a separately hashed, provider-neutral contract for
+the content-free release evidence inside the signed CMS capabilities. It fixes
+the exact field order, SHA-256 and lineage bindings, commercial nullability,
+signed container, and excluded private content so an integration does not need
+to reconstruct those rules from prose.
+
+The runtime validates the contract against its private canonical registry on
+every capability read. Missing, reordered, altered, or merely self-rehashed
+contracts block the complete capability response and publication remains
+fail-closed before any CMS commit.
+
+### Version 6.130.0: public evidence lineage
+
+Version 6.130.0 carries the canonical quality-evidence request ID and revision
+from the verified signed approval into the closed, content-free public release
+evidence. A downstream CMS can now audit and policy-gate the exact evidence
+generation without access to provider receipts or private review state.
+
+The release-evidence schema advances to v6. Missing or malformed lineage blocks
+before host commit, while any change to the already signed publication bytes
+fails authentication. The durable receiver preserves the exact fields and
+still exposes no source text, target text, raw receipt, reviewer identity, or
+reviewer prose.
+
+### Version 6.129.0: evidence-context-bound approval
+
+Version 6.129.0 carries the canonical quality-evidence request ID and evidence
+revision into every purpose-specific receipt-verification binding and into the
+signed durable approval. A provider cannot relabel an otherwise valid quality,
+qualified-human, or independent-model receipt under a newer evidence envelope.
+
+The receipt binding advances to v5 and the signed approval to v5. Missing,
+malformed, stale, or substituted evidence context blocks before verifier or
+signer access; changing either dimension also derives a new verifier HTTP
+idempotency key. Raw receipts remain outside durable translation memory.
+
+### Version 6.128.0: derived quality-evidence identity
+
+Version 6.128.0 makes the quality-evidence request ID independently
+derivable at every local and network boundary. The durable lease store and
+provider-neutral HTTPS adapter now recompute the ID from the same exact
+versioned field set after validating the complete source and target hashes.
+
+The evidence request advances to v8. A random ID, a stale ID retained after
+changing locale, policy, profile, provider, confidence, result or commercial
+contract, and an ID derived from an incomplete field set all block before a
+database row, authentication callback or network request. The request ID,
+canonical request digest and receipt binding remain separate proofs.
+
+### Version 6.127.0: contract-bound commercial evidence
+
+Version 6.127.0 binds every unresolved commercial evidence request and receipt
+to the exact advertised review-resolution contract SHA-256. The binding enters
+the deterministic request ID, the provider-neutral HTTPS request, each receipt
+verification context, and the signed durable approval.
+
+The evidence request advances to v7, the receipt binding to v4, and the signed
+approval to v4. A missing, stale, self-selected, or non-commercial contract
+digest blocks before authentication, provider transport, approval, or CMS
+publication. Verified commercial results and all other content types require a
+null binding, so the escalation contract cannot leak into unrelated work.
+
+### Version 6.126.0: independently verifiable commercial resolution
+
+Version 6.126.0 makes targeted commercial-review resolution independently
+verifiable at the CMS boundary. Each content-free resolution now binds the
+exact commercial profile, the advertised resolution-contract SHA-256, and the
+primary provider identity. An independent-model route also carries the second
+provider identity, whose provider ID must differ from the primary provider.
+
+The commercial profile advances to v8, the CMS capability generation to v7,
+the publication HTTP contract to v3, and release evidence to v5. Missing or
+altered profile, contract, primary-provider, or independence bindings block
+before CMS persistence. Qualified-human identity, raw receipts, credentials,
+reviewer prose, prices, brands, source text, and target text remain excluded.
+
+### Version 6.125.0: machine-readable commercial review resolution
+
+Version 6.125.0 publishes a separate, hashed contract for resolving uncertain
+commercial checks. It binds the exact ordered dimensions to the unresolved
+summary and distinguishes qualified-human review from an independent model,
+including the conditional provider fields and verified receipt hash without
+exposing the raw receipt, reviewer identity, prose, prices, brands, or content.
+
+The commercial profile advances to v7, the CMS capability generation to v6,
+and release evidence to v4. The release path now uses the same provider-neutral
+resolution schema advertised by discovery. Reordered or partial dimensions,
+an unexpected human provider, a non-independent model, raw-receipt exposure,
+or any rehashed contract drift blocks the entire capability response.
+
+### Version 6.124.0: locale-bound commercial review evidence
+
+Version 6.124.0 binds every commercial fidelity-evidence digest to the exact
+target locale and commercial locale-quality profile version and SHA-256, in
+addition to the commercial profile and exact source and target texts. Evidence
+from another locale or an older rendering, morphology, or evaluation generation
+therefore cannot be reused as if it covered the current job.
+
+The worker derives this binding only from the already validated job. The
+portable checker requires the same three explicit content-free inputs and
+reports them only after successful structural validation. Missing or malformed
+bindings block without provider, approval, or publication authority.
+
+### Version 6.123.0: end-to-end commercial acceptance binding
+
+Version 6.123.0 requires every accepted commercial submission to prove that
+the downstream website used the same 24-locale rendering-registry generation
+that the CMS acknowledged at enqueue. A merely well-formed and self-consistent
+website capability binding is insufficient when its commercial registry hash
+differs from the durable caller-owned contract.
+
+The equality is enforced before acceptance, revalidated from SQLite after
+restart and during health checks, and independently checked by the HTTP edge
+and provider-neutral reference client. The versioned capability and OpenAPI
+contracts advertise the invariant explicitly. Ambiguous or substituted
+generations remain fail-closed without exposing price, brand, source, or target
+content.
+
+### Version 6.122.0: durable commercial contract acknowledgement
+
+Version 6.122.0 carries the exact commercial profile and 24-locale registry
+acknowledgement through the caller-owned outbox, leases, retries, restarts,
+queue responses, status reads, lifecycle responses, OpenAPI contract, and
+reference client. The content-free binding is now durable evidence rather than
+an ingress-only check.
+
+Every stored row is revalidated against its canonical source payload and the
+installed commercial contract before work or status can proceed. Altered or
+missing bindings block fail-closed. An exact empty schema-v1 outbox is upgraded
+transactionally; any populated legacy outbox remains untouched and blocked
+because its historic commercial acknowledgement cannot be reconstructed.
+
+### Version 6.121.0: commercial contract acknowledgement at enqueue
+
+Version 6.121.0 closes the transition from commercial-profile discovery to
+durable CMS intake. Every enqueue envelope now carries an exact content-free
+commercial contract binding. A commercial change must acknowledge the active
+profile and 24-locale rendering-registry hashes; every other content type,
+cancellation, and tombstone must carry `null`.
+
+The authenticated HTTP body, capability generation, OpenAPI 3.1 conditional,
+and provider-neutral reference client all use the same closed binding.
+Missing, stale, altered, or cross-scope acknowledgements block before runtime
+enqueue and persistence. The acknowledgement contains no amount, brand,
+product, source text, target text, credential, or publication authority.
+
+### Version 6.120.0: public commercial localization contract
+
+Version 6.120.0 carries the existing brand-neutral price and offer profile to
+the outer public CMS dispatch edge. The capability generation, separately
+scoped body-free route, OpenAPI 3.1 document, runtime, and provider-neutral
+reference client expose the exact ten semantic dimensions and all 24
+locale-specific Unicode CLDR rendering references. No project price, brand,
+product, credential, source text, or target text is part of the response.
+
+The route fetches and revalidates the live downstream website capability
+generation before returning the local contract. Its commercial-rendering hash
+must equal the bundled canonical registry; a missing, stale, substituted, or
+malformed binding blocks before serialization. The result is explicitly
+content-free and grants neither linguistic approval nor publication authority.
+
+### Version 6.119.0: verified outer lifecycle read
+
+Version 6.119.0 completes the post-intake read path for non-Python CMS
+backends. A dedicated tenant-bound operation carries the full known request
+identity through the caller-owned outbox, process-guarded runtime,
+authenticated HTTP edge, capability generation, OpenAPI 3.1 profile, and
+provider-neutral reference client. It reads the already verified downstream
+source lifecycle only after durable website acceptance.
+
+Pending, retrying, leased, and failed outer records cause no downstream read.
+The returned lifecycle keeps local dispatch status, website generation,
+sidecar generation, source generation, and source processing state separate;
+acceptance remains explicitly non-publication. Missing, foreign, substituted,
+or internally inconsistent identities and bindings fail closed.
+
+### Version 6.118.0: visible accepted website generation
+
+Version 6.118.0 carries the complete verified website capability binding from
+durable intake into the outer CMS dispatch status, authenticated HTTP edge,
+capability snapshot, OpenAPI profile, and provider-neutral reference client.
+An accepted status now identifies the exact delivery, runtime, commercial
+rendering, and terminal receiver generations that accepted the request. An
+outer dispatch row that is still pending or has failed exposes no such binding.
+
+The projection is reconstructed only from the already validated canonical
+response stored by the outbox. Its inner binding hash and delivery capability
+pin are checked again at every status boundary. Missing, altered, partially
+substituted, or prematurely populated bindings fail closed. Tests cover all
+three operations, pre-acceptance absence, authenticated status serialization,
+client-side substitution, and validated restart recovery.
+
+### Version 6.117.0: receiver-bound website delivery generation
+
+Version 6.117.0 binds the website-side durable delivery generation to the
+terminal receiver capability SHA-256 already verified by the source runtime.
+The trusted host carries that pin through the sidecar adapter, its synthetic
+contract digest, the guarded SQLite binding, and the public submission
+capability snapshot. A missing, changed, or substituted receiver generation
+now blocks restart and queue access before any downstream network call.
+
+The binding table advances to v2 and the adapter contract to v3. An exact,
+empty v1 database can migrate transactionally only when its historical v2
+adapter digest is reconstructed from the same trusted inputs. A non-empty,
+ambiguous, altered, or unbound generation remains fail-closed. Tests cover
+restart drift, in-process mutation, exact empty migration, legacy work, and
+outer capability tampering.
+
+### Version 6.116.0: receiver-bound public source projections
+
+Version 6.116.0 carries the terminal receiver capability SHA-256 through the
+source service's status and health projections, the authenticated HTTP edge,
+the provider-neutral reference client, and the outer CMS lifecycle view. A
+healthy enabled monitor now exposes the same exact digest at both service and
+component level; disabled monitoring remains explicitly `null`.
+
+The source status, health, and capability schemas advance together so old
+deployment pins cannot silently accept the expanded contract. Missing,
+substituted, malformed, or internally inconsistent receiver bindings block
+before a caller can trust the projected processing state. Tests exercise the
+real WSGI path and reject altered status, health, and outer lifecycle views.
+
+### Version 6.115.0: durable terminal-monitor capability binding
+
+Version 6.115.0 binds the source CMS's durable terminal-processing monitor to
+one exact receiver capability SHA-256. The pin is stored in the monitor schema,
+returned in content-free health, checked before status, health, and worker
+progress, and required on every accepted receiver status response. A changed
+client pin or response generation now blocks before remote state can replace
+known state.
+
+An empty v1 monitor can be transactionally adopted into the bound v2 schema.
+Existing unbound monitoring work is never guessed or relabelled: startup stays
+fail-closed until the operator resolves it under verified deployment evidence.
+Tests cover response substitution, runtime pin mutation, restart drift, empty
+migration, and non-empty legacy rejection.
+
+### Version 6.114.0: race-free terminal receiver contract
+
+Version 6.114.0 closes the capability discovery-to-operation race across the
+terminal CMS callback boundary. Every notification, status, health, readiness,
+and OpenAPI request now carries the exact freshly verified receiver capability
+SHA-256 in the authenticated
+`X-Localization-Capabilities-SHA256` precondition header. Missing and stale
+generations return `428` and `412` before durable intake or operational access.
+
+The v3 receiver capability contract and v2 OpenAPI document publish this rule
+for every non-discovery operation. Both reference clients reserve and bind the
+header, including the one-attempt notifier's deployment-pinned capability
+digest. Tests prove stale generations cannot store a notification and that all
+control routes remain read-only when their precondition fails.
+
+### Version 6.113.0: verified terminal receiver OpenAPI client
+
+Version 6.113.0 completes the provider-neutral OpenAPI path through the
+terminal receiver reference client. `openapi()` performs fresh pinned
+capability discovery, fetches the separately authenticated document, and
+reconstructs the only acceptable OpenAPI 3.1 profile locally from that exact
+generation. A substituted document cannot become trusted by recomputing its
+own hash, and generation changes between the two requests fail closed.
+
+The bounded transport now distinguishes the 16-KiB request limit from the
+advertised 1-MiB response limit, allowing the complete closed contract without
+weakening request validation. Tests cover the real large response, custom
+notification paths, self-rehashed substitutions, capability races, oversized
+responses, and read-only runtime behavior.
+
+### Version 6.112.0: capability-bound terminal receiver OpenAPI
+
+Version 6.112.0 completes the machine-readable callback contract for the
+durable CMS terminal-notification receiver. Its authenticated, separately
+scoped OpenAPI 3.1 route publishes all six active operations, including a
+custom intake path, closed request and response schemas, required binding
+headers, fail-closed error forms, and degraded monitor responses.
+
+The v2 receiver capability generation pins the OpenAPI document schema and
+operation. Every returned document and envelope is bound to the complete
+capability SHA-256, and the envelope also carries the canonical document hash.
+The route reads no inbox content, claims no processing lease, and performs no
+model or publication work.
+
+### Version 6.111.0: capability-preconditioned CMS operations
+
+Version 6.111.0 closes the capability discovery-to-operation race at the
+public CMS sidecar. Every route except capability discovery now requires the
+authenticated `X-Localization-Capabilities-SHA256` header to equal the exact
+active complete capability generation. A missing precondition returns the
+contract-bound `428`; a stale or substituted generation returns `412` before
+enqueue, status lookup, monitor access, OpenAPI generation, or other runtime
+work. The reference client reserves and supplies the header automatically and
+includes the digest in its host-authentication context.
+
+The v8 capability contract and v7 OpenAPI document publish the required header
+per operation and bind both precondition failures to their exact status and
+error code. Capability discovery remains the single authenticated bootstrap
+route and does not require knowledge of its own response digest.
+
+### Version 6.110.0: exact CMS error reasons
+
+Version 6.110.0 binds every public CMS sidecar failure reason to its exact
+route and HTTP status. The ordered error-code maps participate in the
+capability SHA-256 and are reproduced as closed per-response enums in OpenAPI.
+Bodyless discovery and monitor routes now also advertise their real `411` and
+`413` framing outcomes, so generated clients do not mistake an oversized or
+invalid `Content-Length` for an undocumented server response.
+
+The provider-neutral reference client validates the complete error envelope
+against that pinned map before exposing its status and stable remote code as
+content-free exception metadata. Unknown codes, extra fields, mismatched
+statuses, malformed JSON, and stale capability generations remain blocked.
+Only a verified advertised server failure can influence the caller's retry
+decision; no source or target content is copied into the exception message.
+
+### Version 6.109.0: executable CMS state invariants
+
+Version 6.109.0 binds the public CMS sidecar's cross-field state rules into
+the live capability generation and its OpenAPI profile. Generated validators
+can now reject a leased submission without an expiry, a non-leased submission
+with one, or an accepted submission without all remote status, attempt and
+digest evidence. Relationships that JSON Schema cannot express portably, such
+as attempt ceilings and request-identity equality, remain explicit stable
+invariant identifiers rather than disappearing into prose.
+
+Health now proves that `ok` has neither failed work nor expired leases, while a
+blocked state must have at least one of them. Readiness is a closed union:
+`ready` requires a running worker, healthy outbox and no error; `not_ready`
+requires a content-free error code. Every operation publishes its exact
+response-invariant list, which participates in the capability SHA-256 and is
+copied unchanged into OpenAPI.
+
+### Version 6.108.0: exact CMS failure contracts
+
+Version 6.108.0 makes every public CMS sidecar outcome explicit in both live
+capabilities and OpenAPI. Each operation publishes its complete bounded set of
+HTTP error statuses alongside its success status; those lists participate in
+the capability SHA-256 and are reproduced as concrete OpenAPI responses rather
+than an ambiguous `default` branch. A stale client therefore cannot silently
+miss a conflict, tenant-safe not-found result, framing rejection, or runtime
+outage while still matching the active deployment pin.
+
+Health and readiness now model their real `503` behavior precisely. The body
+may be a validated content-free degraded monitor response or a fail-closed
+error envelope, expressed as a closed `oneOf`; all other advertised non-success
+statuses accept only the error envelope. Runtime tests compare every operation,
+status code, extension, and response schema with the live capability generation.
+
+### Version 6.107.0: self-describing CMS capabilities
+
+Version 6.107.0 closes the remaining untyped discovery boundary in the public
+CMS OpenAPI profile. `CapabilitiesResponse` now references a recursively
+closed schema for the complete active capability generation: all routes,
+methods, scopes, principals, request and response schemas, limits, retry
+owners, source-event schemas, downstream pin, and fail-closed semantics are
+fixed values rather than an open object.
+
+The capability document now also carries the exact OpenAPI document schema
+version. That field participates in the capability SHA-256, so an older or
+substituted API description cannot retain the same deployment pin. Runtime
+fixtures verify every nested property, leaf value, required field, and
+`additionalProperties: false` boundary without storing customer content.
+
+### Version 6.106.0: closed CMS source payload schemas
+
+Version 6.106.0 makes the capability-bound OpenAPI document directly usable
+for CMS client generation. Its enqueue body now contains a discriminated,
+closed union for one content change, cancellation, or tombstone instead of an
+opaque payload object. Every operation has its exact runtime schema ID,
+required identity fields, positive source generation, and no unknown fields.
+
+The content-change schema includes the complete provider-neutral localization
+request: source identity and NFC text, exact BCP-47 locale, content type,
+glossary, policy, model and software versions, and an optional unique target
+set restricted to all 24 current EU locale profiles. Runtime validation remains
+authoritative for UTF-8 byte limits, canonical locale casing, and exclusion of
+the source language. The v3 capability hash binds all three payload schema IDs,
+so stale generated clients fail closed before enqueue.
+
 ### Version 6.105.0: capability-bound OpenAPI discovery
 
 Version 6.105.0 publishes an authenticated, origin-free OpenAPI 3.1 document
@@ -1674,7 +2579,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.105.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.168.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

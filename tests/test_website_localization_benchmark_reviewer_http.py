@@ -78,8 +78,17 @@ def review_request(*, phase="target_native", suffix="1", content_type="marketing
         if content_type == "commercial":
             dimensions = list(BENCHMARK._WORKER._COMMERCIAL.DIMENSIONS)
             review_input["benchmark_suite"]["commercial_dimensions"] = dimensions
+            review_input["benchmark_suite"]["commercial_offer_count"] = 2
+            source_text = review_input["source"]["text"]
+            midpoint = len(source_text) // 2
+            review_input["benchmark_suite"]["commercial_offer_registry"] = (
+                BENCHMARK._SUITE._commercial_offer_registry(
+                    source_text, (((0, midpoint),), ((midpoint, len(source_text)),)),
+                    (),
+                )
+            )
             review_input["response_schema"]["commercial_evaluation"] = (
-                BENCHMARK._commercial_response_contract(dimensions)
+                BENCHMARK._commercial_response_contract(dimensions, 2)
             )
     else:
         review_input["target_terms"] = []
@@ -115,13 +124,44 @@ def review_response(request, *, preference="A", **overrides):
     }
     contract = request.input["response_schema"].get("commercial_evaluation")
     if contract is not None:
+        texts = {
+            item["label"]: item["text"] for item in request.input["variants"]
+        }
+        count = contract["offer_count"]
+        target_offer_registries = {
+            label: BENCHMARK._commercial_target_offer_registry(
+                text,
+                [
+                    [(len(text) * index // count,
+                      len(text) * (index + 1) // count)]
+                    for index in range(count)
+                ],
+                [],
+            )
+            for label, text in texts.items()
+        }
         value["commercial_evaluation"] = {
             "schema": BENCHMARK.COMMERCIAL_REVIEW_SCHEMA,
+            "offer_count": count,
+            "target_offer_registries": target_offer_registries,
             "dimensions": [
                 {
                     "dimension": item["dimension"],
                     "variants": {
-                        label: {"status": "equivalent", "defect_index": None}
+                        label: {
+                            "target_offer_registry_sha256": (
+                                target_offer_registries[label]["sha256"]
+                            ),
+                            "status": "equivalent",
+                            "offers": [
+                                {
+                                    "offer_index": offer["offer_index"],
+                                    "status": "equivalent",
+                                    "defect_index": None,
+                                }
+                                for offer in item["variants"][label]["offers"]
+                            ],
+                        }
                         for label in ("A", "B")
                     },
                 }
@@ -226,6 +266,31 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
             sent["input"]["benchmark_suite"]["commercial_dimensions"],
             dimensions,
         )
+        target_registries = response["commercial_evaluation"][
+            "target_offer_registries"
+        ]
+        variant_texts = {
+            item["label"]: item["text"] for item in sent["input"]["variants"]
+        }
+        for label in ("A", "B"):
+            self.assertEqual(
+                target_registries[label]["target_length"],
+                len(variant_texts[label]),
+            )
+            self.assertEqual(
+                target_registries[label]["target_sha256"],
+                hashlib.sha256(variant_texts[label].encode("utf-8")).hexdigest(),
+            )
+        self.assertEqual(
+            sent["input"]["benchmark_suite"]["commercial_offer_count"], 2,
+        )
+        registry = sent["input"]["benchmark_suite"][
+            "commercial_offer_registry"
+        ]
+        self.assertEqual(registry["offset_unit"], "unicode-code-point")
+        self.assertEqual(
+            [offer["offer_index"] for offer in registry["offers"]], [0, 1],
+        )
         self.assertEqual(
             [
                 item["dimension"]
@@ -254,6 +319,17 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
         self.assertEqual((error.code, error.retryable), ("request_invalid", False))
         self.assertEqual(authentication_calls, [])
 
+        invalid_registry = review_request(
+            phase="source_fidelity", content_type="commercial",
+            suffix="registry-drift",
+        )
+        invalid_registry.input["benchmark_suite"][
+            "commercial_offer_registry"
+        ]["offers"][0]["source_spans"][0]["end"] -= 1
+        error = self.failure(lambda: adapter.review(invalid_registry))
+        self.assertEqual((error.code, error.retryable), ("request_invalid", False))
+        self.assertEqual(authentication_calls, [])
+
         request = review_request(
             phase="source_fidelity", content_type="commercial", suffix="ack",
         )
@@ -263,6 +339,36 @@ class HTTPBenchmarkReviewerAdapterTests(unittest.TestCase):
             request, commercial_evaluation=incomplete["commercial_evaluation"],
         )]
         error = self.failure(lambda: adapter.review(request))
+        self.assertEqual((error.code, error.retryable), ("response_invalid", False))
+
+        target_drift = review_request(
+            phase="source_fidelity", content_type="commercial",
+            suffix="target-registry-drift",
+        )
+        response = review_response(target_drift)
+        response["commercial_evaluation"]["target_offer_registries"]["A"][
+            "target_length"
+        ] += 1
+        self.transport.results = [http_response(
+            target_drift,
+            commercial_evaluation=response["commercial_evaluation"],
+        )]
+        error = self.failure(lambda: adapter.review(target_drift))
+        self.assertEqual((error.code, error.retryable), ("response_invalid", False))
+
+        decision_drift = review_request(
+            phase="source_fidelity", content_type="commercial",
+            suffix="decision-registry-drift",
+        )
+        response = review_response(decision_drift)
+        response["commercial_evaluation"]["dimensions"][0]["variants"][
+            "A"
+        ]["target_offer_registry_sha256"] = "0" * 64
+        self.transport.results = [http_response(
+            decision_drift,
+            commercial_evaluation=response["commercial_evaluation"],
+        )]
+        error = self.failure(lambda: adapter.review(decision_drift))
         self.assertEqual((error.code, error.retryable), ("response_invalid", False))
 
     def test_headers_bind_authentication_idempotency_and_request_hash(self):

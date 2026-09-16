@@ -34,11 +34,12 @@ MAX_RESPONSE_BYTES = 4_000_000
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
-AUTH_CONTEXT_SCHEMA = "blun.cms-public-submission-dispatch-client-auth-context.v1"
+AUTH_CONTEXT_SCHEMA = "blun.cms-public-submission-dispatch-client-auth-context.v4"
 RESERVED_HEADERS = {
     "accept", "connection", "content-length", "content-type", "host",
     "idempotency-key", "transfer-encoding",
     "x-localization-source-payload-sha256",
+    "x-localization-capabilities-sha256",
 }
 
 
@@ -64,12 +65,31 @@ class CMSSourceDeliverySubmissionDispatchClientBlocked(RuntimeError):
 
     cms_source_delivery_submission_dispatch_client_failure = True
 
-    def __init__(self, code: str, *, retryable: bool):
-        if ERROR_CODE.fullmatch(code) is None or not isinstance(retryable, bool):
+    def __init__(
+        self, code: str, *, retryable: bool,
+        http_status: int | None = None, remote_error_code: str | None = None,
+    ):
+        remote_valid = (
+            remote_error_code is None
+            or isinstance(remote_error_code, str)
+            and ERROR_CODE.fullmatch(remote_error_code) is not None
+        )
+        status_valid = (
+            http_status is None
+            or isinstance(http_status, int) and not isinstance(http_status, bool)
+            and 400 <= http_status <= 599
+        )
+        if (
+            ERROR_CODE.fullmatch(code) is None or not isinstance(retryable, bool)
+            or not remote_valid or not status_valid
+            or (remote_error_code is None) != (http_status is None)
+        ):
             raise ValueError("submission sidecar client failure is invalid")
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+        self.http_status = http_status
+        self.remote_error_code = remote_error_code
 
 
 @dataclass(frozen=True)
@@ -118,10 +138,15 @@ class URLTransport:
             response.close()
 
 
-def _fail(code: str, *, retryable: bool = False) -> None:
+def _fail(
+    code: str, *, retryable: bool = False,
+    http_status: int | None = None, remote_error_code: str | None = None,
+) -> None:
     raise CMSSourceDeliverySubmissionDispatchClientBlocked(
         "source_delivery_submission_dispatch_client." + code,
         retryable=retryable,
+        http_status=http_status,
+        remote_error_code=remote_error_code,
     )
 
 
@@ -234,15 +259,42 @@ def _authentication_headers(provider, context) -> dict[str, str]:
     return result
 
 
-def _json_response(result: Any, allowed_statuses: set[int]) -> dict[str, Any]:
+def _remote_error(
+    value: Any, status: int, error_codes: Mapping[str, Any],
+) -> None:
+    allowed = error_codes.get(str(status))
+    code = value.get("error_code") if isinstance(value, Mapping) else None
+    if (
+        not isinstance(allowed, list) or not allowed
+        or not all(isinstance(item, str) for item in allowed)
+        or not isinstance(value, Mapping)
+        or set(value) != {"schema", "status", "error_code"}
+        or value.get("schema") != _HTTP.ERROR_SCHEMA
+        or value.get("status") != "BLOCK"
+        or not isinstance(code, str) or code not in allowed
+    ):
+        _fail("error_response", retryable=status >= 500)
+    _fail(
+        "http_status", retryable=status in {408, 425, 429} or status >= 500,
+        http_status=status, remote_error_code=code,
+    )
+
+
+def _json_response(
+    result: Any, allowed_statuses: set[int], error_codes: Mapping[str, Any],
+) -> dict[str, Any]:
     if (
         not isinstance(result, HTTPResult) or isinstance(result.status, bool)
         or not isinstance(result.status, int) or not 100 <= result.status <= 599
     ):
         _fail("transport_invalid", retryable=True)
-    if result.status not in allowed_statuses:
-        if 300 <= result.status <= 399:
-            _fail("redirect")
+    if 300 <= result.status <= 399:
+        _fail("redirect")
+    known_error = (
+        result.status not in allowed_statuses
+        and str(result.status) in error_codes
+    )
+    if result.status not in allowed_statuses and not known_error:
         _fail(
             "http_status",
             retryable=result.status in {408, 425, 429} or result.status >= 500,
@@ -284,20 +336,33 @@ def _json_response(result: Any, allowed_statuses: set[int]) -> dict[str, Any]:
         _fail("response_json")
     if not isinstance(value, dict):
         _fail("response_binding")
+    if known_error:
+        _remote_error(value, result.status, error_codes)
     return value
 
 
-def _status(value: Any, identity: Mapping[str, str]) -> dict[str, Any]:
+def _status(
+    value: Any, identity: Mapping[str, str],
+    expected_commercial_binding: Mapping[str, str],
+) -> dict[str, Any]:
     fields = {
         "operation", "request_id", "event_id", "site_id", "payload_sha256",
+        "commercial_contract_binding",
         "source_max_attempts", "delivery_max_attempts", "status", "attempts",
         "client_max_attempts", "next_attempt_at", "lease_expires_at",
         "lease_expired", "last_error_code", "remote_status", "remote_attempts",
-        "remote_capabilities_sha256", "remote_binding_sha256", "response_sha256",
+        "remote_capabilities_sha256", "remote_binding_sha256",
+        "remote_website_capability_binding", "response_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         _fail("status_binding")
     payload = dict(value)
+    commercial_binding = payload["commercial_contract_binding"]
+    if commercial_binding is not None and (
+        commercial_binding != expected_commercial_binding
+        or payload["operation"] != "change"
+    ):
+        _fail("status_binding")
     valid = (
         payload["operation"] in _HTTP.OPERATIONS
         and all(payload.get(name) == wanted for name, wanted in identity.items())
@@ -325,12 +390,34 @@ def _status(value: Any, identity: Mapping[str, str]) -> dict[str, Any]:
             "remote_capabilities_sha256", "remote_binding_sha256", "response_sha256",
         ))
     )
+    binding = payload["remote_website_capability_binding"]
+    if binding is not None:
+        try:
+            normalized_binding = _HTTP._website_capability_binding(binding)
+        except Exception:
+            _fail("status_binding")
+        if normalized_binding != binding:
+            _fail("status_binding")
+        binding = normalized_binding
     remote = (
         payload["remote_status"], payload["remote_attempts"],
         payload["remote_capabilities_sha256"], payload["remote_binding_sha256"],
-        payload["response_sha256"],
+        binding, payload["response_sha256"],
     )
-    if not valid or (payload["status"] == "accepted") != all(item is not None for item in remote):
+    accepted = payload["status"] == "accepted"
+    if (
+        not valid
+        or accepted != all(item is not None for item in remote)
+        or accepted and (
+            binding["delivery_capabilities_sha256"]
+            != payload["remote_capabilities_sha256"]
+            or hashlib.sha256(_canonical(binding)).hexdigest()
+            != payload["remote_binding_sha256"]
+            or commercial_binding is not None
+            and binding["commercial_rendering_registry_sha256"]
+            != commercial_binding["commercial_rendering_registry_sha256"]
+        )
+    ):
         _fail("status_binding")
     return payload
 
@@ -378,19 +465,30 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
     def __repr__(self) -> str:
         return "CMSSourceDeliverySubmissionDispatchHTTPClient(configured=True)"
 
-    def _request(self, method, path, scope, body, statuses, context, headers=None):
+    def _request(
+        self, method, path, scope, body, statuses, context,
+        error_codes, headers=None,
+    ):
         authentication = {
             "schema": AUTH_CONTEXT_SCHEMA, "method": method,
             "origin": self.origin, "path": path, "scope": scope,
             "body_sha256": hashlib.sha256(body or b"").hexdigest(),
             **context,
         }
+        if path != _HTTP.CAPABILITIES_PATH:
+            authentication["capabilities_sha256"] = (
+                self.expected_capabilities_sha256
+            )
         request_headers = _authentication_headers(
             self.authentication_headers, authentication,
         )
         request_headers["Accept"] = "application/json"
         if body is not None:
             request_headers["Content-Type"] = "application/json; charset=utf-8"
+        if path != _HTTP.CAPABILITIES_PATH:
+            request_headers[_HTTP.CAPABILITIES_PRECONDITION_HEADER] = (
+                self.expected_capabilities_sha256
+            )
         if headers:
             request_headers.update(headers)
         try:
@@ -402,12 +500,13 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             raise
         except Exception:
             _fail("network", retryable=True)
-        return _json_response(result, statuses)
+        return _json_response(result, statuses, error_codes)
 
     def capabilities(self) -> Mapping[str, Any]:
+        contract = self._expected_capabilities["operations"]["capabilities"]
         response = self._request(
             "GET", _HTTP.CAPABILITIES_PATH, _HTTP.SCOPES[_HTTP.CAPABILITIES_PATH],
-            None, {200}, {},
+            None, {200}, {}, contract["error_codes"],
         )
         if (
             set(response) != {"schema", "capabilities"}
@@ -438,11 +537,20 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             "source_max_attempts": source_max_attempts,
             "delivery_max_attempts": delivery_max_attempts,
             "client_max_attempts": client_max_attempts,
+            "commercial_contract_binding": (
+                self._expected_capabilities["commercial_contract_binding"]
+                if (
+                    copied.get("schema") == _HTTP._DISPATCH._CLIENT._CMS.CHANGE_SCHEMA
+                    and copied.get("localization", {}).get("content_type")
+                    == "commercial"
+                ) else None
+            ),
         }
         body = _canonical(request)
         response = self._request(
             contract["method"], contract["path"], contract["scope"], body,
             {contract["success_status"]}, identity,
+            contract["error_codes"],
             {
                 "Idempotency-Key": identity["request_id"],
                 "X-Localization-Source-Payload-Sha256": hashlib.sha256(
@@ -461,11 +569,16 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             or response.get("accepted_implies_publication") is not False
         ):
             _fail("enqueue_binding")
-        status = _status(response.get("status"), identity)
+        status = _status(
+            response.get("status"), identity,
+            self._expected_capabilities["commercial_contract_binding"],
+        )
         if (
             status["source_max_attempts"] != source_max_attempts
             or status["delivery_max_attempts"] != delivery_max_attempts
             or status["client_max_attempts"] != client_max_attempts
+            or status["commercial_contract_binding"]
+            != request["commercial_contract_binding"]
         ):
             _fail("enqueue_binding")
         return response
@@ -490,7 +603,7 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
         body = _canonical({"schema": contract["request_schema"], **identity})
         response = self._request(
             contract["method"], contract["path"], contract["scope"], body,
-            {contract["success_status"]}, identity,
+            {contract["success_status"]}, identity, contract["error_codes"],
         )
         if (
             set(response) != {
@@ -503,7 +616,114 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
             or response.get("accepted_implies_publication") is not False
         ):
             _fail("status_binding")
-        _status(response.get("status"), identity)
+        _status(
+            response.get("status"), identity,
+            self._expected_capabilities["commercial_contract_binding"],
+        )
+        return response
+
+    def lifecycle(
+        self, operation: str, request_id: str, event_id: str, site_id: str,
+        payload_sha256: str,
+    ) -> Mapping[str, Any]:
+        identity = {
+            "operation": operation, "request_id": request_id,
+            "event_id": event_id, "site_id": site_id,
+            "payload_sha256": payload_sha256,
+        }
+        if (
+            operation not in _HTTP.OPERATIONS
+            or not all(_token(identity[name]) for name in (
+                "request_id", "event_id", "site_id",
+            ))
+            or operation == "change" and request_id != event_id
+            or not _sha256(payload_sha256)
+        ):
+            _fail("request_invalid")
+        contract = self._contract("lifecycle")
+        body = _canonical({"schema": contract["request_schema"], **identity})
+        response = self._request(
+            contract["method"], contract["path"], contract["scope"], body,
+            {contract["success_status"]}, identity, contract["error_codes"],
+        )
+        if (
+            set(response) != {
+                "schema", "api_schema", "lifecycle", "capabilities_sha256",
+                "accepted_implies_publication",
+            }
+            or response.get("schema") != contract["response_schema"]
+            or response.get("api_schema") != _HTTP.API_SCHEMA
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("accepted_implies_publication") is not False
+            or not isinstance(response.get("lifecycle"), Mapping)
+        ):
+            _fail("lifecycle_binding")
+        lifecycle = response["lifecycle"]
+        try:
+            normalized = _HTTP._lifecycle_payload(
+                _HTTP._DISPATCH.SubmissionDispatchLifecycle(
+                    dispatch_status=_HTTP._DISPATCH.SubmissionDispatchStatus(
+                        **lifecycle["dispatch_status"]
+                    ),
+                    source_lifecycle=lifecycle["source_lifecycle"],
+                ),
+                identity,
+            )
+        except Exception:
+            _fail("lifecycle_binding")
+        if normalized != lifecycle:
+            _fail("lifecycle_binding")
+        return response
+
+    def commercial_profile(self) -> Mapping[str, Any]:
+        """Return the exact live-bound, content-free commercial contract."""
+        contract = self._contract("commercial_profile")
+        response = self._request(
+            contract["method"], contract["path"], contract["scope"], None,
+            {contract["success_status"]}, {}, contract["error_codes"],
+        )
+        if (
+            set(response) != {
+                "schema", "api_schema", "commercial_profile",
+                "commercial_rendering_registry", "website_capability_binding",
+                "capabilities_sha256", "content_free",
+                "publication_authority",
+            }
+            or response.get("schema") != contract["response_schema"]
+            or response.get("api_schema") != _HTTP.API_SCHEMA
+            or response.get("capabilities_sha256")
+            != self.expected_capabilities_sha256
+            or response.get("content_free") is not True
+            or response.get("publication_authority") is not False
+            or response.get("commercial_profile")
+            != self._expected_capabilities["commercial_profile"]
+            or response.get("commercial_rendering_registry")
+            != self._expected_capabilities["commercial_rendering_registry"]
+            or not isinstance(response.get("website_capability_binding"), Mapping)
+        ):
+            _fail("commercial_profile_binding")
+        try:
+            value = _HTTP._DISPATCH.SubmissionDispatchCommercialProfile(
+                commercial_profile=response["commercial_profile"],
+                commercial_rendering_registry=response[
+                    "commercial_rendering_registry"
+                ],
+                website_capability_binding=response[
+                    "website_capability_binding"
+                ],
+            )
+            normalized = _HTTP._commercial_profile_payload(value)
+        except Exception:
+            _fail("commercial_profile_binding")
+        if (
+            normalized["commercial_profile"] != response["commercial_profile"]
+            or normalized["commercial_rendering_registry"]
+            != response["commercial_rendering_registry"]
+            or normalized["website_capability_binding"]
+            != response["website_capability_binding"]
+        ):
+            _fail("commercial_profile_binding")
         return response
 
     def health(self) -> Mapping[str, Any]:
@@ -517,7 +737,7 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
         contract = self._contract("openapi")
         response = self._request(
             contract["method"], contract["path"], contract["scope"], None,
-            {contract["success_status"]}, {},
+            {contract["success_status"]}, {}, contract["error_codes"],
         )
         expected = _HTTP._OPENAPI.build_document(self._expected_capabilities)
         if (
@@ -538,10 +758,10 @@ class CMSSourceDeliverySubmissionDispatchHTTPClient:
         contract = self._contract(name)
         response = self._request(
             contract["method"], contract["path"], contract["scope"], None,
-            {contract["success_status"], 503}, {},
+            {contract["success_status"], 503}, {}, contract["error_codes"],
         )
         if response.get("schema") == _HTTP.ERROR_SCHEMA:
-            _fail("http_status", retryable=True)
+            _remote_error(response, 503, contract["error_codes"])
         key = name
         if (
             set(response) != {"schema", key, "capabilities_sha256"}

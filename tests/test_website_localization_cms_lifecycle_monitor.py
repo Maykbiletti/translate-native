@@ -173,7 +173,9 @@ class DurableCMSLifecycleMonitorTests(unittest.TestCase):
             max_consecutive_failures=3, now=100,
         )
         client = ScriptedClient(
-            support.CLIENT.CMSClientFailed("network", retryable=True),
+            support.CLIENT.CMSClientFailed(
+                "cms.release.policy_unavailable", retryable=True,
+            ),
             lifecycle(source),
             support.CLIENT.CMSClientFailed("network", retryable=True),
         )
@@ -183,8 +185,11 @@ class DurableCMSLifecycleMonitorTests(unittest.TestCase):
         recovered = self.monitor.run_once(client, "worker", now=105)
         failed_again = self.monitor.run_once(client, "worker", now=135)
 
-        self.assertEqual((failed_once.state, failed_once.next_poll_at), (
-            "retry_wait", 105,
+        self.assertEqual((
+            failed_once.state, failed_once.next_poll_at,
+            failed_once.error_code,
+        ), (
+            "retry_wait", 105, "cms.release.policy_unavailable",
         ))
         self.assertIsNone(early)
         self.assertEqual((recovered.state, recovered.consecutive_failures), (

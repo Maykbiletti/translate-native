@@ -1,5 +1,523 @@
 # Version 6 premortem
 
+## Phase-bound benchmark findings (16 September 2026)
+
+Assume both benchmark reviews run in the correct order, but the signed case
+keeps only their combined defect totals.
+
+- A target-native finding could later be relabelled as source-fidelity evidence
+  without changing the aggregate.
+- A commercial verdict could reference a valid case finding from the wrong
+  review phase.
+- Missing or duplicated finding hashes could still agree with a separately
+  edited total.
+- Persisting the original finding object would leak excerpts or reviewer prose.
+
+Each ordered pass will therefore retain only its exact candidate and baseline
+finding hashes by severity. Result validation will reconstruct aggregate counts
+from those phase registries, reject duplicate or malformed hashes, and require
+commercial finding registries to equal the source-fidelity pass exactly. No
+finding text, excerpt, reason, source, or target is added to signed evidence.
+
+## Finding-bound commercial offer verdicts (16 September 2026)
+
+Assume a reviewer correctly references a source-fidelity defect while reviewing
+an offer, but unblinding keeps only the offer status and discards which exact
+finding justified it.
+
+- A major or blocking status could later be reassigned to another offer or
+  dimension without changing aggregate counts.
+- Storing an arbitrary SHA-256-shaped value would not prove that the finding
+  occurred in the matching variant and severity list.
+- Parallel status and hash arrays could drift in length or order after restart
+  or report reconstruction.
+- Retaining excerpts or reasons would leak reviewer prose into durable,
+  otherwise content-free evidence.
+
+The source-fidelity boundary will therefore resolve every non-passing offer's
+defect index to the exact validated finding hash. Unblinding will preserve
+content-free candidate and baseline finding registries by severity and store
+each offer as one indivisible status/hash record. Signed-result and report
+validation will reject missing, foreign, wrong-severity, malformed, or
+unexpected hashes. Passing and absent offers require `null`; reviewer prose is
+discarded, and the target-native pass remains unchanged.
+
+## Decision-bound commercial target registries (16 September 2026)
+
+Assume both anonymous target registries are complete and valid, but an
+individual commercial dimension decision is copied from another variant or
+survives a later registry replacement.
+
+- A reviewer could swap an A/B decision while leaving both global registries
+  independently valid.
+- A registry could be replaced and canonically rehashed while existing
+  dimension decisions still refer to the previous target partition.
+- Unblinding could retain only top-level registry digests and lose the binding
+  between each signed candidate or baseline decision and its exact registry.
+- Adding the binding to the target-native pass would reveal commercial
+  structure and weaken source-blind review independence.
+
+Every source-fidelity decision will therefore repeat the exact digest of its
+anonymous variant's validated target registry. Validation will reject missing,
+foreign, swapped, or stale decision bindings. Unblinding will preserve an
+explicit candidate and baseline registry digest on every signed dimension row
+and revalidate it against the corresponding top-level digest. The target-native
+contract remains unchanged and contains neither registries nor decision
+bindings.
+
+## Target-bound commercial benchmark offer registry (16 September 2026)
+
+Assume the source-fidelity reviewer reports a complete per-offer status matrix,
+but silently attaches an opaque offer index to different target passages in
+variants A and B.
+
+- A reviewer could swap the two variant registries while preserving otherwise
+  valid statuses and hashes.
+- UTF-8 byte offsets could split native characters or disagree with Python's
+  Unicode-code-point indexing.
+- Gaps, overlaps, or empty offer ranges could leave a changed price or
+  condition outside every reviewed offer.
+- Deriving target ranges with a language-independent regular expression could
+  misread reordered transcreation, number words, native digits, or shared
+  commercial conditions.
+- Returning target mappings to the target-native pass would weaken its source-
+  blind independence.
+
+The source-fidelity reviewer must therefore supply one semantic, complete
+Unicode-code-point partition for each exact anonymous target variant. The
+boundary validates variant identity, target length, ordered offer indexes,
+non-empty offer ranges, explicit shared ranges, complete coverage, and a
+canonical digest; it never invents ranges. Only content-free candidate and
+baseline registry digests survive unblinding into the signed case result.
+Target-native requests remain free of every commercial registry.
+
+## Source-bound commercial benchmark offer registry (16 September 2026)
+
+Assume two independent reviewers receive the same opaque offer count but attach
+offer index 0 to different parts of a commercial source.
+
+- Byte offsets could split native Unicode even when the documented ranges look
+  valid as character positions.
+- Overlapping, reordered, or uncovered regions could silently assign one price
+  or condition to the wrong offer.
+- Shared tax, discount, renewal, or cancellation conditions could be treated as
+  belonging to only the nearest offer.
+- Publishing the registry to the source-blind pass would reveal source layout
+  and weaken the independent native-quality decision.
+
+Every commercial fixture will carry a manually versioned, complete partition
+of its exact source into ordered Unicode-code-point spans for each opaque offer
+and explicitly shared spans. The suite, reviewer boundary, durable evidence,
+and signed case result will bind the canonical registry digest. Validation will
+reject gaps, overlaps, stale lengths, bad indexes, and non-commercial exposure;
+the target-native pass will receive none of the registry.
+
+## Offer-complete commercial benchmark verdicts (16 September 2026)
+
+Assume the blind commercial benchmark reports a publishable result even though
+one of several source offers contains a changed price or condition.
+
+- One dimension-level verdict could describe only the first offer and silently
+  omit later offers.
+- A reviewer could return the right number of rows in the wrong order or reuse
+  an offer index.
+- A harmless offer could determine the aggregate verdict while a major or
+  blocking defect in another offer remains hidden.
+- A signed stored result could lose its per-offer evidence after unblinding or
+  report aggregation.
+
+The suite will register an explicit opaque offer count for every commercial
+fixture. Source-fidelity review will require one ordered status per offer, per
+dimension, and per anonymous variant, with a severity-derived aggregate that
+cannot override any major or blocking offer defect. Signed case results and
+reports will retain and revalidate the complete matrix. Tests will cover
+missing, duplicated and reordered offers, inconsistent aggregates, unbound
+defects, tampered stored matrices, and multi-offer report blocking.
+
+## Durable general locale-policy invalidation (15 September 2026)
+
+Assume a CMS accepts correctly signed localized content and the installed
+target-locale quality policy changes before a later read or replay.
+
+- Release evidence could prove the review receipt while omitting the exact
+  language-profile generation that governed it.
+- A coherently substituted locale, version, and digest could pass a shape-only
+  check after restart.
+- Reusing the commercial-only binding would leave ordinary content uncovered
+  or incorrectly couple it to the price-and-offer policy.
+- A missing or failing general profile resolver could escape as an internal
+  error or allow an old bundle to remain active.
+
+Every release proof will carry the exact current target-locale quality profile
+and will be revalidated before approval lookup, CMS commit, active read, health,
+or idempotent replay. The general binding applies to all content; the commercial
+binding remains a separate add-on. Tests will cover all 24 EU locales, ordinary
+content, profile drift and substitution, resolver failure, durable
+read/health/replay blocking, and safe tombstone deletion.
+
+## Durable commercial locale-policy invalidation (15 September 2026)
+
+Assume a CMS accepts correctly signed commercial copy and the installed
+locale-specific quality policy changes before a later read or replay.
+
+- The stored three-field quality binding could remain structurally valid while
+  its CLDR, morphology, terminology, or evaluation generation is obsolete.
+- A coherently substituted version and digest could pass a shape-only release-
+  evidence check after restart.
+- Applying the commercial lookup to ordinary content could incorrectly block
+  unrelated active localizations.
+- A missing or failing profile resolver could escape as an internal exception
+  instead of a stable fail-closed validation result.
+
+Every commercial release proof will be compared with the exact current target-
+locale commercial quality profile before approval lookup, CMS commit, active
+read, health, or idempotent replay. Non-commercial evidence retains strict null
+bindings without invoking the commercial resolver. Tests will cover all 24 EU
+locales, profile generation drift, resolver failure, durable read/health/replay
+blocking, and safe tombstone deletion of obsolete content.
+
+## Exact routing contract at the reviewer transport (15 September 2026)
+
+Assume an independent review adapter accepts the digest on a private offer
+route but the remote reviewer never receives the contract that defines it.
+
+- Separate capability discovery could be unavailable, stale, or associated
+  with a different commercial generation when the review attempt runs.
+- A reviewer could interpret indexes or span ends differently while still
+  returning a structurally valid receipt for the supplied route.
+- A self-rehashed substitute could appear internally consistent unless the
+  trusted adapter compares the complete contract with its local canonical one.
+- Sending the contract for verified commercial or non-commercial work could
+  create an unintended review surface and weaken strict request nullability.
+
+The quality-evidence request will carry the complete, content-free routing
+contract alongside its private route only when commercial review is required.
+The coordinator and HTTPS adapter will independently reconstruct and compare
+the canonical object before authentication or transport, and request identity
+will cover the full contract. Verified commercial and non-commercial requests
+will require both route and contract to be `null`. Tests will cover exact
+transport, stale and self-rehashed substitutions, request-ID invalidation,
+strict nullability, and zero network access on rejection.
+
+## Contract-bound private offer routing (15 September 2026)
+
+Assume a host and an independent reviewer both accept a syntactically valid
+private routing object but disagree about whether offsets are bytes, Unicode
+code points, inclusive ends, registry positions, or arbitrary labels.
+
+- A schema name alone does not expose the complete routing semantics to a
+  provider-neutral adapter.
+- A changed span, ordering, privacy, or text-length rule could reinterpret an
+  archived route without changing its apparent profile.
+- A self-reported digest could legitimize a substituted routing contract unless
+  the trusted runtime reconstructs it independently.
+- Publishing the actual private spans while advertising the contract would
+  leak project structure across the CMS boundary.
+
+The public commercial capability will advertise a separately versioned,
+content-free routing contract with deterministic SHA-256. Every private route
+will carry that exact digest, and each worker, evidence adapter, receipt
+verifier, release gate, benchmark boundary, and capability reader will
+reconstruct and compare it. The advertised contract describes shapes and
+semantics only; actual spans remain private and absent from CMS release
+evidence. Tests will cover contract tampering, self-rehashing, stale route
+digests, privacy, request invalidation, and zero provider access on failure.
+
+## Private offer routing for targeted commercial review (15 September 2026)
+
+Assume a commercial summary correctly says that offer index 1 has an
+unresolved tax claim, but the independent reviewer receives only the complete
+source, target, and opaque index.
+
+- An opaque index without its source and target regions is not an actionable
+  review route and can make the reviewer inspect the wrong offer.
+- Reordered, overlapping, empty, or off-by-one Unicode spans could silently
+  relabel an offer while leaving the public summary unchanged.
+- A routing context changed after evidence acquisition could be verified under
+  the original request or receipt identity.
+- Publishing configured offer IDs, extracted text, or reviewer explanations
+  would break the content-free CMS boundary.
+
+The worker now derives a private routing context from the already validated
+offer registry: ordered numeric indexes, exact source/target lengths, and
+non-overlapping Unicode code-point regions only. The context is required only
+for unresolved commercial summaries, enters the evidence request identity and
+every receipt-verification binding, and is revalidated before network access
+and approval. Public release evidence explicitly excludes it. Tests cover
+index and span drift, out-of-range regions, request-ID invalidation, receipt
+binding, and the absence of IDs, text, and explanations.
+
+## Targeted per-offer commercial review scope (15 September 2026)
+
+Assume one offer has an unresolved tax or cancellation claim while a second
+offer in the same page is already fully verified.
+
+- A dimension-only summary cannot tell the independent reviewer which offer
+  remains uncertain and can cause either incomplete review or needless replay.
+- Publishing configured offer identifiers would disclose project product or
+  brand labels through otherwise content-free operational evidence.
+- A resolution could echo the right dimensions while silently covering a
+  different subset of offers.
+- Global evidence uncertainty and an empty offer registry still need a safe
+  route without inventing an offer identity.
+
+The content-free summary now carries ordered zero-based offer indexes for every
+dimension with offer-local uncertainty. The resolution must echo that exact
+scope, while dimension-level uncertainty remains valid with an empty index list
+when no private offer can be named. Validators reject duplicates, reordering,
+out-of-range indexes, non-required dimensions, and scope changes at every HTTP
+and CMS boundary; no price, brand, offer identifier, or reviewer prose leaves
+the private evidence.
+
+## Stale-job quarantine without head-of-line blocking (15 September 2026)
+
+Assume several durable locale jobs outlive the worker contract while valid
+work is already waiting behind them.
+
+- One stale head job per service tick could delay every current locale.
+- A 24-locale plan could require many ticks merely to expose known drift.
+- Quarantining stale rows must not consume attempts or resolve assets/providers.
+- A later validator outage must not leave a partially committed batch decision.
+
+One claim now quarantines a bounded batch of up to 24 consecutive stale jobs
+inside the same transaction and leases the first current job reached within
+that batch. This covers one complete EU-locale plan without an unbounded write
+transaction. Proven stale rows become terminal and content-free with zero
+attempts, while valid work proceeds in that same call. If any later validation
+raises or mutates a payload, the whole batch rolls back and all work remains
+recoverable.
+
+## Current job bindings before lease (15 September 2026)
+
+Assume a canonical durable job outlives the planner or worker contract that
+created it and a worker starts without first consulting service health.
+
+- The stale job could consume a lease and retry attempt before local rejection.
+- Translation memory or host-owned asset resolution could run against obsolete
+  identity before the worker validates the job.
+- A validator outage could be mistaken for proven staleness and destroy
+  recoverable work.
+- A validator could mutate the decoded payload between integrity checking and
+  execution.
+
+Every claim now replays the current job binding inside the lease transaction.
+Expected mismatch becomes terminal and content-free without incrementing the
+attempt counter; unexpected validator failure or mutation rolls the complete
+transaction back. The runner supplies its exact worker validator, and the queue
+loads the same current contract by default for direct trusted-host claims.
+
+## Per-offer commercial dimension coverage (15 September 2026)
+
+Assume a commercial page contains two offers but the source-fidelity provider
+records one global equivalent verdict and evidence only for the first.
+
+- A global pass can hide the omitted price, discount, tax statement, renewal,
+  cancellation term, or footnote of the second offer.
+- Free-form offer lists can be incomplete, duplicated, or reordered while the
+  dimension result still looks internally plausible.
+- A caller can label the aggregate status independently of its offer-level
+  findings and weaken a known defect into a pass.
+- Regex comparison cannot safely repair the gap across number words, native
+  digits, locale separators, or equivalent time expressions.
+
+The v2 evidence contract requires one ordered verdict per registered offer for
+every dimension. The validator derives the aggregate status, requires local
+evidence for every non-absent offer verdict, and rejects missing, duplicate,
+reordered, or inconsistent matrices. Contract/profile/hash generation changes
+invalidate old jobs and summaries without treating numeric spelling as proof.
+
+## Current job bindings in read-only health (15 September 2026)
+
+Assume a durable commercial job remains queued across an evidence-contract
+deployment change.
+
+- Its stored JSON and unkeyed payload hash could still be internally valid.
+- Health could report the queue as healthy until a worker leases the stale job.
+- Operators could see a green service immediately before deterministic worker
+  rejection, delaying safe replanning.
+- Drift detection must not depend on a provider response, mutate the queue, or
+  disclose source or target text.
+
+The read-only health monitor now revalidates every stored job through the exact
+current planner and worker contract. A stale or substituted binding emits only
+`queue.job_binding_invalid`, blocks overall health through local validation, and
+leaves durable state unchanged. Tests exercise a contract-only commercial
+generation change while keeping the profile identifier and stored bytes valid.
+
+## Commercial evidence-contract identity at planning (14 September 2026)
+
+Assume the public commercial review-evidence contract changed while its parent
+commercial profile identifier remained stable.
+
+- A queue could deduplicate the new work against a job created under the old
+  evidence semantics.
+- A translation-memory lookup could reuse a candidate whose source-fidelity
+  review followed stale offer, span, or verdict rules.
+- A caller could replace the job's contract digest while preserving all other
+  valid profile and locale-quality bindings.
+- The provider request could carry the current full contract without proving
+  that it is the contract that created the job identity.
+
+The v3 plan and job contracts bind the exact canonical review-evidence-contract
+SHA-256 into every commercial job, idempotency key, and plan ID. The worker
+joins that stored digest to the separately validated full fidelity contract
+before any provider access. Tests cover contract-only generation changes,
+tampered job bindings, stale jobs, and unchanged non-commercial payloads.
+
+## Commercial contract acknowledgement at enqueue (14 September 2026)
+
+Assume a CMS discovered the public price and offer profile but enqueued work
+under a different or unspecified commercial generation.
+
+- A commercial change could omit the discovered profile acknowledgement.
+- A caller could substitute one syntactically valid profile or rendering hash.
+- An ordinary content change, cancellation, or tombstone could inject
+  commercial scope and later be mistaken for reviewed offer content.
+- OpenAPI and the reference client could disagree with the runtime-only rule.
+
+The v12 public dispatch contract carries one exact, content-free commercial
+binding in every enqueue envelope. It must equal the current profile and
+24-locale rendering-registry generations for commercial changes and must be
+`null` for all other operations. The authenticated raw body, runtime,
+capability response, OpenAPI conditional, and reference client bind the same
+value; omission, substitution, stale discovery, and cross-scope injection all
+block before durable intake.
+
+## Public commercial profile at the outer CMS edge (14 September 2026)
+
+Assume a CMS discovered a price and offer contract but still published under
+the wrong commercial rules.
+
+- The public response could accidentally include project prices, brands,
+  products, credentials, or website content.
+- A locally valid profile could be returned while the live website is pinned
+  to another commercial-rendering generation.
+- A caller could skip capability discovery or reuse an earlier generation
+  between discovery and the commercial-profile read.
+- OpenAPI or a reference client could accept a merely similar profile and miss
+  a removed locale, changed semantic dimension, or added publication flag.
+
+The v11 public dispatch capability exposes the exact content-free commercial
+profile and all 24 locale rendering bindings through one separately scoped
+body-free route. The dispatcher revalidates the live website capability and
+requires its commercial registry hash to equal the canonical local registry;
+the HTTP edge, OpenAPI profile, and client then independently require exact
+closed values. Tests cover Maltese and Finnish presence, profile and registry
+tampering, capability preconditions, project-content exclusion, and explicit
+non-publication semantics.
+
+## Verified outer CMS lifecycle read (14 September 2026)
+
+Assume a non-Python CMS safely submitted an edit but learned the wrong
+downstream localization state afterward.
+
+- A lifecycle read could contact the website service before durable outer
+  acceptance, duplicating uncertainty during retries or recovery.
+- A guessed request identifier could reveal another tenant's processing state.
+- A substituted nested lifecycle could retain the request ID while changing
+  the website, sidecar, source, or terminal-receiver generation.
+- A CMS could mistake durable acceptance or a processing state for linguistic
+  approval and publication authority.
+- The runtime, OpenAPI profile, and reference client could disagree about the
+  new route or its exact fail-closed errors.
+
+The v10 public dispatch capability adds one separately scoped lifecycle read
+bound to the complete known request identity and exact capability
+precondition. The durable dispatcher permits its one downstream read only
+after a fully revalidated accepted row, and the runtime, HTTP edge, OpenAPI
+profile, and client each validate the complete nested lifecycle independently.
+Tests cover pre-acceptance zero-I/O blocking, tenant isolation, generation
+parity, content-free output, exact errors, and non-publication semantics.
+
+## Exact CMS error reasons (13 September 2026)
+
+Assume a CMS handled the advertised success and failure statuses but made an
+unsafe decision from an unverified error body.
+
+- A peer could return a real status with an invented or stale error code.
+- An open error object could carry private fields into logs or user interfaces.
+- A transient `503` and terminal `409` could receive the wrong retry treatment.
+- Bodyless routes could still emit undocumented `411` or `413` framing errors.
+- A code-map change could escape the active capability and OpenAPI hashes.
+
+The v7 capability generation binds the complete error-code set for every
+route and status. The v6 OpenAPI document emits closed status-specific enums,
+including the real bodyless framing outcomes. The reference client accepts
+remote status and code metadata only after exact envelope validation and keeps
+unknown, extra, malformed, or mismatched errors fail-closed. Tests exercise
+valid terminal and retryable errors plus forged-code and private-field probes.
+
+## Executable CMS state invariants (13 September 2026)
+
+Assume a generated CMS client rejected malformed fields but accepted a
+cross-field contradiction as a real queue or monitor state.
+
+- `leased` could be paired with no lease expiry, or another state with one.
+- `accepted` could omit one of the remote binding digests or attempt fields.
+- Health could claim `ok` while reporting failures or expired leases.
+- Readiness could claim `ready` with a stopped worker, blocked outbox, or error.
+- Portable-schema limits could leave important remaining relationships hidden.
+
+The v6 capability generation now binds an exact response-invariant list per
+operation. The v5 OpenAPI document enforces leased, accepted, health and
+readiness relationships with JSON Schema 2020-12 conditionals and publishes
+stable identifiers for non-portable attempt, identity and aggregate rules.
+Tests prove exact capability-to-OpenAPI parity and inspect every executable
+branch rather than accepting descriptive text as enforcement.
+
+## Exact CMS failure contracts (13 September 2026)
+
+Assume a generated CMS client handled successful requests correctly but made
+an unsafe retry or parsing decision on a non-success response.
+
+- A single OpenAPI `default` branch hid which failures each route can emit.
+- Conflict and tenant-safe not-found results could be mistaken for outages.
+- Health and readiness can return a valid degraded monitor body at `503`, not
+  only the ordinary error envelope.
+- New failure behavior could appear without changing the capability pin.
+
+Every operation now carries an exact ordered `error_statuses` list inside the
+v5 capability generation. OpenAPI emits only the success and those concrete
+statuses; health and readiness use an explicit `oneOf` for their two valid
+`503` bodies. Tests prove route-by-route parity, reject a catch-all response,
+and bind the new OpenAPI document generation into the capability digest.
+
+## Self-describing CMS capability schema (13 September 2026)
+
+Assume a CMS generated correct source payload types but still accepted a stale
+or structurally altered capability response.
+
+- The capability response was an open object in the OpenAPI document.
+- A generator could silently ignore missing operations, limits, or semantics.
+- An older OpenAPI document could retain the same external capability pin.
+- Nested unknown fields could disguise a route, scope, retry, or publication
+  policy change.
+
+The OpenAPI profile now describes the complete capability object recursively:
+every object is closed, every field is required, and every scalar is fixed to
+the active generation. The OpenAPI document schema itself is included in the
+v4 capability hash. Tests walk the independent runtime capability fixture and
+prove exact nested parity, closure, the response reference, and the document
+version binding.
+
+## Closed CMS source payload schemas (13 September 2026)
+
+Assume a CMS generated a client from the authenticated OpenAPI document, but
+the generated enqueue type still accepted a partial or ambiguous payload.
+
+- An opaque payload object could omit localization policy or model bindings.
+- A change could be confused with a cancellation or tombstone.
+- Unknown fields or a non-positive source generation could reach transport.
+- A stale generator could retain old payload schema IDs while discovery looked
+  current.
+
+The OpenAPI profile now publishes a closed discriminated union for all three
+runtime payloads and a complete closed localization request with the 24 exact
+EU target locales. The v3 capability generation binds each payload schema ID.
+Tests compare required and allowed fields with real runtime-valid fixtures,
+pin every discriminator mapping, and verify locale uniqueness and source-
+language exclusion metadata.
+
 ## Capability-bound OpenAPI discovery (13 September 2026)
 
 Assume a CMS generated a client from the public API description, but silently
@@ -753,6 +1271,7 @@ Assume the Version 6 response-and-translation gateway and automatic updater ship
 
 | Failure | Early warning | Mitigation | Proof required |
 | --- | --- | --- | --- |
+| A commercial acknowledgement is validated at ingress but discarded before retry or restart | A queued pricing change survives while its accepted profile and 24-locale registry generation cannot be proven from durable status | Persist the exact content-free binding beside the immutable payload hash, revalidate it before claims and reads, migrate only exact empty legacy stores, and leave populated legacy stores untouched and blocked | Queue, claim, retry, restart, HTTP, OpenAPI, and reference-client tests prove the same binding; tampering blocks; exact empty v1 upgrades; populated v1 remains unchanged and fail-closed |
 | Signed commercial benchmark evidence preserves only totals, so an operator cannot see which offer dimension failed | The final report blocks, but amount, tax, renewal, cancellation, and conditions remain indistinguishable without reopening private reviewer output | Unblind only the four content-free dimension statuses into each signed case, bind them to the exact source-fidelity response hash, aggregate every dimension separately, and block a dimension on any candidate major/blocking status | Case and report tests prove exact A/B-to-origin rebinding, ten ordered dimension summaries, per-status counts, no reviewer prose, a visible candidate-defect block, and rejection of a re-signed response-hash mismatch |
 | A commercial benchmark reviewer receives all ten dimensions but returns only a generic preference | The request looks complete while tax, renewal, cancellation, or target-only inventions were never explicitly decided; uncertainty is averaged into a win | Require an ordered per-dimension acknowledgement for both anonymous variants, link major/blocking decisions to exact defect entries, reject uncertainty, and enforce the same conditional contract in the runner, HTTPS adapter, and durable store | Positive end-to-end and HTTPS/store tests cover ten decisions per variant; missing, additional, reordered, uncertain, unbound, and preferred-defect responses fail closed without becoming benchmark evidence |
 | Commercial benchmark tags drift from the public offer profile or leak semantic source scope into the source-blind pass | A pricing case omits tax or cancellation review, accepts an invented target-only claim, or native review receives source-aware dimensions | Bind all ten ordered dimensions from the shared commercial registry to every commercial suite case, include the scope in the suite digest, validate it before any reviewer call, and expose it only during source-fidelity review | Manifest tests cover eight cases by all ten dimensions; missing, additional, and reordered scope block with zero reviewer calls; request tests prove native scope isolation and fidelity exposure |
@@ -948,6 +1467,9 @@ Assume the Version 6 response-and-translation gateway and automatic updater ship
 | A pre-fork server inherits a CMS runtime into another process | The child reuses a duplicated SQLite connection or waits forever on a lock held by a vanished parent thread, while retries appear to be ordinary receiver failures | Bind the runtime to its creator process and check ownership before every lock acquisition; block inherited trusted operations and callbacks without exposing content, while allowing each post-fork worker to open its own connection | Simulated process drift blocks reads, writes, close, and signed WSGI publication before store access; two independent worker runtimes on one database handle concurrent retries and converge on one receipt and bundle |
 | Replaced CMS bundles retain superseded target prose indefinitely | Old localized pages and release evidence remain readable in SQLite after a newer complete bundle is active, increasing breach impact and storage without serving rollback | Enable SQLite secure deletion and scrub the predecessor payload and locale rows only after the replacement is complete and the active pointer has moved, all inside the same transaction; retain only content-free replay bindings | A successful replacement leaves prose only for the active generation; a cleanup trigger failure rolls the entire switch back to the last-known-good bundle; restored superseded content makes health fail closed |
 | A source dispatch succeeds but its website never learns the terminal localization outcome | A poller replays an expired signed read, accepts another plan or source generation, overlaps after a crash, or retries an outage without limit while its status leaks website prose | Register only an exact successful durable change dispatch; bind event, site, plan, version, sequence, job count, and canonical change hash; create a fresh signed lifecycle request per leased poll; separate normal polling from capped consecutive-failure backoff; retain only content-free state | Real client integration proves distinct request IDs across polls; cross-connection leases recover crashes; altered generations, responses, schemas, and state block; retry ceilings and terminal remote failures remain visible without retaining source or target text |
+| A temporary locale-policy resolver outage permanently ends lifecycle monitoring, or an integrity defect is retried as an outage | The release reader collapses policy availability and policy drift into one error; HTTP status alone then gives the client the wrong retry decision | Preserve a typed, content-free policy result through release readiness, CMS lifecycle, HTTP, client, and durable monitor; give verified drift and mixed integrity failures terminal precedence | Resolver loss returns one retryable `cms.release.policy_unavailable` without writes or details and recovers under bounded backoff; stale evidence returns non-retryable `cms.release.integrity_failed` |
+| The general service monitor reports healthy while current locale policy cannot authorize publication | Health validates stored signatures but either skips current policy resolution or collapses outage, verified drift, and malformed evidence into an ordinary missing approval | Revalidate every approved locale read-only, preserve stable per-locale evidence codes, and give verified drift or integrity failure precedence over a simultaneous resolver outage | Resolver loss blocks health as `release.policy_unavailable`; drift and malformed evidence block as `release.policy_stale` or `release.integrity_failed`; tests prove zero writes and no private detail leakage |
+| A remote operator loses the actionable health reason behind a generic `503` or trusts a malformed assessment | Ad hoc clients treat every non-`200` as network failure, follow redirects, accept stale reports, or parse duplicate keys and inconsistent status fields differently | Provide one provider-neutral single-attempt HTTPS client that validates the exact report and security envelope while preserving a structurally valid blocked assessment | Policy outage, drift, and integrity `503` reports remain inspectable; unsafe origins, redirects, stale timestamps, header or length mismatches, duplicate JSON, and transport detail all fail closed with stable content-free errors |
 | A source CMS successfully submits a website change but never begins lifecycle monitoring | The process exits after the remote acknowledgement or after the separate monitor commit; a manual host handoff is forgotten, normal changes starve removals, or recovery sends duplicate logical work | Compose removal dispatch, acknowledgement-to-monitor reconciliation, change dispatch, and lifecycle polling into one removal-first source service; reuse exact persisted IDs, acknowledgements, hashes, leases, and idempotent registration while permitting only one network operation per tick | Tests cover both crash boundaries, restart recovery without change resend, removal priority, conflicting bindings before network access, stable error redaction, content-free health, bounded loop delays, and invalid configuration before schema creation |
 
 | The source-CMS service has durable logic but no owned production runtime | A bad worker, timeout, lease, or path creates partial state; threads enter one connection concurrently; a pre-fork child inherits a locked runtime; or linked, shared, replaced, or permission-weakened databases allow the next request to use untrusted state | Add one composition root that validates the complete service in memory, requires three distinct canonical private database files, owns their connections, serializes threads, binds itself to its creator process, and rechecks every file identity around each operation | Invalid configuration and unsafe paths create no schemas; restart, close, fork, permission drift, 24 concurrent ticks, and two separately opened workers prove fail-closed operation and one durable change dispatch |
@@ -982,5 +1504,27 @@ Assume the Version 6 response-and-translation gateway and automatic updater ship
 | A CMS backend uses the safe one-attempt public client without a durable local handoff | A crash loses an unsent edit, remote HTTP 202 is lost before local commit, nested retry ceilings are collapsed, a new deployment resumes old-generation work, or altered SQLite state reaches the network | Persist each immutable change, cancellation, or tombstone with its complete identity, capability pin, and three separate retry ceilings before transport; lease one attempt, back off only explicit retryable failures, replay identically after expiry, and revalidate every stored row | Real hosted-runtime tests cover all operations, persist-before-send, lost-response replay, bounded transient and permanent failures, full idempotency binding, capability drift before claim, payload and response tampering, stale claims, restart generation binding, and competing workers |
 | The CMS-side public submission outbox is durable but deployment glue owns its file, connection, and worker lifetime | Invalid policy creates or mutates storage before failure, a prefork child inherits a locked connection, linked or replaced state reaches the network, a dead worker accepts stranded edits, or shutdown closes SQLite under a slow transport call | Add one preflighted process-owned runtime with an owner-only identity-bound file, read-only restart validation, serialized connection access, exact client-pin checks, a supervised non-daemon worker, managed-intake gating, content-free readiness, and signal-before-join shutdown | Tests prove zero-file invalid preflight, mode `0600`, restart delivery, live-worker gating, permission, symlink, inode, schema, capability and process drift blocking before transport, concurrent idempotent intake, and database preservation after a bounded shutdown timeout |
 | Non-Python CMS backends cannot reach the protected caller-side submission runtime safely | A local endpoint parses hostile JSON before authentication, accepts another site's event, exposes stored source text through status, acknowledges work behind a dead worker, collapses three retry budgets, or serializes a forged runtime result | Add one authenticated HTTPS/WSGI sidecar with route-specific tenant and operator scopes, exact body and source-payload hashes, full-identity status, supervised-worker write gating, independently validated content-free responses, and a canonical capability digest | Tests prove authentication-before-parse, commit-before-202, full retry preservation, replay and collision behavior, foreign-site not-found equivalence, stopped-worker rejection, separate health and readiness, unsafe-storage blocking before downstream transport, malformed framing rejection, exact capabilities, and zero-file invalid configuration |
+
+| A commercial CMS acknowledgement and a website acceptance each verify but refer to different rendering registries | A self-consistent downstream capability binding is accepted because only its delivery generation and internal hash are checked, allowing an offer localized under unacknowledged price, tax, or term rules to appear durably accepted | Require the accepted website binding's commercial-registry hash to equal the durable enqueue contract; recheck the equality before commit, after restart, at health, at HTTP serialization, and in the reference client | A self-rehashed foreign registry fails before acceptance; a coherently altered accepted row fails health; HTTP and client reject the same cross-registry substitution while the exact live generation succeeds |
+| Commercial fidelity evidence is replayed across locales or locale-quality generations | The source, target and generic commercial profile are unchanged, so an opaque evidence digest from another locale or an older rendering, morphology or evaluation profile appears reusable | Include the exact target locale plus commercial locale-quality profile version and SHA-256 in the versioned evidence-hash binding; derive them from the validated job and require them explicitly in the portable checker | Changing only locale, quality-profile version or quality-profile digest changes the evidence hash; missing, noncanonical or malformed bindings block before a result, approval or publication |
+| A CMS or review adapter guesses how unresolved commercial checks were cleared | Prose documentation and the runtime disagree about dimension ordering, qualified-human provider privacy, model independence, or receipt handling; a self-rehashed partial contract looks valid | Publish one separately hashed resolution contract inside the commercial capability profile and use the same provider-neutral result schema in release evidence | Exact-contract tests cover both methods and excluded content; reordered dimensions, a human provider, a non-independent model, raw-receipt exposure, or rehashed drift makes the complete capability response unavailable |
+| A signed commercial resolution cannot prove which contract and primary model it resolved | The CMS sees the second model but not the primary provider or resolution-contract digest, so it cannot detect the same provider on both sides or a result created under an older self-consistent contract | Bind the exact commercial profile, resolution-contract SHA-256 and primary provider identity into the closed resolution result; require an independent provider ID to differ before release, CMS validation and durable commit | Tests accept both valid resolution methods and reject profile drift, contract drift, missing or altered primary-provider fields, and equal primary/secondary providers before CMS persistence |
+| Commercial review evidence is verified without the exact resolution-contract generation | The evidence provider and receipt verifier see unresolved dimensions but not the contract digest they must satisfy, so an old receipt can be interpreted as approval under a changed escalation contract | Bind the canonical resolution-contract SHA-256 into the commercial evidence request, deterministic request ID and every receipt-verification context; require null outside unresolved commercial review and recompute the installed contract before transport | Contract drift changes the request ID and receipt binding; missing, stale, cross-scope or self-selected digests fail before authentication, provider transport, approval or publication |
+| A quality-evidence request supplies a well-formed but self-selected request ID | Changed locale, profile, provider, confidence or commercial-contract bindings can enter an existing lease and idempotency namespace because the durable store and HTTPS adapter trust the ID instead of deriving it | Define one exact versioned identity field set, recompute the request ID from its canonical JSON after validating the source and target hashes, and enforce the same derivation before persistence and before authentication or transport | A stale, random or recomputed-under-the-wrong-field-set ID fails without a database row, credential callback or network call; coordinator and HTTPS identity-field registries must remain exactly equal |
+| A quality service relabels an old receipt with a current evidence request ID | The response envelope matches the current request, but the opaque quality, human or independent-model receipt was issued for another evidence revision or request and still verifies against the older release-only binding | Carry the canonical evidence request ID and revision into every purpose-specific receipt-verification binding and the signed approval; reject missing, malformed or substituted context before verifier or signer access | Replaying one otherwise valid receipt under a changed evidence request or revision fails at verification; HTTP verifier requests expose the exact context, signed approval lookup detects tampering, and no raw receipt enters durable state |
+| A downstream CMS receives a signed approval hash without the evidence generation it represents | The localization service can detect a stale evidence request internally, but the public release proof omits its request ID and revision, so a CMS cannot audit or policy-gate that exact generation without private state | Advance the closed release-evidence schema and carry the canonical content-free evidence request ID and revision from the verified signed approval through publication, receiver validation and durable CMS storage | End-to-end tests expose and persist the exact lineage at the host commit; missing or malformed lineage fails closed, signed-byte substitution fails authentication, and raw receipts and reviewer prose remain absent |
+| CMS integrators know the release-evidence schema name but must reconstruct its semantics from prose | A client omits the evidence generation, accepts an obsolete field set, publishes private review material, or treats a self-rehashed partial contract as current because no machine-readable contract enumerates lineage, hashes, commercial scope and excluded content | Publish one exact, separately hashed release-evidence capability contract inside the signed publication-HTTP capabilities; reconstruct and validate it from runtime constants before returning any capability response | Contract tests cover the closed ordered field set, hash and lineage bindings, commercial nullability, content exclusions and digest; missing, altered, reordered or self-rehashed contracts make the complete capability response and reference-client result fail closed |
+| A signed release proof names its evidence schema but not the exact machine-readable contract generation | Archived or delayed evidence can be interpreted under a newer field, scope or privacy contract even though its signature and schema name remain valid | Bind the canonical release-evidence-contract SHA-256 into every signed approval and release proof, validate it before publication and CMS commit, and persist the exact bound proof unchanged | Missing, malformed, stale or substituted contract digests fail before signing, publication or host commit; non-commercial and commercial paths carry the same canonical digest through restart and durable CMS retrieval |
+| A durable CMS bundle outlives its approval or the release-evidence contract that authorized it | The receiver validates on initial delivery but keeps serving and reporting an active localization after approval expiry or a runtime contract upgrade; blindly applying the same rule to deletion could then trap the stale content | Inject the canonical release-evidence validator into the durable store and re-run it with expiry checks on active reads, health and idempotent publication replay, while structural-only tombstone paths remain able to remove stale content | Restart and time-advance tests make stale active reads, health and replay fail closed; the same expired and contract-stale bundle can still be tombstoned atomically without exposing target text in errors |
+| A database rewrite replaces an accepted CMS bundle and recomputes its unkeyed hashes after the receiver process restarts | The durable store retains payload and release-evidence fields but not the verified outer publication signature, so internally consistent replacement bytes could appear authorized without proving their publisher | Persist the exact canonical publication signature beside every active bundle, inject the configured publisher authority into the store through a closed validator, and reverify the signed canonical payload on commit, active reads, health and replay; migrate legacy rows without inventing missing signatures | Rehashed payload-and-evidence tampering fails only at signature verification, signed file-backed bundles survive restart, and migrated signatureless active rows remain unrenderable and unhealthy while structural tombstones can still remove them |
+| A commercial reviewer labels several offers with one arbitrary identifier | Every price and condition has a formally valid span, but the free label does not prove which source and target offer own it, so swapped prices or conditions could hide inside an apparently complete report | Add a versioned offer registry with unique identifiers and ordered, non-overlapping source and target regions; require every proposition span and every offer-assignment item to resolve inside its declared offer regions | Cross-offer spans, overlapping ownership, missing offer assignments, unknown labels and relabelled propositions fail deterministically; multiple discontiguous regions remain possible for linked footnotes, while unresolved semantic boundaries still route to independent review |
+| CMS and provider adapters infer the commercial evidence shape from a prompt example or prose | An integration can silently omit the offer registry, accept overlapping regions, or reinterpret one-sided evidence while still pinning the summary contract and commercial profile digest | Publish a separately versioned and hashed evidence contract with the exact closed fields, limits, span semantics, verdict invariants, offer-assignment coverage and structural-only trust boundary; bind it into the public commercial profile | Capability, OpenAPI, discovery-client and portable-checker tests consume the same canonical contract; missing, altered or self-rehashed evidence contracts block the complete capability response before content or provider access |
+| A commercial review summary outlives the evidence contract under which its private report was accepted | The summary retains the evidence hash but not the exact evidence-contract digest, so a cached result, evidence request, receipt or approval could be replayed after structural rules change while the commercial profile identifier stays constant | Bind the canonical review-evidence-contract SHA-256 into the private evidence hash and content-free summary, then carry that closed summary through worker result, evidence request, receipt verification, signed approval and CMS release evidence | Stale or self-selected contract digests fail at summary validation and every outer boundary; contract changes derive new evidence, request, receipt, approval and release hashes without exposing private report content |
+| A commercial source-fidelity provider receives only an illustrative evidence example | The provider guesses offer limits, Unicode span semantics, verdict invariants or trust boundaries differently from the validator, so a formally plausible report fails late or silently omits required reasoning | Resolve and verify the complete separately hashed public evidence contract before provider access, then bind it only into the source-aware fidelity request and its deterministic request hash | Exact-contract tests prove the fidelity provider sees the current canonical contract and resulting summary digest; a self-rehashed substitute blocks before any provider call, while transcreation and source-blind native review remain contract-free |
+| A global commercial dimension verdict covers only one of several registered offers | A reviewer supplies correct evidence for one tier while silently omitting another tier's price or condition; a global equivalent result still appears complete | Require exactly one ordered per-offer verdict for every dimension, derive the aggregate status by fixed severity, and require evidence within each non-absent offer region | Missing, duplicate, reordered, cross-offer, or aggregate-inconsistent matrices fail deterministically; uncertain semantics still route to independent review without numeric regex proof |
+| A CMS cannot prove the escalation policy behind an already verified commercial approval | The resolution-contract digest is hidden inside opaque internal identities and only an unresolved result exposes it, so downstream policy checks cannot distinguish approval generations | Carry the exact current content-free resolution-contract SHA-256 in every commercial release proof; require `null` outside commercial content and retain the detailed resolution object only for unresolved offers | Release, CMS, receiver and capability tests accept the current digest for verified and escalated paths, reject stale or substituted values before host commit, and expose no private route, receipt, reviewer prose, price or brand |
+| A queued CMS publication outlives its locale policy or approval and blocks newer valid work | The outbox validates only when claiming its oldest row, rolls back on stale evidence, and does not recheck after the outer lease guard, so one obsolete delivery can block the queue or policy drift can reach the publisher | Verify authenticated structure before freshness, quarantine stale or expired deliveries terminally without consuming an attempt, skip a bounded batch, and revalidate the exact leased request after the operation guard immediately before publisher access | Stale and expired rows expose only stable reason codes; a valid follower succeeds in the same tick; policy drift after lease acquisition makes no publisher call; payload and signature corruption remain hard failures; structural-only tombstones can still remove obsolete content |
+| An operator deploys the strict one-request health client without durable scheduling | Concurrent processes duplicate probes, a crash leaves ambiguous ownership, retryable outages hammer the endpoint, terminal authentication failures loop forever, or storing the full report leaks tenant identifiers | Wrap each read in one atomic SQLite lease with expiry recovery, bounded retryability-driven backoff, terminal operator rearm, and a content-free persisted summary | Tests cover due/not-due behavior, valid blocked reports, capped retryable and immediate terminal failures, crash recovery across connections, active-lease rearm rejection, schema/state tampering before client access, and absence of site, event and locale identifiers in durable state |
+| A host has durable health polling but must invent its own endless loop and poller status | A busy loop hammers SQLite, shutdown sleeps through deployment, terminal failures disappear behind the last service report, an expired lease looks active, or a convenience wrapper leaks the full remote assessment | Provide one synchronous interruptible loop driven by durable deadlines and one closed content-free poller-health contract while leaving thread, process, signal and connection ownership with the host | Tests cover exact due waits, pre-set stop without state access, invalid host controls, initial/no-report degradation, healthy/degraded/blocked reports, retry wait, terminal failure, expired lease and identifier-free serialization |
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.

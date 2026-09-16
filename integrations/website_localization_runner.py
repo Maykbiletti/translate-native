@@ -136,6 +136,15 @@ def _retry_delay(attempt: int, base: float, maximum: float) -> float:
     return min(maximum, base * (2 ** min(attempt - 1, 30)))
 
 
+def _current_job_binding(payload: dict[str, Any]) -> bool:
+    """Return False only for an expected current-worker binding rejection."""
+    try:
+        _WORKER._validated_job(payload)
+    except _WORKER.LocalizationWorkerBlocked:
+        return False
+    return True
+
+
 def run_next_localization_job(
     queue: Any,
     worker_id: str,
@@ -177,6 +186,7 @@ def run_next_localization_job(
     claim_arguments = {
         "now": _now(clock),
         "lease_seconds": lease_seconds,
+        "binding_validator": _current_job_binding,
     }
     if eligible_plan_ids is not None:
         claim_arguments["eligible_plan_ids"] = eligible_plan_ids
