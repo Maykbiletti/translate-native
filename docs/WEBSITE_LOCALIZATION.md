@@ -1133,6 +1133,32 @@ unsafe origin, forged protocol header, malformed response, or future-dated
 rearm remains fail-closed. The default implementation permits plain HTTP only
 when a host explicitly opts into a loopback origin for local testing.
 
+`website_localization_benchmark_watcher_recovery_runner.py` adds durable
+operator-side execution without making recovery automatic. The host must first
+call `start()` with one explicit opaque operation identity. The runner derives
+the actual rearm request ID from a canonical hash and never stores the supplied
+operation text. Contract discovery, status observation, and rearm are separate
+SQLite-leased steps; each process therefore performs at most one remote
+request before committing its next phase.
+
+The discovered contract hashes and failed watcher generation are durable
+before the rearm phase becomes eligible. An uncertain response or crash then
+replays the exact request ID, attempt count, failure timestamp, and error code.
+Only a confirmed expired lease may be recovered. Retryable client failures use
+bounded exponential backoff and a fixed total attempt ceiling; contract,
+authentication, parser, state, binding, and storage-integrity failures become
+terminal without changing the remote watcher. If status shows that the watcher
+is no longer failed, the operation finishes as `not_required` and sends no
+rearm request.
+
+The runner database binds the HTTPS origin, lease and retry policy, and retains
+only content-free operation/request hashes, OpenAPI digests, the stable failed
+generation, receipt digest, counters, timestamps, and stable error codes. It
+does not retain credentials, campaign or locale identities, benchmark text,
+provider or model details, or response prose. `run_forever()` is interruptible;
+after a successful rearm the benchmark watcher still resumes only through its
+ordinary supervised production tick and outer-lease guard.
+
 One supervised tick always prioritizes customer translation, release, and
 delivery work. If those are idle, configured local benchmark case execution
 runs next. Only when both are idle may the runtime perform one due report-watch
