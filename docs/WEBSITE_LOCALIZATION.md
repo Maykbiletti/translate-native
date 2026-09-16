@@ -944,9 +944,29 @@ status before report loading. Authentication failure, credential rotation,
 cross-campaign access, request bodies, query parameters, plaintext transport,
 incomplete or expired campaigns, malformed runtime output, and report
 verification failures all return only a stable code and retry flag. Responses
-use `Cache-Control: no-store`; neither route starts benchmark work, signs a
-report, repairs state, or returns case prose, source text, target text,
-credentials, or adapter exceptions.
+use `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and strict JSON
+framing; neither route starts benchmark work, signs a report, repairs state, or
+returns case prose, source text, target text, credentials, or adapter
+exceptions.
+
+`integrations/website_localization_benchmark_client.py` is the matching
+provider-neutral consumer boundary. Configure it with a callable credential
+source plus the expected campaign ID, policy hash, and suite hash. Its
+`report()` operation first reads and validates `/status`; it does not contact
+`/report` while the campaign is incomplete, operationally blocked, or not
+successfully finalized. The second response must repeat the exact campaign,
+match the pinned suite and validity window, and carry the SHA-256 digest of the
+canonical report bytes. Expiry is checked after each request, so a campaign
+that becomes stale between calls cannot be accepted.
+
+The client follows no redirects, rejects plaintext non-loopback origins,
+duplicate headers and JSON keys, ambiguous lengths, reserved authentication
+headers, malformed remote errors, and every unexpected schema or status. A
+valid signed report with `status: BLOCK` is returned as evidence rather than
+converted into a network error; its `superiority_claim_allowed: false` and
+claim-block reasons remain unchanged. Callers must treat every
+`BenchmarkClientFailed` as no authority to publish a superiority claim and may
+retry only when its explicit `retryable` field is true.
 
 `BenchmarkCampaignStore.health` verifies the complete campaign binding, every
 row invariant, successful result hash, and case attestation in a consistent

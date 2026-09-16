@@ -1,5 +1,28 @@
 # Version 6 premortem
 
+## Provider-neutral benchmark report client (16 September 2026)
+
+Assume the benchmark server stores and reverifies the correct signed report,
+but a remote website or CMS consumes it through an incomplete client.
+
+- A client could fetch a report without first proving the expected campaign,
+  policy, suite, completion state, or report-finalization state.
+- A valid `BLOCK` decision could be mistaken for a transport failure, retried
+  until ignored, or reduced to an aggregate boolean that hides per-axis reasons.
+- Redirects, ambiguous headers, duplicate JSON keys, or reserved authentication
+  headers could move credentials or change the response interpretation.
+- A modified report could carry a self-consistent outer hash while referring to
+  another campaign, suite, validity window, or report schema.
+- The campaign could expire between the status and report requests.
+
+The client will therefore pin the exact origin, campaign, policy and suite;
+perform one bounded status request before the report request; reject redirects,
+ambiguous framing and malformed JSON; verify the canonical report digest and
+all repeated bindings; and recheck expiry after both requests. A verified
+`BLOCK` remains a successful, immutable benchmark result with all content-free
+reasons intact. Every transport or contract failure becomes a stable,
+content-free error and never authorizes a superiority claim.
+
 ## Axis-visible benchmark defects (16 September 2026)
 
 Assume every signed case preserves its exact phase-bound finding hashes, but

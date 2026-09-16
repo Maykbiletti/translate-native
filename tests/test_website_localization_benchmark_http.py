@@ -145,6 +145,7 @@ class BenchmarkHTTPTests(unittest.TestCase):
         status, headers, payload, _ = self.call(app, HTTP.STATUS_PATH)
         self.assertTrue(status.startswith("200 "))
         self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(payload, {
             "schema": HTTP.STATUS_RESPONSE_SCHEMA,
             "campaign": campaign_status(),

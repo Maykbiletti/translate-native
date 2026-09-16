@@ -332,6 +332,7 @@ class BenchmarkReportHTTPApplication:
         headers = [
             ("Cache-Control", "no-store"),
             ("Content-Length", str(len(body))),
+            ("Referrer-Policy", "no-referrer"),
             ("X-Content-Type-Options", "nosniff"),
         ]
         if body:
