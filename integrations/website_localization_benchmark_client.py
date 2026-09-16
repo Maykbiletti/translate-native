@@ -253,6 +253,17 @@ class BenchmarkReportSnapshot:
         return deepcopy(self.report)
 
 
+@dataclass(frozen=True)
+class BenchmarkOpenAPISnapshot:
+    campaign: dict[str, Any]
+    contract_sha256: str
+    openapi_sha256: str
+    openapi: dict[str, Any]
+
+    def as_payload(self) -> dict[str, Any]:
+        return deepcopy(self.openapi)
+
+
 class WebsiteLocalizationBenchmarkClient:
     """Read one exact campaign's stored report through a strict HTTP boundary."""
 
@@ -387,4 +398,43 @@ class WebsiteLocalizationBenchmarkClient:
             _fail("benchmark_client.campaign_expired")
         return BenchmarkReportSnapshot(
             deepcopy(status), report_sha256, deepcopy(report),
+        )
+
+    def openapi(self) -> BenchmarkOpenAPISnapshot:
+        """Return only the exact locally reconstructed reader contract."""
+        status = self.status().as_payload()
+        _, value = self._request(_HTTP.OPENAPI_PATH)
+        if (
+            value.get("schema") != _HTTP.OPENAPI_RESPONSE_SCHEMA
+            or set(value) != {
+                "schema", "contract_sha256", "openapi_sha256", "openapi",
+            }
+            or not isinstance(value.get("contract_sha256"), str)
+            or _HTTP.SHA256.fullmatch(value["contract_sha256"]) is None
+            or not isinstance(value.get("openapi_sha256"), str)
+            or _HTTP.SHA256.fullmatch(value["openapi_sha256"]) is None
+            or not isinstance(value.get("openapi"), dict)
+        ):
+            _fail("benchmark_client.response_invalid", retryable=True)
+        try:
+            contract = _HTTP._openapi_contract()
+            expected = _HTTP._OPENAPI.build_document(contract)
+            contract_sha256 = _HTTP._OPENAPI.document_sha256(contract)
+            openapi_sha256 = _HTTP._OPENAPI.document_sha256(expected)
+        except Exception:
+            _fail("benchmark_client.contract_unavailable")
+        if value["contract_sha256"] != contract_sha256:
+            _fail("benchmark_client.contract_mismatch")
+        if (
+            value["openapi_sha256"] != openapi_sha256
+            or _HTTP._OPENAPI.document_sha256(value["openapi"])
+            != value["openapi_sha256"]
+            or value["openapi"] != expected
+        ):
+            _fail("benchmark_client.openapi_mismatch")
+        if self._now() >= status["valid_until"]:
+            _fail("benchmark_client.campaign_expired")
+        return BenchmarkOpenAPISnapshot(
+            deepcopy(status), contract_sha256, openapi_sha256,
+            deepcopy(expected),
         )

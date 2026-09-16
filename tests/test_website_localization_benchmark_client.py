@@ -122,6 +122,24 @@ def report_response(report=None, *, campaign_id=CAMPAIGN_ID, digest=None):
     })
 
 
+def openapi_response(*, document=None, contract_digest=None, document_digest=None):
+    contract = HTTP._openapi_contract()
+    expected = HTTP._OPENAPI.build_document(contract)
+    document = expected if document is None else document
+    return response({
+        "schema": HTTP.OPENAPI_RESPONSE_SCHEMA,
+        "contract_sha256": (
+            HTTP._OPENAPI.document_sha256(contract)
+            if contract_digest is None else contract_digest
+        ),
+        "openapi_sha256": (
+            HTTP._OPENAPI.document_sha256(document)
+            if document_digest is None else document_digest
+        ),
+        "openapi": document,
+    })
+
+
 class Transport:
     def __init__(self, *results):
         self.results = list(results)
@@ -181,6 +199,34 @@ class BenchmarkClientTests(unittest.TestCase):
         ).report()
         self.assertEqual(snapshot.report["status"], "PASS")
         self.assertTrue(snapshot.report["superiority_claim_allowed"])
+
+    def test_reads_status_then_returns_exact_origin_free_openapi(self):
+        transport = Transport(status_response(), openapi_response())
+        snapshot = self.client(transport).openapi()
+        self.assertEqual(snapshot.openapi["openapi"], "3.1.0")
+        self.assertNotIn("servers", snapshot.openapi)
+        self.assertEqual(set(snapshot.openapi["paths"]), {
+            HTTP.STATUS_PATH, HTTP.REPORT_PATH, HTTP.OPENAPI_PATH,
+        })
+        self.assertTrue(transport.calls[0][1].endswith(HTTP.STATUS_PATH))
+        self.assertTrue(transport.calls[1][1].endswith(HTTP.OPENAPI_PATH))
+
+    def test_self_rehashed_or_contract_stale_openapi_fails_closed(self):
+        changed = deepcopy(HTTP._OPENAPI.build_document(HTTP._openapi_contract()))
+        changed["info"]["title"] = "Substituted reader contract"
+        scenarios = (
+            (openapi_response(document=changed), "benchmark_client.openapi_mismatch"),
+            (openapi_response(contract_digest="d" * 64),
+             "benchmark_client.contract_mismatch"),
+            (openapi_response(document_digest="d" * 64),
+             "benchmark_client.openapi_mismatch"),
+        )
+        for result, code in scenarios:
+            with self.subTest(code=code):
+                self.assert_failure(
+                    code,
+                    self.client(Transport(status_response(), result)).openapi,
+                )
 
     def test_foreign_campaign_policy_or_suite_blocks_before_report(self):
         scenarios = (

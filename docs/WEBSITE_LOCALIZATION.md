@@ -924,7 +924,7 @@ evidence therefore returns a stable failure instead of a report.
 
 `integrations/website_localization_benchmark_http.py` exposes that verified
 read-only boundary to an operator dashboard or evidence consumer without
-granting database access. It provides exactly two HTTPS-only WSGI routes:
+granting database access. It provides exactly three HTTPS-only WSGI routes:
 
 - `GET /v1/benchmarks/status` returns the configured campaign identity,
   policy and suite hashes, validity deadline, work and error counts, plus the
@@ -933,6 +933,9 @@ granting database access. It provides exactly two HTTPS-only WSGI routes:
   and finalized, then invokes only `load_benchmark_report`. Its response binds
   the authenticated campaign ID to the canonical signed report and a SHA-256
   digest of those exact report bytes.
+- `GET /v1/benchmarks/openapi` returns the canonical, origin-free OpenAPI 3.1
+  document for these three routes. Its envelope binds the complete description
+  to separate contract and document SHA-256 digests.
 
 The host authenticator receives
 `blun.website-localization-benchmark-http-auth.v1` with the exact method, path,
@@ -945,9 +948,16 @@ cross-campaign access, request bodies, query parameters, plaintext transport,
 incomplete or expired campaigns, malformed runtime output, and report
 verification failures all return only a stable code and retry flag. Responses
 use `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and strict JSON
-framing; neither route starts benchmark work, signs a report, repairs state, or
-returns case prose, source text, target text, credentials, or adapter
+framing; none of the routes starts benchmark work, signs a report, repairs
+state, or returns case prose, source text, target text, credentials, or adapter
 exceptions.
+
+OpenAPI discovery runs through the same authenticator and exact campaign-scope
+check as status and report access. The document fixes methods, paths, response
+schemas, error statuses, authentication request and principal schemas,
+benchmark-report schema, campaign states, and the response-size ceiling. It
+contains no server origin, campaign identifier, policy or suite hash,
+credential, source or target text, reviewer prose, provider, or model identity.
 
 `integrations/website_localization_benchmark_client.py` is the matching
 provider-neutral consumer boundary. Configure it with a callable credential
@@ -958,6 +968,13 @@ successfully finalized. The second response must repeat the exact campaign,
 match the pinned suite and validity window, and carry the SHA-256 digest of the
 canonical report bytes. Expiry is checked after each request, so a campaign
 that becomes stale between calls cannot be accepted.
+
+Its `openapi()` operation follows the same status-first sequence, reconstructs
+the full expected OpenAPI document from the locally installed closed contract,
+and compares both advertised digests and the exact document. Merely changing a
+description and recomputing its own hash cannot make a foreign contract
+acceptable. The client rechecks campaign expiry after discovery and returns no
+publication authority.
 
 The client follows no redirects, rejects plaintext non-loopback origins,
 duplicate headers and JSON keys, ambiguous lengths, reserved authentication

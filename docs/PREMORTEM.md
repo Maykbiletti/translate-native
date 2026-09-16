@@ -1,5 +1,27 @@
 # Version 6 premortem
 
+## Contract-bound benchmark OpenAPI discovery (16 September 2026)
+
+Assume a CMS can read the authenticated benchmark status and report, but must
+hand-maintain the wire contract from prose.
+
+- Route, schema, response-code, or transport-limit drift could break a generated
+  client while the server and Python reference client continue to agree.
+- A peer could alter an OpenAPI document and recompute only its advertised hash.
+- Discovery could disclose a campaign ID, policy or suite hash, credential,
+  deployment origin, benchmark text, reviewer prose, or model identity.
+- A reader authenticated for another campaign could use discovery without the
+  same campaign-scope check enforced by status and report reads.
+- A campaign could expire between the scope check and contract retrieval.
+
+The reader will therefore generate one canonical, origin-free OpenAPI 3.1
+document from a closed content-free contract; authenticate and campaign-scope
+the discovery route; bind the response to both document and contract digests;
+and return no deployment values. The reference client first validates its
+pinned campaign, reconstructs the complete expected document locally, compares
+both hashes and the full value, then rechecks expiry. A self-rehashed or stale
+description remains unusable.
+
 ## Provider-neutral benchmark report client (16 September 2026)
 
 Assume the benchmark server stores and reverifies the correct signed report,
