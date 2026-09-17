@@ -110,6 +110,40 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.192.0: durable host-subagent facility
+
+The standard HTTPS backend now terminates at a deployable, provider-neutral
+facility implemented by
+`integrations/website_localization_subagent_facility.py` and
+`integrations/website_localization_subagent_facility_runtime.py`. The facility
+authenticates before body access, independently revalidates the pinned route and
+source-blind task shape, and atomically records dispatch intent before asking a
+digest-pinned host driver to start physical reviewer work.
+
+Its SQLite journal binds both request-digest layers, exact reduced input,
+reviewer assignment, facility and driver generations, budgets and authenticated
+principal. Identical retries replay; changed requests conflict. Lost responses
+are recovered only through read-only reconciliation, while ambiguous starts and
+foreign pre-restart dispatches remain fenced as `unknown`. The facility creates
+the outer execution evidence only from driver-supplied trusted metadata and
+bounded usage; model prose cannot choose its identity, phase, locale or cost.
+
+Protected startup binds the credential, owner-only driver factory bytes and
+settings, route table, concurrency ceiling and ledger identity before readiness.
+Drivers must explicitly support atomic idempotency, read-only reconciliation,
+hard deadlines and empty-context isolation. Every driver operation runs in a
+fresh killable process under the assignment deadline, and an exclusive
+deployment lock prevents a second runtime or readiness check from fencing a
+live dispatch owner. The isolated worker inherits that lock, enforces its own
+deadline and ignores ambient Python startup paths, so parent failure cannot
+orphan an unfenced start. This hardened runtime currently requires POSIX process
+and descriptor semantics and blocks startup elsewhere. Drivers receive no Guard
+signer, publication capability, HTTP credential or ledger. Synthetic Finnish
+and Maltese fixtures cover the complete adapter path, restart, replay, source
+isolation and tampering. They are protocol evidence only: productive host/model
+configuration and real native-language evidence remain operator work, and no
+DeepL-superiority claim is made.
+
 ### Version 6.191.0: deployable HTTPS backend for host subagents
 
 The durable executor now ships its standard provider-neutral backend factory in
@@ -3042,7 +3076,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.191.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.192.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

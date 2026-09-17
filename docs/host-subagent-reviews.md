@@ -419,6 +419,62 @@ responsible for mapping the pinned model identity to a supported host subagent,
 real billing, cancellation and qualified-reviewer evidence. Missing support or
 unverifiable execution remains blocked rather than being synthesized locally.
 
+### Durable host-subagent facility
+
+`integrations/website_localization_subagent_facility.py` is the server half of
+the standard HTTPS backend. It authenticates before reading the body and checks
+the closed request schema, both canonical digests, header bindings, exact
+facility generation, reviewer assignment, route, budgets and phase-specific
+model input. The target-native route rejects source content and inherited
+conversation metadata again at this boundary.
+
+Before invoking a host driver, the facility atomically stores the complete
+binding and a `dispatching` barrier in SQLite. The provider execution key is
+stable for that exact assignment and upstream execute digest. An identical
+execute replays stored state; a changed request under the same key returns a
+conflict. A lost reply is recovered through `reconcile`, which is forbidden from
+starting work. Ambiguous, running and cancellation-pending work continues to
+consume capacity. A runtime restart fences an earlier boot's unfinished
+dispatch as `unknown` instead of assuming that it never started.
+
+The provider-neutral driver implements only `execute_idempotent` and
+`reconcile`, and must declare atomic idempotency, read-only reconciliation, hard
+deadline enforcement and isolated-context support. Its trusted result supplies
+the actual reviewer, session, phase, model and bounded usage. The facility
+verifies all fields and constructs the executor-facing evidence itself. It does
+not give the driver a Guard signer, publication authority, facility credential,
+route table or journal.
+
+The protected runtime executes each driver operation in a fresh process and
+kills the complete process group at the assignment deadline. It never retries a
+start. Provider work accepted before a killed response remains recoverable only
+under the same provider execution key. A single owner-only deployment lock is
+held before crash fencing and until shutdown, so another runtime or `--check`
+cannot mutate a live dispatch owner's journal. Each child inherits that lock
+and enforces the same deadline itself; abrupt parent death therefore cannot
+release crash fencing while a driver child remains able to start. The child uses
+Python isolated/no-site mode, accepts only the startup-pinned driver settings
+digest, and returns only a structured content-free error classification. This
+hardened implementation requires POSIX descriptor and process-group semantics;
+it blocks startup on unsupported operating systems.
+
+Copy `integrations/subagent-review-facility.example.json` and
+`integrations/subagent-review-driver.example.json` to an owner-only absolute
+directory. Pin the exact driver factory bytes and initialize once:
+
+```console
+python integrations/website_localization_subagent_facility_runtime.py \
+  --config /absolute/protected/path/subagent-facility.json \
+  --initialize-ledger --check
+```
+
+Normal starts omit `--initialize-ledger`. Missing, replaced, permission-weakened
+or deployment-drifted state blocks before readiness. The bundled server listens
+only on loopback behind a trusted HTTPS terminator. The driver settings may hold
+references to operator-managed provider credentials, but those credentials must
+never enter task input or review evidence. A driver without genuine host
+subagent support must block rather than synthesize an agent review.
+
 ## Authenticated HTTPS host bridge
 
 `integrations/website_localization_subagent_http.py` implements the `ReviewHost`

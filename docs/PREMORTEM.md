@@ -1,5 +1,54 @@
 # Version 6 premortem
 
+## Host-subagent facility execution boundary (17 September 2026)
+
+Assume the standard HTTPS backend reaches a nominally available facility, but
+the facility starts duplicate, over-privileged or falsely attributed reviewer
+work after a crash or ambiguous response.
+
+- Authentication after reading the request body could disclose parsing and
+  state behavior or consume attacker-controlled resources.
+- A lost response or process restart could start the same physical reviewer a
+  second time under the same execution key.
+- Reconciliation could report `not_started` while an earlier dispatch owner is
+  still able to cross the physical-start boundary, incorrectly freeing scarce
+  capacity.
+- Model-generated fields could be mistaken for trusted reviewer identity,
+  isolation state, model generation or metered usage.
+- Native review could receive source material through inherited history,
+  instructions, profile metadata, tools or recursive delegation.
+- A network or wall timeout could be reported as cancellation while provider
+  work continues and consumes cost outside the declared budget.
+- Invalid driver code, credentials or deployment bindings could pass readiness
+  and fail only after a durable dispatch reservation is created.
+
+The facility will authenticate before body access, validate the closed V6.191
+request and both digest layers, and atomically persist the complete execute
+binding before calling a digest-pinned provider-neutral driver. Exact replays
+reuse one execution; changed requests conflict. Dispatch, running, unknown and
+cancel-pending states retain capacity until the same driver confirms a terminal
+result. Reviewer identity, isolation controls and usage come from the trusted
+driver result and are independently matched to the host assignment; they are
+never accepted from reviewer prose. Runtime preflight will validate protected
+credentials, driver bytes, configuration and ledger deployment binding before
+readiness. Finnish and Maltese fixtures will cross the actual V6.191 HTTPS
+adapter and facility endpoint, while crash, source-leak, replay, identity,
+usage, deadline and authentication failures remain fail-closed. These fixtures
+prove protocol behavior only, not native-language quality.
+
+Driver operations therefore run once in a fresh killable process under the
+assignment deadline. The runtime holds an exclusive owner-only deployment lock
+before fencing old dispatches and until shutdown, so a parallel runtime or
+readiness check cannot mutate a live owner's barrier. Provider acceptance before
+a killed or lost reply remains recoverable only with the same durable provider
+execution key; no local retry invents a second key.
+
+The child inherits the deployment lock and arms its own process-group deadline
+before loading driver code. It starts Python without ambient path or site
+customization, rechecks the startup-bound settings digest and reports only a
+structured retryable/terminal classification. Unsupported non-POSIX isolation
+blocks at startup rather than weakening these guarantees.
+
 ## Contract-bound watcher recovery discovery (16 September 2026)
 
 Assume the recovery endpoints work, but an external operator cannot safely

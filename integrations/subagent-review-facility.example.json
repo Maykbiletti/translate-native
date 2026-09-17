@@ -1,0 +1,38 @@
+{
+  "schema": "translate-native.subagent-review-facility-runtime.v1",
+  "backend_id": "production-host-subagents",
+  "backend_version": "http-backend-v1",
+  "facility_id": "production-host-subagent-facility",
+  "facility_version": "immutable-facility-revision",
+  "allow_loopback_http": true,
+  "authentication": {
+    "scheme": "bearer",
+    "token_file": "/absolute/protected/path/subagent-facility.token"
+  },
+  "ledger": {
+    "path": "/absolute/protected/path/subagent-facility.sqlite3",
+    "max_concurrent_executions": 4
+  },
+  "driver": {
+    "factory_file": "/absolute/protected/path/operator_host_subagent_driver.py",
+    "factory_callable": "build_driver",
+    "factory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "driver_id": "operator-host-subagents",
+    "driver_version": "immutable-driver-revision",
+    "config_file": "/absolute/protected/path/subagent-driver.json"
+  },
+  "routes": [
+    {
+      "route_id": "ordinary-fi-FI-native",
+      "phase": "target_native",
+      "reviewer_role": "target-native-reviewer",
+      "reviewer_agent_id": "reviewer-fi-native",
+      "model_id": "deployment-review-model",
+      "model_version": "immutable-model-revision",
+      "host_policy_version": "isolated-host-policy-1",
+      "target_locale": "fi-FI",
+      "content_type": "prose",
+      "task_policy_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}
