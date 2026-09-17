@@ -128,7 +128,8 @@ def _route(value: Any):
         "route_id", "schema", "phase", "target_locale", "content_type",
         "task_policy_sha256", "model_id", "model_version",
         "host_policy_version", "reviewer_agent_id", "reviewer_role",
-        "max_timeout_seconds", "max_output_tokens",
+        "max_timeout_seconds", "max_output_tokens", "max_input_bytes",
+        "cost_unit", "max_cost_units",
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise ReviewHostRuntimeError("review route fields are invalid")
@@ -277,9 +278,9 @@ class _ProcessBoundLauncher:
         self._check()
         return self._launcher.execute_idempotent(assignment, model_input, **budgets)
 
-    def reconcile(self, assignment):
+    def reconcile(self, assignment, model_input, **budgets):
         self._check()
-        return self._launcher.reconcile(assignment)
+        return self._launcher.reconcile(assignment, model_input, **budgets)
 
     def close(self):
         closer = getattr(self._launcher, "close", None)

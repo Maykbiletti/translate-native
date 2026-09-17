@@ -237,13 +237,14 @@ class ResponseSubagentReviewer:
                     "phase", "previous_receipt_sha256", "response_sha256",
                     "agent_id", "session_id", "model_id", "model_version",
                     "inherit_context", "tools", "max_delegation_depth",
-                    "reviewer_role", "assignment_id"}
+                    "reviewer_role", "assignment_id", "usage"}
         if not isinstance(receipt, dict) or set(receipt) != expected:
             raise ResponseReviewBlocked("receipt_invalid")
         bound = {key: control[key] for key in expected - {
-            "response_sha256", "agent_id", "session_id"}}
+            "response_sha256", "agent_id", "session_id", "usage"}}
         if (_raw({key: receipt.get(key) for key in bound}) != _raw(bound)
-                or receipt.get("response_sha256") != _hash(response)):
+                or receipt.get("response_sha256") != _hash(response)
+                or not isinstance(receipt.get("usage"), dict)):
             raise ResponseReviewBlocked("receipt_binding")
         agent = _identifier(receipt.get("agent_id"))
         session = _identifier(receipt.get("session_id"))

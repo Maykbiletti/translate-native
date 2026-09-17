@@ -16,7 +16,7 @@
     "lease_seconds": 65
   },
   "launcher": {
-    "factory_file": "/absolute/protected/path/review_launcher.py",
+    "factory_file": "/absolute/protected/translate-native/integrations/website_localization_subagent_launcher_http.py",
     "factory_callable": "build_launcher",
     "factory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "launcher_id": "deployment-review-launcher",
@@ -37,7 +37,10 @@
       "reviewer_agent_id": "reviewer-fi-native",
       "reviewer_role": "target-native-reviewer",
       "max_timeout_seconds": 60,
-      "max_output_tokens": 4096
+      "max_output_tokens": 4096,
+      "max_input_bytes": 2000000,
+      "cost_unit": "deployment-cost-unit",
+      "max_cost_units": 100000
     }
   ]
 }

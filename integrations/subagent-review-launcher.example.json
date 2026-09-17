@@ -3,6 +3,23 @@
   "launcher_id": "deployment-review-launcher",
   "launcher_version": "immutable-launcher-revision",
   "settings": {
-    "deployment_owned_configuration": "replace-with-provider-neutral-launcher-settings"
+    "schema": "translate-native.subagent-review-http-launcher.v1",
+    "launcher_id": "deployment-review-launcher",
+    "launcher_version": "immutable-launcher-revision",
+    "executor_id": "production-subagent-executor-1",
+    "endpoint": "https://subagent-executor.example/v1/subagent-executions",
+    "authentication": {
+      "scheme": "bearer",
+      "token_file": "/absolute/protected/path/subagent-executor.token",
+      "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "request_timeout_seconds": 60,
+    "poll_interval_milliseconds": 250,
+    "max_status_polls": 120,
+    "max_input_bytes": 2000000,
+    "cost_unit": "deployment-cost-unit",
+    "max_cost_units": 100000,
+    "max_concurrent_executions": 4,
+    "allow_loopback_http": false
   }
 }

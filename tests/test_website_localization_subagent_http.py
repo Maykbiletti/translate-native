@@ -89,7 +89,8 @@ class FixtureHostTransport:
                  if task["schema"] == RESPONSE.SCHEMA else set())}
             receipt = {**bound, "response_sha256": response_sha256,
                        "agent_id": "https-reviewer:" + phase,
-                       "session_id": "https-session:" + key}
+                       "session_id": "https-session:" + key,
+                       "usage": {"fixture": "test-only"}}
             result = {"response": response, "receipt": receipt}
             signed = {
                 "schema": HTTP.ATTESTATION_PAYLOAD_SCHEMA,

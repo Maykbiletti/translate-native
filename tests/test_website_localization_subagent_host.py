@@ -186,6 +186,11 @@ class FixtureLauncher:
             "model_id": assignment.model_id,
             "model_version": assignment.model_version,
             "inherit_context": False, "tools": [], "max_delegation_depth": 0,
+            "usage": {
+                "execute_request_sha256": assignment.execution_key,
+                "cost_unit": assignment.cost_unit, "cost_units": 1,
+                "input_bytes": len(HOST._raw(task)), "output_tokens": 1,
+            },
         }
 
     def execute_idempotent(self, assignment, model_input, *, deadline_seconds,
@@ -214,7 +219,7 @@ class FixtureLauncher:
             self._running.pop(assignment.execution_key).set()
         return result
 
-    def reconcile(self, assignment):
+    def reconcile(self, assignment, model_input, **_budgets):
         result = self.completed.get(assignment.execution_key)
         return {"status": "completed" if result else "not_started",
                 "execution": result}

@@ -58,7 +58,8 @@ class LedgerHost:
                   "inherit_context", "tools", "max_delegation_depth"}
         receipt = {name: control[name] for name in fields}
         receipt.update(response_sha256=SUB._hash(response),
-                       agent_id="reviewer:" + phase, session_id="isolated:" + key)
+                       agent_id="reviewer:" + phase, session_id="isolated:" + key,
+                       usage={"fixture": "test-only"})
         reply = {"response": response, "receipt": receipt}
         self.ledger[key] = SUB._copy(reply)
         if self.mutate:

@@ -234,13 +234,14 @@ class HostSubagentProvider:
         expected = {"schema", "execution_key", "request_sha256", "task_sha256",
                     "phase", "previous_receipt_sha256", "response_sha256",
                     "agent_id", "session_id", "model_id", "model_version",
-                    "inherit_context", "tools", "max_delegation_depth"}
+                    "inherit_context", "tools", "max_delegation_depth", "usage"}
         if not isinstance(receipt, dict) or set(receipt) != expected:
             raise SubagentReviewBlocked("receipt_invalid")
         bound = {key: control[key] for key in expected - {
-            "response_sha256", "agent_id", "session_id"}}
+            "response_sha256", "agent_id", "session_id", "usage"}}
         if (_raw({key: receipt[key] for key in bound}) != _raw(bound)
-                or receipt["response_sha256"] != _hash(response)):
+                or receipt["response_sha256"] != _hash(response)
+                or not isinstance(receipt["usage"], dict)):
             raise SubagentReviewBlocked("receipt_binding")
         agent, session = _id(receipt["agent_id"]), _id(receipt["session_id"])
         if (agent == self._policy["creator_id"]

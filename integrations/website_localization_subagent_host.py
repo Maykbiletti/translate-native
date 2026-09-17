@@ -70,6 +70,21 @@ def _blocked(code: str, status: int, *, retryable: bool = False):
     return ReviewHostBlocked("review_host." + code, status, retryable=retryable)
 
 
+def _launcher_blocked(error: Exception, fallback: str):
+    """Preserve only an explicitly typed launcher's content-free failure."""
+    code = getattr(error, "code", None)
+    retryable = getattr(error, "retryable", None)
+    if (getattr(error, "host_subagent_failure", False) is True
+            and isinstance(code, str)
+            and re.fullmatch(r"launcher\.[a-z0-9_.-]{1,118}", code)
+            and type(retryable) is bool):
+        return _blocked(
+            code.replace(".", "_"), 503 if retryable else 422,
+            retryable=retryable,
+        )
+    return _blocked(fallback, 503, retryable=True)
+
+
 def _pairs(items):
     result = {}
     for key, value in items:
@@ -201,13 +216,16 @@ class PinnedReviewRoute:
     reviewer_role: str
     max_timeout_seconds: int = 60
     max_output_tokens: int = 4096
+    max_input_bytes: int = 2_000_000
+    cost_unit: str = "deployment-cost-unit"
+    max_cost_units: int = 100_000
 
     def __post_init__(self):
         for value in (
             self.route_id, self.schema, self.phase, self.target_locale,
             self.content_type, self.model_id, self.model_version,
             self.host_policy_version, self.reviewer_agent_id,
-            self.reviewer_role,
+            self.reviewer_role, self.cost_unit,
         ):
             if not isinstance(value, str) or TOKEN.fullmatch(value) is None:
                 raise ValueError("review route contains an invalid identifier")
@@ -229,7 +247,11 @@ class PinnedReviewRoute:
         if (type(self.max_timeout_seconds) is not int
                 or not 1 <= self.max_timeout_seconds <= 60
                 or type(self.max_output_tokens) is not int
-                or not 128 <= self.max_output_tokens <= 32768):
+                or not 128 <= self.max_output_tokens <= 32768
+                or type(self.max_input_bytes) is not int
+                or not 1024 <= self.max_input_bytes <= MAX_BODY_BYTES
+                or type(self.max_cost_units) is not int
+                or not 1 <= self.max_cost_units <= 1_000_000_000):
             raise ValueError("review route budgets are invalid")
 
 
@@ -289,6 +311,11 @@ class HostAssignment:
     model_id: str
     model_version: str
     host_policy_version: str
+    deadline_seconds: int
+    max_output_tokens: int
+    max_input_bytes: int
+    cost_unit: str
+    max_cost_units: int
 
 
 class ReviewLauncher(Protocol):
@@ -297,7 +324,9 @@ class ReviewLauncher(Protocol):
                            deadline_seconds: int,
                            max_output_tokens: int) -> Mapping[str, Any]: ...
 
-    def reconcile(self, assignment: HostAssignment) -> Mapping[str, Any]: ...
+    def reconcile(self, assignment: HostAssignment,
+                  model_input: Mapping[str, Any], *, deadline_seconds: int,
+                  max_output_tokens: int) -> Mapping[str, Any]: ...
 
 
 class HMACAttestationSigner:
@@ -632,6 +661,14 @@ class ReviewHostApplication:
             reviewer_session_id=session,
             model_id=route.model_id, model_version=route.model_version,
             host_policy_version=route.host_policy_version,
+            deadline_seconds=min(
+                control["timeout_seconds"], route.max_timeout_seconds,
+            ),
+            max_output_tokens=min(
+                control["max_output_tokens"], route.max_output_tokens,
+            ),
+            max_input_bytes=route.max_input_bytes,
+            cost_unit=route.cost_unit, max_cost_units=route.max_cost_units,
         )
 
     @staticmethod
@@ -660,12 +697,14 @@ class ReviewHostApplication:
         }
 
     @staticmethod
-    def _validate_execution(execution: Any, assignment: HostAssignment) -> dict:
+    def _validate_execution(execution: Any, assignment: HostAssignment,
+                            model_input: Mapping[str, Any]) -> dict:
         execution = _copy(execution)
         expected = {
             "response", "execution_key", "phase", "reviewer_role", "agent_id",
             "session_id", "model_id", "model_version", "inherit_context",
             "tools", "max_delegation_depth",
+            "usage",
         }
         if (not isinstance(execution, dict) or set(execution) != expected
                 or execution.get("execution_key") != assignment.execution_key
@@ -679,8 +718,25 @@ class ReviewHostApplication:
                 or execution.get("tools") != []
                 or type(execution.get("max_delegation_depth")) is not int
                 or execution.get("max_delegation_depth") != 0
-                or not isinstance(execution.get("response"), dict)):
+                or not isinstance(execution.get("response"), dict)
+                or not isinstance(execution.get("usage"), dict)):
             raise _blocked("execution_invalid", 422)
+        usage = execution["usage"]
+        if (set(usage) != {
+                "execute_request_sha256", "cost_unit", "cost_units",
+                "input_bytes", "output_tokens",
+            }
+                or not isinstance(usage.get("execute_request_sha256"), str)
+                or SHA256.fullmatch(usage["execute_request_sha256"]) is None
+                or usage.get("cost_unit") != assignment.cost_unit
+                or type(usage.get("cost_units")) is not int
+                or not 0 <= usage["cost_units"] <= assignment.max_cost_units
+                or type(usage.get("input_bytes")) is not int
+                or usage["input_bytes"] != len(_raw(model_input))
+                or usage["input_bytes"] > assignment.max_input_bytes
+                or type(usage.get("output_tokens")) is not int
+                or not 0 <= usage["output_tokens"] <= assignment.max_output_tokens):
+            raise _blocked("execution_usage_invalid", 422)
         return execution
 
     @staticmethod
@@ -823,6 +879,7 @@ class ReviewHostApplication:
             "response_sha256": _sha(response),
             "agent_id": execution["agent_id"],
             "session_id": execution["session_id"],
+            "usage": execution["usage"],
         }
 
     def _result(self, envelope: dict, control: dict, execution: dict,
@@ -854,6 +911,7 @@ class ReviewHostApplication:
              principal_sha256: str) -> bytes:
         route = self.policy.resolve(task, control)
         assignment = self._assignment(route, control)
+        model_task = self._model_task(task)
         creator_agent = control.get("creator_id")
         creator_session = control.get("creator_session_id")
         if control["schema"] == RESPONSE_REVIEW_SCHEMA:
@@ -883,14 +941,20 @@ class ReviewHostApplication:
             return lease.replay
         if lease.attempts:
             try:
-                reconciled = _copy(self.launcher.reconcile(assignment))
-            except Exception:
-                raise _blocked("reconcile_unavailable", 503, retryable=True) from None
+                reconciled = _copy(self.launcher.reconcile(
+                    assignment, model_task,
+                    deadline_seconds=assignment.deadline_seconds,
+                    max_output_tokens=assignment.max_output_tokens,
+                ))
+            except Exception as error:
+                raise _launcher_blocked(error, "reconcile_unavailable") from None
             if not isinstance(reconciled, dict) or set(reconciled) != {"status", "execution"}:
                 raise _blocked("reconcile_invalid", 422)
             status = reconciled["status"]
             if status == "completed":
-                execution = self._validate_execution(reconciled["execution"], assignment)
+                execution = self._validate_execution(
+                    reconciled["execution"], assignment, model_task,
+                )
             elif status == "not_started" and reconciled["execution"] is None:
                 execution = None
             elif status in {"running", "unknown", "cancel_pending"} \
@@ -913,17 +977,19 @@ class ReviewHostApplication:
                 # old commit, but cannot by itself stop a paused old process from
                 # crossing the external start boundary after its lease expires.
                 launched = self.launcher.execute_idempotent(
-                    assignment, self._model_task(task),
-                    deadline_seconds=min(control["timeout_seconds"], route.max_timeout_seconds),
-                    max_output_tokens=min(control["max_output_tokens"], route.max_output_tokens),
+                    assignment, model_task,
+                    deadline_seconds=assignment.deadline_seconds,
+                    max_output_tokens=assignment.max_output_tokens,
                 )
-                execution = self._validate_execution(launched, assignment)
+                execution = self._validate_execution(
+                    launched, assignment, model_task,
+                )
             except ReviewHostBlocked:
                 self.ledger.mark_unknown(lease)
                 raise
-            except Exception:
+            except Exception as error:
                 self.ledger.mark_unknown(lease)
-                raise _blocked("launcher_unknown", 503, retryable=True) from None
+                raise _launcher_blocked(error, "launcher_unknown") from None
         try:
             body, receipt_sha256 = self._result(
                 envelope, control, execution, route, task,

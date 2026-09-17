@@ -110,6 +110,41 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.189.0: provider-neutral HTTPS launcher for isolated reviewers
+
+The protected review host now includes a deployable HTTPS launcher in
+`integrations/website_localization_subagent_launcher_http.py`. It forwards the
+host-assigned identity and only the already reduced model input to a separately
+operated subagent executor. Authentication remains outside the JSON body and
+model context. HTTPS is mandatory except for explicitly enabled loopback tests;
+redirects, changed identities, malformed responses and ambiguous states block
+fail-closed.
+
+Every start carries the exact execution key, canonical request digest, pinned
+launcher and executor identities, input-byte and cost ceilings, hard deadline
+and output-token ceiling. The immutable transport worker runs with Python
+isolation in a killable one-shot process, so changed factory bytes, inherited
+Python startup code and slow streams cannot cross the verified wall limit. A
+configured non-queuing concurrency cap keeps ambiguous and running execution
+keys occupied until reconciliation proves a terminal state. The same cap is
+part of the execute contract, so the trusted executor must enforce it atomically
+across launcher restarts. Excess starts remain retryable and never become model
+work. The
+remote executor must atomically deduplicate that key and retain a completed
+result plus a complete bounded usage receipt for reconciliation. That receipt
+binds the original execute-request digest, exact input bytes, output tokens,
+cost unit and cost value through the host attestation and Guard evidence. A lost
+start response is therefore recovered against the same values without a second
+physical model start; polling, runtime and declared cost remain bounded. Typed,
+content-free launcher failures retain their terminal or retryable classification
+at the trusted host boundary.
+
+Synthetic Finnish response and ordered Maltese translation tests exercise the
+real launcher interface, source isolation, identity binding, polling and
+recovery. They prove protocol behavior only. A deployment must still provide
+the actual host-subagent executor, provider configuration and qualified
+native-language evidence; no native-quality or DeepL-superiority claim follows.
+
 ### Version 6.188.0: protected runtime for the isolated-review host
 
 The durable reviewer endpoint now has a provider-neutral deployment
@@ -2950,7 +2985,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.188.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.189.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

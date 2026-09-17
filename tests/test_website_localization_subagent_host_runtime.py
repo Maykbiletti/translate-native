@@ -91,6 +91,9 @@ class RuntimeTests(unittest.TestCase):
             "reviewer_role": route.reviewer_role,
             "max_timeout_seconds": route.max_timeout_seconds,
             "max_output_tokens": route.max_output_tokens,
+            "max_input_bytes": route.max_input_bytes,
+            "cost_unit": route.cost_unit,
+            "max_cost_units": route.max_cost_units,
         }
 
     def configuration(self, routes, **changes):

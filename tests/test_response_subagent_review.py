@@ -61,7 +61,8 @@ class LedgerHost:
             }
         }
         receipt.update(response_sha256=REVIEW._hash(response),
-                       agent_id="native-reviewer", session_id="isolated-review-session")
+                       agent_id="native-reviewer", session_id="isolated-review-session",
+                       usage={"fixture": "test-only"})
         reply = {"response": response, "receipt": receipt}
         self.ledger[control["execution_key"]] = REVIEW._copy(reply)
         if self.mutate:

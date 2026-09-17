@@ -150,8 +150,17 @@ execute_idempotent(
     deadline_seconds=deadline_seconds,
     max_output_tokens=max_output_tokens,
 )
-reconcile(assignment)
+reconcile(
+    assignment, model_input,
+    deadline_seconds=deadline_seconds,
+    max_output_tokens=max_output_tokens,
+)
 ```
+
+The current contract passes the same reduced `model_input`, deadline and output
+ceiling to `reconcile(...)` locally so the launcher can reconstruct the original
+execute digest and exact usage limits. The reconcile HTTP request itself still
+contains no model content.
 
 `execute_idempotent` must atomically deduplicate the physical model start by
 `assignment.execution_key` across processes. SQLite lease generations fence
@@ -237,12 +246,57 @@ hop. Do not expose this listener directly. A forked or closed runtime rejects
 requests before journal replay or launcher access. Startup never invents a
 launcher, reviewer result, credential or signing key.
 
-This composition makes the server deployable but does not supply or endorse a
-model-specific launcher. Operators must implement and independently test real
-host isolation, atomic execution-key deduplication, cancellation, billing and
-provider credentials. Synthetic Finnish and Maltese runtime tests prove the
-configuration, source isolation, restart replay and fail-closed bindings only;
-they are not native-language evidence and make no DeepL superiority claim.
+The bundled
+`integrations/website_localization_subagent_launcher_http.py` is the standard
+provider-neutral launcher factory for this runtime. Its protected settings pin
+one HTTPS executor endpoint, launcher and executor identities, one owner-only
+digest-bound bearer token, request timeout, input-byte ceiling, named cost unit,
+cost ceiling, non-queuing concurrency cap and finite polling budget. Plain HTTP
+is allowed only for an explicitly enabled loopback test. Authentication appears
+only in the transport header and never in the JSON body or model-visible input.
+The launcher is self-contained: its protected factory digest covers the
+embedded transport worker, and each request starts that immutable worker with
+Python isolation instead of rereading mutable factory bytes or inherited Python
+startup paths.
+
+For `execute`, the launcher sends the exact host assignment, the already reduced
+`model_input`, hard deadline, input-byte, output-token and cost ceilings. For `reconcile`, it sends
+the same assignment without model content. Both operations bind canonical
+request bytes to `X-Subagent-Request-Sha256`, and send the exact execution key as
+both `Idempotency-Key` and `X-Subagent-Execution-Key`. The executor response must
+echo the operation, request digest, execution key and all pinned service
+identities. A completed result must contain the exact execution object expected
+by the host and an exact usage object with the original execute-request digest,
+pinned cost unit, bounded integer cost, exact input-byte count and bounded
+output-token count. Recovery reconstructs and checks those same exact values.
+The host stores the usage object in its signed receipt, so the worker and Guard
+evidence bind it as well. Missing, boolean, negative, excessive, foreign or
+rebound usage values block. `running`, `unknown`, `cancel_pending` and
+`not_started` never become review evidence.
+
+The executor, not this transport adapter, owns the physical host-subagent
+facility. It must atomically deduplicate starts by the execution key, enforce the
+deadline, byte, token and cost ceilings, retain completed results and usage for reconciliation and run
+each reviewer with empty inherited history, no tools and zero delegation depth.
+If that host facility is unavailable, the launcher returns a content-free
+blocked state rather than inventing a review. The launcher never receives the
+Guard signer, host attestation key, publication rights, route table or SQLite
+journal. `max_concurrent_executions` rejects a new physical start immediately as
+retryable when all slots are occupied; it does not create an unbounded waiting
+queue. A running or ambiguous key retains its local slot until reconciliation
+proves `completed` or `not_started`. The exact cap is also in the signed execute
+request and the trusted executor must enforce it atomically across launcher and
+host-process restarts; the local bound is not a substitute for that durable
+executor boundary.
+
+Operators still must independently test their real executor isolation,
+provider credentials and the mapping from provider billing into the pinned
+deployment cost unit. The launcher's production request runs in a killable
+one-shot process; the parent terminates it at the remaining wall deadline,
+including slow response streams. Synthetic Finnish and
+Maltese runtime tests prove the configuration, source isolation, restart replay
+and fail-closed bindings only; they are not native-language evidence and make no
+DeepL superiority claim.
 
 ## Authenticated HTTPS host bridge
 
