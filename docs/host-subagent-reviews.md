@@ -372,6 +372,53 @@ must independently prove isolation, billing mapping, cancellation semantics and
 provider credentials. Synthetic Finnish and Maltese fixtures are explicitly
 protocol tests, not native-language or DeepL-quality evidence.
 
+### Standard HTTPS facility backend
+
+`integrations/website_localization_subagent_backend_http.py` is the bundled
+`ExecutionBackend` factory. Its complete source is intended to be copied into a
+protected deployment directory and pinned by the executor runtime's
+`factory_sha256`. The module includes its own no-redirect, one-request isolated
+transport and response validators; it does not import an unpinned model SDK or
+select a model provider.
+
+The backend sends `POST` to one configured HTTPS endpoint. Loopback HTTP exists
+only for explicit tests. Authentication is a bearer header loaded from an
+owner-only file whose SHA-256 is bound by protected configuration. Neither the
+credential nor its digest enters the JSON body or model input. The request
+contains:
+
+- schema, operation and exact backend/facility identities and versions;
+- the complete host-owned execution assignment and upstream execute digest;
+- explicit `inherit_context: false`, empty tools and zero delegation depth;
+- for `execute` only, the already reduced phase task and all bounded budgets;
+- a canonical request SHA-256 echoed in headers and the response.
+
+`Idempotency-Key` is exactly the host execution key. The remote facility must
+atomically persist that key and canonical execute request before physical model
+work, reject a changed request under the same key with HTTP 409, and keep the
+completed execution plus usage available to read-only `reconcile`. The client
+does not retry. A lost execute response therefore becomes executor state
+`unknown`; only reconciliation may recover it. `not_started` is accepted only
+from reconciliation and must never represent a failed or unobserved start.
+
+Responses use
+`translate-native.subagent-review-facility-response.v1`, repeat the operation,
+backend and facility generations, execution key, upstream execute digest and
+request digest, and return exactly one existing executor status. HTTP 202 is
+required for `running`, `unknown` and `cancel_pending`; HTTP 200 is required for
+`completed` and reconciled `not_started`. Only `completed` carries execution and
+usage. Reviewer, session, phase, model, empty-context flags, cost, input bytes,
+output tokens and original execute digest are checked by both this adapter and
+the durable executor before evidence can reach the trusted review host.
+
+Use `integrations/subagent-review-backend.example.json` with the executor
+example. Replace all placeholder paths, revisions and SHA-256 values, place the
+token and both configuration files in an owner-only directory, and keep the
+facility's provider credential outside this adapter. The facility remains
+responsible for mapping the pinned model identity to a supported host subagent,
+real billing, cancellation and qualified-reviewer evidence. Missing support or
+unverifiable execution remains blocked rather than being synthesized locally.
+
 ## Authenticated HTTPS host bridge
 
 `integrations/website_localization_subagent_http.py` implements the `ReviewHost`

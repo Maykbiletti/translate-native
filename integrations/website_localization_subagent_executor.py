@@ -737,10 +737,16 @@ class SubagentExecutorApplication:
             if not preserve_dispatch:
                 self.ledger.quarantine(reservation)
             raise
-        except Exception:
+        except Exception as error:
             if not preserve_dispatch:
                 self.ledger.quarantine(reservation)
-            raise _blocked("backend_unavailable", 503, retryable=True) from None
+            retryable = getattr(error, "retryable", True)
+            if type(retryable) is not bool:
+                retryable = True
+            raise _blocked(
+                "backend_unavailable" if retryable else "backend_rejected",
+                503 if retryable else 422, retryable=retryable,
+            ) from None
 
     def _stored_input_bytes(self, execution_key: str) -> int:
         with self.ledger._connect() as connection:

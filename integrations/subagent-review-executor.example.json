@@ -13,11 +13,11 @@
     "max_concurrent_executions": 4
   },
   "backend": {
-    "factory_file": "/absolute/protected/path/subagent-backend.py",
+    "factory_file": "/absolute/protected/path/website_localization_subagent_backend_http.py",
     "factory_callable": "build_backend",
     "factory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "backend_id": "production-host-subagents",
-    "backend_version": "immutable-backend-revision",
+    "backend_version": "http-backend-v1",
     "config_file": "/absolute/protected/path/subagent-backend.json"
   },
   "routes": [

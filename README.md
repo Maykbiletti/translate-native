@@ -110,6 +110,32 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.191.0: deployable HTTPS backend for host subagents
+
+The durable executor now ships its standard provider-neutral backend factory in
+`integrations/website_localization_subagent_backend_http.py`. Operators can bind
+one fixed host-subagent facility through protected configuration instead of
+writing privileged Python glue. The adapter sends one canonical `execute` or
+read-only `reconcile` request, authenticates only through headers and carries
+the trusted empty-context, no-tools and zero-delegation controls with the exact
+host-assigned reviewer identity.
+
+Every response must echo the backend and facility generation, execution key,
+upstream execute digest and request digest. Completed results additionally bind
+the exact reviewer, phase, session, model and bounded usage. Redirects, changed
+identity, malformed JSON, unsupported statuses, unbounded cost or token usage,
+unsafe token files and non-HTTPS origins block fail-closed. One isolated,
+killable HTTP worker enforces the wall deadline without redirects or implicit
+retries. A lost start response is recovered only through `reconcile`; the
+adapter never repeats physical model work under a new identity.
+
+Synthetic Finnish and Maltese fixtures traverse the complete review host,
+launcher, durable executor and HTTPS backend. They prove transport, isolation,
+idempotency and binding behavior only. The remote facility must still implement
+atomic persist-before-start deduplication and connect its configured models or
+qualified reviewers. No real native-language quality or DeepL-superiority claim
+follows from these tests.
+
 ### Version 6.190.0: durable executor for isolated host subagents
 
 The provider-neutral launcher now has a protected server half in
@@ -3016,7 +3042,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.190.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.191.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

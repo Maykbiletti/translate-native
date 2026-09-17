@@ -1,8 +1,24 @@
 {
   "schema": "translate-native.subagent-review-backend-config.v1",
   "backend_id": "production-host-subagents",
-  "backend_version": "immutable-backend-revision",
+  "backend_version": "http-backend-v1",
   "settings": {
-    "deployment": "operator-defined-host-subagent-facility"
+    "schema": "translate-native.subagent-review-http-backend.v1",
+    "backend_id": "production-host-subagents",
+    "backend_version": "http-backend-v1",
+    "facility_id": "production-host-subagent-facility",
+    "facility_version": "immutable-facility-revision",
+    "endpoint": "https://subagents.example/v1/isolated-review-executions",
+    "authentication": {
+      "scheme": "bearer",
+      "token_file": "/absolute/protected/path/subagent-facility.token",
+      "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "request_timeout_seconds": 60,
+    "max_input_bytes": 2000000,
+    "max_output_tokens": 4096,
+    "cost_unit": "deployment-cost-unit",
+    "max_cost_units": 100000,
+    "allow_loopback_http": false
   }
 }
