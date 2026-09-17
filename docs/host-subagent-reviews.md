@@ -418,18 +418,39 @@ usage. Reviewer, session, phase, model, empty-context flags, cost, input bytes,
 output tokens and original execute digest are checked by both this adapter and
 the durable executor before evidence can reach the trusted review host.
 
-Use `integrations/subagent-review-backend.example.json` with the executor
-example. Run the facility's `--check` first and copy its exact
-`driver_deployment_sha256`, `deployment_manifest_sha256`,
-`route_requirements_sha256`, `readiness_policy_sha256`,
-`facility_ledger_instance_id` and `routes_checked`
-values into the backend's
-closed `readiness` object. Replace all placeholder paths, revisions and SHA-256
-values, place the token and both configuration files in an owner-only directory, and keep the
-facility's provider credential outside this adapter. The facility remains
-responsible for mapping the pinned model identity to a supported host subagent,
-real billing, cancellation and qualified-reviewer evidence. Missing support or
-unverifiable execution remains blocked rather than being synthesized locally.
+Use `integrations/subagent-review-backend-bootstrap.example.json` with the
+executor example. Configure its endpoint, limits and protected token digest,
+but leave `readiness` as `null`. Initialize and check the facility ledger once,
+then stop that check process and materialize a new backend file:
+
+```console
+python integrations/website_localization_subagent_backend_bootstrap.py \
+  --facility-config /absolute/protected/path/subagent-facility.json \
+  --backend-template /absolute/protected/path/subagent-backend-template.json \
+  --executor-config /absolute/protected/path/subagent-executor.json \
+  --output /absolute/protected/path/subagent-backend.json
+```
+
+The executor configuration's `backend.config_file` must name exactly that
+missing output, and its ledger must not exist yet. The bootstrap opens the
+initialized facility under its exclusive runtime lock, executes the actual
+content-free driver preflight, verifies that every executor route is identical
+to the facility route, validates the pinned bundled backend factory and shared
+token, and writes the six readiness bindings as one canonical owner-only file.
+It never accepts pasted readiness JSON or a remote endpoint as a trust anchor.
+It never overwrites: an exact protected rerun succeeds idempotently and any
+different existing file blocks.
+
+Start the facility normally after bootstrap, then initialize the executor with
+its existing `--initialize-ledger --check` command. That startup still performs
+the authenticated, challenge-bound live-readiness request before creating the
+executor ledger. Bootstrap is intentionally local and non-exclusive; it is not
+a cross-host enrollment protocol and does not assign a unique client identity.
+Rotation still requires the quiesced, fresh-journal procedure below. The
+facility remains responsible for mapping the pinned model identity to a
+supported host subagent, real billing, cancellation and qualified-reviewer
+evidence. Missing support or unverifiable execution remains blocked rather than
+being synthesized locally.
 
 ### Durable host-subagent facility
 
@@ -519,7 +540,7 @@ The Version 6.194→6.195 configuration change deliberately changes both
 deployment bindings. Use a quiesced cutover: stop intake, keep the old pinned
 binary, configuration and journal as the only running stack, and resolve every
 active, unknown or cancellation-pending record. Then stop that stack completely
-before starting Version 6.195 with fresh facility and executor journals. The
+before starting Version 6.196 with fresh facility and executor journals. The
 runtime has no reconcile-only drain mode, so old and new stacks must not overlap.
 There is no automatic cross-generation migration and no permission to relabel
 ambiguous provider work as `not_started`.

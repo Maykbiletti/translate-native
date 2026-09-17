@@ -110,6 +110,29 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.196.0: protected facility-to-backend bootstrap
+
+The standard host-subagent stack now materializes its executor backend
+configuration directly from the protected local facility deployment. The new
+bootstrap runs the real content-free command preflight under the facility's
+exclusive runtime lock, requires the executor and facility to have the exact
+same reviewer, phase, model, locale, content-type and task-policy routes, and
+pins the resulting ledger-instance, driver, manifest, route and readiness-policy
+digests without manual copying.
+
+The bootstrap accepts only owner-only local configuration files, validates the
+bundled digest-pinned HTTPS backend and shared token binding, refuses an
+existing executor ledger, and creates the configured backend path without
+overwriting. Exact reruns are idempotent; drift, unsafe files, an active facility
+or conflicting output blocks. It does not use network discovery, initialize an
+executor ledger, start a model, or receive signing/publication authority. The
+executor's authenticated live-readiness check remains mandatory at startup.
+
+This is non-exclusive local bootstrap materialization, not cross-host trust
+enrollment. Synthetic Finnish and Maltese tests prove the configuration and
+adapter mechanics only; they do not prove native quality, reviewer
+qualification, model independence or superiority over DeepL.
+
 ### Version 6.195.0: continuously supervised host-subagent readiness
 
 The protected facility now refreshes its content-free operator preflight on a
@@ -3160,7 +3183,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.195.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.196.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

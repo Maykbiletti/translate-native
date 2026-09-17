@@ -63,6 +63,71 @@ class _MissingExecutorLedger(SubagentExecutorRuntimeError):
     """Internal signal allowing first initialization after local inspection."""
 
 
+class _RuntimeLock:
+    """Exclusive executor deployment lock shared with local bootstrap."""
+
+    def __init__(self, ledger_path: Path):
+        self.path = ledger_path.with_name(ledger_path.name + ".runtime.lock")
+        self._handle = None
+        try:
+            with PROTECTED._open_directory(self.path) as directory:
+                flags = (os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0))
+                descriptor = (os.open(self.path, flags, 0o600)
+                              if directory is None else os.open(
+                                  self.path.name, flags, 0o600, dir_fd=directory,
+                              ))
+                handle = os.fdopen(descriptor, "r+b", buffering=0)
+                linked = PROTECTED._lstat(self.path, directory)
+                details = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1
+                    or _ledger_identity(details) != _ledger_identity(linked)
+                    or (os.name != "nt" and stat.S_IMODE(details.st_mode) & 0o077)
+                    or (hasattr(os, "getuid") and details.st_uid != os.getuid())):
+                raise SubagentExecutorRuntimeError("executor runtime lock is unsafe")
+            if os.name == "nt":
+                import msvcrt
+                if details.st_size == 0:
+                    handle.write(b"0")
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._handle = handle
+        except PROTECTED.ResponseReviewRuntimeError as error:
+            if "handle" in locals():
+                handle.close()
+            raise SubagentExecutorRuntimeError(
+                "executor runtime lock directory is unsafe"
+            ) from error
+        except (BlockingIOError, OSError) as error:
+            if "handle" in locals():
+                handle.close()
+            raise SubagentExecutorRuntimeError(
+                "executor runtime is already active"
+            ) from error
+        except Exception:
+            if "handle" in locals():
+                handle.close()
+            raise
+
+    def close(self):
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
 def _pairs(items):
     result = {}
     for key, value in items:
@@ -402,6 +467,7 @@ class SubagentExecutorRuntime:
     backend: _ProcessBoundBackend
     ledger_path: Path
     ledger_identity: tuple[int, int, int, int, int, int]
+    runtime_lock: _RuntimeLock
 
     def __post_init__(self):
         self._pid, self._closed, self._closing, self._active = (
@@ -454,21 +520,26 @@ class SubagentExecutorRuntime:
         try:
             self.backend.close()
         finally:
-            with self._condition:
-                self._closed = True
-                self._condition.notify_all()
+            try:
+                self.runtime_lock.close()
+            finally:
+                with self._condition:
+                    self._closed = True
+                    self._condition.notify_all()
 
 
 def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = False):
     config, _config_raw = load_executor_runtime_config(path)
-    backend_document, backend_raw = _backend_configuration(config["backend"])
-    backend = _build_backend(config["backend"], backend_document)
+    ledger_path = Path(config["ledger"]["path"])
+    runtime_lock = _RuntimeLock(ledger_path)
+    backend = None
     try:
+        backend_document, backend_raw = _backend_configuration(config["backend"])
+        backend = _build_backend(config["backend"], backend_document)
         bearer = _protected_text(
             config["authentication"]["token_file"], PROTECTED.BEARER,
             "executor authentication token",
         )
-        ledger_path = Path(config["ledger"]["path"])
         binding = _deployment_binding(config, backend_raw, bearer)
         try:
             initial_identity = _prepare_ledger(ledger_path, initialize=False)
@@ -512,9 +583,13 @@ def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = Fals
             policy=EXECUTOR.PinnedExecutorPolicy(routes), ledger=ledger,
             backend=backend, allow_loopback_http=config["allow_loopback_http"],
         )
-        return SubagentExecutorRuntime(application, backend, ledger_path, identity)
+        return SubagentExecutorRuntime(
+            application, backend, ledger_path, identity, runtime_lock,
+        )
     except Exception:
-        backend.close()
+        if backend is not None:
+            backend.close()
+        runtime_lock.close()
         raise
 
 

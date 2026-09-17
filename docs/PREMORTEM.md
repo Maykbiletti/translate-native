@@ -1,5 +1,38 @@
 # Version 6 premortem
 
+## Protected facility-to-backend bootstrap (17 September 2026)
+
+Assume the isolated facility is correctly configured, but its deployment
+bindings are copied manually into an executor backend configuration.
+
+- Six individually copied values could be mixed across facility generations,
+  routes or health policies while still looking syntactically valid.
+- Pasted readiness JSON or a remote endpoint could be mistaken for a trust
+  anchor and enroll an attacker-controlled facility.
+- A bootstrap could overwrite a backend file already bound to an executor
+  ledger, silently changing the deployment under recoverable work.
+- A route, locale, reviewer, model or task-policy mismatch between facility and
+  executor could survive until the first real review.
+- Concurrent bootstrap, path replacement or a crash during output could leave
+  a partially trusted configuration.
+- Bootstrap output or diagnostics could disclose the facility bearer, model
+  input, source, target, provider credential or publication authority.
+
+The bootstrap will therefore run only against the protected local facility
+configuration and its initialized ledger, under the existing exclusive runtime
+lock. It will execute the real content-free driver preflight, require the exact
+executor route matrix and standard digest-pinned backend factory, preserve the
+template-owned endpoint and budgets, validate the shared token locally, and
+refuse an existing executor ledger. It creates one canonical owner-only backend
+configuration without overwriting; an exact protected rerun is idempotent and
+any differing destination blocks. Facility, template and executor inputs are
+re-read before commit while the facility lock remains held.
+
+This is non-exclusive local configuration materialization, not remote trust
+discovery or a unique client enrollment. It does not start a model, call the
+facility over the network, grant signing/publication authority, prove reviewer
+qualification or replace the executor's authenticated live-readiness gate.
+
 ## Live host-subagent readiness after startup (17 September 2026)
 
 Assume the startup preflight passed, but the configured host route, credential,

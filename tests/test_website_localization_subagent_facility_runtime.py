@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -26,6 +27,11 @@ import test_website_localization_subagents as BASE
 RUNTIME = BASE.load(
     "test_website_localization_subagent_facility_runtime_impl",
     BASE.ROOT / "integrations" / "website_localization_subagent_facility_runtime.py",
+)
+BOOTSTRAP = BASE.load(
+    "test_website_localization_subagent_backend_bootstrap_impl",
+    BASE.ROOT / "integrations"
+    / "website_localization_subagent_backend_bootstrap.py",
 )
 
 
@@ -325,12 +331,10 @@ class FacilityRuntimeTests(unittest.TestCase):
         mt_routes, _captures = HOST_TEST.website_routes(["mt-MT"])
         routes = [fi_route, *mt_routes]
         facility_config = self.configuration(routes)
-        facility_runtime = RUNTIME.open_subagent_facility_runtime(
+        initialized = RUNTIME.open_subagent_facility_runtime(
             facility_config, initialize_ledger=True,
         )
-        server = make_server("127.0.0.1", 0, facility_runtime.application)
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
+        initialized.close()
 
         backend_factory = self.root / "website_localization_subagent_backend_http.py"
         backend_factory.write_bytes((
@@ -339,8 +343,12 @@ class FacilityRuntimeTests(unittest.TestCase):
         ).read_bytes())
         if os.name != "nt":
             backend_factory.chmod(0o600)
-        preflight = facility_runtime.preflight
-        backend_config = self.write_json("http-backend.json", {
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        facility_port = probe.getsockname()[1]
+        probe.close()
+        backend_config = self.root / "http-backend.json"
+        backend_template = self.write_json("http-backend-template.json", {
             "schema": BACKEND_TEST.RUNTIME_TEST.RUNTIME.BACKEND_SCHEMA,
             "backend_id": "production-host-subagents",
             "backend_version": "backend-1",
@@ -351,7 +359,7 @@ class FacilityRuntimeTests(unittest.TestCase):
                 "facility_id": "host-subagent-facility",
                 "facility_version": "facility-1",
                 "endpoint": (
-                    f"http://127.0.0.1:{server.server_port}"
+                    f"http://127.0.0.1:{facility_port}"
                     "/v1/isolated-review-executions"
                 ),
                 "authentication": {
@@ -360,24 +368,7 @@ class FacilityRuntimeTests(unittest.TestCase):
                         BACKEND_TEST.FACILITY_TOKEN.encode("ascii")
                     ).hexdigest(),
                 },
-                "readiness": {
-                    "facility_ledger_instance_id": preflight[
-                        "facility_ledger_instance_id"
-                    ],
-                    "driver_deployment_sha256": preflight[
-                        "driver_deployment_sha256"
-                    ],
-                    "deployment_manifest_sha256": preflight[
-                        "deployment_manifest_sha256"
-                    ],
-                    "route_requirements_sha256": preflight[
-                        "route_requirements_sha256"
-                    ],
-                    "readiness_policy_sha256": preflight[
-                        "readiness_policy_sha256"
-                    ],
-                    "routes_count": preflight["routes_checked"],
-                },
+                "readiness": None,
                 "request_timeout_seconds": 10,
                 "max_input_bytes": 2_000_000,
                 "max_output_tokens": 4096,
@@ -414,6 +405,28 @@ class FacilityRuntimeTests(unittest.TestCase):
             },
             "routes": [self.route_dict(route) for route in routes],
         })
+        receipt = BOOTSTRAP.bootstrap_backend(
+            facility_config, backend_template, executor_config, backend_config,
+        )
+        self.assertEqual(receipt["status"], "created")
+        self.assertTrue(receipt["content_free"])
+        self.assertFalse(self.driver_state.exists())
+        self.assertEqual(
+            BOOTSTRAP.bootstrap_backend(
+                facility_config, backend_template, executor_config, backend_config,
+            )["status"],
+            "already_materialized",
+        )
+        materialized = json.loads(backend_config.read_text(encoding="utf-8"))
+        self.assertIsInstance(materialized["settings"]["readiness"], dict)
+        self.assertNotIn("source", json.dumps(receipt))
+        self.assertNotIn("target", json.dumps(receipt))
+        self.assertNotIn(BACKEND_TEST.FACILITY_TOKEN, backend_config.read_text())
+
+        facility_runtime = RUNTIME.open_subagent_facility_runtime(facility_config)
+        server = make_server("127.0.0.1", facility_port, facility_runtime.application)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
         executor_runtime = None
         try:
             executor_runtime = (
@@ -459,6 +472,125 @@ class FacilityRuntimeTests(unittest.TestCase):
             server.server_close()
             server_thread.join(2)
             facility_runtime.close()
+
+    def test_backend_bootstrap_rejects_route_drift_and_existing_ledger(self):
+        fi_task, _control = HOST_TEST.response_request("fi-FI")
+        fi_route = HOST_TEST.response_route(fi_task)
+        facility_config = self.configuration([fi_route])
+        initialized = RUNTIME.open_subagent_facility_runtime(
+            facility_config, initialize_ledger=True,
+        )
+        initialized.close()
+        backend_factory = self.root / "website_localization_subagent_backend_http.py"
+        backend_factory.write_bytes((
+            BASE.ROOT / "integrations"
+            / "website_localization_subagent_backend_http.py"
+        ).read_bytes())
+        if os.name != "nt":
+            backend_factory.chmod(0o600)
+        output = self.root / "bootstrapped-backend.json"
+        template = self.write_json("bootstrap-template.json", {
+            "schema": BACKEND_TEST.RUNTIME_TEST.RUNTIME.BACKEND_SCHEMA,
+            "backend_id": "production-host-subagents",
+            "backend_version": "backend-1",
+            "settings": {
+                "schema": BACKEND_TEST.BACKEND.SETTINGS_SCHEMA,
+                "backend_id": "production-host-subagents",
+                "backend_version": "backend-1",
+                "facility_id": "host-subagent-facility",
+                "facility_version": "facility-1",
+                "endpoint": "http://127.0.0.1:47643/v1/isolated-review-executions",
+                "authentication": {
+                    "scheme": "bearer", "token_file": str(self.token_file),
+                    "token_sha256": hashlib.sha256(
+                        BACKEND_TEST.FACILITY_TOKEN.encode("ascii")
+                    ).hexdigest(),
+                },
+                "readiness": None,
+                "request_timeout_seconds": 10,
+                "max_input_bytes": 2_000_000,
+                "max_output_tokens": 4096,
+                "cost_unit": "deployment-cost-unit",
+                "max_cost_units": 100_000,
+                "allow_loopback_http": True,
+            },
+        })
+        executor_token = self.write("bootstrap-executor.token", EXEC_TEST.EXECUTOR_TOKEN)
+        executor_ledger = self.root / "bootstrap-executor.sqlite3"
+        executor_value = {
+            "schema": BACKEND_TEST.RUNTIME_TEST.RUNTIME.CONFIG_SCHEMA,
+            "executor_id": "executor-1",
+            "launcher_id": "deployment-review-launcher",
+            "launcher_version": "launcher-1",
+            "allow_loopback_http": True,
+            "authentication": {"scheme": "bearer", "token_file": str(executor_token)},
+            "ledger": {"path": str(executor_ledger), "max_concurrent_executions": 4},
+            "backend": {
+                "factory_file": str(backend_factory),
+                "factory_callable": "build_backend",
+                "factory_sha256": hashlib.sha256(backend_factory.read_bytes()).hexdigest(),
+                "backend_id": "production-host-subagents",
+                "backend_version": "backend-1",
+                "config_file": str(output),
+            },
+            "routes": [self.route_dict(fi_route)],
+        }
+        executor_config = self.write_json("bootstrap-executor.json", executor_value)
+        drifted = dict(executor_value)
+        drifted["routes"] = [dict(executor_value["routes"][0])]
+        drifted["routes"][0]["model_version"] = "wrong-model-generation"
+        executor_config.write_text(json.dumps(drifted), encoding="utf-8")
+        if os.name != "nt":
+            executor_config.chmod(0o600)
+        with self.assertRaisesRegex(
+                BOOTSTRAP.SubagentBackendBootstrapError,
+                "executor and facility routes differ"):
+            BOOTSTRAP.bootstrap_backend(
+                facility_config, template, executor_config, output,
+            )
+        self.assertFalse(output.exists())
+
+        executor_config.write_text(json.dumps(executor_value), encoding="utf-8")
+        if os.name != "nt":
+            executor_config.chmod(0o600)
+        executor_ledger.write_bytes(b"occupied")
+        if os.name != "nt":
+            executor_ledger.chmod(0o600)
+        with self.assertRaisesRegex(
+                BOOTSTRAP.SubagentBackendBootstrapError,
+                "executor ledger already exists"):
+            BOOTSTRAP.bootstrap_backend(
+                facility_config, template, executor_config, output,
+            )
+        self.assertFalse(output.exists())
+
+        executor_ledger.unlink()
+        receipt = BOOTSTRAP.bootstrap_backend(
+            facility_config, template, executor_config, output,
+        )
+        self.assertEqual(receipt["status"], "created")
+        output.write_text("{}", encoding="utf-8")
+        if os.name != "nt":
+            output.chmod(0o600)
+        with self.assertRaisesRegex(
+                BOOTSTRAP.SubagentBackendBootstrapError,
+                "different content"):
+            BOOTSTRAP.bootstrap_backend(
+                facility_config, template, executor_config, output,
+            )
+
+        output.unlink()
+        active = RUNTIME.open_subagent_facility_runtime(facility_config)
+        try:
+            with self.assertRaisesRegex(
+                    BOOTSTRAP.SubagentBackendBootstrapError,
+                    "facility preflight blocked"):
+                BOOTSTRAP.bootstrap_backend(
+                    facility_config, template, executor_config, output,
+                )
+            self.assertFalse(output.exists())
+        finally:
+            active.close()
 
     def test_live_preflight_failure_blocks_new_start_then_recovers(self):
         task, control = HOST_TEST.response_request("fi-FI")
