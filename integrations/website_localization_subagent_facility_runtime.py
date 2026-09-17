@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,9 +33,9 @@ from wsgiref.simple_server import WSGIServer, make_server
 ROOT = Path(__file__).resolve().parents[1]
 FACILITY_PATH = ROOT / "integrations" / "website_localization_subagent_facility.py"
 PROTECTED_PATH = ROOT / "integrations" / "response_subagent_https_runtime.py"
-CONFIG_SCHEMA = "translate-native.subagent-review-facility-runtime.v1"
+CONFIG_SCHEMA = "translate-native.subagent-review-facility-runtime.v2"
 DRIVER_SCHEMA = "translate-native.subagent-review-driver-config.v1"
-DEPLOYMENT_SCHEMA = "translate-native.subagent-review-facility-deployment.v1"
+DEPLOYMENT_SCHEMA = "translate-native.subagent-review-facility-deployment.v2"
 PREFLIGHT_SCHEMA = "translate-native.subagent-review-facility-preflight.v1"
 PREFLIGHT_RESULT_SCHEMA = (
     "translate-native.subagent-review-facility-preflight-result.v1"
@@ -159,7 +160,7 @@ def load_facility_runtime_config(path: Path) -> tuple[dict, bytes]:
     expected = {
         "schema", "backend_id", "backend_version", "facility_id",
         "facility_version", "allow_loopback_http", "authentication",
-        "ledger", "driver", "routes",
+        "ledger", "driver", "health", "routes",
     }
     if set(value) != expected or value.get("schema") != CONFIG_SCHEMA:
         raise SubagentFacilityRuntimeError("facility configuration fields are invalid")
@@ -199,6 +200,18 @@ def load_facility_runtime_config(path: Path) -> tuple[dict, bytes]:
         raise SubagentFacilityRuntimeError("driver configuration is invalid")
     _identifier(driver.get("driver_id"), "driver_id")
     _identifier(driver.get("driver_version"), "driver_version")
+    health = value.get("health")
+    if (not isinstance(health, dict)
+            or set(health) != {
+                "preflight_interval_seconds", "max_staleness_seconds",
+            }
+            or type(health.get("preflight_interval_seconds")) is not int
+            or not 15 <= health["preflight_interval_seconds"] <= 3600
+            or type(health.get("max_staleness_seconds")) is not int
+            or not (health["preflight_interval_seconds"]
+                    + PREFLIGHT_DEADLINE_SECONDS
+                    <= health["max_staleness_seconds"] <= 7200)):
+        raise SubagentFacilityRuntimeError("facility health configuration is invalid")
     routes_value = value.get("routes")
     if not isinstance(routes_value, list) or not routes_value:
         raise SubagentFacilityRuntimeError("at least one facility route is required")
@@ -473,7 +486,113 @@ def _preflight_routes(driver: _IsolatedDriver, routes: list[Any]) -> dict:
         "requirements_sha256": requirements_sha256,
         "route_requirements_sha256": route_requirements_sha256,
         "routes_checked": len(route_requirements),
+        "driver_deployment_sha256": driver.driver_deployment_sha256,
+        "deployment_manifest_sha256": driver.deployment_manifest_sha256,
     }
+
+
+class _PreflightSupervisor:
+    """Keep one bounded, content-free readiness lease fresh at runtime."""
+
+    def __init__(self, driver: _IsolatedDriver, routes: list[Any], *,
+                 interval_seconds: int, max_staleness_seconds: int,
+                 initial: Mapping[str, Any], clock=time.monotonic):
+        self._driver, self._routes = driver, list(routes)
+        self._interval = interval_seconds
+        self._max_staleness = max_staleness_seconds
+        self._clock = clock
+        self._condition = threading.Condition()
+        self._stop = threading.Event()
+        self._probe_lock = threading.Lock()
+        self._thread = None
+        self._last_success = float(clock())
+        self._last = _copy(initial)
+        self._readiness_policy_sha256 = initial["readiness_policy_sha256"]
+        self._facility_ledger_instance_id = initial[
+            "facility_ledger_instance_id"
+        ]
+        self._generation = 1
+        self._failure_generation = 0
+        self._failed = False
+        self._stopped = False
+
+    def start(self):
+        with self._condition:
+            if self._thread is not None or self._stopped:
+                raise SubagentFacilityRuntimeError("facility health monitor state is invalid")
+            self._thread = threading.Thread(
+                target=self._loop, name="subagent-facility-readiness", daemon=True,
+            )
+            self._thread.start()
+
+    def _loop(self):
+        while not self._stop.wait(self._interval):
+            self.run_once()
+
+    def run_once(self):
+        if self._stop.is_set() or not self._probe_lock.acquire(blocking=False):
+            return False
+        try:
+            try:
+                result = _preflight_routes(self._driver, self._routes)
+            except Exception:
+                with self._condition:
+                    self._failed = True
+                    self._generation += 1
+                    self._failure_generation += 1
+                return False
+            result["readiness_policy_sha256"] = self._readiness_policy_sha256
+            result["facility_ledger_instance_id"] = (
+                self._facility_ledger_instance_id
+            )
+            with self._condition:
+                self._last = _copy(result)
+                self._last_success = float(self._clock())
+                self._failed = False
+                self._generation += 1
+            return True
+        finally:
+            self._probe_lock.release()
+
+    def snapshot(self) -> dict:
+        with self._condition:
+            age = max(0.0, float(self._clock()) - self._last_success)
+            if self._stopped:
+                ready, reason = False, "monitor_stopped"
+            elif self._failed:
+                ready, reason = False, "preflight_failed"
+            elif age > self._max_staleness:
+                ready, reason = False, "preflight_stale"
+            else:
+                ready, reason = True, "ready"
+            return {
+                "ready": ready,
+                "reason": reason,
+                "probe_generation": self._generation,
+                "failure_generation": self._failure_generation,
+                "routes_checked": self._last["routes_checked"],
+                "driver_deployment_sha256": (
+                    self._last["driver_deployment_sha256"]
+                ),
+                "deployment_manifest_sha256": (
+                    self._last["deployment_manifest_sha256"]
+                ),
+                "route_requirements_sha256": (
+                    self._last["route_requirements_sha256"]
+                ),
+                "readiness_policy_sha256": self._readiness_policy_sha256,
+                "facility_ledger_instance_id": (
+                    self._facility_ledger_instance_id
+                ),
+            }
+
+    def close(self):
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(PREFLIGHT_DEADLINE_SECONDS + 2)
+        with self._condition:
+            self._stopped = True
 
 
 def _ledger_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -582,7 +701,17 @@ def _prepare_ledger(path: Path, *, initialize: bool):
         raise SubagentFacilityRuntimeError("facility ledger is unavailable") from error
 
 
-def _bind_deployment(path: Path, binding_sha256: str, *, initialize: bool):
+def _facility_deployment_binding(
+        configuration_sha256: str, facility_ledger_instance_id: str) -> str:
+    return hashlib.sha256(_canonical({
+        "schema": DEPLOYMENT_SCHEMA,
+        "configuration_sha256": configuration_sha256,
+        "facility_ledger_instance_id": facility_ledger_instance_id,
+    })).hexdigest()
+
+
+def _bind_deployment(path: Path, configuration_sha256: str, *,
+                     initialize: bool) -> str:
     try:
         connection = sqlite3.connect(path, timeout=10, isolation_level=None)
         try:
@@ -602,27 +731,47 @@ def _bind_deployment(path: Path, binding_sha256: str, *, initialize: bool):
                     CREATE TABLE IF NOT EXISTS subagent_facility_deployment (
                         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                         schema_name TEXT NOT NULL,
-                        binding_sha256 TEXT NOT NULL
+                        binding_sha256 TEXT NOT NULL,
+                        facility_ledger_instance_id TEXT NOT NULL
                     )
                 """)
             row = connection.execute(
-                "SELECT schema_name,binding_sha256 FROM "
+                "SELECT schema_name,binding_sha256,facility_ledger_instance_id FROM "
                 "subagent_facility_deployment WHERE singleton=1"
             ).fetchone()
-            expected = (DEPLOYMENT_SCHEMA, binding_sha256)
             if row is None and initialize:
+                facility_ledger_instance_id = hashlib.sha256(
+                    os.urandom(32)
+                ).hexdigest()
+                binding_sha256 = _facility_deployment_binding(
+                    configuration_sha256, facility_ledger_instance_id,
+                )
                 connection.execute(
-                    "INSERT INTO subagent_facility_deployment VALUES (1,?,?)",
-                    expected,
+                    "INSERT INTO subagent_facility_deployment VALUES (1,?,?,?)",
+                    (DEPLOYMENT_SCHEMA, binding_sha256,
+                     facility_ledger_instance_id),
                 )
             elif row is None:
                 raise SubagentFacilityRuntimeError("facility ledger has no deployment binding")
-            elif tuple(row) != expected:
-                if initialize:
-                    connection.rollback()
-                raise SubagentFacilityRuntimeError("facility deployment binding changed")
+            else:
+                schema_name, binding_sha256, facility_ledger_instance_id = row
+                expected_binding = _facility_deployment_binding(
+                    configuration_sha256, facility_ledger_instance_id,
+                )
+                if (schema_name != DEPLOYMENT_SCHEMA
+                        or not isinstance(facility_ledger_instance_id, str)
+                        or FACILITY.SHA256.fullmatch(
+                            facility_ledger_instance_id
+                        ) is None
+                        or binding_sha256 != expected_binding):
+                    if initialize:
+                        connection.rollback()
+                    raise SubagentFacilityRuntimeError(
+                        "facility deployment binding changed"
+                    )
             if initialize:
                 connection.commit()
+            return facility_ledger_instance_id
         finally:
             connection.close()
     except SubagentFacilityRuntimeError:
@@ -641,6 +790,7 @@ def _deployment_binding(config: Mapping[str, Any], driver_raw: bytes, bearer: st
         "allow_loopback_http": config["allow_loopback_http"],
         "authentication_sha256": hashlib.sha256(bearer.encode("ascii")).hexdigest(),
         "max_concurrent_executions": config["ledger"]["max_concurrent_executions"],
+        "health": config["health"],
         "driver": {
             key: config["driver"][key] for key in (
                 "factory_file", "factory_callable", "factory_sha256",
@@ -660,6 +810,7 @@ class SubagentFacilityRuntime:
     ledger_identity: tuple[int, int, int, int, int, int]
     runtime_lock: _RuntimeLock
     preflight: dict
+    supervisor: _PreflightSupervisor
 
     def __post_init__(self):
         self._pid, self._closed, self._closing, self._active = (
@@ -708,6 +859,7 @@ class SubagentFacilityRuntime:
             while self._active:
                 self._condition.wait()
         try:
+            self.supervisor.close()
             self.driver.close()
         finally:
             self.runtime_lock.close()
@@ -724,23 +876,34 @@ def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = Fals
     config, _config_raw = load_facility_runtime_config(path)
     driver_document, driver_raw = _driver_configuration(config["driver"])
     routes = [_route(item) for item in config["routes"]]
+    bearer = _protected_text(
+        config["authentication"]["token_file"], PROTECTED.BEARER,
+        "facility authentication token",
+    )
     ledger_path = Path(config["ledger"]["path"])
     runtime_lock = _RuntimeLock(ledger_path)
-    driver = None
+    driver = supervisor = None
     try:
         driver = _build_driver(
             config["driver"], driver_document, driver_raw,
             runtime_lock.fileno(),
         )
         preflight = _preflight_routes(driver, routes)
-        bearer = _protected_text(
-            config["authentication"]["token_file"], PROTECTED.BEARER,
-            "facility authentication token",
-        )
+        preflight["readiness_policy_sha256"] = FACILITY._sha({
+            "schema": "translate-native.subagent-review-readiness-policy.v1",
+            **config["health"],
+        })
         initial_identity = _prepare_ledger(ledger_path, initialize=initialize_ledger)
-        _bind_deployment(
+        facility_ledger_instance_id = _bind_deployment(
             ledger_path, _deployment_binding(config, driver_raw, bearer),
             initialize=initialize_ledger,
+        )
+        preflight["facility_ledger_instance_id"] = facility_ledger_instance_id
+        supervisor = _PreflightSupervisor(
+            driver, routes,
+            interval_seconds=config["health"]["preflight_interval_seconds"],
+            max_staleness_seconds=config["health"]["max_staleness_seconds"],
+            initial=preflight,
         )
         if _prepare_ledger(ledger_path, initialize=False) != initial_identity:
             raise SubagentFacilityRuntimeError("facility ledger changed during startup")
@@ -761,13 +924,18 @@ def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = Fals
             facility_version=config["facility_version"],
             bearer_token=bearer,
             policy=FACILITY.EXECUTOR.PinnedExecutorPolicy(routes),
-            ledger=ledger, driver=driver,
+            ledger=ledger, driver=driver, readiness=supervisor.snapshot,
             allow_loopback_http=config["allow_loopback_http"],
         )
-        return SubagentFacilityRuntime(
+        runtime = SubagentFacilityRuntime(
             application, driver, ledger_path, identity, runtime_lock, preflight,
+            supervisor,
         )
+        supervisor.start()
+        return runtime
     except Exception:
+        if supervisor is not None:
+            supervisor.close()
         if driver is not None:
             driver.close()
         runtime_lock.close()
@@ -906,6 +1074,21 @@ def main() -> int:
                 "content_free": True,
                 "driver_preflight": "passed",
                 "routes_checked": runtime.preflight["routes_checked"],
+                "driver_deployment_sha256": (
+                    runtime.preflight["driver_deployment_sha256"]
+                ),
+                "deployment_manifest_sha256": (
+                    runtime.preflight["deployment_manifest_sha256"]
+                ),
+                "route_requirements_sha256": (
+                    runtime.preflight["route_requirements_sha256"]
+                ),
+                "readiness_policy_sha256": (
+                    runtime.preflight["readiness_policy_sha256"]
+                ),
+                "facility_ledger_instance_id": (
+                    runtime.preflight["facility_ledger_instance_id"]
+                ),
             }, sort_keys=True, separators=(",", ":")))
             runtime.close()
             return 0

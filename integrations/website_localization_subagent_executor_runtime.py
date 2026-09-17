@@ -59,6 +59,10 @@ class SubagentExecutorRuntimeError(RuntimeError):
     """Content-free startup failure; no executor is exposed."""
 
 
+class _MissingExecutorLedger(SubagentExecutorRuntimeError):
+    """Internal signal allowing first initialization after local inspection."""
+
+
 def _pairs(items):
     result = {}
     for key, value in items:
@@ -248,6 +252,10 @@ class _ProcessBoundBackend:
         if os.getpid() != self._pid:
             raise SubagentExecutorRuntimeError("executor runtime cannot be used after fork")
 
+    def readiness(self):
+        self._check()
+        return self._backend.readiness()
+
     def execute_idempotent(self, assignment, model_input, **controls):
         self._check()
         return self._backend.execute_idempotent(assignment, model_input, **controls)
@@ -271,7 +279,7 @@ def _build_backend(config: Mapping[str, Any], document: Mapping[str, Any]):
     if (getattr(backend, "backend_id", None) != config["backend_id"]
             or getattr(backend, "backend_version", None) != config["backend_version"]
             or any(not callable(getattr(backend, name, None))
-                   for name in ("execute_idempotent", "reconcile"))):
+                   for name in ("readiness", "execute_idempotent", "reconcile"))):
         closer = getattr(backend, "close", None)
         if callable(closer):
             closer()
@@ -297,7 +305,7 @@ def _prepare_ledger(path: Path, *, initialize: bool):
                 details = PROTECTED._lstat(path, directory)
             except FileNotFoundError:
                 if not initialize:
-                    raise SubagentExecutorRuntimeError("executor ledger is missing") from None
+                    raise _MissingExecutorLedger("executor ledger is missing") from None
                 flags = (os.O_RDWR | os.O_CREAT | os.O_EXCL
                          | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
                 descriptor = (os.open(path, flags, 0o600) if directory is None
@@ -461,11 +469,32 @@ def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = Fals
             "executor authentication token",
         )
         ledger_path = Path(config["ledger"]["path"])
-        initial_identity = _prepare_ledger(ledger_path, initialize=initialize_ledger)
-        _bind_deployment(
-            ledger_path, _deployment_binding(config, backend_raw, bearer),
-            initialize=initialize_ledger,
-        )
+        binding = _deployment_binding(config, backend_raw, bearer)
+        try:
+            initial_identity = _prepare_ledger(ledger_path, initialize=False)
+        except SubagentExecutorRuntimeError as error:
+            if not (initialize_ledger and isinstance(error, _MissingExecutorLedger)):
+                raise
+            initial_identity = None
+        if initial_identity is not None:
+            _bind_deployment(ledger_path, binding, initialize=False)
+            if _prepare_ledger(ledger_path, initialize=False) != initial_identity:
+                raise SubagentExecutorRuntimeError(
+                    "executor ledger changed during startup"
+                )
+        try:
+            readiness = backend.readiness()
+            if (not isinstance(readiness, Mapping)
+                    or readiness.get("ready") is not True):
+                raise ValueError("backend readiness result is invalid")
+        except Exception as error:
+            raise SubagentExecutorRuntimeError(
+                "host-subagent facility readiness failed"
+            ) from error
+        if initial_identity is None:
+            initial_identity = _prepare_ledger(ledger_path, initialize=True)
+            _bind_deployment(ledger_path, binding, initialize=True)
+        _bind_deployment(ledger_path, binding, initialize=False)
         if _prepare_ledger(ledger_path, initialize=False) != initial_identity:
             raise SubagentExecutorRuntimeError("executor ledger changed during startup")
         routes = [_route(item) for item in config["routes"]]

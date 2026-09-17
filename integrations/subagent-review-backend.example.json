@@ -3,7 +3,7 @@
   "backend_id": "production-host-subagents",
   "backend_version": "http-backend-v1",
   "settings": {
-    "schema": "translate-native.subagent-review-http-backend.v1",
+    "schema": "translate-native.subagent-review-http-backend.v2",
     "backend_id": "production-host-subagents",
     "backend_version": "http-backend-v1",
     "facility_id": "production-host-subagent-facility",
@@ -13,6 +13,14 @@
       "scheme": "bearer",
       "token_file": "/absolute/protected/path/subagent-facility.token",
       "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "readiness": {
+      "facility_ledger_instance_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "driver_deployment_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "deployment_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "route_requirements_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "readiness_policy_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "routes_count": 1
     },
     "request_timeout_seconds": 60,
     "max_input_bytes": 2000000,

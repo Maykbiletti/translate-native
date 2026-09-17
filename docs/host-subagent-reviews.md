@@ -326,6 +326,7 @@ duplicate paid review work.
 The deployment backend implements:
 
 ```python
+readiness()  # returns a Mapping with exact Boolean ready=True or raises
 execute_idempotent(
     assignment, model_input,
     execute_request_sha256=execute_request_sha256,
@@ -337,7 +338,13 @@ reconcile(
 )
 ```
 
-It must atomically deduplicate physical work by the host-owned execution key,
+The protected runtime validates `readiness()` after local credential and
+existing-journal checks but before a new journal is created or recovered. A
+missing method, exception, non-mapping result or any value other than exact
+`ready: true` blocks startup. It then rechecks the local deployment binding to
+close mutation races during the external call.
+
+The backend must atomically deduplicate physical work by the host-owned execution key,
 start each reviewer with empty inherited history, no tools and zero delegation
 depth, and return one of `completed`, `not_started`, `running`, `unknown` or
 `cancel_pending`. Only `completed` carries execution and usage. The executor,
@@ -402,7 +409,7 @@ does not retry. A lost execute response therefore becomes executor state
 from reconciliation and must never represent a failed or unobserved start.
 
 Responses use
-`translate-native.subagent-review-facility-response.v1`, repeat the operation,
+`translate-native.subagent-review-facility-response.v2`, repeat the operation,
 backend and facility generations, execution key, upstream execute digest and
 request digest, and return exactly one existing executor status. HTTP 202 is
 required for `running`, `unknown` and `cancel_pending`; HTTP 200 is required for
@@ -412,8 +419,13 @@ output tokens and original execute digest are checked by both this adapter and
 the durable executor before evidence can reach the trusted review host.
 
 Use `integrations/subagent-review-backend.example.json` with the executor
-example. Replace all placeholder paths, revisions and SHA-256 values, place the
-token and both configuration files in an owner-only directory, and keep the
+example. Run the facility's `--check` first and copy its exact
+`driver_deployment_sha256`, `deployment_manifest_sha256`,
+`route_requirements_sha256`, `readiness_policy_sha256`,
+`facility_ledger_instance_id` and `routes_checked`
+values into the backend's
+closed `readiness` object. Replace all placeholder paths, revisions and SHA-256
+values, place the token and both configuration files in an owner-only directory, and keep the
 facility's provider credential outside this adapter. The facility remains
 responsible for mapping the pinned model identity to a supported host subagent,
 real billing, cancellation and qualified-reviewer evidence. Missing support or
@@ -478,6 +490,39 @@ only on loopback behind a trusted HTTPS terminator. The driver settings may hold
 references to operator-managed provider credentials, but those credentials must
 never enter task input or review evidence. A driver without genuine host
 subagent support must block rather than synthesize an agent review.
+
+After startup, one supervisor refreshes that same content-free preflight at the
+configured bounded interval. A failed probe blocks new executions immediately;
+an overdue successful lease blocks as stale even if the monitor thread stops.
+The authenticated `POST /v1/isolated-review-executions/readiness` endpoint only
+returns the caller challenge, fixed deployment digests, route count, probe
+generation and stable readiness reason. It reads cached state and never invokes
+the driver. Authentication happens before its body is read. Execution is gated
+before facility-ledger reservation and rechecked before a completed response is
+returned, while reconciliation stays available for crash recovery.
+
+The executor's standard HTTPS backend validates this live endpoint against the
+pinned values emitted by `--check` before creating or recovering its ledger.
+The probe is single-flight and freshness uses monotonic time. It carries no
+source, target, model input, reviewer identity, credential, signer or
+publication capability and must not start a model.
+
+Every Version 2 execute and reconcile envelope also carries the exact facility
+ledger instance, driver, manifest, route-matrix and readiness-policy binding. The facility compares it
+with its current cached snapshot before any ledger access and echoes it in the
+response. A replacement facility using the same public IDs but a different
+deployment or health policy therefore cannot accept a start or claim an old
+execution was not started. Reconciliation bypasses only the healthy Boolean;
+it never bypasses the deployment binding.
+
+The Version 6.194→6.195 configuration change deliberately changes both
+deployment bindings. Use a quiesced cutover: stop intake, keep the old pinned
+binary, configuration and journal as the only running stack, and resolve every
+active, unknown or cancellation-pending record. Then stop that stack completely
+before starting Version 6.195 with fresh facility and executor journals. The
+runtime has no reconcile-only drain mode, so old and new stacks must not overlap.
+There is no automatic cross-generation migration and no permission to relabel
+ambiguous provider work as `not_started`.
 
 ### Standard host-command driver
 

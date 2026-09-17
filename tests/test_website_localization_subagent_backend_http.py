@@ -26,6 +26,12 @@ BACKEND = BASE.load(
 HOST = HOST_TEST.HOST
 HTTP = HOST_TEST.HTTP
 FACILITY_TOKEN = "facility-bearer-token-with-at-least-32-characters"
+DRIVER_DEPLOYMENT_SHA256 = "8" * 64
+DEPLOYMENT_MANIFEST_SHA256 = "9" * 64
+ROUTE_REQUIREMENTS_SHA256 = "a" * 64
+READINESS_POLICY_SHA256 = "b" * 64
+FACILITY_LEDGER_INSTANCE_ID = "c" * 64
+ROUTES_COUNT = 2
 
 
 class FacilityTransport:
@@ -38,6 +44,8 @@ class FacilityTransport:
         self.lose_first_execute_reply = False
         self.mutate_reply = None
         self.status = "completed"
+        self.readiness_status = "ready"
+        self.mutate_readiness = None
 
     @staticmethod
     def _result(status, body):
@@ -69,6 +77,28 @@ class FacilityTransport:
     def post(self, _url, headers, body, *, timeout):
         request = json.loads(body)
         self.calls.append((request, dict(headers), timeout, bytes(body)))
+        if request.get("schema") == BACKEND.READINESS_REQUEST_SCHEMA:
+            ready = self.readiness_status == "ready"
+            reply = {
+                "schema": BACKEND.READINESS_RESPONSE_SCHEMA,
+                "backend_id": request["backend_id"],
+                "backend_version": request["backend_version"],
+                "facility_id": request["facility_id"],
+                "facility_version": request["facility_version"],
+                "challenge": request["challenge"],
+                "request_sha256": request["request_sha256"],
+                "ready": ready, "reason": self.readiness_status,
+                "probe_generation": 1, "failure_generation": 0,
+                "routes_checked": ROUTES_COUNT,
+                "driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                "deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                "readiness_policy_sha256": READINESS_POLICY_SHA256,
+                "facility_ledger_instance_id": FACILITY_LEDGER_INSTANCE_ID,
+            }
+            if self.mutate_readiness:
+                self.mutate_readiness(reply)
+            return self._result(200 if ready else 503, reply)
         key, operation = (
             request["assignment"]["execution_key"], request["operation"],
         )
@@ -105,6 +135,7 @@ class FacilityTransport:
             "execution_key": key,
             "execute_request_sha256": request["execute_request_sha256"],
             "request_sha256": request["request_sha256"],
+            "readiness_binding": request["readiness_binding"],
             "status": status,
             "execution": self.executions.get(key) if status == "completed" else None,
             "usage": self.usage.get(key) if status == "completed" else None,
@@ -126,6 +157,12 @@ class HTTPBackendTests(unittest.TestCase):
             facility_id="host-subagent-facility",
             facility_version="facility-1", transport=self.facility,
             max_output_tokens=4096, allow_loopback_http=True,
+            expected_driver_deployment_sha256=DRIVER_DEPLOYMENT_SHA256,
+            expected_deployment_manifest_sha256=DEPLOYMENT_MANIFEST_SHA256,
+            expected_route_requirements_sha256=ROUTE_REQUIREMENTS_SHA256,
+            expected_readiness_policy_sha256=READINESS_POLICY_SHA256,
+            expected_facility_ledger_instance_id=FACILITY_LEDGER_INSTANCE_ID,
+            expected_routes_count=ROUTES_COUNT,
         )
         self.fixture = EXEC_TEST.ExecutorTests()
         self.fixture.temporary = self.temporary
@@ -151,6 +188,41 @@ class HTTPBackendTests(unittest.TestCase):
             "max_cost_units": assignment.max_cost_units,
             "max_concurrent_executions": 4,
         }
+
+    def test_readiness_is_content_free_bound_and_fail_closed(self):
+        reply = self.backend.readiness()
+        self.assertTrue(reply["ready"])
+        request, headers, timeout, body = self.facility.calls[-1]
+        self.assertEqual(set(request), {
+            "schema", "backend_id", "backend_version", "facility_id",
+            "facility_version", "challenge", "request_sha256",
+        })
+        serialized = body.decode("utf-8")
+        for forbidden in ("assignment", "model_input", "source", "candidate"):
+            self.assertNotIn(forbidden, serialized)
+        self.assertEqual(
+            headers["X-Subagent-Readiness-Challenge"], request["challenge"],
+        )
+        self.assertEqual(timeout, 60.0)
+        self.assertEqual(self.facility.physical_starts, 0)
+
+        self.facility.readiness_status = "preflight_failed"
+        with self.assertRaises(BACKEND.SubagentHTTPBackendFailed) as blocked:
+            self.backend.readiness()
+        self.assertEqual(blocked.exception.code,
+                         "backend_http.readiness_blocked")
+        self.assertTrue(blocked.exception.retryable)
+        self.assertEqual(self.facility.physical_starts, 0)
+
+        self.facility.readiness_status = "ready"
+        self.facility.mutate_readiness = lambda value: value.update(
+            route_requirements_sha256="0" * 64,
+        )
+        with self.assertRaises(BACKEND.SubagentHTTPBackendFailed) as forged:
+            self.backend.readiness()
+        self.assertEqual(forged.exception.code,
+                         "backend_http.readiness_binding")
+        self.assertTrue(forged.exception.retryable)
 
     def test_finnish_response_crosses_complete_chain_without_source_or_secret(self):
         task, control = HOST_TEST.response_request("fi-FI")
@@ -276,6 +348,14 @@ class HTTPBackendTests(unittest.TestCase):
                     facility_id="host-subagent-facility",
                     facility_version="facility-1", transport=facility,
                     max_output_tokens=4096, allow_loopback_http=True,
+                    expected_driver_deployment_sha256=DRIVER_DEPLOYMENT_SHA256,
+                    expected_deployment_manifest_sha256=DEPLOYMENT_MANIFEST_SHA256,
+                    expected_route_requirements_sha256=ROUTE_REQUIREMENTS_SHA256,
+                    expected_readiness_policy_sha256=READINESS_POLICY_SHA256,
+                    expected_facility_ledger_instance_id=(
+                        FACILITY_LEDGER_INSTANCE_ID
+                    ),
+                    expected_routes_count=ROUTES_COUNT,
                 )
                 ledger = EXEC_TEST.EXECUTOR.SQLiteExecutionLedger(
                     Path(self.temporary.name) / f"bad-{index}.sqlite3",
@@ -326,6 +406,14 @@ class HTTPBackendTests(unittest.TestCase):
                 backend_version="backend-1",
                 facility_id="host-subagent-facility",
                 facility_version="facility-1",
+                expected_driver_deployment_sha256=DRIVER_DEPLOYMENT_SHA256,
+                expected_deployment_manifest_sha256=DEPLOYMENT_MANIFEST_SHA256,
+                expected_route_requirements_sha256=ROUTE_REQUIREMENTS_SHA256,
+                expected_readiness_policy_sha256=READINESS_POLICY_SHA256,
+                expected_facility_ledger_instance_id=(
+                    FACILITY_LEDGER_INSTANCE_ID
+                ),
+                expected_routes_count=ROUTES_COUNT,
             )
 
     def test_protected_factory_binds_token_digest_and_permissions(self):
@@ -348,6 +436,14 @@ class HTTPBackendTests(unittest.TestCase):
                 "token_sha256": hashlib.sha256(
                     FACILITY_TOKEN.encode("ascii"),
                 ).hexdigest(),
+            },
+            "readiness": {
+                "facility_ledger_instance_id": FACILITY_LEDGER_INSTANCE_ID,
+                "driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                "deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                "readiness_policy_sha256": READINESS_POLICY_SHA256,
+                "routes_count": ROUTES_COUNT,
             },
             "request_timeout_seconds": 60,
             "max_input_bytes": 2_000_000,
@@ -390,6 +486,14 @@ class HTTPBackendTests(unittest.TestCase):
                 "token_sha256": hashlib.sha256(
                     FACILITY_TOKEN.encode("ascii"),
                 ).hexdigest(),
+            },
+            "readiness": {
+                "facility_ledger_instance_id": FACILITY_LEDGER_INSTANCE_ID,
+                "driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                "deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                "readiness_policy_sha256": READINESS_POLICY_SHA256,
+                "routes_count": ROUTES_COUNT,
             },
             "request_timeout_seconds": 60,
             "max_input_bytes": 2_000_000,
@@ -485,6 +589,16 @@ class HTTPBackendTests(unittest.TestCase):
                         "authentication": {
                             "scheme": "bearer", "token_file": str(token_file),
                             "token_sha256": token_sha256,
+                        },
+                        "readiness": {
+                            "facility_ledger_instance_id": (
+                                FACILITY_LEDGER_INSTANCE_ID
+                            ),
+                            "driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                            "deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                            "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                            "readiness_policy_sha256": READINESS_POLICY_SHA256,
+                            "routes_count": ROUTES_COUNT,
                         },
                         "request_timeout_seconds": 60,
                         "max_input_bytes": 2_000_000,

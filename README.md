@@ -110,6 +110,30 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.195.0: continuously supervised host-subagent readiness
+
+The protected facility now refreshes its content-free operator preflight on a
+bounded interval after startup and exposes only the cached lease through a new
+authenticated readiness route. A failed or stale lease blocks every new
+`execute` before facility-ledger reservation and model start; read-only
+`reconcile` remains available so ambiguous work can still recover. Probes are
+single-flight, use monotonic freshness and stop within the existing hard
+deadline.
+
+The standard HTTPS backend binds a fresh readiness challenge to the exact
+facility-ledger instance, driver deployment, operator manifest, route-matrix
+digest, readiness policy and route count. The
+executor performs that live check only after validating its local credential
+and before creating or recovering its own ledger. Authentication at the
+facility precedes readiness-body access, and polling never triggers a probe or
+receives source, target, prompts, identities, credentials or publication
+authority. `--check` prints the five content-free identifiers and digests required for the
+backend's pinned `readiness` configuration.
+
+This proves control-plane availability and binding only. Synthetic Finnish and
+Maltese tests do not prove native fluency, reviewer qualification, independent
+models or superiority over DeepL; those real quality records remain required.
+
 ### Version 6.194.0: active readiness for host subagents
 
 Every normal facility start and `--check` now executes a mandatory,
@@ -3136,7 +3160,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.194.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.195.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

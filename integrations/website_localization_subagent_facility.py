@@ -28,6 +28,13 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND_PATH = ROOT / "integrations" / "website_localization_subagent_backend_http.py"
 EXECUTOR_PATH = ROOT / "integrations" / "website_localization_subagent_executor.py"
 PATH = "/v1/isolated-review-executions"
+READINESS_PATH = PATH + "/readiness"
+READINESS_REQUEST_SCHEMA = (
+    "translate-native.subagent-review-facility-readiness-request.v2"
+)
+READINESS_RESPONSE_SCHEMA = (
+    "translate-native.subagent-review-facility-readiness-response.v2"
+)
 MAX_BODY_BYTES = 4_500_000
 MAX_RESPONSE_BYTES = 4_500_000
 TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
@@ -449,7 +456,8 @@ class SubagentFacilityApplication:
         self, *, backend_id: str, backend_version: str, facility_id: str,
         facility_version: str, bearer_token: str,
         policy: Any, ledger: SQLiteFacilityLedger,
-        driver: HostSubagentDriver, allow_loopback_http: bool = False,
+        driver: HostSubagentDriver, readiness: Callable[[], Mapping[str, Any]],
+        allow_loopback_http: bool = False,
     ):
         self.backend_id = _identifier(backend_id)
         self.backend_version = _identifier(backend_version)
@@ -486,8 +494,11 @@ class SubagentFacilityApplication:
             raise TypeError("facility driver lacks mandatory capabilities")
         if type(allow_loopback_http) is not bool:
             raise TypeError("allow_loopback_http must be boolean")
+        if not callable(readiness):
+            raise TypeError("facility readiness probe is invalid")
         self._bearer = bearer_token
         self.policy, self.ledger, self.driver = policy, ledger, driver
+        self._readiness = readiness
         self.allow_loopback_http = allow_loopback_http
 
     def _authenticate(self, environ: Mapping[str, Any]) -> str:
@@ -534,7 +545,8 @@ class SubagentFacilityApplication:
         expected = {
             "schema", "operation", "backend_id", "backend_version",
             "facility_id", "facility_version", "assignment",
-            "execute_request_sha256", "isolation", "request_sha256",
+            "execute_request_sha256", "readiness_binding", "isolation",
+            "request_sha256",
         }
         if operation == "execute":
             expected |= {"model_input", "budgets"}
@@ -546,6 +558,26 @@ class SubagentFacilityApplication:
                 or request.get("facility_id") != self.facility_id
                 or request.get("facility_version") != self.facility_version
                 or request.get("isolation") != ISOLATION
+                or not isinstance(request.get("readiness_binding"), dict)
+                or set(request["readiness_binding"]) != {
+                    "facility_ledger_instance_id",
+                    "driver_deployment_sha256",
+                    "deployment_manifest_sha256",
+                    "route_requirements_sha256", "readiness_policy_sha256",
+                    "routes_count",
+                }
+                or any(not isinstance(request["readiness_binding"].get(name), str)
+                       or SHA256.fullmatch(
+                           request["readiness_binding"][name]
+                       ) is None for name in (
+                           "facility_ledger_instance_id",
+                           "driver_deployment_sha256",
+                           "deployment_manifest_sha256",
+                           "route_requirements_sha256",
+                           "readiness_policy_sha256",
+                       ))
+                or type(request["readiness_binding"].get("routes_count")) is not int
+                or not 1 <= request["readiness_binding"]["routes_count"] <= 10_000
                 or not isinstance(request.get("execute_request_sha256"), str)
                 or SHA256.fullmatch(request["execute_request_sha256"]) is None):
             raise _blocked("request_invalid", 400)
@@ -601,6 +633,112 @@ class SubagentFacilityApplication:
                            retryable=error.retryable) from None
         request["assignment"] = assignment
         return request
+
+    def _readiness_request(self, environ: Mapping[str, Any], body: bytes) -> dict:
+        content_type = environ.get("CONTENT_TYPE")
+        if not isinstance(content_type, str) or content_type.lower().replace(" ", "") \
+                != "application/json;charset=utf-8":
+            raise _blocked("content_type", 415)
+        try:
+            text = body.decode("utf-8")
+            if text.startswith("\ufeff"):
+                raise ValueError
+            request = json.loads(
+                text, object_pairs_hook=_pairs, parse_constant=_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+            raise _blocked("json_invalid", 400) from None
+        expected = {
+            "schema", "backend_id", "backend_version", "facility_id",
+            "facility_version", "challenge", "request_sha256",
+        }
+        if (not isinstance(request, dict) or set(request) != expected
+                or request.get("schema") != READINESS_REQUEST_SCHEMA
+                or request.get("backend_id") != self.backend_id
+                or request.get("backend_version") != self.backend_version
+                or request.get("facility_id") != self.facility_id
+                or request.get("facility_version") != self.facility_version
+                or not isinstance(request.get("challenge"), str)
+                or SHA256.fullmatch(request["challenge"]) is None):
+            raise _blocked("readiness_request_invalid", 400)
+        unsigned = {key: request[key] for key in request if key != "request_sha256"}
+        if request.get("request_sha256") != _sha(unsigned):
+            raise _blocked("readiness_request_digest", 400)
+        if (environ.get("HTTP_X_SUBAGENT_READINESS_CHALLENGE")
+                != request["challenge"]
+                or environ.get("HTTP_X_SUBAGENT_READINESS_REQUEST_SHA256")
+                != request["request_sha256"]):
+            raise _blocked("readiness_header_binding", 400)
+        return request
+
+    def _readiness_snapshot(self) -> dict:
+        try:
+            result = _copy(self._readiness())
+        except Exception:
+            raise _blocked("readiness_unavailable", 503, retryable=True) from None
+        expected = {
+            "ready", "reason", "probe_generation", "failure_generation",
+            "routes_checked",
+            "facility_ledger_instance_id",
+            "driver_deployment_sha256", "deployment_manifest_sha256",
+            "route_requirements_sha256", "readiness_policy_sha256",
+        }
+        if (not isinstance(result, dict) or set(result) != expected
+                or type(result.get("ready")) is not bool
+                or result.get("reason") not in {
+                    "ready", "preflight_failed", "preflight_stale",
+                    "monitor_stopped",
+                }
+                or (result["ready"] != (result["reason"] == "ready"))
+                or type(result.get("probe_generation")) is not int
+                or result["probe_generation"] < 1
+                or type(result.get("failure_generation")) is not int
+                or result["failure_generation"] < 0
+                or type(result.get("routes_checked")) is not int
+                or result["routes_checked"] < 1
+                or any(not isinstance(result.get(name), str)
+                       or SHA256.fullmatch(result[name]) is None for name in (
+                           "facility_ledger_instance_id",
+                           "driver_deployment_sha256",
+                           "deployment_manifest_sha256",
+                           "route_requirements_sha256",
+                           "readiness_policy_sha256",
+                       ))):
+            raise _blocked("readiness_invalid", 503, retryable=True)
+        return result
+
+    def _readiness_reply(self, request: Mapping[str, Any], snapshot: dict) -> bytes:
+        return _raw({
+            "schema": READINESS_RESPONSE_SCHEMA,
+            "backend_id": self.backend_id,
+            "backend_version": self.backend_version,
+            "facility_id": self.facility_id,
+            "facility_version": self.facility_version,
+            "challenge": request["challenge"],
+            "request_sha256": request["request_sha256"],
+            **snapshot,
+        })
+
+    @staticmethod
+    def _snapshot_binding(snapshot: Mapping[str, Any]) -> dict:
+        return {
+            "facility_ledger_instance_id": snapshot[
+                "facility_ledger_instance_id"
+            ],
+            "driver_deployment_sha256": snapshot[
+                "driver_deployment_sha256"
+            ],
+            "deployment_manifest_sha256": snapshot[
+                "deployment_manifest_sha256"
+            ],
+            "route_requirements_sha256": snapshot[
+                "route_requirements_sha256"
+            ],
+            "readiness_policy_sha256": snapshot[
+                "readiness_policy_sha256"
+            ],
+            "routes_count": snapshot["routes_checked"],
+        }
 
     def _provider_identity(self, request: Mapping[str, Any]) -> tuple[str, str]:
         assignment = request["assignment"]
@@ -801,6 +939,7 @@ class SubagentFacilityApplication:
             "execution_key": request["assignment"]["execution_key"],
             "execute_request_sha256": request["execute_request_sha256"],
             "request_sha256": request["request_sha256"],
+            "readiness_binding": _copy(request["readiness_binding"]),
             "status": result.status,
             "execution": (_copy(result.execution)
                           if result.status == "completed" else None),
@@ -827,7 +966,8 @@ class SubagentFacilityApplication:
 
     def __call__(self, environ: Mapping[str, Any], start_response: Callable[..., Any]):
         try:
-            if not isinstance(environ, Mapping) or environ.get("PATH_INFO") != PATH:
+            if (not isinstance(environ, Mapping)
+                    or environ.get("PATH_INFO") not in {PATH, READINESS_PATH}):
                 raise _blocked("route_not_found", 404)
             if environ.get("REQUEST_METHOD") != "POST":
                 raise _blocked("method_not_allowed", 405)
@@ -837,8 +977,31 @@ class SubagentFacilityApplication:
                     and server in {"localhost", "127.0.0.1", "::1"}):
                 raise _blocked("https_required", 400)
             principal = self._authenticate(environ)
+            if environ.get("PATH_INFO") == READINESS_PATH:
+                request = self._readiness_request(environ, self._body(environ))
+                snapshot = self._readiness_snapshot()
+                payload = self._readiness_reply(request, snapshot)
+                return self._send(start_response, 200 if snapshot["ready"] else 503,
+                                  payload)
             request = self._request(environ, self._body(environ))
+            snapshot = self._readiness_snapshot()
+            if (request["readiness_binding"]
+                    != self._snapshot_binding(snapshot)):
+                raise _blocked("readiness_binding", 422)
+            if request["operation"] == "execute":
+                if not snapshot["ready"]:
+                    raise _blocked("readiness_blocked", 503, retryable=True)
+                failure_generation = snapshot["failure_generation"]
             result = self._run(request, principal)
+            if request["operation"] == "execute":
+                snapshot = self._readiness_snapshot()
+                if (request["readiness_binding"]
+                        != self._snapshot_binding(snapshot)):
+                    raise _blocked("readiness_binding", 422)
+                if (not snapshot["ready"]
+                        or snapshot["failure_generation"]
+                        != failure_generation):
+                    raise _blocked("readiness_blocked", 503, retryable=True)
             payload = self._reply(request, result)
             status = 202 if result.status in {"running", "unknown", "cancel_pending"} else 200
             return self._send(start_response, status, payload)

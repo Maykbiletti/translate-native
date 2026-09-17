@@ -270,6 +270,8 @@ class ExecutionBackend(Protocol):
     backend_id: str
     backend_version: str
 
+    def readiness(self) -> Mapping[str, Any]: ...
+
     def execute_idempotent(self, assignment: Mapping[str, Any],
                            model_input: Mapping[str, Any], *,
                            execute_request_sha256: str,

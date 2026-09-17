@@ -1,5 +1,42 @@
 # Version 6 premortem
 
+## Live host-subagent readiness after startup (17 September 2026)
+
+Assume the startup preflight passed, but the configured host route, credential,
+interpreter, model mapping or remote dependency fails while the facility keeps
+running.
+
+- The exclusive facility lock prevents a second `--check` process from probing
+  the live deployment, so a startup-only PASS could remain falsely green.
+- The first real review after drift could reserve a ledger slot before the
+  failure is discovered and leave ambiguous work occupying capacity.
+- An unauthenticated readiness request could become a probe oracle or denial of
+  service if it can trigger the operator command before authentication.
+- Concurrent polling could create a probe storm, while wall-clock adjustments
+  could make a stale result appear fresh.
+- Blocking read-only reconciliation together with new starts could destroy the
+  existing crash-recovery path.
+- A readiness response could leak routes, reviewer identities, prompts,
+  credentials or user text, or a nominal probe could accidentally start a
+  model.
+
+The runtime will therefore keep one monotonic, single-owner readiness state and
+refresh it at a bounded configured interval through the existing content-free
+preflight. A failure blocks new `execute` operations before ledger reservation;
+an overdue last success also blocks even if the monitor thread failed silently.
+`reconcile` remains read-only and available. The authenticated readiness route
+returns only a caller challenge, fixed deployment digests, route count, probe
+generation and a stable content-free reason. Authentication precedes body
+access, and polling only reads cached state; it never starts a probe or model.
+The executor's standard HTTPS backend verifies that exact contract during its
+own startup before creating or recovering its ledger.
+
+Startup validates local authentication material before the first external
+preflight. The monitor uses monotonic time, one thread, one bounded probe per
+interval and a bounded shutdown join. Its technical PASS remains an operator
+control-plane statement—not native-language evidence, model independence or a
+DeepL benchmark result.
+
 ## Active host-command readiness preflight (17 September 2026)
 
 Assume the protected files and facility ledger are valid, but the configured

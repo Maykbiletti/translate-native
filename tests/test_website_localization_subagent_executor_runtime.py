@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -177,6 +178,80 @@ class ExecutorRuntimeTests(unittest.TestCase):
                          ["target_native", "source_fidelity"])
         self.assertNotIn("source", ACTIVE_BACKEND.starts[0][1]["input"])
 
+    def test_live_backend_readiness_precedes_ledger_and_dispatch(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        ACTIVE_BACKEND.readiness_error = RuntimeError("facility unavailable")
+        with self.assertRaisesRegex(
+                RUNTIME.SubagentExecutorRuntimeError,
+                "facility readiness failed"):
+            RUNTIME.open_subagent_executor_runtime(
+                config, initialize_ledger=True,
+            )
+        self.assertEqual(ACTIVE_BACKEND.readiness_calls, 1)
+        self.assertEqual(ACTIVE_BACKEND.starts, [])
+        self.assertFalse(self.ledger.exists())
+
+        for malformed in (None, {}, {"ready": False}):
+            with self.subTest(malformed=malformed):
+                ACTIVE_BACKEND.readiness_error = None
+                ACTIVE_BACKEND.readiness_result = malformed
+                with self.assertRaisesRegex(
+                        RUNTIME.SubagentExecutorRuntimeError,
+                        "facility readiness failed"):
+                    RUNTIME.open_subagent_executor_runtime(
+                        config, initialize_ledger=True,
+                    )
+                self.assertFalse(self.ledger.exists())
+
+        ACTIVE_BACKEND.readiness_error = None
+        ACTIVE_BACKEND.readiness_result = {"ready": True, "fixture": True}
+        readiness_calls = ACTIVE_BACKEND.readiness_calls
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        try:
+            self.assertEqual(ACTIVE_BACKEND.readiness_calls,
+                             readiness_calls + 1)
+        finally:
+            runtime.close()
+
+    def test_executor_authentication_precedes_external_readiness(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        self.token_file.unlink()
+        with self.assertRaises(RUNTIME.SubagentExecutorRuntimeError):
+            RUNTIME.open_subagent_executor_runtime(
+                config, initialize_ledger=True,
+            )
+        self.assertEqual(ACTIVE_BACKEND.readiness_calls, 0)
+        self.assertFalse(self.ledger.exists())
+
+    def test_deployment_binding_is_rechecked_after_remote_readiness(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+
+        def replace_binding():
+            with sqlite3.connect(self.ledger) as connection:
+                connection.execute(
+                    "UPDATE subagent_executor_deployment "
+                    "SET binding_sha256=? WHERE singleton=1", ("0" * 64,),
+                )
+
+        ACTIVE_BACKEND.readiness_hook = replace_binding
+        with self.assertRaisesRegex(
+                RUNTIME.SubagentExecutorRuntimeError,
+                "deployment binding changed"):
+            RUNTIME.open_subagent_executor_runtime(config)
+        self.assertEqual(ACTIVE_BACKEND.starts, [])
+
     def test_deployment_drift_and_unsafe_files_block_before_backend(self):
         task, _control = HOST_TEST.response_request("fi-FI")
         route = HOST_TEST.response_route(task)
@@ -188,9 +263,11 @@ class ExecutorRuntimeTests(unittest.TestCase):
         value = json.loads(config.read_text(encoding="utf-8"))
         value["routes"][0]["reviewer_agent_id"] = "different-native-reviewer"
         self.write_json("executor.json", value)
+        calls = ACTIVE_BACKEND.readiness_calls
         with self.assertRaisesRegex(
                 RUNTIME.SubagentExecutorRuntimeError, "deployment binding changed"):
             RUNTIME.open_subagent_executor_runtime(config)
+        self.assertEqual(ACTIVE_BACKEND.readiness_calls, calls)
 
         if os.name != "nt":
             self.backend_file.chmod(0o644)

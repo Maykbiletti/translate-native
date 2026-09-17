@@ -31,10 +31,22 @@ class FixtureBackend:
 
     def __init__(self):
         self.starts, self.reconciles, self.completed = [], [], {}
+        self.readiness_calls = 0
+        self.readiness_error = None
+        self.readiness_result = {"ready": True, "fixture": True}
+        self.readiness_hook = None
         self.running = set()
         self.raise_after_start = False
         self.stay_running = False
         self.mutate = None
+
+    def readiness(self):
+        self.readiness_calls += 1
+        if self.readiness_error is not None:
+            raise self.readiness_error
+        if self.readiness_hook is not None:
+            self.readiness_hook()
+        return EXECUTOR._copy(self.readiness_result)
 
     @staticmethod
     def _response(model_input):

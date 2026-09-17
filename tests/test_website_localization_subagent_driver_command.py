@@ -269,6 +269,10 @@ class CommandDriverTests(unittest.TestCase):
             "ledger": {
                 "path": str(self.ledger), "max_concurrent_executions": 4,
             },
+            "health": {
+                "preflight_interval_seconds": 60,
+                "max_staleness_seconds": 120,
+            },
             "driver": {
                 "factory_file": str(self.factory),
                 "factory_callable": "build_driver",
@@ -282,6 +286,7 @@ class CommandDriverTests(unittest.TestCase):
 
     @staticmethod
     def backend(runtime):
+        preflight = runtime.preflight
         return BACKEND_TEST.BACKEND.HTTPSExecutionBackend(
             "http://127.0.0.1/v1/isolated-review-executions",
             lambda: {"Authorization": "Bearer " + BACKEND_TEST.FACILITY_TOKEN},
@@ -289,6 +294,22 @@ class CommandDriverTests(unittest.TestCase):
             facility_id="host-subagent-facility", facility_version="facility-1",
             transport=FACILITY_TEST.WSGIFacilityTransport(runtime.application),
             allow_loopback_http=True,
+            expected_driver_deployment_sha256=(
+                preflight["driver_deployment_sha256"]
+            ),
+            expected_deployment_manifest_sha256=(
+                preflight["deployment_manifest_sha256"]
+            ),
+            expected_route_requirements_sha256=(
+                preflight["route_requirements_sha256"]
+            ),
+            expected_readiness_policy_sha256=(
+                preflight["readiness_policy_sha256"]
+            ),
+            expected_facility_ledger_instance_id=(
+                preflight["facility_ledger_instance_id"]
+            ),
+            expected_routes_count=preflight["routes_checked"],
         )
 
     def direct(self, runtime, task, control, digest="1" * 64):

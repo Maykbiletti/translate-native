@@ -9,10 +9,12 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from wsgiref.simple_server import make_server
 
 import test_website_localization_subagent_backend_http as BACKEND_TEST
 import test_website_localization_subagent_executor as EXEC_TEST
@@ -135,6 +137,10 @@ class FacilityRuntimeTests(unittest.TestCase):
             "ledger": {
                 "path": str(self.ledger), "max_concurrent_executions": 4,
             },
+            "health": {
+                "preflight_interval_seconds": 60,
+                "max_staleness_seconds": 120,
+            },
             "driver": {
                 "factory_file": str(self.module_path),
                 "factory_callable": "build",
@@ -150,6 +156,7 @@ class FacilityRuntimeTests(unittest.TestCase):
 
     @staticmethod
     def backend(runtime):
+        preflight = runtime.preflight
         return BACKEND_TEST.BACKEND.HTTPSExecutionBackend(
             "http://127.0.0.1/v1/isolated-review-executions",
             lambda: {"Authorization": "Bearer " + BACKEND_TEST.FACILITY_TOKEN},
@@ -159,6 +166,22 @@ class FacilityRuntimeTests(unittest.TestCase):
             facility_version="facility-1",
             transport=FACILITY_TEST.WSGIFacilityTransport(runtime.application),
             allow_loopback_http=True,
+            expected_driver_deployment_sha256=(
+                preflight["driver_deployment_sha256"]
+            ),
+            expected_deployment_manifest_sha256=(
+                preflight["deployment_manifest_sha256"]
+            ),
+            expected_route_requirements_sha256=(
+                preflight["route_requirements_sha256"]
+            ),
+            expected_readiness_policy_sha256=(
+                preflight["readiness_policy_sha256"]
+            ),
+            expected_facility_ledger_instance_id=(
+                preflight["facility_ledger_instance_id"]
+            ),
+            expected_routes_count=preflight["routes_checked"],
         )
 
     def test_finnish_roundtrip_and_restart_replay(self):
@@ -244,6 +267,39 @@ class FacilityRuntimeTests(unittest.TestCase):
         self.assertEqual(recovered["execution"]["response"]["locale"], "fi-FI")
         self.assertEqual(json.loads(self.driver_state.read_text())["starts"], 1)
 
+    def test_facility_ledger_instance_is_persistent_and_unique(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        first_config = self.configuration([route])
+        first = RUNTIME.open_subagent_facility_runtime(
+            first_config, initialize_ledger=True,
+        )
+        first_id = first.preflight["facility_ledger_instance_id"]
+        first.close()
+        reopened = RUNTIME.open_subagent_facility_runtime(first_config)
+        try:
+            self.assertEqual(
+                reopened.preflight["facility_ledger_instance_id"], first_id,
+            )
+        finally:
+            reopened.close()
+
+        second_ledger = self.root / "facility-second.sqlite3"
+        second_config = self.configuration(
+            [route], ledger={
+                "path": str(second_ledger), "max_concurrent_executions": 4,
+            },
+        )
+        second = RUNTIME.open_subagent_facility_runtime(
+            second_config, initialize_ledger=True,
+        )
+        try:
+            self.assertNotEqual(
+                second.preflight["facility_ledger_instance_id"], first_id,
+            )
+        finally:
+            second.close()
+
     def test_maltese_runtime_preserves_two_isolated_phases(self):
         routes, _captures = HOST_TEST.website_routes(["mt-MT"])
         config = self.configuration(routes)
@@ -262,6 +318,243 @@ class FacilityRuntimeTests(unittest.TestCase):
             runtime.close()
         self.assertTrue(result["release_required"])
         self.assertEqual(json.loads(self.driver_state.read_text())["starts"], 2)
+
+    def test_real_url_transport_reaches_facility_and_executor_runtime(self):
+        fi_task, fi_control = HOST_TEST.response_request("fi-FI")
+        fi_route = HOST_TEST.response_route(fi_task)
+        mt_routes, _captures = HOST_TEST.website_routes(["mt-MT"])
+        routes = [fi_route, *mt_routes]
+        facility_config = self.configuration(routes)
+        facility_runtime = RUNTIME.open_subagent_facility_runtime(
+            facility_config, initialize_ledger=True,
+        )
+        server = make_server("127.0.0.1", 0, facility_runtime.application)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+        backend_factory = self.root / "website_localization_subagent_backend_http.py"
+        backend_factory.write_bytes((
+            BASE.ROOT / "integrations"
+            / "website_localization_subagent_backend_http.py"
+        ).read_bytes())
+        if os.name != "nt":
+            backend_factory.chmod(0o600)
+        preflight = facility_runtime.preflight
+        backend_config = self.write_json("http-backend.json", {
+            "schema": BACKEND_TEST.RUNTIME_TEST.RUNTIME.BACKEND_SCHEMA,
+            "backend_id": "production-host-subagents",
+            "backend_version": "backend-1",
+            "settings": {
+                "schema": BACKEND_TEST.BACKEND.SETTINGS_SCHEMA,
+                "backend_id": "production-host-subagents",
+                "backend_version": "backend-1",
+                "facility_id": "host-subagent-facility",
+                "facility_version": "facility-1",
+                "endpoint": (
+                    f"http://127.0.0.1:{server.server_port}"
+                    "/v1/isolated-review-executions"
+                ),
+                "authentication": {
+                    "scheme": "bearer", "token_file": str(self.token_file),
+                    "token_sha256": hashlib.sha256(
+                        BACKEND_TEST.FACILITY_TOKEN.encode("ascii")
+                    ).hexdigest(),
+                },
+                "readiness": {
+                    "facility_ledger_instance_id": preflight[
+                        "facility_ledger_instance_id"
+                    ],
+                    "driver_deployment_sha256": preflight[
+                        "driver_deployment_sha256"
+                    ],
+                    "deployment_manifest_sha256": preflight[
+                        "deployment_manifest_sha256"
+                    ],
+                    "route_requirements_sha256": preflight[
+                        "route_requirements_sha256"
+                    ],
+                    "readiness_policy_sha256": preflight[
+                        "readiness_policy_sha256"
+                    ],
+                    "routes_count": preflight["routes_checked"],
+                },
+                "request_timeout_seconds": 10,
+                "max_input_bytes": 2_000_000,
+                "max_output_tokens": 4096,
+                "cost_unit": "deployment-cost-unit",
+                "max_cost_units": 100_000,
+                "allow_loopback_http": True,
+            },
+        })
+        executor_token = self.write(
+            "executor.token", EXEC_TEST.EXECUTOR_TOKEN,
+        )
+        executor_ledger = self.root / "executor.sqlite3"
+        executor_config = self.write_json("executor.json", {
+            "schema": BACKEND_TEST.RUNTIME_TEST.RUNTIME.CONFIG_SCHEMA,
+            "executor_id": "executor-1",
+            "launcher_id": "deployment-review-launcher",
+            "launcher_version": "launcher-1",
+            "allow_loopback_http": True,
+            "authentication": {
+                "scheme": "bearer", "token_file": str(executor_token),
+            },
+            "ledger": {
+                "path": str(executor_ledger), "max_concurrent_executions": 4,
+            },
+            "backend": {
+                "factory_file": str(backend_factory),
+                "factory_callable": "build_backend",
+                "factory_sha256": hashlib.sha256(
+                    backend_factory.read_bytes()
+                ).hexdigest(),
+                "backend_id": "production-host-subagents",
+                "backend_version": "backend-1",
+                "config_file": str(backend_config),
+            },
+            "routes": [self.route_dict(route) for route in routes],
+        })
+        executor_runtime = None
+        try:
+            executor_runtime = (
+                BACKEND_TEST.RUNTIME_TEST.RUNTIME.open_subagent_executor_runtime(
+                    executor_config, initialize_ledger=True,
+                )
+            )
+            launcher = EXEC_TEST.LAUNCHER.HTTPSSubagentLauncher(
+                "http://127.0.0.1/v1/subagent-executions",
+                lambda: {
+                    "Authorization": "Bearer " + EXEC_TEST.EXECUTOR_TOKEN,
+                },
+                launcher_id="deployment-review-launcher",
+                launcher_version="launcher-1", executor_id="executor-1",
+                transport=EXEC_TEST.WSGIExecutorTransport(
+                    executor_runtime.application
+                ),
+                allow_loopback_http=True,
+            )
+            fi_assignment = HOST_TEST.HOST.ReviewHostApplication._assignment(
+                fi_route, fi_control,
+            )
+            fi_result = launcher.execute_idempotent(
+                fi_assignment,
+                HOST_TEST.HOST.ReviewHostApplication._model_task(fi_task),
+                deadline_seconds=fi_assignment.deadline_seconds,
+                max_output_tokens=fi_assignment.max_output_tokens,
+            )
+            self.assertEqual(fi_result["response"]["locale"], "fi-FI")
+
+            fixture = EXEC_TEST.ExecutorTests()
+            fixture.temporary = self.temporary
+            host = fixture.review_host(routes, launcher)
+            mt_result = BASE.HostSubagentTests().execute(
+                BASE.adapter(fixture.review_client(host)), "mt-MT",
+            )
+            self.assertTrue(mt_result["release_required"])
+            self.assertEqual(json.loads(self.driver_state.read_text())["starts"], 3)
+        finally:
+            if executor_runtime is not None:
+                executor_runtime.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(2)
+            facility_runtime.close()
+
+    def test_live_preflight_failure_blocks_new_start_then_recovers(self):
+        task, control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        runtime = RUNTIME.open_subagent_facility_runtime(
+            config, initialize_ledger=True,
+        )
+        assignment = vars(
+            HOST_TEST.HOST.ReviewHostApplication._assignment(route, control)
+        )
+        model_input = HOST_TEST.HOST.ReviewHostApplication._model_task(task)
+        budgets = BACKEND_TEST.HTTPBackendTests.direct_request()[2]
+        try:
+            with mock.patch.object(
+                    RUNTIME, "_preflight_routes",
+                    side_effect=RUNTIME.SubagentFacilityRuntimeError("offline")):
+                self.assertFalse(runtime.supervisor.run_once())
+            failed_snapshot = runtime.supervisor.snapshot()
+            self.assertEqual(failed_snapshot["reason"], "preflight_failed")
+            self.assertEqual(failed_snapshot["failure_generation"], 1)
+            with self.assertRaises(
+                    BACKEND_TEST.BACKEND.SubagentHTTPBackendFailed) as blocked:
+                self.backend(runtime).execute_idempotent(
+                    assignment, model_input,
+                    execute_request_sha256="6" * 64, budgets=budgets,
+                )
+            self.assertEqual(blocked.exception.code, "backend_http.status")
+            self.assertTrue(blocked.exception.retryable)
+            self.assertEqual(runtime.facility.ledger.count_active(), 0)
+            self.assertFalse(self.driver_state.exists())
+
+            with mock.patch.object(
+                    RUNTIME, "_preflight_routes", return_value=runtime.preflight):
+                self.assertTrue(runtime.supervisor.run_once())
+            recovered_snapshot = runtime.supervisor.snapshot()
+            self.assertEqual(recovered_snapshot["reason"], "ready")
+            self.assertEqual(recovered_snapshot["failure_generation"], 1)
+            result = self.backend(runtime).execute_idempotent(
+                assignment, model_input,
+                execute_request_sha256="6" * 64, budgets=budgets,
+            )
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(json.loads(self.driver_state.read_text())["starts"], 1)
+        finally:
+            runtime.close()
+
+    def test_readiness_lease_stales_and_preflight_is_single_flight(self):
+        now = [10.0]
+        initial = {
+            "routes_checked": 1,
+            "driver_deployment_sha256": "8" * 64,
+            "deployment_manifest_sha256": "9" * 64,
+            "route_requirements_sha256": "a" * 64,
+            "readiness_policy_sha256": "b" * 64,
+            "facility_ledger_instance_id": "c" * 64,
+        }
+        supervisor = RUNTIME._PreflightSupervisor(
+            object(), [], interval_seconds=60, max_staleness_seconds=120,
+            initial=initial, clock=lambda: now[0],
+        )
+        self.assertEqual(supervisor.snapshot()["reason"], "ready")
+        now[0] = 131.0
+        self.assertEqual(supervisor.snapshot()["reason"], "preflight_stale")
+
+        entered, release = threading.Event(), threading.Event()
+
+        def blocking_probe(_driver, _routes):
+            entered.set()
+            release.wait(1)
+            return initial
+
+        with mock.patch.object(RUNTIME, "_preflight_routes", blocking_probe):
+            worker = threading.Thread(target=supervisor.run_once)
+            worker.start()
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(supervisor.run_once())
+            release.set()
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(supervisor.snapshot()["reason"], "ready")
+        supervisor.close()
+        self.assertEqual(supervisor.snapshot()["reason"], "monitor_stopped")
+
+    def test_facility_authentication_is_validated_before_external_preflight(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        self.token_file.unlink()
+        config = self.configuration([route])
+        with mock.patch.object(RUNTIME, "_preflight_routes") as preflight:
+            with self.assertRaises(RUNTIME.SubagentFacilityRuntimeError):
+                RUNTIME.open_subagent_facility_runtime(
+                    config, initialize_ledger=True,
+                )
+            preflight.assert_not_called()
+        self.assertFalse(self.ledger.exists())
 
     def test_deployment_drift_and_unsafe_files_fail_before_readiness(self):
         task, _control = HOST_TEST.response_request("fi-FI")
@@ -350,12 +643,21 @@ class FacilityRuntimeTests(unittest.TestCase):
         ]), contextlib.redirect_stdout(output):
             self.assertEqual(RUNTIME.main(), 0)
         status = json.loads(output.getvalue())
-        self.assertEqual(status, {
-            "content_free": True,
-            "driver_preflight": "passed",
-            "ready": True,
-            "routes_checked": 1,
+        self.assertEqual(set(status), {
+            "content_free", "deployment_manifest_sha256",
+            "driver_deployment_sha256", "driver_preflight", "ready",
+            "readiness_policy_sha256", "route_requirements_sha256",
+            "routes_checked", "facility_ledger_instance_id",
         })
+        self.assertEqual(status["content_free"], True)
+        self.assertEqual(status["deployment_manifest_sha256"], "9" * 64)
+        self.assertEqual(status["driver_preflight"], "passed")
+        self.assertEqual(status["ready"], True)
+        self.assertEqual(status["routes_checked"], 1)
+        self.assertRegex(status["driver_deployment_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(status["route_requirements_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(status["readiness_policy_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(status["facility_ledger_instance_id"], r"^[0-9a-f]{64}$")
         self.assertTrue(self.ledger.exists())
         self.assertFalse(self.driver_state.exists())
 

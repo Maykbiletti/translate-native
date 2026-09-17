@@ -21,6 +21,11 @@ FACILITY = BASE.load(
 BACKEND = BACKEND_TEST.BACKEND
 HOST = HOST_TEST.HOST
 TOKEN = BACKEND_TEST.FACILITY_TOKEN
+DRIVER_DEPLOYMENT_SHA256 = "8" * 64
+DEPLOYMENT_MANIFEST_SHA256 = "9" * 64
+ROUTE_REQUIREMENTS_SHA256 = "a" * 64
+READINESS_POLICY_SHA256 = "b" * 64
+FACILITY_LEDGER_INSTANCE_ID = "c" * 64
 
 
 class FixtureDriver:
@@ -130,10 +135,11 @@ class WSGIFacilityTransport:
         self.calls = []
         self.lose_first_execute_reply = False
 
-    def post(self, _url, headers, body, *, timeout):
+    def post(self, url, headers, body, *, timeout):
         self.calls.append((dict(headers), bytes(body), timeout))
         environ = {
-            "PATH_INFO": FACILITY.PATH, "REQUEST_METHOD": "POST",
+            "PATH_INFO": (FACILITY.READINESS_PATH if url.endswith("/readiness")
+                          else FACILITY.PATH), "REQUEST_METHOD": "POST",
             "wsgi.url_scheme": "http", "SERVER_NAME": "127.0.0.1",
             "CONTENT_TYPE": headers["Content-Type"],
             "CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body),
@@ -149,7 +155,8 @@ class WSGIFacilityTransport:
 
         response = b"".join(self.application(environ, start_response))
         request = json.loads(body)
-        if request["operation"] == "execute" and self.lose_first_execute_reply:
+        if (request.get("operation") == "execute"
+                and self.lose_first_execute_reply):
             self.lose_first_execute_reply = False
             raise OSError("synthetic lost facility response")
         return BACKEND.HTTPResult(
@@ -176,7 +183,8 @@ class FacilityTests(unittest.TestCase):
             task_policy_sha256=route.task_policy_sha256,
         ) for route in host_routes]
 
-    def application(self, routes, *, driver=None, ledger=None, capacity=4):
+    def application(self, routes, *, driver=None, ledger=None, capacity=4,
+                    readiness=None):
         ledger = ledger or FACILITY.SQLiteFacilityLedger(
             Path(self.temporary.name) / "facility.sqlite3",
             max_concurrent_executions=capacity, boot_id=self.boot_id,
@@ -188,6 +196,16 @@ class FacilityTests(unittest.TestCase):
             facility_version="facility-1", bearer_token=TOKEN,
             policy=FACILITY.EXECUTOR.PinnedExecutorPolicy(self.routes(routes)),
             ledger=ledger, driver=driver or self.driver,
+            readiness=readiness or (lambda: {
+                "ready": True, "reason": "ready", "probe_generation": 1,
+                "failure_generation": 0,
+                "routes_checked": len(routes),
+                "driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                "deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                "readiness_policy_sha256": READINESS_POLICY_SHA256,
+                "facility_ledger_instance_id": FACILITY_LEDGER_INSTANCE_ID,
+            }),
             allow_loopback_http=True,
         )
 
@@ -203,6 +221,12 @@ class FacilityTests(unittest.TestCase):
             facility_id="host-subagent-facility",
             facility_version="facility-1", transport=transport,
             max_output_tokens=4096, allow_loopback_http=True,
+            expected_driver_deployment_sha256=DRIVER_DEPLOYMENT_SHA256,
+            expected_deployment_manifest_sha256=DEPLOYMENT_MANIFEST_SHA256,
+            expected_route_requirements_sha256=ROUTE_REQUIREMENTS_SHA256,
+            expected_readiness_policy_sha256=READINESS_POLICY_SHA256,
+            expected_facility_ledger_instance_id=FACILITY_LEDGER_INSTANCE_ID,
+            expected_routes_count=len(routes),
         )
         return backend, transport
 
@@ -283,6 +307,67 @@ class FacilityTests(unittest.TestCase):
         self.assertEqual(other_recovered["response"]["status"], "PASS")
         self.assertEqual(other_driver.physical_starts, 1)
 
+    def test_reconcile_cannot_cross_facility_ledger_instances(self):
+        task, control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        assignment = vars(
+            HOST.ReviewHostApplication._assignment(route, control)
+        )
+        model_input = HOST.ReviewHostApplication._model_task(task)
+        budgets = BACKEND_TEST.HTTPBackendTests.direct_request()[2]
+        first = self.application([route])
+        second_ledger = FACILITY.SQLiteFacilityLedger(
+            Path(self.temporary.name) / "second.sqlite3",
+            max_concurrent_executions=4, boot_id="b" * 64,
+        )
+        second = self.application(
+            [route], ledger=second_ledger,
+            readiness=lambda: {
+                "ready": True, "reason": "ready", "probe_generation": 1,
+                "failure_generation": 0, "routes_checked": 1,
+                "facility_ledger_instance_id": "d" * 64,
+                "driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                "deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                "readiness_policy_sha256": READINESS_POLICY_SHA256,
+            },
+        )
+        first_transport = WSGIFacilityTransport(first)
+        first_transport.lose_first_execute_reply = True
+        backend = BACKEND.HTTPSExecutionBackend(
+            "http://127.0.0.1/v1/isolated-review-executions",
+            lambda: {"Authorization": "Bearer " + TOKEN},
+            backend_id="production-host-subagents", backend_version="backend-1",
+            facility_id="host-subagent-facility", facility_version="facility-1",
+            transport=first_transport, allow_loopback_http=True,
+            expected_driver_deployment_sha256=DRIVER_DEPLOYMENT_SHA256,
+            expected_deployment_manifest_sha256=DEPLOYMENT_MANIFEST_SHA256,
+            expected_route_requirements_sha256=ROUTE_REQUIREMENTS_SHA256,
+            expected_readiness_policy_sha256=READINESS_POLICY_SHA256,
+            expected_facility_ledger_instance_id=FACILITY_LEDGER_INSTANCE_ID,
+            expected_routes_count=1,
+        )
+        with self.assertRaises(BACKEND.SubagentHTTPBackendFailed):
+            backend.execute_idempotent(
+                assignment, model_input,
+                execute_request_sha256="8" * 64, budgets=budgets,
+            )
+        self.assertEqual(self.driver.physical_starts, 1)
+        backend.transport = WSGIFacilityTransport(second)
+        with self.assertRaises(BACKEND.SubagentHTTPBackendFailed) as blocked:
+            backend.reconcile(
+                assignment, execute_request_sha256="8" * 64,
+            )
+        self.assertEqual(blocked.exception.code, "backend_http.status")
+        self.assertEqual(second_ledger.count_active(), 0)
+
+        backend.transport = WSGIFacilityTransport(first)
+        recovered = backend.reconcile(
+            assignment, execute_request_sha256="8" * 64,
+        )
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(self.driver.physical_starts, 1)
+
     def test_changed_replay_wrong_identity_and_usage_are_quarantined(self):
         task, control = HOST_TEST.response_request("fi-FI")
         route = HOST_TEST.response_route(task)
@@ -339,17 +424,175 @@ class FacilityTests(unittest.TestCase):
                 raise AssertionError("body must not be read before authentication")
 
         statuses = []
-        response = b"".join(application({
-            "PATH_INFO": FACILITY.PATH, "REQUEST_METHOD": "POST",
-            "wsgi.url_scheme": "http", "SERVER_NAME": "127.0.0.1",
-            "CONTENT_TYPE": "application/json; charset=utf-8",
-            "CONTENT_LENGTH": "2", "wsgi.input": BlockingBody(),
-            "HTTP_AUTHORIZATION": "Bearer wrong-token-with-at-least-32-characters",
-        }, lambda status, _headers: statuses.append(status)))
-        self.assertTrue(statuses[0].startswith("401"))
-        self.assertIn(b"authentication_rejected", response)
+        for path in (FACILITY.PATH, FACILITY.READINESS_PATH):
+            statuses.clear()
+            response = b"".join(application({
+                "PATH_INFO": path, "REQUEST_METHOD": "POST",
+                "wsgi.url_scheme": "http", "SERVER_NAME": "127.0.0.1",
+                "CONTENT_TYPE": "application/json; charset=utf-8",
+                "CONTENT_LENGTH": "2", "wsgi.input": BlockingBody(),
+                "HTTP_AUTHORIZATION": (
+                    "Bearer wrong-token-with-at-least-32-characters"
+                ),
+            }, lambda status, _headers: statuses.append(status)))
+            self.assertTrue(statuses[0].startswith("401"))
+            self.assertIn(b"authentication_rejected", response)
         self.assertEqual(self.driver.starts, [])
         self.assertEqual(application.ledger.count_active(), 0)
+
+    def test_unhealthy_readiness_blocks_execute_before_ledger_but_not_reconcile(self):
+        task, control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        assignment = HOST.ReviewHostApplication._assignment(route, control)
+        model_input = HOST.ReviewHostApplication._model_task(task)
+        budgets = BACKEND_TEST.HTTPBackendTests.direct_request()[2]
+        readiness_calls = []
+
+        def unhealthy():
+            readiness_calls.append(True)
+            return {
+                "ready": False, "reason": "preflight_failed",
+                "probe_generation": 2, "failure_generation": 1,
+                "routes_checked": 1,
+                "facility_ledger_instance_id": FACILITY_LEDGER_INSTANCE_ID,
+                "driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                "deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                "readiness_policy_sha256": READINESS_POLICY_SHA256,
+            }
+
+        application = self.application([route], readiness=unhealthy)
+        transport = WSGIFacilityTransport(application)
+        backend = BACKEND.HTTPSExecutionBackend(
+            "http://127.0.0.1/v1/isolated-review-executions",
+            lambda: {"Authorization": "Bearer " + TOKEN},
+            backend_id="production-host-subagents", backend_version="backend-1",
+            facility_id="host-subagent-facility", facility_version="facility-1",
+            transport=transport, max_output_tokens=4096,
+            allow_loopback_http=True,
+            expected_driver_deployment_sha256=DRIVER_DEPLOYMENT_SHA256,
+            expected_deployment_manifest_sha256=DEPLOYMENT_MANIFEST_SHA256,
+            expected_route_requirements_sha256=ROUTE_REQUIREMENTS_SHA256,
+            expected_readiness_policy_sha256=READINESS_POLICY_SHA256,
+            expected_facility_ledger_instance_id=FACILITY_LEDGER_INSTANCE_ID,
+            expected_routes_count=1,
+        )
+        with self.assertRaises(BACKEND.SubagentHTTPBackendFailed) as blocked:
+            backend.execute_idempotent(
+                vars(assignment), model_input,
+                execute_request_sha256="f" * 64, budgets=budgets,
+            )
+        self.assertEqual(blocked.exception.code, "backend_http.status")
+        self.assertTrue(blocked.exception.retryable)
+        self.assertEqual(self.driver.starts, [])
+        self.assertEqual(application.ledger.count_active(), 0)
+        self.assertEqual(len(readiness_calls), 1)
+
+        reconciled = backend.reconcile(
+            vars(assignment), execute_request_sha256="f" * 64,
+        )
+        self.assertEqual(reconciled["status"], "not_started")
+        self.assertEqual(len(readiness_calls), 2)
+
+    def test_wrong_deployment_or_health_generation_blocks_before_ledger(self):
+        task, control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        assignment = HOST.ReviewHostApplication._assignment(route, control)
+        model_input = HOST.ReviewHostApplication._model_task(task)
+        budgets = BACKEND_TEST.HTTPBackendTests.direct_request()[2]
+        for name, changed in (
+                ("driver", {"expected_driver_deployment_sha256": "c" * 64}),
+                ("policy", {"expected_readiness_policy_sha256": "d" * 64})):
+            with self.subTest(name=name):
+                application = self.application([route])
+                options = {
+                    "expected_driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                    "expected_deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                    "expected_route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                    "expected_readiness_policy_sha256": READINESS_POLICY_SHA256,
+                    "expected_facility_ledger_instance_id": (
+                        FACILITY_LEDGER_INSTANCE_ID
+                    ),
+                }
+                options.update(changed)
+                backend = BACKEND.HTTPSExecutionBackend(
+                    "http://127.0.0.1/v1/isolated-review-executions",
+                    lambda: {"Authorization": "Bearer " + TOKEN},
+                    backend_id="production-host-subagents",
+                    backend_version="backend-1",
+                    facility_id="host-subagent-facility",
+                    facility_version="facility-1",
+                    transport=WSGIFacilityTransport(application),
+                    expected_routes_count=1, allow_loopback_http=True,
+                    **options,
+                )
+                with self.assertRaises(BACKEND.SubagentHTTPBackendFailed) as execute:
+                    backend.execute_idempotent(
+                        vars(assignment), model_input,
+                        execute_request_sha256="e" * 64, budgets=budgets,
+                    )
+                self.assertFalse(execute.exception.retryable)
+                with self.assertRaises(BACKEND.SubagentHTTPBackendFailed) as reconcile:
+                    backend.reconcile(
+                        vars(assignment), execute_request_sha256="e" * 64,
+                    )
+                self.assertFalse(reconcile.exception.retryable)
+                self.assertEqual(application.ledger.count_active(), 0)
+                self.assertEqual(self.driver.starts, [])
+
+    def test_mid_execution_probe_failure_blocks_reply_and_reconciles_once(self):
+        task, control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        assignment = HOST.ReviewHostApplication._assignment(route, control)
+        model_input = HOST.ReviewHostApplication._model_task(task)
+        budgets = BACKEND_TEST.HTTPBackendTests.direct_request()[2]
+        state = {"probe_generation": 1, "failure_generation": 0}
+
+        def readiness():
+            return {
+                "ready": True, "reason": "ready",
+                "probe_generation": state["probe_generation"],
+                "failure_generation": state["failure_generation"],
+                "routes_checked": 1,
+                "facility_ledger_instance_id": FACILITY_LEDGER_INSTANCE_ID,
+                "driver_deployment_sha256": DRIVER_DEPLOYMENT_SHA256,
+                "deployment_manifest_sha256": DEPLOYMENT_MANIFEST_SHA256,
+                "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
+                "readiness_policy_sha256": READINESS_POLICY_SHA256,
+            }
+
+        def fail_and_recover(_result):
+            state.update(probe_generation=3, failure_generation=1)
+            self.driver.mutate = None
+
+        self.driver.mutate = fail_and_recover
+        application = self.application([route], readiness=readiness)
+        transport = WSGIFacilityTransport(application)
+        backend = BACKEND.HTTPSExecutionBackend(
+            "http://127.0.0.1/v1/isolated-review-executions",
+            lambda: {"Authorization": "Bearer " + TOKEN},
+            backend_id="production-host-subagents", backend_version="backend-1",
+            facility_id="host-subagent-facility", facility_version="facility-1",
+            transport=transport, allow_loopback_http=True,
+            expected_driver_deployment_sha256=DRIVER_DEPLOYMENT_SHA256,
+            expected_deployment_manifest_sha256=DEPLOYMENT_MANIFEST_SHA256,
+            expected_route_requirements_sha256=ROUTE_REQUIREMENTS_SHA256,
+            expected_readiness_policy_sha256=READINESS_POLICY_SHA256,
+            expected_facility_ledger_instance_id=FACILITY_LEDGER_INSTANCE_ID,
+            expected_routes_count=1,
+        )
+        with self.assertRaises(BACKEND.SubagentHTTPBackendFailed) as interrupted:
+            backend.execute_idempotent(
+                vars(assignment), model_input,
+                execute_request_sha256="7" * 64, budgets=budgets,
+            )
+        self.assertTrue(interrupted.exception.retryable)
+        self.assertEqual(self.driver.physical_starts, 1)
+        recovered = backend.reconcile(
+            vars(assignment), execute_request_sha256="7" * 64,
+        )
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(self.driver.physical_starts, 1)
 
     def test_execute_not_started_and_native_source_injection_fail_closed(self):
         task, control = HOST_TEST.response_request("fi-FI")

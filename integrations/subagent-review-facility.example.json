@@ -1,5 +1,5 @@
 {
-  "schema": "translate-native.subagent-review-facility-runtime.v1",
+  "schema": "translate-native.subagent-review-facility-runtime.v2",
   "backend_id": "production-host-subagents",
   "backend_version": "http-backend-v1",
   "facility_id": "production-host-subagent-facility",
@@ -12,6 +12,10 @@
   "ledger": {
     "path": "/absolute/protected/path/subagent-facility.sqlite3",
     "max_concurrent_executions": 4
+  },
+  "health": {
+    "preflight_interval_seconds": 60,
+    "max_staleness_seconds": 120
   },
   "driver": {
     "factory_file": "/absolute/protected/path/website_localization_subagent_driver_command.py",

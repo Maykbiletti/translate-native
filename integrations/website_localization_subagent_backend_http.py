@@ -24,9 +24,15 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 
-SETTINGS_SCHEMA = "translate-native.subagent-review-http-backend.v1"
-REQUEST_SCHEMA = "translate-native.subagent-review-facility-request.v1"
-RESPONSE_SCHEMA = "translate-native.subagent-review-facility-response.v1"
+SETTINGS_SCHEMA = "translate-native.subagent-review-http-backend.v2"
+REQUEST_SCHEMA = "translate-native.subagent-review-facility-request.v2"
+RESPONSE_SCHEMA = "translate-native.subagent-review-facility-response.v2"
+READINESS_REQUEST_SCHEMA = (
+    "translate-native.subagent-review-facility-readiness-request.v2"
+)
+READINESS_RESPONSE_SCHEMA = (
+    "translate-native.subagent-review-facility-readiness-response.v2"
+)
 WORKER_SCHEMA = "translate-native.subagent-review-facility-http-worker.v1"
 MAX_ENDPOINT_LENGTH = 2048
 MAX_REQUEST_BYTES = 4_500_000
@@ -348,6 +354,12 @@ class HTTPSExecutionBackend:
                  max_output_tokens: int = 4096,
                  cost_unit: str = "deployment-cost-unit",
                  max_cost_units: int = 100_000,
+                 expected_driver_deployment_sha256: str | None = None,
+                 expected_deployment_manifest_sha256: str | None = None,
+                 expected_route_requirements_sha256: str | None = None,
+                 expected_readiness_policy_sha256: str | None = None,
+                 expected_facility_ledger_instance_id: str | None = None,
+                 expected_routes_count: int | None = None,
                  allow_loopback_http: bool = False):
         if type(allow_loopback_http) is not bool:
             raise TypeError("allow_loopback_http must be boolean")
@@ -365,7 +377,29 @@ class HTTPSExecutionBackend:
                 or type(max_output_tokens) is not int
                 or not 128 <= max_output_tokens <= 32768
                 or type(max_cost_units) is not int
-                or not 1 <= max_cost_units <= 1_000_000_000):
+                or not 1 <= max_cost_units <= 1_000_000_000
+                or any(value is None for value in (
+                    expected_driver_deployment_sha256,
+                    expected_deployment_manifest_sha256,
+                    expected_route_requirements_sha256,
+                    expected_readiness_policy_sha256,
+                    expected_facility_ledger_instance_id,
+                    expected_routes_count,
+                ))
+                or any(value is not None and (
+                    not isinstance(value, str) or SHA256.fullmatch(value) is None
+                    or value == "0" * 64
+                ) for value in (
+                    expected_driver_deployment_sha256,
+                    expected_deployment_manifest_sha256,
+                    expected_route_requirements_sha256,
+                    expected_readiness_policy_sha256,
+                    expected_facility_ledger_instance_id,
+                ))
+                or expected_routes_count is not None and (
+                    type(expected_routes_count) is not int
+                    or not 1 <= expected_routes_count <= 10_000
+                )):
             raise ValueError("backend configuration is invalid")
         self.authentication_headers = authentication_headers
         self.transport = URLTransport() if transport is None else transport
@@ -375,6 +409,42 @@ class HTTPSExecutionBackend:
         self.max_input_bytes = max_input_bytes
         self.max_output_tokens = max_output_tokens
         self.max_cost_units = max_cost_units
+        self.expected_driver_deployment_sha256 = (
+            expected_driver_deployment_sha256
+        )
+        self.expected_deployment_manifest_sha256 = (
+            expected_deployment_manifest_sha256
+        )
+        self.expected_route_requirements_sha256 = (
+            expected_route_requirements_sha256
+        )
+        self.expected_readiness_policy_sha256 = (
+            expected_readiness_policy_sha256
+        )
+        self.expected_facility_ledger_instance_id = (
+            expected_facility_ledger_instance_id
+        )
+        self.expected_routes_count = expected_routes_count
+
+    def _readiness_binding(self) -> dict:
+        return {
+            "facility_ledger_instance_id": (
+                self.expected_facility_ledger_instance_id
+            ),
+            "driver_deployment_sha256": (
+                self.expected_driver_deployment_sha256
+            ),
+            "deployment_manifest_sha256": (
+                self.expected_deployment_manifest_sha256
+            ),
+            "route_requirements_sha256": (
+                self.expected_route_requirements_sha256
+            ),
+            "readiness_policy_sha256": (
+                self.expected_readiness_policy_sha256
+            ),
+            "routes_count": self.expected_routes_count,
+        }
 
     def _auth(self) -> dict[str, str]:
         try:
@@ -424,6 +494,7 @@ class HTTPSExecutionBackend:
             "facility_version": self.facility_version,
             "assignment": assigned,
             "execute_request_sha256": execute_request_sha256,
+            "readiness_binding": self._readiness_binding(),
             "isolation": {
                 "inherit_context": False, "tools": [],
                 "max_delegation_depth": 0,
@@ -493,7 +564,7 @@ class HTTPSExecutionBackend:
             "schema", "operation", "backend_id", "backend_version",
             "facility_id", "facility_version", "execution_key",
             "execute_request_sha256", "request_sha256", "status",
-            "execution", "usage",
+            "readiness_binding", "execution", "usage",
         }
         assignment = request["assignment"]
         if (not isinstance(reply, dict) or set(reply) != expected
@@ -507,6 +578,8 @@ class HTTPSExecutionBackend:
                 or reply.get("execute_request_sha256")
                 != request["execute_request_sha256"]
                 or reply.get("request_sha256") != request["request_sha256"]
+                or reply.get("readiness_binding")
+                != request["readiness_binding"]
                 or reply.get("status") not in STATUSES
                 or (reply["status"] in ACTIVE) != (result.status == 202)
                 or (reply["status"] in {"completed", "not_started"})
@@ -578,6 +651,109 @@ class HTTPSExecutionBackend:
         except Exception:
             raise _failed("network", retryable=True) from None
         return self._parse(result, request)
+
+    def readiness(self) -> Mapping[str, Any]:
+        """Return one authenticated, challenge-bound live readiness snapshot."""
+        challenge = hashlib.sha256(os.urandom(32)).hexdigest()
+        unsigned = {
+            "schema": READINESS_REQUEST_SCHEMA,
+            "backend_id": self.backend_id,
+            "backend_version": self.backend_version,
+            "facility_id": self.facility_id,
+            "facility_version": self.facility_version,
+            "challenge": challenge,
+        }
+        request = {**unsigned, "request_sha256": _sha(unsigned)}
+        body = _raw(request)
+        headers = self._auth()
+        headers.update({
+            "Accept": "application/json", "Accept-Encoding": "identity",
+            "Content-Type": "application/json; charset=utf-8",
+            "X-Subagent-Readiness-Challenge": challenge,
+            "X-Subagent-Readiness-Request-SHA256": request["request_sha256"],
+        })
+        try:
+            result = self.transport.post(
+                self.endpoint.rstrip("/") + "/readiness", headers, body,
+                timeout=float(self.request_timeout_seconds),
+            )
+        except SubagentHTTPBackendFailed:
+            raise
+        except Exception:
+            raise _failed("network", retryable=True) from None
+        if (not isinstance(result, HTTPResult) or type(result.status) is not int
+                or not isinstance(result.body, bytes)
+                or len(result.body) > MAX_RESPONSE_BYTES):
+            raise _failed("transport_invalid", retryable=True)
+        if result.status not in {200, 503}:
+            if result.status in {301, 302, 303, 307, 308}:
+                raise _failed("redirect")
+            if result.status in {401, 403}:
+                raise _failed("authentication_rejected")
+            raise _failed(
+                "status", retryable=(result.status in {408, 425, 429}
+                                      or 500 <= result.status <= 599),
+            )
+        response_headers = _response_headers(result.headers)
+        if response_headers.get("content-type", "").lower().replace(" ", "") \
+                != "application/json;charset=utf-8" \
+                or "content-length" not in response_headers \
+                or not response_headers["content-length"].isascii() \
+                or not response_headers["content-length"].isdecimal() \
+                or int(response_headers["content-length"]) != len(result.body):
+            raise _failed("response_headers")
+        try:
+            text = result.body.decode("utf-8")
+            if text.startswith("\ufeff"):
+                raise ValueError
+            reply = json.loads(
+                text, object_pairs_hook=_pairs, parse_constant=_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+            raise _failed("readiness_invalid") from None
+        expected = {
+            "schema", "backend_id", "backend_version", "facility_id",
+            "facility_version", "challenge", "request_sha256", "ready",
+            "reason", "probe_generation", "routes_checked",
+            "failure_generation", "readiness_policy_sha256",
+            "facility_ledger_instance_id",
+            "driver_deployment_sha256", "deployment_manifest_sha256",
+            "route_requirements_sha256",
+        }
+        if (not isinstance(reply, dict) or set(reply) != expected
+                or reply.get("schema") != READINESS_RESPONSE_SCHEMA
+                or reply.get("backend_id") != self.backend_id
+                or reply.get("backend_version") != self.backend_version
+                or reply.get("facility_id") != self.facility_id
+                or reply.get("facility_version") != self.facility_version
+                or reply.get("challenge") != challenge
+                or reply.get("request_sha256") != request["request_sha256"]
+                or type(reply.get("ready")) is not bool
+                or reply.get("reason") not in {
+                    "ready", "preflight_failed", "preflight_stale",
+                    "monitor_stopped",
+                }
+                or reply["ready"] != (reply["reason"] == "ready")
+                or (result.status == 200) != reply["ready"]
+                or type(reply.get("probe_generation")) is not int
+                or reply["probe_generation"] < 1
+                or type(reply.get("failure_generation")) is not int
+                or reply["failure_generation"] < 0
+                or reply.get("routes_checked") != self.expected_routes_count
+                or reply.get("driver_deployment_sha256")
+                != self.expected_driver_deployment_sha256
+                or reply.get("deployment_manifest_sha256")
+                != self.expected_deployment_manifest_sha256
+                or reply.get("route_requirements_sha256")
+                != self.expected_route_requirements_sha256
+                or reply.get("readiness_policy_sha256")
+                != self.expected_readiness_policy_sha256
+                or reply.get("facility_ledger_instance_id")
+                != self.expected_facility_ledger_instance_id):
+            raise _failed("readiness_binding", retryable=True)
+        if not reply["ready"]:
+            raise _failed("readiness_blocked", retryable=True)
+        return _copy(reply)
 
     def execute_idempotent(self, assignment: Mapping[str, Any],
                            model_input: Mapping[str, Any], *,
@@ -671,7 +847,7 @@ def build_backend(settings: Mapping[str, Any]) -> HTTPSExecutionBackend:
         "schema", "backend_id", "backend_version", "facility_id",
         "facility_version", "endpoint", "authentication",
         "request_timeout_seconds", "max_input_bytes", "max_output_tokens",
-        "cost_unit", "max_cost_units", "allow_loopback_http",
+        "cost_unit", "max_cost_units", "readiness", "allow_loopback_http",
     }
     if not isinstance(settings, Mapping) or set(settings) != expected:
         raise ValueError("HTTP backend settings are invalid")
@@ -684,6 +860,14 @@ def build_backend(settings: Mapping[str, Any]) -> HTTPSExecutionBackend:
     token_file, token_sha256 = (
         authentication.get("token_file"), authentication.get("token_sha256"),
     )
+    readiness = copied["readiness"]
+    if (not isinstance(readiness, dict) or set(readiness) != {
+            "facility_ledger_instance_id",
+            "driver_deployment_sha256", "deployment_manifest_sha256",
+            "route_requirements_sha256", "readiness_policy_sha256",
+            "routes_count",
+    }):
+        raise ValueError("HTTP backend readiness settings are invalid")
 
     # Fail deployment readiness before a ledger or dispatch slot can be
     # created.  Requests deliberately re-read and revalidate the file below so
@@ -705,5 +889,21 @@ def build_backend(settings: Mapping[str, Any]) -> HTTPSExecutionBackend:
         max_output_tokens=copied["max_output_tokens"],
         cost_unit=copied["cost_unit"],
         max_cost_units=copied["max_cost_units"],
+        expected_driver_deployment_sha256=(
+            readiness["driver_deployment_sha256"]
+        ),
+        expected_deployment_manifest_sha256=(
+            readiness["deployment_manifest_sha256"]
+        ),
+        expected_route_requirements_sha256=(
+            readiness["route_requirements_sha256"]
+        ),
+        expected_readiness_policy_sha256=(
+            readiness["readiness_policy_sha256"]
+        ),
+        expected_facility_ledger_instance_id=(
+            readiness["facility_ledger_instance_id"]
+        ),
+        expected_routes_count=readiness["routes_count"],
         allow_loopback_http=copied["allow_loopback_http"],
     )
