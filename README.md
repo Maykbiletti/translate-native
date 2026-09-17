@@ -110,6 +110,31 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.194.0: active readiness for host subagents
+
+Every normal facility start and `--check` now executes a mandatory,
+content-free preflight through the same isolated worker and sealed operator
+command used by real reviews. The probe binds a fresh challenge, the complete
+configured route matrix, reviewer/model identities, the exact driver
+deployment and an operator-owned deployment-manifest digest. It requires
+explicit support for atomic start deduplication, read-only reconciliation, hard
+deadlines, empty inherited context and zero model starts.
+
+The preflight carries no source, candidate, creator context, model input,
+budget, credential, signing key or publication right. Timeout, nonzero exit,
+wrong route or identity, stale challenge, changed manifest, false capability,
+malformed response or unsupported command blocks before the review ledger is
+created or recovered. The manifest digest also changes the external provider
+idempotency namespace and is echoed on every later execute/reconcile exchange.
+This closes the earlier false-green state in which protected files could pass
+readiness even though the actual operator command was unusable.
+
+The probe proves only that the configured control-plane contract is reachable
+and internally bound. It does not start a reviewer, approve text, establish
+native fluency, prove model independence or demonstrate superiority over
+DeepL. Productive model credentials/configuration and qualified native-language
+evidence remain deployment responsibilities.
+
 ### Version 6.193.0: standard command driver for host subagents
 
 The facility now ships a provider-neutral command adapter in
@@ -3111,7 +3136,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.193.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.194.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

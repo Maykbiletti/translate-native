@@ -2,9 +2,10 @@
 """Pinned command adapter for a provider-neutral host-subagent facility.
 
 The adapter is a factory for ``website_localization_subagent_facility_runtime``.
-It gives an operator-owned executable one closed JSON request on stdin and
-accepts one closed JSON response on stdout.  It never invokes a shell, inherits
-no ambient environment, and can run only inside the runtime's isolated worker.
+It gives an operator-owned executable one closed preflight, execute or reconcile
+JSON request on stdin and accepts one closed JSON response on stdout. It never
+invokes a shell, inherits no ambient environment, and can run only inside the
+runtime's isolated worker.
 """
 
 from __future__ import annotations
@@ -37,10 +38,22 @@ else:  # pragma: no cover - sealed memfd execution is Linux-specific.
     F_SEAL_SEAL = F_SEAL_SHRINK = F_SEAL_GROW = F_SEAL_WRITE = None
 
 
-SETTINGS_SCHEMA = "translate-native.subagent-review-command-driver.v1"
-REQUEST_SCHEMA = "translate-native.subagent-review-command-request.v1"
-RESPONSE_SCHEMA = "translate-native.subagent-review-command-response.v1"
-PROTOCOL_VERSION = "1"
+SETTINGS_SCHEMA = "translate-native.subagent-review-command-driver.v2"
+REQUEST_SCHEMA = "translate-native.subagent-review-command-request.v2"
+RESPONSE_SCHEMA = "translate-native.subagent-review-command-response.v2"
+PREFLIGHT_REQUEST_SCHEMA = (
+    "translate-native.subagent-review-command-preflight-request.v1"
+)
+PREFLIGHT_RESPONSE_SCHEMA = (
+    "translate-native.subagent-review-command-preflight-response.v1"
+)
+PREFLIGHT_REQUIREMENTS_SCHEMA = (
+    "translate-native.subagent-review-facility-preflight.v1"
+)
+PREFLIGHT_RESULT_SCHEMA = (
+    "translate-native.subagent-review-facility-preflight-result.v1"
+)
+PROTOCOL_VERSION = "2"
 MAX_EXECUTABLE_BYTES = 64 * 1024 * 1024
 MAX_REQUEST_BYTES = 4_500_000
 MAX_RESPONSE_BYTES = 4_500_000
@@ -48,6 +61,13 @@ TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RESULT_STATUSES = {"completed", "not_started", "running", "unknown", "cancel_pending"}
 ISOLATION = {"inherit_context": False, "tools": [], "max_delegation_depth": 0}
+PREFLIGHT_CAPABILITIES = {
+    "atomic_idempotency": True,
+    "read_only_reconcile": True,
+    "hard_deadline": True,
+    "isolated_context": True,
+    "no_model_start": True,
+}
 
 
 class CommandSubagentDriverFailed(RuntimeError):
@@ -234,13 +254,14 @@ class CommandHostSubagentDriver:
     supports_reconcile = True
     supports_hard_deadline = True
     supports_isolated_context = True
+    supports_preflight = True
 
     def __init__(self, settings: Mapping[str, Any]):
         expected = {
             "schema", "driver_id", "driver_version", "command_id",
             "command_version", "executable",
             "executable_sha256", "arguments", "working_directory",
-            "max_response_bytes",
+            "max_response_bytes", "deployment_manifest_sha256",
         }
         if not isinstance(settings, Mapping) or set(settings) != expected \
                 or settings.get("schema") != SETTINGS_SCHEMA:
@@ -253,6 +274,11 @@ class CommandHostSubagentDriver:
         self.command_version = _identifier(
             settings.get("command_version"), "command_version",
         )
+        manifest = settings.get("deployment_manifest_sha256")
+        if (not isinstance(manifest, str) or SHA256.fullmatch(manifest) is None
+                or manifest == "0" * 64):
+            raise _failed("deployment_manifest_invalid")
+        self.deployment_manifest_sha256 = manifest
         arguments = settings.get("arguments")
         if (not isinstance(arguments, list) or len(arguments) > 64
                 or any(not isinstance(item, str) or len(item) > 4096 or "\x00" in item
@@ -378,25 +404,34 @@ class CommandHostSubagentDriver:
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             self._abort_worker_group()
+        preflight = request["operation"] == "preflight"
         expected = {
             "schema", "operation", "protocol_version", "driver_id",
             "driver_version", "command_id", "command_version",
-            "request_sha256", "provider_execution_key",
-            "provider_request_sha256", "ok", "retryable", "result",
+            "deployment_manifest_sha256", "request_sha256", "ok",
+            "retryable", "result",
         }
+        if not preflight:
+            expected |= {"provider_execution_key", "provider_request_sha256"}
         if (not isinstance(response, dict) or set(response) != expected
-                or response.get("schema") != RESPONSE_SCHEMA
+                or response.get("schema") != (
+                    PREFLIGHT_RESPONSE_SCHEMA if preflight else RESPONSE_SCHEMA
+                )
                 or response.get("operation") != request["operation"]
                 or response.get("protocol_version") != PROTOCOL_VERSION
                 or response.get("driver_id") != self.driver_id
                 or response.get("driver_version") != self.driver_version
                 or response.get("command_id") != self.command_id
                 or response.get("command_version") != self.command_version
+                or response.get("deployment_manifest_sha256")
+                != self.deployment_manifest_sha256
                 or response.get("request_sha256") != request["request_sha256"]
-                or response.get("provider_execution_key")
-                != request["provider_execution_key"]
-                or response.get("provider_request_sha256")
-                != request["provider_request_sha256"]):
+                or not preflight and (
+                    response.get("provider_execution_key")
+                    != request["provider_execution_key"]
+                    or response.get("provider_request_sha256")
+                    != request["provider_request_sha256"]
+                )):
             self._abort_worker_group()
         if type(response.get("ok")) is not bool \
                 or type(response.get("retryable")) is not bool:
@@ -411,6 +446,71 @@ class CommandHostSubagentDriver:
         if response["retryable"] or not isinstance(response.get("result"), dict):
             self._abort_worker_group()
         return response
+
+    def preflight(
+        self, requirements: Mapping[str, Any], *, deadline_seconds: int,
+    ) -> dict:
+        requirements = _copy(requirements)
+        expected = {
+            "schema", "challenge", "driver_deployment_sha256",
+            "deployment_manifest_sha256", "route_requirements",
+            "route_requirements_sha256", "required_capabilities",
+        }
+        routes = requirements.get("route_requirements")
+        if (set(requirements) != expected
+                or requirements.get("schema") != PREFLIGHT_REQUIREMENTS_SCHEMA
+                or not isinstance(requirements.get("challenge"), str)
+                or SHA256.fullmatch(requirements["challenge"]) is None
+                or not isinstance(
+                    requirements.get("driver_deployment_sha256"), str,
+                )
+                or SHA256.fullmatch(
+                    requirements["driver_deployment_sha256"]
+                ) is None
+                or requirements.get("deployment_manifest_sha256")
+                != self.deployment_manifest_sha256
+                or not isinstance(routes, list) or not routes
+                or requirements.get("route_requirements_sha256")
+                != _sha(routes)
+                or requirements.get("required_capabilities")
+                != PREFLIGHT_CAPABILITIES
+                or type(deadline_seconds) is not int
+                or not 1 <= deadline_seconds <= 300):
+            raise _failed("preflight_invalid")
+        command_request = {
+            "schema": PREFLIGHT_REQUEST_SCHEMA,
+            "operation": "preflight",
+            "protocol_version": PROTOCOL_VERSION,
+            "driver_id": self.driver_id,
+            "driver_version": self.driver_version,
+            "command_id": self.command_id,
+            "command_version": self.command_version,
+            "deployment_manifest_sha256": self.deployment_manifest_sha256,
+            "requirements": requirements,
+            "isolation": ISOLATION,
+            "deadline_seconds": deadline_seconds,
+        }
+        response = self._invoke(command_request, timeout=deadline_seconds)
+        result = response["result"]
+        expected_result = {
+            "schema", "status", "challenge", "requirements_sha256",
+            "driver_deployment_sha256", "deployment_manifest_sha256",
+            "route_requirements_sha256", "capabilities",
+        }
+        if (set(result) != expected_result
+                or result.get("schema") != PREFLIGHT_RESULT_SCHEMA
+                or result.get("status") != "ready"
+                or result.get("challenge") != requirements["challenge"]
+                or result.get("requirements_sha256") != _sha(requirements)
+                or result.get("driver_deployment_sha256")
+                != requirements["driver_deployment_sha256"]
+                or result.get("deployment_manifest_sha256")
+                != self.deployment_manifest_sha256
+                or result.get("route_requirements_sha256")
+                != requirements["route_requirements_sha256"]
+                or result.get("capabilities") != PREFLIGHT_CAPABILITIES):
+            self._abort_worker_group()
+        return _copy(result)
 
     def _operation(
         self, operation: str, assignment: Mapping[str, Any], *,
@@ -443,6 +543,7 @@ class CommandHostSubagentDriver:
             "driver_version": self.driver_version,
             "command_id": self.command_id,
             "command_version": self.command_version,
+            "deployment_manifest_sha256": self.deployment_manifest_sha256,
             "provider_execution_key": provider_execution_key,
             "provider_request_sha256": provider_request_sha256,
             "assignment": assignment,

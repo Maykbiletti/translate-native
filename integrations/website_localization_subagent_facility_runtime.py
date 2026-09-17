@@ -35,6 +35,18 @@ PROTECTED_PATH = ROOT / "integrations" / "response_subagent_https_runtime.py"
 CONFIG_SCHEMA = "translate-native.subagent-review-facility-runtime.v1"
 DRIVER_SCHEMA = "translate-native.subagent-review-driver-config.v1"
 DEPLOYMENT_SCHEMA = "translate-native.subagent-review-facility-deployment.v1"
+PREFLIGHT_SCHEMA = "translate-native.subagent-review-facility-preflight.v1"
+PREFLIGHT_RESULT_SCHEMA = (
+    "translate-native.subagent-review-facility-preflight-result.v1"
+)
+PREFLIGHT_CAPABILITIES = {
+    "atomic_idempotency": True,
+    "read_only_reconcile": True,
+    "hard_deadline": True,
+    "isolated_context": True,
+    "no_model_start": True,
+}
+PREFLIGHT_DEADLINE_SECONDS = 10
 MAX_CONFIG_BYTES = 512 * 1024
 MAX_FACTORY_BYTES = 2 * 1024 * 1024
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
@@ -260,8 +272,11 @@ def _create_driver(config: Mapping[str, Any], document: Mapping[str, Any]):
         and getattr(driver, "supports_reconcile", None) is True
         and getattr(driver, "supports_hard_deadline", None) is True
         and getattr(driver, "supports_isolated_context", None) is True
+        and getattr(driver, "supports_preflight", None) is True
+        and isinstance(getattr(driver, "deployment_manifest_sha256", None), str)
+        and SHA256.fullmatch(driver.deployment_manifest_sha256) is not None
         and all(callable(getattr(driver, name, None))
-                for name in ("execute_idempotent", "reconcile"))
+                for name in ("execute_idempotent", "reconcile", "preflight"))
     )
     if not valid:
         closer = getattr(driver, "close", None)
@@ -272,20 +287,26 @@ def _create_driver(config: Mapping[str, Any], document: Mapping[str, Any]):
 
 
 class _IsolatedDriver:
-    """One killable process per execute/reconcile; never implicitly retries."""
+    """One killable process per operation; never implicitly retries."""
 
     def __init__(self, config: Mapping[str, Any], config_sha256: str,
-                 lifetime_fd: int):
+                 deployment_manifest_sha256: str, lifetime_fd: int):
         self._config, self._pid = _copy(config), os.getpid()
         self._config_sha256 = config_sha256
         self._lifetime_fd = lifetime_fd
         self.driver_id = config["driver_id"]
         self.driver_version = config["driver_version"]
-        self.driver_deployment_sha256 = config_sha256
+        self.deployment_manifest_sha256 = deployment_manifest_sha256
+        self.driver_deployment_sha256 = hashlib.sha256(_canonical({
+            "schema": "translate-native.subagent-review-driver-deployment.v1",
+            "driver_config_sha256": config_sha256,
+            "deployment_manifest_sha256": deployment_manifest_sha256,
+        })).hexdigest()
         self.supports_atomic_idempotency = True
         self.supports_reconcile = True
         self.supports_hard_deadline = True
         self.supports_isolated_context = True
+        self.supports_preflight = True
 
     def _check(self):
         if os.getpid() != self._pid:
@@ -361,6 +382,13 @@ class _IsolatedDriver:
         }
         return self._call(payload, assignment["deadline_seconds"])
 
+    def preflight(self, requirements, *, deadline_seconds):
+        payload = {
+            "operation": "preflight", "requirements": _copy(requirements),
+            "controls": {"deadline_seconds": deadline_seconds},
+        }
+        return self._call(payload, deadline_seconds)
+
     def reconcile(self, assignment, **controls):
         payload = {
             "operation": "reconcile", "assignment": _copy(assignment),
@@ -375,12 +403,77 @@ class _IsolatedDriver:
 def _build_driver(config: Mapping[str, Any], document: Mapping[str, Any],
                   config_raw: bytes, lifetime_fd: int):
     driver = _create_driver(config, document)
+    deployment_manifest_sha256 = driver.deployment_manifest_sha256
     closer = getattr(driver, "close", None)
     if callable(closer):
         closer()
     return _IsolatedDriver(
-        config, hashlib.sha256(config_raw).hexdigest(), lifetime_fd,
+        config, hashlib.sha256(config_raw).hexdigest(),
+        deployment_manifest_sha256, lifetime_fd,
     )
+
+
+def _preflight_routes(driver: _IsolatedDriver, routes: list[Any]) -> dict:
+    route_requirements = [{
+        "route_id": route.route_id,
+        "phase": route.phase,
+        "reviewer_role": route.reviewer_role,
+        "reviewer_agent_id": route.reviewer_agent_id,
+        "model_id": route.model_id,
+        "model_version": route.model_version,
+        "host_policy_version": route.host_policy_version,
+        "target_locale": route.target_locale,
+        "content_type": route.content_type,
+        "task_policy_sha256": route.task_policy_sha256,
+    } for route in sorted(routes, key=lambda item: item.route_id)]
+    route_requirements_sha256 = hashlib.sha256(
+        _canonical(route_requirements)
+    ).hexdigest()
+    challenge = hashlib.sha256(os.urandom(32)).hexdigest()
+    requirements = {
+        "schema": PREFLIGHT_SCHEMA,
+        "challenge": challenge,
+        "driver_deployment_sha256": driver.driver_deployment_sha256,
+        "deployment_manifest_sha256": driver.deployment_manifest_sha256,
+        "route_requirements": route_requirements,
+        "route_requirements_sha256": route_requirements_sha256,
+        "required_capabilities": _copy(PREFLIGHT_CAPABILITIES),
+    }
+    requirements_sha256 = hashlib.sha256(_canonical(requirements)).hexdigest()
+    try:
+        result = _copy(driver.preflight(
+            requirements, deadline_seconds=PREFLIGHT_DEADLINE_SECONDS,
+        ))
+    except Exception as error:
+        raise SubagentFacilityRuntimeError(
+            "host-subagent driver preflight failed"
+        ) from error
+    expected = {
+        "schema", "status", "challenge", "requirements_sha256",
+        "driver_deployment_sha256", "deployment_manifest_sha256",
+        "route_requirements_sha256", "capabilities",
+    }
+    if (not isinstance(result, dict) or set(result) != expected
+            or result.get("schema") != PREFLIGHT_RESULT_SCHEMA
+            or result.get("status") != "ready"
+            or result.get("challenge") != challenge
+            or result.get("requirements_sha256") != requirements_sha256
+            or result.get("driver_deployment_sha256")
+            != driver.driver_deployment_sha256
+            or result.get("deployment_manifest_sha256")
+            != driver.deployment_manifest_sha256
+            or result.get("route_requirements_sha256")
+            != route_requirements_sha256
+            or result.get("capabilities") != PREFLIGHT_CAPABILITIES):
+        raise SubagentFacilityRuntimeError(
+            "host-subagent driver preflight is invalid"
+        )
+    return {
+        "schema": PREFLIGHT_RESULT_SCHEMA,
+        "requirements_sha256": requirements_sha256,
+        "route_requirements_sha256": route_requirements_sha256,
+        "routes_checked": len(route_requirements),
+    }
 
 
 def _ledger_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -566,6 +659,7 @@ class SubagentFacilityRuntime:
     ledger_path: Path
     ledger_identity: tuple[int, int, int, int, int, int]
     runtime_lock: _RuntimeLock
+    preflight: dict
 
     def __post_init__(self):
         self._pid, self._closed, self._closing, self._active = (
@@ -629,6 +723,7 @@ def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = Fals
         )
     config, _config_raw = load_facility_runtime_config(path)
     driver_document, driver_raw = _driver_configuration(config["driver"])
+    routes = [_route(item) for item in config["routes"]]
     ledger_path = Path(config["ledger"]["path"])
     runtime_lock = _RuntimeLock(ledger_path)
     driver = None
@@ -637,6 +732,7 @@ def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = Fals
             config["driver"], driver_document, driver_raw,
             runtime_lock.fileno(),
         )
+        preflight = _preflight_routes(driver, routes)
         bearer = _protected_text(
             config["authentication"]["token_file"], PROTECTED.BEARER,
             "facility authentication token",
@@ -648,7 +744,6 @@ def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = Fals
         )
         if _prepare_ledger(ledger_path, initialize=False) != initial_identity:
             raise SubagentFacilityRuntimeError("facility ledger changed during startup")
-        routes = [_route(item) for item in config["routes"]]
         boot_id = hashlib.sha256(os.urandom(32)).hexdigest()
         ledger = FACILITY.SQLiteFacilityLedger(
             ledger_path,
@@ -670,7 +765,7 @@ def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = Fals
             allow_loopback_http=config["allow_loopback_http"],
         )
         return SubagentFacilityRuntime(
-            application, driver, ledger_path, identity, runtime_lock,
+            application, driver, ledger_path, identity, runtime_lock, preflight,
         )
     except Exception:
         if driver is not None:
@@ -751,6 +846,11 @@ def _driver_worker(arguments: list[str]) -> int:
         elif operation == "reconcile" and set(payload) == {
                 "operation", "assignment", "controls"}:
             result = driver.reconcile(payload["assignment"], **payload["controls"])
+        elif operation == "preflight" and set(payload) == {
+                "operation", "requirements", "controls"}:
+            result = driver.preflight(
+                payload["requirements"], **payload["controls"],
+            )
         else:
             raise SubagentFacilityRuntimeError("driver worker request is invalid")
         output = _canonical({
@@ -801,7 +901,12 @@ def main() -> int:
             args.config, initialize_ledger=args.initialize_ledger,
         )
         if args.check:
-            print('{"ready":true,"content_free":true}')
+            print(json.dumps({
+                "ready": True,
+                "content_free": True,
+                "driver_preflight": "passed",
+                "routes_checked": runtime.preflight["routes_checked"],
+            }, sort_keys=True, separators=(",", ":")))
             runtime.close()
             return 0
         server = make_server(

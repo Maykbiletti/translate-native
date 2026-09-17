@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import test_website_localization_subagent_backend_http as BACKEND_TEST
 import test_website_localization_subagent_executor as EXEC_TEST
@@ -44,6 +48,8 @@ class FacilityRuntimeTests(unittest.TestCase):
             "    supports_reconcile = True\n"
             "    supports_hard_deadline = True\n"
             "    supports_isolated_context = True\n"
+            "    supports_preflight = True\n"
+            "    deployment_manifest_sha256 = '9' * 64\n"
             "    def __init__(self, state_file):\n"
             "        self.state_file = Path(state_file)\n"
             "    def execute_idempotent(self, assignment, model_input, **kwargs):\n"
@@ -61,6 +67,8 @@ class FacilityRuntimeTests(unittest.TestCase):
             "            state['results'][key] = {'status': 'completed', 'provider_execution_key': key, 'provider_request_sha256': kwargs['provider_request_sha256'], 'actual_execution': actual, 'usage': usage}\n"
             "            self.state_file.write_text(json.dumps(state))\n"
             "        return state['results'][key]\n"
+            "    def preflight(self, requirements, **kwargs):\n"
+            "        return {'schema': 'translate-native.subagent-review-facility-preflight-result.v1', 'status': 'ready', 'challenge': requirements['challenge'], 'requirements_sha256': hashlib.sha256(raw(requirements)).hexdigest(), 'driver_deployment_sha256': requirements['driver_deployment_sha256'], 'deployment_manifest_sha256': self.deployment_manifest_sha256, 'route_requirements_sha256': requirements['route_requirements_sha256'], 'capabilities': requirements['required_capabilities']}\n"
             "    def reconcile(self, assignment, **kwargs):\n"
             "        state = json.loads(self.state_file.read_text()) if self.state_file.exists() else {'starts': 0, 'results': {}}\n"
             "        result = state['results'].get(kwargs['provider_execution_key'])\n"
@@ -291,8 +299,11 @@ class FacilityRuntimeTests(unittest.TestCase):
             "    supports_reconcile = True\n"
             "    supports_hard_deadline = False\n"
             "    supports_isolated_context = True\n"
+            "    supports_preflight = True\n"
+            "    deployment_manifest_sha256 = '9' * 64\n"
             "    def execute_idempotent(self, *args, **kwargs): return {}\n"
             "    def reconcile(self, *args, **kwargs): return {}\n"
+            "    def preflight(self, *args, **kwargs): return {}\n"
             "def build(settings):\n"
             "    return Driver()\n",
             encoding="utf-8",
@@ -328,6 +339,26 @@ class FacilityRuntimeTests(unittest.TestCase):
         self.assertTrue(statuses[0].startswith("503"))
         self.assertIn(b"runtime_unavailable", response)
 
+    def test_check_cli_reports_only_after_active_preflight(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", [
+                "website_localization_subagent_facility_runtime.py",
+                "--config", str(config), "--initialize-ledger", "--check",
+        ]), contextlib.redirect_stdout(output):
+            self.assertEqual(RUNTIME.main(), 0)
+        status = json.loads(output.getvalue())
+        self.assertEqual(status, {
+            "content_free": True,
+            "driver_preflight": "passed",
+            "ready": True,
+            "routes_checked": 1,
+        })
+        self.assertTrue(self.ledger.exists())
+        self.assertFalse(self.driver_state.exists())
+
     def test_second_runtime_cannot_fence_a_live_dispatch_owner(self):
         task, _control = HOST_TEST.response_request("fi-FI")
         route = HOST_TEST.response_route(task)
@@ -355,6 +386,12 @@ class FacilityRuntimeTests(unittest.TestCase):
             "    supports_reconcile = True\n"
             "    supports_hard_deadline = True\n"
             "    supports_isolated_context = True\n"
+            "    supports_preflight = True\n"
+            "    deployment_manifest_sha256 = '9' * 64\n"
+            "    def preflight(self, requirements, **kwargs):\n"
+            "        import hashlib, json\n"
+            "        raw = json.dumps(requirements, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':')).encode('utf-8')\n"
+            "        return {'schema': 'translate-native.subagent-review-facility-preflight-result.v1', 'status': 'ready', 'challenge': requirements['challenge'], 'requirements_sha256': hashlib.sha256(raw).hexdigest(), 'driver_deployment_sha256': requirements['driver_deployment_sha256'], 'deployment_manifest_sha256': self.deployment_manifest_sha256, 'route_requirements_sha256': requirements['route_requirements_sha256'], 'capabilities': requirements['required_capabilities']}\n"
             "    def execute_idempotent(self, *args, **kwargs):\n"
             "        time.sleep(3)\n"
             "        return {}\n"
@@ -475,8 +512,14 @@ class FacilityRuntimeTests(unittest.TestCase):
             "    supports_reconcile = True\n"
             "    supports_hard_deadline = True\n"
             "    supports_isolated_context = True\n"
+            "    supports_preflight = True\n"
+            "    deployment_manifest_sha256 = '9' * 64\n"
             "    def execute_idempotent(self, *args, **kwargs): raise Rejected()\n"
             "    def reconcile(self, *args, **kwargs): raise Rejected()\n"
+            "    def preflight(self, requirements, **kwargs):\n"
+            "        import hashlib, json\n"
+            "        raw = json.dumps(requirements, sort_keys=True, separators=(',', ':')).encode()\n"
+            "        return {'schema': 'translate-native.subagent-review-facility-preflight-result.v1', 'status': 'ready', 'challenge': requirements['challenge'], 'requirements_sha256': hashlib.sha256(raw).hexdigest(), 'driver_deployment_sha256': requirements['driver_deployment_sha256'], 'deployment_manifest_sha256': self.deployment_manifest_sha256, 'route_requirements_sha256': requirements['route_requirements_sha256'], 'capabilities': requirements['required_capabilities']}\n"
             "def build(settings): return Driver()\n",
             encoding="utf-8",
         )

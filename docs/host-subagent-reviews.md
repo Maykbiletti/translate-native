@@ -470,7 +470,10 @@ python integrations/website_localization_subagent_facility_runtime.py \
 ```
 
 Normal starts omit `--initialize-ledger`. Missing, replaced, permission-weakened
-or deployment-drifted state blocks before readiness. The bundled server listens
+or deployment-drifted state blocks before readiness. Both a normal start and
+`--check` also require the command preflight below; a broken executable,
+protocol, route, model mapping or operator deployment is reported as `BLOCK`
+before the review ledger is created or recovered. The bundled server listens
 only on loopback behind a trusted HTTPS terminator. The driver settings may hold
 references to operator-managed provider credentials, but those credentials must
 never enter task input or review evidence. A driver without genuine host
@@ -489,9 +492,33 @@ response-size ceiling. On Linux it copies the verified bytes into a sealed
 in-memory file and invokes that immutable snapshot with no shell, ambient
 environment or inherited working directory. A platform without the required
 sealed-memory and descriptor-execution primitives blocks at startup.
+Replace every zero digest in the example before use; the standard driver rejects
+the all-zero deployment-manifest placeholder.
 
-For `execute`, stdin is one canonical UTF-8 JSON object using
-`translate-native.subagent-review-command-request.v1`. Its closed fields are
+Version 6.194 adds a mandatory command preflight to every normal runtime start
+and `--check`. Before the facility creates, binds or recovers its review ledger,
+the runtime invokes the actual configured command through the same isolated
+worker, sealed executable snapshot, minimal environment and hard deadline used
+for reviews. The preflight request contains a fresh random challenge, the exact
+route matrix and reviewer/model identities, the combined driver-deployment
+digest, an operator-owned deployment-manifest digest and required capability
+flags. It contains no candidate, source, model input, creator context, budget,
+credential, Guard key or publication capability.
+
+The operator command must check its own provider routing, interpreter,
+credentials and external dependencies against that manifest, without starting
+a model. It returns only a closed readiness result bound to the challenge,
+route digest, deployment digests and explicit capabilities for atomic
+idempotency, read-only reconciliation, hard deadlines, isolated context and no
+model start. Failure, timeout, nonzero exit, malformed output, an unavailable
+route/model, false capability or changed binding blocks startup. A failed probe
+does not create a review row, signed receipt or release evidence. The deployment
+manifest digest also participates in the provider idempotency namespace and is
+echoed on every later command exchange. Rotating external configuration
+therefore requires a deliberate manifest/config generation change.
+
+For `execute` and `reconcile`, stdin is one canonical UTF-8 JSON object using
+`translate-native.subagent-review-command-request.v2`. Its closed fields are
 the operation and protocol version; driver and command identities; provider
 execution key and request digest; trusted assignment; reduced phase-specific
 model input; budgets; exact empty-context isolation controls; a lifetime
@@ -501,7 +528,7 @@ the same binding omits model input and budgets; the executable must perform a
 read-only status lookup and may not continue or start model work.
 
 Stdout must contain exactly one
-`translate-native.subagent-review-command-response.v1` object. It echoes every
+`translate-native.subagent-review-command-response.v2` object. It echoes every
 identity, operation, provider binding and request digest, adds exact Boolean
 `ok` and `retryable` fields, and contains either the existing five-field driver
 result or `null` for a rejected operation. The adapter never creates reviewer
@@ -509,21 +536,23 @@ identity, usage or PASS evidence. The facility independently checks phase,
 role, reviewer, session, model, isolation flags, cost, input bytes and output
 tokens before it can store a completed result.
 
-The facility binds the SHA-256 of the exact protected driver configuration into
-the external provider execution key. Changing the command identity, version,
-executable digest, arguments, working directory or response limit therefore
-creates a different provider idempotency namespace even when the generic
-adapter ID and version stay unchanged. A changed deployment cannot reconcile
-or replay an older command generation.
+The facility binds both the SHA-256 of the exact protected driver configuration
+and the operator deployment-manifest digest into the external provider execution
+key. Changing the command identity, version, executable digest, arguments,
+working directory, response limit or manifest therefore creates a different
+provider idempotency namespace even when the generic adapter ID and version
+stay unchanged. A changed deployment cannot reconcile or replay an older
+command generation.
 
-The operator executable is the trust boundary for atomic provider-key
+The operator executable is the trust boundary for truthful preflight,
+deployment-manifest validation, atomic provider-key
 deduplication before physical start, durable result storage, read-only
 reconciliation, deadline enforcement and truthful host metadata. It must watch
 the supplied lifetime descriptor, must not daemonize or escape the worker
 process group, and must block when the configured host cannot provide a genuine
-isolated subagent. Its executable hash does not pin a shebang interpreter,
-dynamic libraries, remote service or external configuration; deploy a reviewed
-self-contained artifact or bind those dependencies independently. The adapter
+isolated subagent. Its executable hash alone does not pin a shebang interpreter,
+dynamic libraries, remote service or external configuration; the operator
+manifest and preflight must bind and verify those dependencies. The adapter
 provides prompt/context and transport isolation, not an OS sandbox or native
 fluency proof. Run the command under a service identity that has provider access
 but no Guard signer or publication rights.

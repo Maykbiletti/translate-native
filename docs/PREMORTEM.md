@@ -1,5 +1,39 @@
 # Version 6 premortem
 
+## Active host-command readiness preflight (17 September 2026)
+
+Assume the protected files and facility ledger are valid, but the configured
+operator command cannot provide an isolated reviewer when the first real text
+arrives.
+
+- A missing shebang interpreter, broken argument, incompatible protocol or
+  unavailable host could pass a file-only readiness check.
+- External routing, credential or model configuration could change without
+  changing the provider idempotency generation.
+- A readiness probe could accidentally start paid model work, expose candidate
+  or source text, or create evidence that looks like a review.
+- A replayed response from an earlier deployment could falsely satisfy a later
+  startup.
+- Failed readiness could create or recover a review ledger before the runtime
+  reports its blocked state.
+
+Every normal start and `--check` will therefore run one mandatory,
+non-generative preflight through the same digest-pinned isolated worker and
+sealed command used by real executions. The closed request contains only a
+fresh random challenge, route and model identities, required capability flags,
+deployment digests and a hard deadline. It contains no candidate, source,
+creator context, model prompt, budget, credential, signer or publication
+authority. The command must bind its operator deployment manifest, echo the
+fresh challenge and attest atomic idempotency, read-only reconciliation, hard
+deadlines, isolated context and zero model starts. Any timeout, rejection,
+missing route, wrong digest, false capability or malformed response blocks
+before ledger creation or recovery. The manifest digest also participates in
+the provider namespace and every later command exchange.
+
+Synthetic Finnish and Maltese fixtures prove operational wiring and fail-closed
+behavior only. A command's preflight statement is not a language review,
+native-speaker evidence, provider-independence proof or DeepL benchmark result.
+
 ## Standard host-command driver (17 September 2026)
 
 Assume the durable facility is correct, but the final operator command is

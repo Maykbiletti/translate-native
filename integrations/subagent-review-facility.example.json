@@ -18,7 +18,7 @@
     "factory_callable": "build_driver",
     "factory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "driver_id": "standard-command-driver",
-    "driver_version": "command-v1",
+    "driver_version": "command-v2",
     "config_file": "/absolute/protected/path/subagent-command-driver.json"
   },
   "routes": [

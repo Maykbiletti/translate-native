@@ -120,6 +120,12 @@ class HostSubagentDriver(Protocol):
     supports_reconcile: bool
     supports_hard_deadline: bool
     supports_isolated_context: bool
+    supports_preflight: bool
+    deployment_manifest_sha256: str
+
+    def preflight(
+        self, requirements: Mapping[str, Any], *, deadline_seconds: int,
+    ) -> Mapping[str, Any]: ...
 
     def execute_idempotent(
         self, assignment: Mapping[str, Any], model_input: Mapping[str, Any], *,
@@ -468,8 +474,15 @@ class SubagentFacilityApplication:
                 or getattr(driver, "supports_reconcile", None) is not True
                 or getattr(driver, "supports_hard_deadline", None) is not True
                 or getattr(driver, "supports_isolated_context", None) is not True
+                or getattr(driver, "supports_preflight", None) is not True
+                or not isinstance(
+                    getattr(driver, "deployment_manifest_sha256", None), str,
+                )
+                or SHA256.fullmatch(driver.deployment_manifest_sha256) is None
                 or any(not callable(getattr(driver, name, None))
-                       for name in ("execute_idempotent", "reconcile"))):
+                       for name in (
+                           "execute_idempotent", "reconcile", "preflight",
+                       ))):
             raise TypeError("facility driver lacks mandatory capabilities")
         if type(allow_loopback_http) is not bool:
             raise TypeError("allow_loopback_http must be boolean")

@@ -30,6 +30,8 @@ class FixtureDriver:
     supports_reconcile = True
     supports_hard_deadline = True
     supports_isolated_context = True
+    supports_preflight = True
+    deployment_manifest_sha256 = "9" * 64
 
     def __init__(self):
         self.starts, self.reconciles, self.completed = [], [], {}
@@ -106,6 +108,20 @@ class FixtureDriver:
                 "actual_execution": None, "usage": None,
             }
         return FACILITY._copy(result)
+
+    def preflight(self, requirements, **_kwargs):
+        return {
+            "schema": "translate-native.subagent-review-facility-preflight-result.v1",
+            "status": "ready",
+            "challenge": requirements["challenge"],
+            "requirements_sha256": FACILITY._sha(requirements),
+            "driver_deployment_sha256": requirements["driver_deployment_sha256"],
+            "deployment_manifest_sha256": self.deployment_manifest_sha256,
+            "route_requirements_sha256": requirements[
+                "route_requirements_sha256"
+            ],
+            "capabilities": requirements["required_capabilities"],
+        }
 
 
 class WSGIFacilityTransport:
