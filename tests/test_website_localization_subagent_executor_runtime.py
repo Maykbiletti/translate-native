@@ -1,0 +1,227 @@
+"""Synthetic protected-executor runtime tests; not native-quality evidence."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+import test_website_localization_subagent_executor as ENDPOINT
+import test_website_localization_subagent_host as HOST_TEST
+import test_website_localization_subagents as BASE
+
+
+RUNTIME = BASE.load(
+    "test_website_localization_subagent_executor_runtime_impl",
+    BASE.ROOT / "integrations" / "website_localization_subagent_executor_runtime.py",
+)
+ACTIVE_BACKEND = None
+FACTORY_SETTINGS = []
+
+
+def backend_factory(settings):
+    FACTORY_SETTINGS.append(settings)
+    return ACTIVE_BACKEND
+
+
+class ExecutorRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        global ACTIVE_BACKEND
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        if os.name != "nt":
+            self.root.chmod(0o700)
+        self.module_path = self.root / "synthetic_subagent_backend.py"
+        self.module_path.write_text(
+            "import importlib\n"
+            f"def build(settings):\n    return importlib.import_module({__name__!r}).backend_factory(settings)\n",
+            encoding="utf-8",
+        )
+        if os.name != "nt":
+            self.module_path.chmod(0o600)
+        self.factory_sha256 = hashlib.sha256(self.module_path.read_bytes()).hexdigest()
+        self.token_file = self.write("executor.token", ENDPOINT.EXECUTOR_TOKEN)
+        self.backend_file = self.write_json("backend.json", {
+            "schema": RUNTIME.BACKEND_SCHEMA,
+            "backend_id": "fixture-host-subagents",
+            "backend_version": "fixture-1",
+            "settings": {"host_facility": "synthetic-test-fixture"},
+        })
+        self.ledger = self.root / "executor.sqlite3"
+        ACTIVE_BACKEND = ENDPOINT.FixtureBackend()
+        FACTORY_SETTINGS.clear()
+
+    def write(self, name, content):
+        path = self.root / name
+        path.write_text(content, encoding="ascii")
+        if os.name != "nt":
+            path.chmod(0o600)
+        return path
+
+    def write_json(self, name, value):
+        path = self.root / name
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        if os.name != "nt":
+            path.chmod(0o600)
+        return path
+
+    @staticmethod
+    def route_dict(route):
+        return {
+            "route_id": route.route_id, "phase": route.phase,
+            "reviewer_role": route.reviewer_role,
+            "reviewer_agent_id": route.reviewer_agent_id,
+            "model_id": route.model_id, "model_version": route.model_version,
+            "host_policy_version": route.host_policy_version,
+            "target_locale": route.target_locale,
+            "content_type": route.content_type,
+            "task_policy_sha256": route.task_policy_sha256,
+        }
+
+    def configuration(self, routes, **changes):
+        value = {
+            "schema": RUNTIME.CONFIG_SCHEMA,
+            "executor_id": "executor-1",
+            "launcher_id": "deployment-review-launcher",
+            "launcher_version": "launcher-1",
+            "allow_loopback_http": True,
+            "authentication": {
+                "scheme": "bearer", "token_file": str(self.token_file),
+            },
+            "ledger": {
+                "path": str(self.ledger), "max_concurrent_executions": 4,
+            },
+            "backend": {
+                "factory_file": str(self.module_path),
+                "factory_callable": "build",
+                "factory_sha256": self.factory_sha256,
+                "backend_id": "fixture-host-subagents",
+                "backend_version": "fixture-1",
+                "config_file": str(self.backend_file),
+            },
+            "routes": [self.route_dict(route) for route in routes],
+        }
+        value.update(changes)
+        return self.write_json("executor.json", value)
+
+    @staticmethod
+    def launcher(runtime):
+        return ENDPOINT.LAUNCHER.HTTPSSubagentLauncher(
+            "http://127.0.0.1/v1/subagent-executions",
+            lambda: {"Authorization": "Bearer " + ENDPOINT.EXECUTOR_TOKEN},
+            launcher_id="deployment-review-launcher", launcher_version="launcher-1",
+            executor_id="executor-1",
+            transport=ENDPOINT.WSGIExecutorTransport(runtime.application),
+            allow_loopback_http=True,
+        )
+
+    def test_finnish_roundtrip_and_restart_replay(self):
+        global ACTIVE_BACKEND
+        task, control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        assignment = HOST_TEST.HOST.ReviewHostApplication._assignment(route, control)
+        model_input = HOST_TEST.HOST.ReviewHostApplication._model_task(task)
+        first_backend = ACTIVE_BACKEND
+        try:
+            first = self.launcher(runtime).execute_idempotent(
+                assignment, model_input,
+                deadline_seconds=assignment.deadline_seconds,
+                max_output_tokens=assignment.max_output_tokens,
+            )
+        finally:
+            runtime.close()
+        self.assertEqual(first["response"]["locale"], "fi-FI")
+        self.assertEqual(len(first_backend.starts), 1)
+        self.assertEqual(FACTORY_SETTINGS, [
+            {"host_facility": "synthetic-test-fixture"},
+        ])
+
+        ACTIVE_BACKEND = ENDPOINT.FixtureBackend()
+        runtime = RUNTIME.open_subagent_executor_runtime(config)
+        try:
+            replay = self.launcher(runtime).execute_idempotent(
+                assignment, model_input,
+                deadline_seconds=assignment.deadline_seconds,
+                max_output_tokens=assignment.max_output_tokens,
+            )
+        finally:
+            runtime.close()
+        self.assertEqual(replay, first)
+        self.assertEqual(ACTIVE_BACKEND.starts, [])
+
+    def test_maltese_runtime_keeps_native_and_fidelity_separate(self):
+        routes, _captures = HOST_TEST.website_routes(["mt-MT"])
+        config = self.configuration(routes)
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        fixture = ENDPOINT.ExecutorTests()
+        fixture.temporary = self.temporary
+        try:
+            host = fixture.review_host(routes, self.launcher(runtime))
+            result = BASE.HostSubagentTests().execute(
+                BASE.adapter(fixture.review_client(host)), "mt-MT",
+            )
+        finally:
+            runtime.close()
+        self.assertTrue(result["release_required"])
+        self.assertEqual([item[0]["phase"] for item in ACTIVE_BACKEND.starts],
+                         ["target_native", "source_fidelity"])
+        self.assertNotIn("source", ACTIVE_BACKEND.starts[0][1]["input"])
+
+    def test_deployment_drift_and_unsafe_files_block_before_backend(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+        value = json.loads(config.read_text(encoding="utf-8"))
+        value["routes"][0]["reviewer_agent_id"] = "different-native-reviewer"
+        self.write_json("executor.json", value)
+        with self.assertRaisesRegex(
+                RUNTIME.SubagentExecutorRuntimeError, "deployment binding changed"):
+            RUNTIME.open_subagent_executor_runtime(config)
+
+        if os.name != "nt":
+            self.backend_file.chmod(0o644)
+            self.ledger.unlink()
+            with self.assertRaisesRegex(
+                    RUNTIME.SubagentExecutorRuntimeError, "backend configuration"):
+                RUNTIME.open_subagent_executor_runtime(
+                    config, initialize_ledger=True,
+                )
+
+    def test_closed_runtime_and_missing_ledger_fail_closed(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        with self.assertRaisesRegex(
+                RUNTIME.SubagentExecutorRuntimeError, "ledger is missing"):
+            RUNTIME.open_subagent_executor_runtime(config)
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+        statuses = []
+        body = b"{}"
+        response = b"".join(runtime.application({
+            "PATH_INFO": ENDPOINT.EXECUTOR.PATH, "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "http", "SERVER_NAME": "127.0.0.1",
+            "CONTENT_LENGTH": str(len(body)), "wsgi.input": None,
+        }, lambda status, _headers: statuses.append(status)))
+        self.assertTrue(statuses[0].startswith("503"))
+        self.assertIn(b"runtime_unavailable", response)
+
+
+if __name__ == "__main__":
+    unittest.main()

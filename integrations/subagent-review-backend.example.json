@@ -1,0 +1,8 @@
+{
+  "schema": "translate-native.subagent-review-backend-config.v1",
+  "backend_id": "production-host-subagents",
+  "backend_version": "immutable-backend-revision",
+  "settings": {
+    "deployment": "operator-defined-host-subagent-facility"
+  }
+}

@@ -298,6 +298,80 @@ Maltese runtime tests prove the configuration, source isolation, restart replay
 and fail-closed bindings only; they are not native-language evidence and make no
 DeepL superiority claim.
 
+## Durable executor and backend contract
+
+`integrations/website_localization_subagent_executor.py` terminates the
+launcher's `/v1/subagent-executions` contract. It authenticates before reading
+the body, validates the canonical request and all duplicate header bindings,
+accepts only one pinned launcher/executor identity, and resolves the host's
+assignment through a locally pinned route. Each route repeats the exact
+reviewer, model, locale, content-type and host-policy assignment and the
+candidate-neutral task-policy SHA-256 used by the review host. Changing the
+system instruction, target profile, audience, tone or other permitted native
+brief data therefore blocks even when the attacker keeps every field name
+valid. The candidate itself remains dynamic and is bound by the execution key.
+
+The executor maintains its own owner-controlled SQLite journal. Under one
+`BEGIN IMMEDIATE` transaction it checks the authenticated principal, full
+execute request, assignment and global capacity before committing `dispatching`.
+That state has no timeout-based takeover: while its owner could still cross the
+physical-start boundary, read-only reconciliation may recover a validated
+backend completion but preserves the dispatch barrier through errors and every
+non-completed observation, including `not_started`. `running`, `unknown` and
+`cancel_pending` also keep their reservation. Outside that unresolved dispatch
+window, only an exact completed result or a backend-confirmed `not_started`
+state releases it. This deliberately favors fail-closed capacity loss over
+duplicate paid review work.
+
+The deployment backend implements:
+
+```python
+execute_idempotent(
+    assignment, model_input,
+    execute_request_sha256=execute_request_sha256,
+    budgets=budgets,
+)
+reconcile(
+    assignment,
+    execute_request_sha256=execute_request_sha256,
+)
+```
+
+It must atomically deduplicate physical work by the host-owned execution key,
+start each reviewer with empty inherited history, no tools and zero delegation
+depth, and return one of `completed`, `not_started`, `running`, `unknown` or
+`cancel_pending`. Only `completed` carries execution and usage. The executor,
+not model output, verifies reviewer identity, session, phase, role, model,
+isolation flags, original execute digest, exact input bytes, cost unit, bounded
+cost and bounded output tokens before committing evidence. The current closed
+status set has no terminal failed/aborted state; such outcomes must remain
+`unknown` and quarantined rather than being relabeled `not_started`. Adding
+automatic terminal-failure capacity release requires a versioned change across
+executor, launcher and review host.
+
+`integrations/website_localization_subagent_executor_runtime.py` composes this
+endpoint from protected configuration. Copy
+`integrations/subagent-review-executor.example.json` and
+`integrations/subagent-review-backend.example.json` into an owner-only absolute
+directory, supply an owner-only bearer token and a digest-pinned backend factory,
+then initialize the journal explicitly:
+
+```console
+python integrations/website_localization_subagent_executor_runtime.py \
+  --config /absolute/protected/path/subagent-executor.json \
+  --initialize-ledger --check
+```
+
+Normal starts omit `--initialize-ledger`; missing, foreign, permission-weakened,
+replaced or deployment-drifted state blocks. The backend factory receives only
+its copied settings. It never receives the executor credential, route table,
+journal, review-host attestation key, Guard signer or publication capability.
+The bundled server listens only on loopback behind a trusted HTTPS terminator.
+A concrete backend may connect to a host's supported subagent facility, but it
+must independently prove isolation, billing mapping, cancellation semantics and
+provider credentials. Synthetic Finnish and Maltese fixtures are explicitly
+protocol tests, not native-language or DeepL-quality evidence.
+
 ## Authenticated HTTPS host bridge
 
 `integrations/website_localization_subagent_http.py` implements the `ReviewHost`

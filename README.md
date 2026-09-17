@@ -110,6 +110,37 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.190.0: durable executor for isolated host subagents
+
+The provider-neutral launcher now has a protected server half in
+`integrations/website_localization_subagent_executor.py` and
+`integrations/website_localization_subagent_executor_runtime.py`. The executor
+authenticates before reading JSON, accepts only the exact launcher identity and
+route assignment, independently pins the candidate-neutral review policy, and
+passes only the reduced phase-specific task to an operator-supplied subagent
+backend. Native review remains source-blind; fidelity review receives source
+content only through its separately pinned route.
+
+An owner-controlled SQLite journal commits dispatch intent before external
+work, rejects changed requests under one execution key, and enforces the global
+non-queuing concurrency ceiling atomically across processes and restarts.
+Completed execution and usage evidence are stored before the HTTP response.
+Lost replies reconcile against the original execute digest without another
+physical start. Read-only reconciliation can recover a backend-confirmed
+completion after a crash, but a paused dispatch owner cannot be reclassified as
+`not_started`; errors and every non-completed observation preserve its barrier.
+Ambiguous or terminally failed work stays quarantined and keeps its capacity
+reservation.
+
+Protected configuration binds the bearer credential, executor and launcher
+identities, route policy, concurrency limit, backend factory bytes, backend
+settings and ledger identity. The backend receives no HTTP credential, route
+table, journal, Guard signer or publication capability. Synthetic Finnish and
+Maltese end-to-end fixtures prove protocol isolation, recovery and exact
+identity/usage binding only. Operators must still implement and audit a real
+host-subagent backend and obtain qualified native-language evidence; this
+version makes no DeepL-superiority claim.
+
 ### Version 6.189.0: provider-neutral HTTPS launcher for isolated reviewers
 
 The protected review host now includes a deployable HTTPS launcher in
@@ -2985,7 +3016,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.189.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.190.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status
