@@ -281,6 +281,7 @@ class _IsolatedDriver:
         self._lifetime_fd = lifetime_fd
         self.driver_id = config["driver_id"]
         self.driver_version = config["driver_version"]
+        self.driver_deployment_sha256 = config_sha256
         self.supports_atomic_idempotency = True
         self.supports_reconcile = True
         self.supports_hard_deadline = True
@@ -314,7 +315,10 @@ class _IsolatedDriver:
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, close_fds=True,
             start_new_session=True, pass_fds=(self._lifetime_fd,),
-            env={"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+            env={
+                "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
+                "BLUN_SUBAGENT_DRIVER_WORKER": "1",
+            },
         )
         try:
             output, _unused = process.communicate(encoded, timeout=timeout)

@@ -459,8 +459,9 @@ hardened implementation requires POSIX descriptor and process-group semantics;
 it blocks startup on unsupported operating systems.
 
 Copy `integrations/subagent-review-facility.example.json` and
-`integrations/subagent-review-driver.example.json` to an owner-only absolute
-directory. Pin the exact driver factory bytes and initialize once:
+`integrations/subagent-review-command-driver.example.json` to an owner-only
+absolute directory. Copy and pin the bundled command-driver factory described
+below, then initialize once:
 
 ```console
 python integrations/website_localization_subagent_facility_runtime.py \
@@ -474,6 +475,58 @@ only on loopback behind a trusted HTTPS terminator. The driver settings may hold
 references to operator-managed provider credentials, but those credentials must
 never enter task input or review evidence. A driver without genuine host
 subagent support must block rather than synthesize an agent review.
+
+### Standard host-command driver
+
+`integrations/website_localization_subagent_driver_command.py` is the bundled
+provider-neutral factory for the final facility-to-host boundary. Copy it into
+the protected deployment directory, pin its exact bytes in the facility
+configuration, and use
+`integrations/subagent-review-command-driver.example.json` as the separately
+protected driver configuration. The adapter accepts one owner-only executable,
+its SHA-256, bounded literal arguments, one private working directory and a
+response-size ceiling. On Linux it copies the verified bytes into a sealed
+in-memory file and invokes that immutable snapshot with no shell, ambient
+environment or inherited working directory. A platform without the required
+sealed-memory and descriptor-execution primitives blocks at startup.
+
+For `execute`, stdin is one canonical UTF-8 JSON object using
+`translate-native.subagent-review-command-request.v1`. Its closed fields are
+the operation and protocol version; driver and command identities; provider
+execution key and request digest; trusted assignment; reduced phase-specific
+model input; budgets; exact empty-context isolation controls; a lifetime
+watchdog descriptor; and the request SHA-256. Target-native input contains no
+source, source hash, creator messages or inherited history. For `reconcile`,
+the same binding omits model input and budgets; the executable must perform a
+read-only status lookup and may not continue or start model work.
+
+Stdout must contain exactly one
+`translate-native.subagent-review-command-response.v1` object. It echoes every
+identity, operation, provider binding and request digest, adds exact Boolean
+`ok` and `retryable` fields, and contains either the existing five-field driver
+result or `null` for a rejected operation. The adapter never creates reviewer
+identity, usage or PASS evidence. The facility independently checks phase,
+role, reviewer, session, model, isolation flags, cost, input bytes and output
+tokens before it can store a completed result.
+
+The facility binds the SHA-256 of the exact protected driver configuration into
+the external provider execution key. Changing the command identity, version,
+executable digest, arguments, working directory or response limit therefore
+creates a different provider idempotency namespace even when the generic
+adapter ID and version stay unchanged. A changed deployment cannot reconcile
+or replay an older command generation.
+
+The operator executable is the trust boundary for atomic provider-key
+deduplication before physical start, durable result storage, read-only
+reconciliation, deadline enforcement and truthful host metadata. It must watch
+the supplied lifetime descriptor, must not daemonize or escape the worker
+process group, and must block when the configured host cannot provide a genuine
+isolated subagent. Its executable hash does not pin a shebang interpreter,
+dynamic libraries, remote service or external configuration; deploy a reviewed
+self-contained artifact or bind those dependencies independently. The adapter
+provides prompt/context and transport isolation, not an OS sandbox or native
+fluency proof. Run the command under a service identity that has provider access
+but no Guard signer or publication rights.
 
 ## Authenticated HTTPS host bridge
 

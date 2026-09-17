@@ -459,6 +459,11 @@ class SubagentFacilityApplication:
                 or TOKEN.fullmatch(driver.driver_id) is None
                 or not isinstance(getattr(driver, "driver_version", None), str)
                 or TOKEN.fullmatch(driver.driver_version) is None
+                or (getattr(driver, "driver_deployment_sha256", None) is not None
+                    and (not isinstance(driver.driver_deployment_sha256, str)
+                         or SHA256.fullmatch(
+                             driver.driver_deployment_sha256,
+                         ) is None))
                 or getattr(driver, "supports_atomic_idempotency", None) is not True
                 or getattr(driver, "supports_reconcile", None) is not True
                 or getattr(driver, "supports_hard_deadline", None) is not True
@@ -587,11 +592,14 @@ class SubagentFacilityApplication:
     def _provider_identity(self, request: Mapping[str, Any]) -> tuple[str, str]:
         assignment = request["assignment"]
         execution_key = _sha({
-            "schema": "translate-native.subagent-review-provider-execution.v1",
+            "schema": "translate-native.subagent-review-provider-execution.v2",
             "facility_id": self.facility_id,
             "facility_version": self.facility_version,
             "driver_id": self.driver.driver_id,
             "driver_version": self.driver.driver_version,
+            "driver_deployment_sha256": getattr(
+                self.driver, "driver_deployment_sha256", None,
+            ),
             "execution_key": assignment["execution_key"],
             "execute_request_sha256": request["execute_request_sha256"],
         })

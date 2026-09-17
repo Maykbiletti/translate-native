@@ -110,6 +110,41 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.193.0: standard command driver for host subagents
+
+The facility now ships a provider-neutral command adapter in
+`integrations/website_localization_subagent_driver_command.py`. Operators pin
+one owner-only executable by SHA-256 and connect it through a closed stdin/stdout
+JSON protocol; no model provider, SDK, shell command or inherited environment is
+hard-coded. `execute` carries only the host-assigned identity, exact provider
+idempotency binding, budgets, isolation controls and already reduced model
+input. `reconcile` carries neither model input nor budgets and must never start
+work.
+
+On Linux, the adapter copies the verified executable bytes into a sealed
+in-memory file and executes that immutable snapshot rather than trusting a path
+or mutable inode after hashing. It uses a private descriptor-bound working
+directory, closes ambient file descriptors, discards stderr and caps stdout
+while it is read. Every command stays in a verified isolated session/process
+group and receives a lifetime-watchdog descriptor. Timeout, malformed output,
+changed identity, unknown fields, nonzero exit or oversized output leaves the
+facility record quarantined and unreleasable. A clean, fully bound terminal
+rejection preserves its explicit retryability without authorizing another
+physical start. Unsupported platforms block before readiness.
+
+The pinned executable remains responsible for atomic persist-before-start
+deduplication, read-only reconciliation, hard provider cancellation, truthful
+identity and usage, and empty host context with tools and recursive delegation
+disabled. The adapter never fills missing evidence from the assignment. The
+facility also incorporates the exact protected driver-configuration digest in
+the external provider idempotency namespace, so command-generation changes
+cannot reconcile or replay work from an older configuration. The
+local protocol boundary is not an operating-system sandbox; production must run
+the reviewed executable under an appropriately restricted service identity.
+Synthetic Finnish and Maltese fixtures prove the actual facility-to-command
+path, source isolation, restart reconciliation and fail-closed binding only.
+They are not native-speaker evidence and do not establish DeepL superiority.
+
 ### Version 6.192.0: durable host-subagent facility
 
 The standard HTTPS backend now terminates at a deployable, provider-neutral
@@ -3076,7 +3111,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.192.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.193.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

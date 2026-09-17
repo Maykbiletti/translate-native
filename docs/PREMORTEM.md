@@ -1,5 +1,43 @@
 # Version 6 premortem
 
+## Standard host-command driver (17 September 2026)
+
+Assume the durable facility is correct, but the final operator command is
+swapped, inherits ambient authority, starts paid work twice or returns invented
+review evidence.
+
+- Hashing a pathname and later executing it could run different bytes after a
+  filesystem exchange.
+- A shell, inherited environment, current directory or open descriptor could
+  expose credentials, creator context, Guard authority or publication access.
+- Unbounded stdout, stderr or a descendant process could exceed memory, leak
+  content or outlive the assignment deadline and deployment lock.
+- A lost execute reply could be retried as a new physical start, while a
+  mutating reconcile call could falsely report completion or `not_started`.
+- The command could echo the assignment as fabricated reviewer identity, usage
+  or PASS evidence without running a genuine isolated host subagent.
+- A source-blind request could accidentally receive source text, source hashes,
+  prior messages or inherited conversation metadata.
+
+The standard adapter will open and hash one owner-only, single-link executable,
+copy those exact bytes into a sealed Linux in-memory file and execute that
+immutable snapshot without a shell. It will bind a private descriptor-backed
+working directory, close ambient descriptors and use a fixed minimal
+environment. It will incrementally cap stdout, discard stderr and run only as
+the verified leader of the isolated worker session/process group under the
+existing hard deadline. The facility will include the protected driver-config
+digest in the external provider idempotency namespace.
+The closed request gives `execute` only the trusted assignment, reduced input,
+budgets and exact isolation controls; `reconcile` omits model input and budgets.
+Every response must echo the operation, driver, command, provider key, request
+digest and exact retryability before the facility revalidates reviewer identity,
+model, phase, isolation and usage. The adapter never retries execute or invents
+evidence. Finnish target-only and ordered Maltese target/fidelity fixtures,
+restart reconciliation, changed command generations, in-place inode rewrites,
+swapped files, unsafe permissions, clean environment, wrong bindings, terminal
+rejection, nonzero exit and bounded-output tests prove the transport mechanics
+only—not native quality or provider behavior.
+
 ## Host-subagent facility execution boundary (17 September 2026)
 
 Assume the standard HTTPS backend reaches a nominally available facility, but

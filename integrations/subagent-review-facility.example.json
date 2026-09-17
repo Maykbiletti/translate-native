@@ -14,12 +14,12 @@
     "max_concurrent_executions": 4
   },
   "driver": {
-    "factory_file": "/absolute/protected/path/operator_host_subagent_driver.py",
+    "factory_file": "/absolute/protected/path/website_localization_subagent_driver_command.py",
     "factory_callable": "build_driver",
     "factory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "driver_id": "operator-host-subagents",
-    "driver_version": "immutable-driver-revision",
-    "config_file": "/absolute/protected/path/subagent-driver.json"
+    "driver_id": "standard-command-driver",
+    "driver_version": "command-v1",
+    "config_file": "/absolute/protected/path/subagent-command-driver.json"
   },
   "routes": [
     {

@@ -1,0 +1,20 @@
+{
+  "schema": "translate-native.subagent-review-driver-config.v1",
+  "driver_id": "standard-command-driver",
+  "driver_version": "command-v1",
+  "settings": {
+    "schema": "translate-native.subagent-review-command-driver.v1",
+    "driver_id": "standard-command-driver",
+    "driver_version": "command-v1",
+    "command_id": "operator-host-subagents",
+    "command_version": "immutable-host-command-revision",
+    "executable": "/absolute/protected/path/host-subagent-command",
+    "executable_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "arguments": [
+      "--config",
+      "/absolute/protected/path/host-subagent-command.json"
+    ],
+    "working_directory": "/absolute/protected/path/host-subagent-work",
+    "max_response_bytes": 4500000
+  }
+}
