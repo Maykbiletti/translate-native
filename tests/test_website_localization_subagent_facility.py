@@ -184,7 +184,7 @@ class FacilityTests(unittest.TestCase):
         ) for route in host_routes]
 
     def application(self, routes, *, driver=None, ledger=None, capacity=4,
-                    readiness=None):
+                    readiness=None, accept_new_executions=True):
         ledger = ledger or FACILITY.SQLiteFacilityLedger(
             Path(self.temporary.name) / "facility.sqlite3",
             max_concurrent_executions=capacity, boot_id=self.boot_id,
@@ -207,6 +207,8 @@ class FacilityTests(unittest.TestCase):
                 "facility_ledger_instance_id": FACILITY_LEDGER_INSTANCE_ID,
             }),
             allow_loopback_http=True,
+            accept_new_executions=accept_new_executions,
+            drain_id=None if accept_new_executions else "d" * 64,
         )
 
     def backend(self, routes, *, driver=None, ledger=None, capacity=4):
@@ -263,6 +265,66 @@ class FacilityTests(unittest.TestCase):
         self.assertNotIn(TOKEN, serialized)
         self.assertEqual(isolation, FACILITY.ISOLATION)
         self.assertNotIn(TOKEN, transport.calls[0][1].decode("utf-8"))
+
+    def test_maltese_reconcile_only_blocks_execute_before_facility_reservation(self):
+        routes, captures = HOST_TEST.website_routes(["mt-MT"])
+        task, control = captures["mt-MT"].calls[0]
+        route = routes[0]
+        ledger = FACILITY.SQLiteFacilityLedger(
+            Path(self.temporary.name) / "facility-drain.sqlite3",
+            max_concurrent_executions=4, boot_id=self.boot_id,
+        )
+        application = self.application(
+            routes, ledger=ledger, accept_new_executions=False,
+        )
+        transport = WSGIFacilityTransport(application)
+        backend = BACKEND.HTTPSExecutionBackend(
+            "http://127.0.0.1/v1/isolated-review-executions",
+            lambda: {"Authorization": "Bearer " + TOKEN},
+            backend_id="production-host-subagents", backend_version="backend-1",
+            facility_id="host-subagent-facility", facility_version="facility-1",
+            transport=transport, max_output_tokens=4096,
+            allow_loopback_http=True,
+            expected_driver_deployment_sha256=DRIVER_DEPLOYMENT_SHA256,
+            expected_deployment_manifest_sha256=DEPLOYMENT_MANIFEST_SHA256,
+            expected_route_requirements_sha256=ROUTE_REQUIREMENTS_SHA256,
+            expected_readiness_policy_sha256=READINESS_POLICY_SHA256,
+            expected_facility_ledger_instance_id=FACILITY_LEDGER_INSTANCE_ID,
+            expected_routes_count=len(routes),
+        )
+        assignment = HOST.ReviewHostApplication._assignment(route, control)
+        model_input = HOST.ReviewHostApplication._model_task(task)
+        readiness = backend.readiness()
+        self.assertEqual(readiness["operation_mode"], "reconcile_only")
+        self.assertEqual(readiness["drain_id"], "d" * 64)
+        with self.assertRaises(BACKEND.SubagentHTTPBackendFailed):
+            backend.execute_idempotent(
+                assignment, model_input,
+                execute_request_sha256="1" * 64,
+                budgets={
+                    "deadline_seconds": assignment.deadline_seconds,
+                    "max_output_tokens": assignment.max_output_tokens,
+                    "max_input_bytes": assignment.max_input_bytes,
+                    "cost_unit": assignment.cost_unit,
+                    "max_cost_units": assignment.max_cost_units,
+                    "max_concurrent_executions": 4,
+                },
+            )
+        self.assertEqual(ledger.count_active(), 0)
+        self.assertEqual(self.driver.starts, [])
+        class Unreadable:
+            def read(self, _size):
+                raise AssertionError("drain gate read the request body")
+        statuses = []
+        body = b"".join(application({
+            "PATH_INFO": FACILITY.PATH, "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "http", "SERVER_NAME": "127.0.0.1",
+            "HTTP_AUTHORIZATION": "Bearer " + TOKEN,
+            "HTTP_X_SUBAGENT_FACILITY_OPERATION": "execute",
+            "CONTENT_LENGTH": "1", "wsgi.input": Unreadable(),
+        }, lambda status, _headers: statuses.append(status)))
+        self.assertTrue(statuses[0].startswith("409"))
+        self.assertIn(b"drain_active", body)
 
     def test_maltese_translation_uses_two_separate_facility_executions(self):
         routes, _captures = HOST_TEST.website_routes(["mt-MT"])

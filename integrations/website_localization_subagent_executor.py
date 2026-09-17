@@ -509,6 +509,29 @@ class SQLiteExecutionLedger:
                 "WHERE status IN ('dispatching','running','unknown','cancel_pending')"
             ).fetchone()[0])
 
+    def drain_active_count(self) -> int:
+        """Return active work only after validating every persisted status."""
+        allowed = ACTIVE | {"completed", "not_started"}
+        with self._connect() as connection:
+            counts = dict(connection.execute(
+                "SELECT status,COUNT(*) FROM subagent_executor_jobs GROUP BY status"
+            ))
+        if any(status not in allowed for status in counts):
+            raise ValueError("executor ledger contains an invalid status")
+        return sum(counts.get(status, 0) for status in ACTIVE)
+
+    def recover_dispatches_for_drain(self) -> int:
+        """Fence dispatch owners after the exclusive runtime lock is reacquired."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                "UPDATE subagent_executor_jobs SET status='unknown',updated_at=? "
+                "WHERE status='dispatching'",
+                (float(self.clock()),),
+            ).rowcount
+            connection.commit()
+        return int(changed)
+
 
 class SubagentExecutorApplication:
     """Auth-first WSGI application over one durable execution backend."""
@@ -516,7 +539,8 @@ class SubagentExecutorApplication:
     def __init__(self, *, executor_id: str, launcher_id: str,
                  launcher_version: str, bearer_token: str,
                  policy: PinnedExecutorPolicy, ledger: SQLiteExecutionLedger,
-                 backend: ExecutionBackend, allow_loopback_http: bool = False):
+                 backend: ExecutionBackend, allow_loopback_http: bool = False,
+                 accept_new_executions: bool = True):
         self.executor_id = _identifier(executor_id)
         self.launcher_id = _identifier(launcher_id)
         self.launcher_version = _identifier(launcher_version)
@@ -531,9 +555,12 @@ class SubagentExecutorApplication:
             raise TypeError("executor backend is invalid")
         if type(allow_loopback_http) is not bool:
             raise TypeError("allow_loopback_http must be boolean")
+        if type(accept_new_executions) is not bool:
+            raise TypeError("accept_new_executions must be boolean")
         self._bearer = bearer_token
         self.policy, self.ledger, self.backend = policy, ledger, backend
         self.allow_loopback_http = allow_loopback_http
+        self.accept_new_executions = accept_new_executions
 
     def _authenticate(self, environ: Mapping[str, Any]) -> str:
         supplied, expected = environ.get("HTTP_AUTHORIZATION"), "Bearer " + self._bearer
@@ -764,6 +791,8 @@ class SubagentExecutorApplication:
         assignment, operation = request["assignment"], request["operation"]
         assignment_sha256 = _sha(assignment)
         if operation == "execute":
+            if not self.accept_new_executions:
+                raise _blocked("drain_active", 409)
             reservation = self.ledger.reserve_execute(
                 principal_sha256=principal_sha256, request=request,
                 assignment_sha256=assignment_sha256,
@@ -840,11 +869,14 @@ class SubagentExecutorApplication:
                     and server in {"localhost", "127.0.0.1", "::1"}):
                 raise _blocked("https_required", 400)
             principal = self._authenticate(environ)
+            if (not self.accept_new_executions
+                    and environ.get("HTTP_X_SUBAGENT_OPERATION") != "reconcile"):
+                raise _blocked("drain_active", 409)
             body = self._body(environ)
             request = self._request(environ, body)
             result = self._run(request, principal)
             payload = self._reply(request, result)
-            return self._send(start_response, 202 if result.status == "running" else 200,
+            return self._send(start_response, 202 if result.status in ACTIVE else 200,
                               payload)
         except SubagentExecutorBlocked as error:
             payload = _raw({"error": {"code": error.code,

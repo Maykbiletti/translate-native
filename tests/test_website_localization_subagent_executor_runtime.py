@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
+import io
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import test_website_localization_subagent_executor as ENDPOINT
 import test_website_localization_subagent_host as HOST_TEST
@@ -158,6 +162,190 @@ class ExecutorRuntimeTests(unittest.TestCase):
         self.assertEqual(replay, first)
         self.assertEqual(ACTIVE_BACKEND.starts, [])
 
+    def test_reconcile_only_latch_is_persistent_and_deployment_bound(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+
+        ACTIVE_BACKEND.readiness_result = {
+            "ready": True, "fixture": True,
+            "operation_mode": "reconcile_only", "drain_id": "f" * 64,
+        }
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, begin_drain=True,
+        )
+        drain_id = runtime.drain["drain_id"]
+        self.assertFalse(runtime.executor.accept_new_executions)
+        self.assertEqual(runtime.executor.ledger.count_active(), 0)
+        runtime.close()
+
+        runtime = RUNTIME.open_subagent_executor_runtime(config)
+        self.assertEqual(runtime.drain["drain_id"], drain_id)
+        self.assertFalse(runtime.executor.accept_new_executions)
+        runtime.close()
+
+        marker = RUNTIME.DRAIN.marker_path(self.ledger)
+        marker.unlink()
+        with self.assertRaisesRegex(
+                RUNTIME.SubagentExecutorRuntimeError, "drain latch is missing"):
+            RUNTIME.open_subagent_executor_runtime(config)
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, begin_drain=True,
+        )
+        self.assertEqual(runtime.drain["drain_id"], drain_id)
+        runtime.close()
+
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("""
+                INSERT INTO subagent_executor_jobs VALUES (
+                    'legacy-retry',?,?,?,?,?,?,'not_started',1,0,128,'unit',1,
+                    NULL,NULL,0,0
+                )
+            """, ("a" * 64, "b" * 64, "c" * 64,
+                  "launcher", "launcher-1", "executor-1"))
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE subagent_executor_jobs SET status='dispatching' "
+                    "WHERE execution_key='legacy-retry'"
+                )
+        with sqlite3.connect(self.ledger) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM subagent_executor_jobs "
+                "WHERE execution_key='legacy-retry'"
+            ).fetchone()[0], "not_started")
+
+        document = json.loads(marker.read_text(encoding="utf-8"))
+        document["deployment_binding_sha256"] = "0" * 64
+        marker.write_text(json.dumps(document), encoding="utf-8")
+        if os.name != "nt":
+            marker.chmod(0o600)
+        with self.assertRaises(RUNTIME.SubagentExecutorRuntimeError):
+            RUNTIME.open_subagent_executor_runtime(config)
+
+    def test_reconcile_only_check_reports_content_free_drain_status(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        config = self.configuration([HOST_TEST.response_route(task)])
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+        ACTIVE_BACKEND.readiness_result = {
+            "ready": True, "fixture": True,
+            "operation_mode": "reconcile_only", "drain_id": "f" * 64,
+        }
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", [
+                "website_localization_subagent_executor_runtime.py",
+                "--config", str(config), "--begin-drain", "--check",
+        ]), contextlib.redirect_stdout(output):
+            self.assertEqual(RUNTIME.main(), 0)
+        status = json.loads(output.getvalue())
+        self.assertEqual(status["operation_mode"], "reconcile_only")
+        self.assertRegex(status["drain_id"], r"^[0-9a-f]{64}$")
+        self.assertEqual(status["executor_active_executions"], 0)
+        self.assertTrue(status["drained"])
+        self.assertEqual(set(status), {
+            "ready", "content_free", "operation_mode", "drain_id",
+            "executor_active_executions", "drained",
+        })
+
+    def test_begin_drain_survives_backend_readiness_failure(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        config = self.configuration([HOST_TEST.response_route(task)])
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+
+        ACTIVE_BACKEND.readiness_result = {
+            "ready": True, "fixture": True,
+            "operation_mode": "reconcile_only", "drain_id": "f" * 64,
+        }
+        ACTIVE_BACKEND.readiness_error = RuntimeError("facility unavailable")
+        with self.assertRaisesRegex(
+                RUNTIME.SubagentExecutorRuntimeError,
+                "facility readiness failed"):
+            RUNTIME.open_subagent_executor_runtime(config, begin_drain=True)
+        marker = RUNTIME.DRAIN.marker_path(self.ledger)
+        self.assertTrue(marker.is_file())
+
+        ACTIVE_BACKEND.readiness_error = None
+        runtime = RUNTIME.open_subagent_executor_runtime(config)
+        try:
+            self.assertIsNotNone(runtime.drain)
+            self.assertFalse(runtime.executor.accept_new_executions)
+        finally:
+            runtime.close()
+
+    def test_drain_status_rejects_unknown_persisted_status(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        config = self.configuration([HOST_TEST.response_route(task)])
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+        ACTIVE_BACKEND.readiness_result = {
+            "ready": True, "fixture": True,
+            "operation_mode": "reconcile_only", "drain_id": "f" * 64,
+        }
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, begin_drain=True,
+        )
+        try:
+            with sqlite3.connect(self.ledger) as connection:
+                connection.execute("""
+                    INSERT INTO subagent_executor_jobs VALUES (
+                        'tampered-status',?,?,?,?,?,?,'runing',1,0,128,'unit',1,
+                        NULL,NULL,0,0
+                    )
+                """, ("a" * 64, "b" * 64, "c" * 64,
+                      "launcher", "launcher-1", "executor-1"))
+            with self.assertRaisesRegex(ValueError, "invalid status"):
+                runtime.executor.ledger.drain_active_count()
+        finally:
+            runtime.close()
+
+    def test_readiness_mode_matches_local_drain_and_fences_stale_dispatch(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        config = self.configuration([HOST_TEST.response_route(task)])
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("""
+                INSERT INTO subagent_executor_jobs VALUES (
+                    'crashed-dispatch',?,?,?,?,?,?,'dispatching',1,0,128,
+                    'unit',1,NULL,NULL,0,0
+                )
+            """, ("a" * 64, "b" * 64, "c" * 64,
+                  "launcher", "launcher-1", "executor-1"))
+        ACTIVE_BACKEND.readiness_result = {
+            "ready": True, "fixture": True,
+            "operation_mode": "reconcile_only", "drain_id": "f" * 64,
+        }
+        with self.assertRaisesRegex(
+                RUNTIME.SubagentExecutorRuntimeError,
+                "facility readiness failed"):
+            RUNTIME.open_subagent_executor_runtime(config)
+        runtime = RUNTIME.open_subagent_executor_runtime(
+            config, begin_drain=True,
+        )
+        try:
+            with sqlite3.connect(self.ledger) as connection:
+                status = connection.execute(
+                    "SELECT status FROM subagent_executor_jobs "
+                    "WHERE execution_key='crashed-dispatch'"
+                ).fetchone()[0]
+            self.assertEqual(status, "unknown")
+            self.assertEqual(runtime.executor.ledger.drain_active_count(), 1)
+        finally:
+            runtime.close()
+
     def test_maltese_runtime_keeps_native_and_fidelity_separate(self):
         routes, _captures = HOST_TEST.website_routes(["mt-MT"])
         config = self.configuration(routes)
@@ -206,7 +394,10 @@ class ExecutorRuntimeTests(unittest.TestCase):
                 self.assertFalse(self.ledger.exists())
 
         ACTIVE_BACKEND.readiness_error = None
-        ACTIVE_BACKEND.readiness_result = {"ready": True, "fixture": True}
+        ACTIVE_BACKEND.readiness_result = {
+            "ready": True, "fixture": True,
+            "operation_mode": "execute_and_reconcile", "drain_id": None,
+        }
         readiness_calls = ACTIVE_BACKEND.readiness_calls
         runtime = RUNTIME.open_subagent_executor_runtime(
             config, initialize_ledger=True,

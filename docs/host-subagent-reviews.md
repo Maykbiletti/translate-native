@@ -537,13 +537,44 @@ execution was not started. Reconciliation bypasses only the healthy Boolean;
 it never bypasses the deployment binding.
 
 The Version 6.194→6.195 configuration change deliberately changes both
-deployment bindings. Use a quiesced cutover: stop intake, keep the old pinned
-binary, configuration and journal as the only running stack, and resolve every
-active, unknown or cancellation-pending record. Then stop that stack completely
-before starting Version 6.196 with fresh facility and executor journals. The
-runtime has no reconcile-only drain mode, so old and new stacks must not overlap.
+deployment bindings. Version 6.197 provides a persistent, monotone drain for a
+quiesced cutover:
+
+1. Stop upstream intake and stop the old executor and facility cleanly. Their
+   exclusive runtime locks wait for admitted requests to finish.
+2. With the old configuration and journals, run the Version 6.197 facility once
+   with `--begin-drain --check`, then start that facility normally as a service.
+   It inherits `reconcile_only` mode and its authenticated readiness response
+   exposes that mode.
+3. Run the Version 6.197 executor once with `--begin-drain --check` while the
+   drained facility remains live, then start that executor normally as a
+   service. Each component now has an authoritative ledger record, blocking
+   SQLite admission triggers and an owner-only no-clobber latch bound to its
+   exact deployment. Every later restart inherits `reconcile_only` mode, and
+   executor startup requires the facility mode to match.
+4. Reconcile every known assignment through the old stack. Protocol-valid
+   `execute` requests declare their operation in a mandatory body-bound header
+   and are rejected before request-body consumption or ledger reservation,
+   while authenticated reconciliation remains available.
+5. Stop the executor, keep the facility live, and run the executor `--check`.
+   Require `operation_mode` to be `reconcile_only`, its active count to be zero,
+   and `drained` to be true. Then stop the facility and run its `--check` with
+   the same requirements. Dispatching, running, unknown and
+   cancellation-pending records all prevent `drained`; an unknown stored status
+   blocks instead of being omitted from the count.
+6. Stop the old stack completely before bootstrapping and starting fresh
+   facility and executor journals. Old and new stacks must not overlap.
+
+Drain state cannot be cleared, moved to another deployment or inferred from a
+missing journal. Missing, unsafe, malformed or mismatched latch state blocks
+startup. If latch creation was interrupted after the authoritative ledger
+transition, rerunning `--begin-drain` repairs only the matching missing latch;
+it can never restore execute admission. Ledger triggers also block dispatch
+insertion by a previously installed runtime that does not understand the latch.
 There is no automatic cross-generation migration and no permission to relabel
-ambiguous provider work as `not_started`.
+ambiguous provider work as `not_started`. Version 6.197 changes the authenticated
+readiness schema, so facility, backend and executor must be upgraded and pinned
+together before entering this procedure.
 
 ### Standard host-command driver
 

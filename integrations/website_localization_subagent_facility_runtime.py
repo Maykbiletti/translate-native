@@ -33,6 +33,7 @@ from wsgiref.simple_server import WSGIServer, make_server
 ROOT = Path(__file__).resolve().parents[1]
 FACILITY_PATH = ROOT / "integrations" / "website_localization_subagent_facility.py"
 PROTECTED_PATH = ROOT / "integrations" / "response_subagent_https_runtime.py"
+DRAIN_PATH = ROOT / "integrations" / "website_localization_subagent_drain.py"
 CONFIG_SCHEMA = "translate-native.subagent-review-facility-runtime.v2"
 DRIVER_SCHEMA = "translate-native.subagent-review-driver-config.v1"
 DEPLOYMENT_SCHEMA = "translate-native.subagent-review-facility-deployment.v2"
@@ -71,6 +72,7 @@ def _load(name: str, path: Path):
 
 FACILITY = _load("blun_website_localization_subagent_facility", FACILITY_PATH)
 PROTECTED = _load("blun_subagent_facility_protected", PROTECTED_PATH)
+DRAIN = _load("blun_website_localization_subagent_drain", DRAIN_PATH)
 
 
 class SubagentFacilityRuntimeError(RuntimeError):
@@ -811,6 +813,7 @@ class SubagentFacilityRuntime:
     runtime_lock: _RuntimeLock
     preflight: dict
     supervisor: _PreflightSupervisor
+    drain: dict | None
 
     def __post_init__(self):
         self._pid, self._closed, self._closing, self._active = (
@@ -868,10 +871,15 @@ class SubagentFacilityRuntime:
                 self._condition.notify_all()
 
 
-def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = False):
+def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = False,
+                                   begin_drain: bool = False):
     if os.name != "posix":
         raise SubagentFacilityRuntimeError(
             "facility runtime requires POSIX process isolation"
+        )
+    if initialize_ledger and begin_drain:
+        raise SubagentFacilityRuntimeError(
+            "cannot initialize a facility ledger in drain mode"
         )
     config, _config_raw = load_facility_runtime_config(path)
     driver_document, driver_raw = _driver_configuration(config["driver"])
@@ -884,20 +892,44 @@ def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = Fals
     runtime_lock = _RuntimeLock(ledger_path)
     driver = supervisor = None
     try:
-        driver = _build_driver(
-            config["driver"], driver_document, driver_raw,
-            runtime_lock.fileno(),
+        # Preserve fail-before-state initialization: a new deployment must prove
+        # its driver and routes before its first ledger is created.  An existing
+        # deployment may persist a requested monotone drain before a transient
+        # preflight failure so no later restart can resume admission.
+        if initialize_ledger:
+            driver = _build_driver(
+                config["driver"], driver_document, driver_raw,
+                runtime_lock.fileno(),
+            )
+            preflight = _preflight_routes(driver, routes)
+        initial_identity = _prepare_ledger(ledger_path, initialize=initialize_ledger)
+        configuration_sha256 = _deployment_binding(config, driver_raw, bearer)
+        facility_ledger_instance_id = _bind_deployment(
+            ledger_path, configuration_sha256,
+            initialize=initialize_ledger,
         )
-        preflight = _preflight_routes(driver, routes)
+        drain_binding = _facility_deployment_binding(
+            configuration_sha256, facility_ledger_instance_id,
+        )
+        try:
+            drain = DRAIN.load_or_create(
+                ledger_path, component="facility",
+                deployment_binding_sha256=drain_binding,
+                facility_ledger_instance_id=facility_ledger_instance_id,
+                begin=begin_drain, protected=PROTECTED,
+            )
+        except DRAIN.SubagentDrainError as error:
+            raise SubagentFacilityRuntimeError(str(error)) from error
+        if driver is None:
+            driver = _build_driver(
+                config["driver"], driver_document, driver_raw,
+                runtime_lock.fileno(),
+            )
+            preflight = _preflight_routes(driver, routes)
         preflight["readiness_policy_sha256"] = FACILITY._sha({
             "schema": "translate-native.subagent-review-readiness-policy.v1",
             **config["health"],
         })
-        initial_identity = _prepare_ledger(ledger_path, initialize=initialize_ledger)
-        facility_ledger_instance_id = _bind_deployment(
-            ledger_path, _deployment_binding(config, driver_raw, bearer),
-            initialize=initialize_ledger,
-        )
         preflight["facility_ledger_instance_id"] = facility_ledger_instance_id
         supervisor = _PreflightSupervisor(
             driver, routes,
@@ -926,10 +958,12 @@ def open_subagent_facility_runtime(path: Path, *, initialize_ledger: bool = Fals
             policy=FACILITY.EXECUTOR.PinnedExecutorPolicy(routes),
             ledger=ledger, driver=driver, readiness=supervisor.snapshot,
             allow_loopback_http=config["allow_loopback_http"],
+            accept_new_executions=drain is None,
+            drain_id=drain["drain_id"] if drain else None,
         )
         runtime = SubagentFacilityRuntime(
             application, driver, ledger_path, identity, runtime_lock, preflight,
-            supervisor,
+            supervisor, drain,
         )
         supervisor.start()
         return runtime
@@ -1057,6 +1091,7 @@ def main() -> int:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--initialize-ledger", action="store_true")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--begin-drain", action="store_true")
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=47643)
     args = parser.parse_args()
@@ -1067,8 +1102,10 @@ def main() -> int:
     try:
         runtime = open_subagent_facility_runtime(
             args.config, initialize_ledger=args.initialize_ledger,
+            begin_drain=args.begin_drain,
         )
         if args.check:
+            active_executions = runtime.facility.ledger.drain_active_count()
             print(json.dumps({
                 "ready": True,
                 "content_free": True,
@@ -1089,6 +1126,12 @@ def main() -> int:
                 "facility_ledger_instance_id": (
                     runtime.preflight["facility_ledger_instance_id"]
                 ),
+                "operation_mode": ("reconcile_only" if runtime.drain
+                                   else "execute_and_reconcile"),
+                "drain_id": runtime.drain["drain_id"] if runtime.drain else None,
+                "active_executions": active_executions,
+                "drained": (runtime.drain is not None
+                            and active_executions == 0),
             }, sort_keys=True, separators=(",", ":")))
             runtime.close()
             return 0

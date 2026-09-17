@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import socket
 import sys
 import tempfile
@@ -220,6 +221,113 @@ class FacilityRuntimeTests(unittest.TestCase):
             runtime.close()
         self.assertEqual(replay, first)
         self.assertEqual(json.loads(self.driver_state.read_text())["starts"], 1)
+
+    def test_reconcile_only_latch_is_persistent_and_instance_bound(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        route = HOST_TEST.response_route(task)
+        config = self.configuration([route])
+        runtime = RUNTIME.open_subagent_facility_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+
+        runtime = RUNTIME.open_subagent_facility_runtime(
+            config, begin_drain=True,
+        )
+        drain_id = runtime.drain["drain_id"]
+        self.assertFalse(runtime.facility.accept_new_executions)
+        self.assertEqual(runtime.facility.ledger.count_active(), 0)
+        runtime.close()
+
+        runtime = RUNTIME.open_subagent_facility_runtime(config)
+        self.assertEqual(runtime.drain["drain_id"], drain_id)
+        self.assertFalse(runtime.facility.accept_new_executions)
+        runtime.close()
+
+        marker = RUNTIME.DRAIN.marker_path(self.ledger)
+        marker.unlink()
+        with self.assertRaisesRegex(
+                RUNTIME.SubagentFacilityRuntimeError, "drain latch is missing"):
+            RUNTIME.open_subagent_facility_runtime(config)
+        runtime = RUNTIME.open_subagent_facility_runtime(
+            config, begin_drain=True,
+        )
+        self.assertEqual(runtime.drain["drain_id"], drain_id)
+        runtime.close()
+
+        with sqlite3.connect(self.ledger) as connection:
+            connection.execute("""
+                INSERT INTO subagent_facility_jobs VALUES (
+                    'legacy-retry',?,?,?,?,?,?,?,?,?,?,?,?,?,'not_started',1,
+                    ?,0,128,'unit',1,NULL,NULL,0,0
+                )
+            """, ("a" * 64, "backend", "backend-1", "facility",
+                  "facility-1", "b" * 64, "c" * 64, "d" * 64,
+                  "e" * 64, "f" * 64, "0" * 64, "driver", "driver-1",
+                  "1" * 64))
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE subagent_facility_jobs SET status='dispatching' "
+                    "WHERE execution_key='legacy-retry'"
+                )
+        with sqlite3.connect(self.ledger) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM subagent_facility_jobs "
+                "WHERE execution_key='legacy-retry'"
+            ).fetchone()[0], "not_started")
+
+        document = json.loads(marker.read_text(encoding="utf-8"))
+        document["facility_ledger_instance_id"] = "0" * 64
+        marker.write_text(json.dumps(document), encoding="utf-8")
+        if os.name != "nt":
+            marker.chmod(0o600)
+        with self.assertRaises(RUNTIME.SubagentFacilityRuntimeError):
+            RUNTIME.open_subagent_facility_runtime(config)
+
+    def test_reconcile_only_check_reports_content_free_drain_status(self):
+        task, _control = HOST_TEST.response_request("fi-FI")
+        config = self.configuration([HOST_TEST.response_route(task)])
+        runtime = RUNTIME.open_subagent_facility_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", [
+                "website_localization_subagent_facility_runtime.py",
+                "--config", str(config), "--begin-drain", "--check",
+        ]), contextlib.redirect_stdout(output):
+            self.assertEqual(RUNTIME.main(), 0)
+        status = json.loads(output.getvalue())
+        self.assertEqual(status["operation_mode"], "reconcile_only")
+        self.assertRegex(status["drain_id"], r"^[0-9a-f]{64}$")
+        self.assertEqual(status["active_executions"], 0)
+        self.assertTrue(status["drained"])
+
+    def test_begin_drain_survives_driver_preflight_failure(self):
+        task, _control = HOST_TEST.response_request("mt-MT")
+        config = self.configuration([HOST_TEST.response_route(task)])
+        runtime = RUNTIME.open_subagent_facility_runtime(
+            config, initialize_ledger=True,
+        )
+        runtime.close()
+
+        with mock.patch.object(
+                RUNTIME, "_preflight_routes",
+                side_effect=RUNTIME.SubagentFacilityRuntimeError("offline")):
+            with self.assertRaisesRegex(
+                    RUNTIME.SubagentFacilityRuntimeError, "offline"):
+                RUNTIME.open_subagent_facility_runtime(
+                    config, begin_drain=True,
+                )
+        marker = RUNTIME.DRAIN.marker_path(self.ledger)
+        self.assertTrue(marker.is_file())
+
+        runtime = RUNTIME.open_subagent_facility_runtime(config)
+        try:
+            self.assertIsNotNone(runtime.drain)
+            self.assertFalse(runtime.facility.accept_new_executions)
+        finally:
+            runtime.close()
 
     def test_restart_reconciles_provider_completion_before_facility_commit(self):
         task, control = HOST_TEST.response_request("fi-FI")
@@ -780,12 +888,17 @@ class FacilityRuntimeTests(unittest.TestCase):
             "driver_deployment_sha256", "driver_preflight", "ready",
             "readiness_policy_sha256", "route_requirements_sha256",
             "routes_checked", "facility_ledger_instance_id",
+            "operation_mode", "drain_id", "active_executions", "drained",
         })
         self.assertEqual(status["content_free"], True)
         self.assertEqual(status["deployment_manifest_sha256"], "9" * 64)
         self.assertEqual(status["driver_preflight"], "passed")
         self.assertEqual(status["ready"], True)
         self.assertEqual(status["routes_checked"], 1)
+        self.assertEqual(status["operation_mode"], "execute_and_reconcile")
+        self.assertIsNone(status["drain_id"])
+        self.assertEqual(status["active_executions"], 0)
+        self.assertFalse(status["drained"])
         self.assertRegex(status["driver_deployment_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(status["route_requirements_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(status["readiness_policy_sha256"], r"^[0-9a-f]{64}$")

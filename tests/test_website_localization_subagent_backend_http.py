@@ -95,6 +95,7 @@ class FacilityTransport:
                 "route_requirements_sha256": ROUTE_REQUIREMENTS_SHA256,
                 "readiness_policy_sha256": READINESS_POLICY_SHA256,
                 "facility_ledger_instance_id": FACILITY_LEDGER_INSTANCE_ID,
+                "operation_mode": "execute_and_reconcile", "drain_id": None,
             }
             if self.mutate_readiness:
                 self.mutate_readiness(reply)

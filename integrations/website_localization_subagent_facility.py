@@ -33,7 +33,7 @@ READINESS_REQUEST_SCHEMA = (
     "translate-native.subagent-review-facility-readiness-request.v2"
 )
 READINESS_RESPONSE_SCHEMA = (
-    "translate-native.subagent-review-facility-readiness-response.v2"
+    "translate-native.subagent-review-facility-readiness-response.v3"
 )
 MAX_BODY_BYTES = 4_500_000
 MAX_RESPONSE_BYTES = 4_500_000
@@ -448,6 +448,17 @@ class SQLiteFacilityLedger:
         with self._connect() as connection:
             return self._active_count(connection)
 
+    def drain_active_count(self) -> int:
+        """Return active work only after validating every persisted status."""
+        allowed = ACTIVE | {"completed", "not_started"}
+        with self._connect() as connection:
+            counts = dict(connection.execute(
+                "SELECT status,COUNT(*) FROM subagent_facility_jobs GROUP BY status"
+            ))
+        if any(status not in allowed for status in counts):
+            raise ValueError("facility ledger contains an invalid status")
+        return sum(counts.get(status, 0) for status in ACTIVE)
+
 
 class SubagentFacilityApplication:
     """Auth-first V6.191 facility over one trusted host driver."""
@@ -457,7 +468,8 @@ class SubagentFacilityApplication:
         facility_version: str, bearer_token: str,
         policy: Any, ledger: SQLiteFacilityLedger,
         driver: HostSubagentDriver, readiness: Callable[[], Mapping[str, Any]],
-        allow_loopback_http: bool = False,
+        allow_loopback_http: bool = False, accept_new_executions: bool = True,
+        drain_id: str | None = None,
     ):
         self.backend_id = _identifier(backend_id)
         self.backend_version = _identifier(backend_version)
@@ -494,12 +506,21 @@ class SubagentFacilityApplication:
             raise TypeError("facility driver lacks mandatory capabilities")
         if type(allow_loopback_http) is not bool:
             raise TypeError("allow_loopback_http must be boolean")
+        if type(accept_new_executions) is not bool:
+            raise TypeError("accept_new_executions must be boolean")
+        if ((drain_id is None) != accept_new_executions
+                or drain_id is not None and (
+                    not isinstance(drain_id, str)
+                    or SHA256.fullmatch(drain_id) is None)):
+            raise ValueError("facility drain identity is invalid")
         if not callable(readiness):
             raise TypeError("facility readiness probe is invalid")
         self._bearer = bearer_token
         self.policy, self.ledger, self.driver = policy, ledger, driver
         self._readiness = readiness
         self.allow_loopback_http = allow_loopback_http
+        self.accept_new_executions = accept_new_executions
+        self.drain_id = drain_id
 
     def _authenticate(self, environ: Mapping[str, Any]) -> str:
         supplied, expected = environ.get("HTTP_AUTHORIZATION"), "Bearer " + self._bearer
@@ -716,6 +737,10 @@ class SubagentFacilityApplication:
             "facility_version": self.facility_version,
             "challenge": request["challenge"],
             "request_sha256": request["request_sha256"],
+            "operation_mode": ("execute_and_reconcile"
+                               if self.accept_new_executions
+                               else "reconcile_only"),
+            "drain_id": self.drain_id,
             **snapshot,
         })
 
@@ -891,6 +916,8 @@ class SubagentFacilityApplication:
         assignment = request["assignment"]
         assignment_sha256 = _sha(assignment)
         if request["operation"] == "execute":
+            if not self.accept_new_executions:
+                raise _blocked("drain_active", 409)
             provider_key, provider_digest = self._provider_identity(request)
             input_bytes = len(_raw(request["model_input"]))
             reservation = self.ledger.reserve_execute(
@@ -983,6 +1010,10 @@ class SubagentFacilityApplication:
                 payload = self._readiness_reply(request, snapshot)
                 return self._send(start_response, 200 if snapshot["ready"] else 503,
                                   payload)
+            if (not self.accept_new_executions
+                    and environ.get("HTTP_X_SUBAGENT_FACILITY_OPERATION")
+                    != "reconcile"):
+                raise _blocked("drain_active", 409)
             request = self._request(environ, self._body(environ))
             snapshot = self._readiness_snapshot()
             if (request["readiness_binding"]

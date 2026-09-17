@@ -40,6 +40,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 BEARER = re.compile(r"^[A-Za-z0-9._~+/=-]{32,2048}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,117}$")
 STATUSES = {"completed", "not_started", "running", "unknown", "cancel_pending"}
+ACTIVE = {"running", "unknown", "cancel_pending"}
 
 
 class SubagentLauncherFailed(RuntimeError):
@@ -508,8 +509,7 @@ class HTTPSSubagentLauncher:
                 or (reply["status"] != "completed" and reply["execution"] is not None)
                 or (reply["status"] == "completed") != isinstance(reply["usage"], dict)
                 or (reply["status"] != "completed" and reply["usage"] is not None)
-                or (result.status == 202 and reply["status"] != "running")
-                or (result.status == 200 and reply["status"] == "running")):
+                or (result.status == 202) != (reply["status"] in ACTIVE)):
             raise SubagentLauncherFailed("launcher.response_invalid", retryable=False)
         if reply["status"] == "completed":
             usage = reply["usage"]

@@ -33,7 +33,10 @@ class FixtureBackend:
         self.starts, self.reconciles, self.completed = [], [], {}
         self.readiness_calls = 0
         self.readiness_error = None
-        self.readiness_result = {"ready": True, "fixture": True}
+        self.readiness_result = {
+            "ready": True, "fixture": True,
+            "operation_mode": "execute_and_reconcile", "drain_id": None,
+        }
         self.readiness_hook = None
         self.running = set()
         self.raise_after_start = False
@@ -155,7 +158,8 @@ class ExecutorTests(unittest.TestCase):
             task_policy_sha256=route.task_policy_sha256,
         ) for route in host_routes]
 
-    def executor(self, host_routes, *, backend=None, ledger=None, capacity=4):
+    def executor(self, host_routes, *, backend=None, ledger=None, capacity=4,
+                 accept_new_executions=True):
         ledger = ledger or EXECUTOR.SQLiteExecutionLedger(
             Path(self.temporary.name) / "executor.sqlite3",
             max_concurrent_executions=capacity,
@@ -166,6 +170,7 @@ class ExecutorTests(unittest.TestCase):
             policy=EXECUTOR.PinnedExecutorPolicy(self.executor_routes(host_routes)),
             ledger=ledger, backend=backend or self.backend,
             allow_loopback_http=True,
+            accept_new_executions=accept_new_executions,
         )
 
     def launcher(self, application, *, capacity=4):
@@ -217,6 +222,48 @@ class ExecutorTests(unittest.TestCase):
         self.assertFalse(self.backend.completed[control["execution_key"]][
             "execution"]["inherit_context"])
         self.assertEqual(budgets["max_concurrent_executions"], 4)
+
+    def test_finnish_reconcile_only_blocks_execute_before_reservation(self):
+        task, control = HOST_TEST.response_request("fi-FI")
+        routes = [HOST_TEST.response_route(task)]
+        ledger = EXECUTOR.SQLiteExecutionLedger(
+            Path(self.temporary.name) / "executor-drain.sqlite3",
+            max_concurrent_executions=4,
+        )
+        application = self.executor(
+            routes, ledger=ledger, accept_new_executions=False,
+        )
+        assignment = HOST.ReviewHostApplication._assignment(routes[0], control)
+        model_input = HOST.ReviewHostApplication._model_task(task)
+        with self.assertRaises(LAUNCHER.SubagentLauncherFailed):
+            self.launcher(application).execute_idempotent(
+                assignment, model_input,
+                deadline_seconds=assignment.deadline_seconds,
+                max_output_tokens=assignment.max_output_tokens,
+            )
+        self.assertEqual(ledger.count_active(), 0)
+        self.assertEqual(self.backend.starts, [])
+        class Unreadable:
+            def read(self, _size):
+                raise AssertionError("drain gate read the request body")
+        statuses = []
+        body = b"".join(application({
+            "PATH_INFO": EXECUTOR.PATH, "REQUEST_METHOD": "POST",
+            "wsgi.url_scheme": "http", "SERVER_NAME": "127.0.0.1",
+            "HTTP_AUTHORIZATION": "Bearer " + EXECUTOR_TOKEN,
+            "HTTP_X_SUBAGENT_OPERATION": "execute",
+            "CONTENT_LENGTH": "1", "wsgi.input": Unreadable(),
+        }, lambda status, _headers: statuses.append(status)))
+        self.assertTrue(statuses[0].startswith("409"))
+        self.assertIn(b"drain_active", body)
+        self.assertEqual(
+            self.launcher(application).reconcile(
+                assignment, model_input,
+                deadline_seconds=assignment.deadline_seconds,
+                max_output_tokens=assignment.max_output_tokens,
+            ),
+            {"status": "not_started", "execution": None},
+        )
 
     def test_maltese_translation_uses_two_ordered_isolated_executor_starts(self):
         routes, _captures = HOST_TEST.website_routes(["mt-MT"])

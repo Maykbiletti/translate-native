@@ -27,6 +27,7 @@ from wsgiref.simple_server import WSGIServer, make_server
 ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR_PATH = ROOT / "integrations" / "website_localization_subagent_executor.py"
 PROTECTED_PATH = ROOT / "integrations" / "response_subagent_https_runtime.py"
+DRAIN_PATH = ROOT / "integrations" / "website_localization_subagent_drain.py"
 CONFIG_SCHEMA = "translate-native.subagent-review-executor-runtime.v1"
 BACKEND_SCHEMA = "translate-native.subagent-review-backend-config.v1"
 DEPLOYMENT_SCHEMA = "translate-native.subagent-review-executor-deployment.v1"
@@ -53,6 +54,7 @@ def _load(name: str, path: Path):
 
 EXECUTOR = _load("blun_website_localization_subagent_executor", EXECUTOR_PATH)
 PROTECTED = _load("blun_response_subagent_executor_protected", PROTECTED_PATH)
+DRAIN = _load("blun_website_localization_subagent_drain", DRAIN_PATH)
 
 
 class SubagentExecutorRuntimeError(RuntimeError):
@@ -468,6 +470,7 @@ class SubagentExecutorRuntime:
     ledger_path: Path
     ledger_identity: tuple[int, int, int, int, int, int]
     runtime_lock: _RuntimeLock
+    drain: dict | None
 
     def __post_init__(self):
         self._pid, self._closed, self._closing, self._active = (
@@ -528,14 +531,18 @@ class SubagentExecutorRuntime:
                     self._condition.notify_all()
 
 
-def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = False):
+def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = False,
+                                   begin_drain: bool = False):
+    if initialize_ledger and begin_drain:
+        raise SubagentExecutorRuntimeError(
+            "cannot initialize an executor ledger in drain mode"
+        )
     config, _config_raw = load_executor_runtime_config(path)
     ledger_path = Path(config["ledger"]["path"])
     runtime_lock = _RuntimeLock(ledger_path)
     backend = None
     try:
         backend_document, backend_raw = _backend_configuration(config["backend"])
-        backend = _build_backend(config["backend"], backend_document)
         bearer = _protected_text(
             config["authentication"]["token_file"], PROTECTED.BEARER,
             "executor authentication token",
@@ -553,10 +560,25 @@ def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = Fals
                 raise SubagentExecutorRuntimeError(
                     "executor ledger changed during startup"
                 )
+        drain = None
+        if initial_identity is not None:
+            try:
+                drain = DRAIN.load_or_create(
+                    ledger_path, component="executor",
+                    deployment_binding_sha256=binding,
+                    facility_ledger_instance_id=None, begin=begin_drain,
+                    protected=PROTECTED,
+                )
+            except DRAIN.SubagentDrainError as error:
+                raise SubagentExecutorRuntimeError(str(error)) from error
+        backend = _build_backend(config["backend"], backend_document)
         try:
             readiness = backend.readiness()
             if (not isinstance(readiness, Mapping)
-                    or readiness.get("ready") is not True):
+                    or readiness.get("ready") is not True
+                    or readiness.get("operation_mode") != (
+                        "reconcile_only" if drain else "execute_and_reconcile"
+                    )):
                 raise ValueError("backend readiness result is invalid")
         except Exception as error:
             raise SubagentExecutorRuntimeError(
@@ -565,6 +587,15 @@ def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = Fals
         if initial_identity is None:
             initial_identity = _prepare_ledger(ledger_path, initialize=True)
             _bind_deployment(ledger_path, binding, initialize=True)
+            try:
+                drain = DRAIN.load_or_create(
+                    ledger_path, component="executor",
+                    deployment_binding_sha256=binding,
+                    facility_ledger_instance_id=None, begin=False,
+                    protected=PROTECTED,
+                )
+            except DRAIN.SubagentDrainError as error:
+                raise SubagentExecutorRuntimeError(str(error)) from error
         _bind_deployment(ledger_path, binding, initialize=False)
         if _prepare_ledger(ledger_path, initialize=False) != initial_identity:
             raise SubagentExecutorRuntimeError("executor ledger changed during startup")
@@ -574,6 +605,8 @@ def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = Fals
             max_concurrent_executions=config["ledger"]["max_concurrent_executions"],
             initialize_schema=initialize_ledger,
         )
+        if drain is not None:
+            ledger.recover_dispatches_for_drain()
         identity = _prepare_ledger(ledger_path, initialize=False)
         if identity != initial_identity:
             raise SubagentExecutorRuntimeError("executor ledger changed during startup")
@@ -582,9 +615,10 @@ def open_subagent_executor_runtime(path: Path, *, initialize_ledger: bool = Fals
             launcher_version=config["launcher_version"], bearer_token=bearer,
             policy=EXECUTOR.PinnedExecutorPolicy(routes), ledger=ledger,
             backend=backend, allow_loopback_http=config["allow_loopback_http"],
+            accept_new_executions=drain is None,
         )
         return SubagentExecutorRuntime(
-            application, backend, ledger_path, identity, runtime_lock,
+            application, backend, ledger_path, identity, runtime_lock, drain,
         )
     except Exception:
         if backend is not None:
@@ -613,6 +647,7 @@ def main() -> int:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--initialize-ledger", action="store_true")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--begin-drain", action="store_true")
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=47642)
     args = parser.parse_args()
@@ -623,9 +658,19 @@ def main() -> int:
     try:
         runtime = open_subagent_executor_runtime(
             args.config, initialize_ledger=args.initialize_ledger,
+            begin_drain=args.begin_drain,
         )
         if args.check:
-            print('{"ready":true,"content_free":true}')
+            executor_active = runtime.executor.ledger.drain_active_count()
+            print(json.dumps({
+                "ready": True, "content_free": True,
+                "operation_mode": ("reconcile_only" if runtime.drain
+                                   else "execute_and_reconcile"),
+                "drain_id": runtime.drain["drain_id"] if runtime.drain else None,
+                "executor_active_executions": executor_active,
+                "drained": (runtime.drain is not None
+                            and executor_active == 0),
+            }, sort_keys=True, separators=(",", ":")))
             runtime.close()
             return 0
         server = make_server(

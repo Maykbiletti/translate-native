@@ -110,6 +110,33 @@ For a translation, use `"task_kind": "translation"`, include the complete `sourc
 
 This covers every human language and writing system, not only German umlauts. The same contract protects Swedish `å/ä/ö`, Czech `č/ř/š/ž`, Spanish accents and punctuation, Vietnamese tone marks, Greek, Cyrillic, Arabic, Hebrew, Indic scripts, Chinese, Japanese, Korean, and languages not named here. Deterministic checks are intentionally conservative and cannot prove perfect native wording; the native-language workflow and human review remain necessary where consequences are material.
 
+### Version 6.197.0: persistent reconcile-only cutover drain
+
+An old host-subagent deployment can now enter a permanent, deployment-bound
+`reconcile_only` mode before replacement. Facility and executor each persist an
+authoritative monotone record inside the locked ledger plus an owner-only latch
+beside it. SQLite admission triggers keep earlier runtime code from inserting
+or reviving dispatch work after the transition. Once latched, both reject
+protocol-valid `execute` requests from their mandatory bound operation header,
+before reading the body or reserving ledger state,
+while authenticated `reconcile` remains available for crash recovery. Restarts
+inherit the latch; there is no automatic unlatch or migration to a new
+deployment.
+
+The content-free `--check` response reports the mode, drain identifier, active
+count and derived `drained` state. Dispatching, running, unknown and
+cancellation-pending work all count as active, so ambiguous work cannot be
+declared drained. Activation, persistence and restart recovery are serialized
+by the existing exclusive runtime lock, and unsafe, malformed or
+deployment-mismatched latch state blocks startup fail-closed.
+Facility readiness exposes its exact operation mode, and executor startup
+requires the remote mode to match its local mode before any dispatch.
+
+Synthetic Finnish and Maltese adapter tests cover both review phases and the
+new cutover boundary. They prove only isolation and lifecycle mechanics—not
+native quality, reviewer qualification, model independence or superiority over
+DeepL.
+
 ### Version 6.196.0: protected facility-to-backend bootstrap
 
 The standard host-subagent stack now materializes its executor backend
@@ -3183,7 +3210,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.196.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.197.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

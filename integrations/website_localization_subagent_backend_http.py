@@ -31,7 +31,7 @@ READINESS_REQUEST_SCHEMA = (
     "translate-native.subagent-review-facility-readiness-request.v2"
 )
 READINESS_RESPONSE_SCHEMA = (
-    "translate-native.subagent-review-facility-readiness-response.v2"
+    "translate-native.subagent-review-facility-readiness-response.v3"
 )
 WORKER_SCHEMA = "translate-native.subagent-review-facility-http-worker.v1"
 MAX_ENDPOINT_LENGTH = 2048
@@ -718,7 +718,7 @@ class HTTPSExecutionBackend:
             "failure_generation", "readiness_policy_sha256",
             "facility_ledger_instance_id",
             "driver_deployment_sha256", "deployment_manifest_sha256",
-            "route_requirements_sha256",
+            "route_requirements_sha256", "operation_mode", "drain_id",
         }
         if (not isinstance(reply, dict) or set(reply) != expected
                 or reply.get("schema") != READINESS_RESPONSE_SCHEMA
@@ -734,6 +734,14 @@ class HTTPSExecutionBackend:
                     "monitor_stopped",
                 }
                 or reply["ready"] != (reply["reason"] == "ready")
+                or reply.get("operation_mode") not in {
+                    "execute_and_reconcile", "reconcile_only",
+                }
+                or ((reply.get("drain_id") is None)
+                    != (reply["operation_mode"] == "execute_and_reconcile"))
+                or (reply.get("drain_id") is not None and (
+                    not isinstance(reply["drain_id"], str)
+                    or SHA256.fullmatch(reply["drain_id"]) is None))
                 or (result.status == 200) != reply["ready"]
                 or type(reply.get("probe_generation")) is not int
                 or reply["probe_generation"] < 1
