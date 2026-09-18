@@ -64,12 +64,19 @@ class FixtureBackend:
             }
         response_schema = model_input["input"].get("response_schema", {}).get("schema")
         if response_schema == REWRITE.RW.REVIEW_SCHEMA:
-            return {
+            response = {
                 "schema": REWRITE.RW.REVIEW_SCHEMA,
                 "phase": model_input["phase"], "locale": locale,
                 "status": "PASS", "confidence": "high",
                 "blocking_defects": [], "major_defects": [], "uncertainties": [],
             }
+            if model_input["phase"] == "target_native":
+                response["holistic_assessment"] = {
+                    "reads_as_native_original": True,
+                    "reason": "Synthetic fixture marks the complete candidate as native.",
+                    "repair_scope": "none",
+                }
+            return response
         return BASE.review(locale, model_input["phase"], confidence="high")
 
     def _completed(self, assignment, model_input, request_sha256, budgets):

@@ -37,7 +37,7 @@ RESPONSE_REVIEW_SCHEMA = "translate-native.response-subagent-review.v1"
 WEBSITE_REVIEW_SCHEMA = "translate-native.host-subagent-review.v1"
 RESPONSE_NATIVE_SCHEMA = "translate-native.response-native-review.v1"
 WEBSITE_RESPONSE_SCHEMA = "blun.website-localization-review.v2"
-NATIVE_REWRITE_RESPONSE_SCHEMA = "translate-native.native-rewrite-review.v1"
+NATIVE_REWRITE_RESPONSE_SCHEMA = "translate-native.native-rewrite-review.v2"
 NATIVE_PHASE = "target_native"
 FIDELITY_PHASE = "source_fidelity"
 
@@ -803,13 +803,17 @@ class ReviewHostApplication:
         )
         if response_schema == NATIVE_REWRITE_RESPONSE_SCHEMA:
             expected.add("uncertainties")
+            if route.phase == NATIVE_PHASE:
+                expected.add("holistic_assessment")
             if (not isinstance(response, dict) or set(response) != expected
                     or response.get("schema") != response_schema
                     or response.get("phase") != route.phase
                     or response.get("locale") != route.target_locale
                     or response.get("status") not in {"PASS", "FAIL"}
                     or response.get("confidence") not in {"high", "low"}
-                    or not isinstance(response.get("uncertainties"), list)):
+                    or not isinstance(response.get("uncertainties"), list)
+                    or (route.phase == NATIVE_PHASE
+                        and not isinstance(response.get("holistic_assessment"), dict))):
                 raise _blocked("review_invalid", 422)
             defect_fields = {"severity", "class", "excerpt", "reason", "impact",
                              "revision_direction"}
@@ -840,8 +844,26 @@ class ReviewHostApplication:
                                or not uncertainty[name].strip()
                                for name in uncertainty_fields)):
                     raise _blocked("review_invalid", 422)
+            holistic_pass = True
+            if route.phase == NATIVE_PHASE:
+                holistic = response["holistic_assessment"]
+                if (set(holistic) != {
+                        "reads_as_native_original", "reason", "repair_scope"}
+                        or type(holistic.get("reads_as_native_original")) is not bool
+                        or not isinstance(holistic.get("reason"), str)
+                        or not holistic["reason"].strip()
+                        or holistic.get("repair_scope") not in {
+                            "none", "local", "passage", "whole_text"}
+                        or (not holistic["reads_as_native_original"]
+                            and (not has_findings or holistic["repair_scope"] not in {
+                                "passage", "whole_text"}))
+                        or (holistic["reads_as_native_original"]
+                            and holistic["repair_scope"] in {"passage", "whole_text"})):
+                    raise _blocked("review_invalid", 422)
+                holistic_pass = (holistic["reads_as_native_original"]
+                                 and holistic["repair_scope"] == "none")
             passing = (not has_findings and not response["uncertainties"]
-                       and response["confidence"] == "high")
+                       and response["confidence"] == "high" and holistic_pass)
             if ((response["status"] == "PASS") != passing
                     or response["confidence"] == "low" and not response["uncertainties"]):
                 raise _blocked("review_invalid", 422)
@@ -933,7 +955,13 @@ class ReviewHostApplication:
                 or response.get("blocking_defects") != []
                 or response.get("major_defects") != []
                 or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
-                    and response.get("uncertainties") != [])):
+                    and response.get("uncertainties") != [])
+                or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
+                    and response.get("holistic_assessment", {}).get(
+                        "reads_as_native_original") is not True)
+                or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
+                    and response.get("holistic_assessment", {}).get(
+                        "repair_scope") != "none")):
             raise _blocked("native_predecessor_invalid", 409)
 
     @staticmethod

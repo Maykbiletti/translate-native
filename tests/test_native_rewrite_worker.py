@@ -104,6 +104,12 @@ class Host:
                         "uncertainties": ([] if self.confidence == "high" else [{
                             "class": "fixture_uncertainty", "reason": "Synthetic low confidence.",
                             "evidence_needed": "Independent native fixture evidence."}])}
+            if task["phase"] == "target_native":
+                response["holistic_assessment"] = {
+                    "reads_as_native_original": True,
+                    "reason": "Synthetic fixture marks the complete candidate as native.",
+                    "repair_scope": "none",
+                }
             if self.confidence == "low":
                 response["status"] = "FAIL"
             if self.review_factory is not None:

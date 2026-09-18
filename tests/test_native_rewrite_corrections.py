@@ -1,6 +1,7 @@
 """Synthetic correction fixtures: protocol tests, not native-quality evidence."""
 import json
 import copy
+import copy
 import tempfile
 import threading
 import unittest
@@ -11,9 +12,21 @@ import test_native_rewrite_service as API
 
 RW = FIX.RW
 
+OFFICIAL_EU_LOCALES = (
+    "bg-BG", "hr-HR", "cs-CZ", "da-DK", "nl-NL", "en-IE", "et-EE",
+    "fi-FI", "fr-FR", "de-AT", "el-GR", "hu-HU", "ga-IE", "it-IT",
+    "lv-LV", "lt-LT", "mt-MT", "pl-PL", "pt-PT", "ro-RO", "sk-SK",
+    "sl-SI", "es-ES", "sv-SE",
+)
+
 
 def defect(candidate, *, confidence="high", blocking=False, excerpt=None):
     return {"status": "FAIL", "confidence": confidence,
+            "holistic_assessment": {
+                "reads_as_native_original": False,
+                "reason": "Synthetic fixture marks the complete candidate as unnatural.",
+                "repair_scope": "whole_text",
+            },
             "major_defects": [] if blocking else [{
                 "severity": "major", "class": "idiom", "excerpt": excerpt or candidate,
                 "reason": "Synthetic editorial finding.",
@@ -106,6 +119,50 @@ class CorrectionTests(unittest.TestCase):
             self.assertFalse(never_called.calls)
             self.assertEqual(len(host.ledger), 3)
 
+    def test_spanish_whole_text_translationese_requires_fresh_complete_rewrite(self):
+        source = ("Cuando abrí la ventana esta mañana, olía a lluvia. Abajo, frente a la "
+                  "casa, mi vecino intentaba meter una maleta demasiado grande en un "
+                  "maletero demasiado pequeño. Aunque tenía prisa, bajé a ayudarlo.")
+        stiff = ("Cuando abrí la ventana esta mañana, olía a lluvia. Abajo, frente a la "
+                 "casa, mi vecino intentaba meter una maleta demasiado grande en un "
+                 "maletero demasiado pequeño. La verdad es que tenía prisa. Aun así, "
+                 "bajé y lo ayudé.")
+        natural = ("Cuando abrí la ventana esta mañana, olía a lluvia. Abajo, frente a la "
+                   "casa, mi vecino intentaba encajar una maleta enorme en un maletero "
+                   "demasiado pequeño. Aunque tenía prisa, bajé a echarle una mano.")
+        creator, host = Creator(stiff, natural), Host(stiff, change={
+            **defect(stiff),
+            "major_defects": [{
+                "severity": "major", "class": "translationese",
+                "excerpt": "La verdad es que tenía prisa. Aun así, bajé y lo ayudé.",
+                "reason": "The passage is grammatical but reads as a literal sequence.",
+                "impact": "The narrative voice and information flow remain stiff.",
+                "revision_direction": "Recast the passage from its intent, not by word swaps.",
+            }],
+        })
+        result = self.worker(creator, host, "es-ES").run(
+            source, "prose", "spanish-holistic-regression")
+        self.assertEqual(result["target_text"], natural)
+        self.assertEqual([task["phase"] for task, _ in host.calls],
+                         ["target_native", "target_native", "source_fidelity"])
+        first_review = host.calls[0][0]["input"]["response_schema"]
+        self.assertEqual(first_review["holistic_assessment"]["repair_scope"],
+                         "none, local, passage, or whole_text")
+
+    def test_whole_text_verdict_is_required_for_every_eu_locale_and_other_scripts(self):
+        # Protocol coverage only: these fixtures make no native-quality claim.
+        for locale in (*OFFICIAL_EU_LOCALES, "ar", "hi-IN", "ja-JP"):
+            with self.subTest(locale=locale):
+                candidate = "Synthetic whole-text review fixture."
+                creator, host = Creator(candidate, candidate), Host(candidate)
+                worker = self.worker(creator, host, locale, max_corrections=0)
+                with self.assertRaisesRegex(
+                        RW.NativeRewriteBlocked, "independent_review_required"):
+                    worker.run(candidate, "prose", "holistic-" + locale)
+                schema = host.calls[0][0]["input"]["response_schema"]
+                self.assertIn("holistic_assessment", schema)
+                self.assertEqual(schema["locale"], locale)
+
     def test_uncertain_blocking_unanchored_disabled_and_legal_do_not_correct(self):
         bad = "On tärkeää huomata, että teksti on selkeä."
         for i, (change, options, kind) in enumerate((
@@ -142,6 +199,14 @@ class CorrectionTests(unittest.TestCase):
         malformed_uncertainty = defect(candidate, confidence="low")
         malformed_uncertainty["uncertainties"][0].pop("evidence_needed")
         cases.append(malformed_uncertainty)
+        pass_with_negative_holistic = {**defect(candidate), "status": "PASS",
+                                      "major_defects": []}
+        cases.append(pass_with_negative_holistic)
+        negative_without_defect = {**defect(candidate), "major_defects": []}
+        cases.append(negative_without_defect)
+        local_negative = copy.deepcopy(defect(candidate))
+        local_negative["holistic_assessment"]["repair_scope"] = "local"
+        cases.append(local_negative)
         for index, change in enumerate(cases):
             creator, host = Creator(candidate, "Teksti on selkeä."), Host(candidate, change=change)
             with self.assertRaisesRegex(RW.NativeRewriteBlocked, "review_invalid"):
@@ -253,7 +318,9 @@ class CorrectionTests(unittest.TestCase):
             def run_isolated(self, task, *, control):
                 reply = super().run_isolated(task, control=control)
                 if task["phase"] == "source_fidelity":
-                    reply["response"].update(defect(task["input"]["candidate"]))
+                    finding = defect(task["input"]["candidate"])
+                    finding.pop("holistic_assessment")
+                    reply["response"].update(finding)
                     reply["receipt"]["response_sha256"] = RW.SUBAGENTS._hash(reply["response"])
                     self.ledger[control["execution_key"]] = reply
                 return reply

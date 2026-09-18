@@ -14,7 +14,7 @@ from typing import Any, Mapping, Protocol
 
 
 SCHEMA = "translate-native.host-subagent-review.v1"
-NATIVE_REWRITE_REVIEW_SCHEMA = "translate-native.native-rewrite-review.v1"
+NATIVE_REWRITE_REVIEW_SCHEMA = "translate-native.native-rewrite-review.v2"
 CREATOR_COMPLETION_SCHEMA = "translate-native.creator-completion.v1"
 PROVIDER_PREFIX = "host-subagents-v1-"
 MAX_BYTES = 4_000_000
@@ -290,6 +290,8 @@ class HostSubagentProvider:
                            "blocking_defects", "major_defects"}
         if expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA:
             expected_fields.add("uncertainties")
+            if phase == "target_native":
+                expected_fields.add("holistic_assessment")
         elif expected_schema != "blun.website-localization-review.v2":
             raise SubagentReviewBlocked("review_invalid")
         if (not isinstance(response, dict)
@@ -303,13 +305,21 @@ class HostSubagentProvider:
                 or not isinstance(response.get("blocking_defects"), list)
                 or not isinstance(response.get("major_defects"), list)
                 or (expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA
-                    and not isinstance(response.get("uncertainties"), list))):
+                    and not isinstance(response.get("uncertainties"), list))
+                or (expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA
+                    and phase == "target_native"
+                    and not isinstance(response.get("holistic_assessment"), dict))):
             raise SubagentReviewBlocked("review_invalid")
         # Existing worker validates full findings and commercial evidence.
         self._evidence[_hash(payload)] = (_hash(response), host_evidence)
         if (phase == "target_native" and response["status"] == "PASS"
                 and not response["blocking_defects"] and not response["major_defects"]
-                and not response.get("uncertainties", [])):
+                and not response.get("uncertainties", [])
+                and (expected_schema != NATIVE_REWRITE_REVIEW_SCHEMA or (
+                    response.get("holistic_assessment", {}).get(
+                        "reads_as_native_original") is True
+                    and response.get("holistic_assessment", {}).get(
+                        "repair_scope") == "none"))):
             self._native_receipt = receipt
             self._finished = False
         return response

@@ -33,7 +33,7 @@ HTMLRW = _load("native_rewrite_html_planner", "native_rewrite_html.py")
 XMLRW = _load("native_rewrite_xml_planner", "native_rewrite_xml.py")
 MDRW = _load("native_rewrite_markdown_planner", "native_rewrite_markdown.py")
 SCHEMA = "translate-native.native-rewrite.v7"
-REVIEW_SCHEMA = "translate-native.native-rewrite-review.v1"
+REVIEW_SCHEMA = "translate-native.native-rewrite-review.v2"
 LONG_SCHEMA = "translate-native.native-rewrite-chunk.v1"
 LONG_EVIDENCE_SCHEMA = "translate-native.long-rewrite-evidence.v1"
 LONG_JSON_SCHEMA = "translate-native.native-rewrite-json-chunk.v1"
@@ -170,7 +170,15 @@ REPORT = """For every defect return its severity, class, exact candidate excerpt
 reason, concrete reader or meaning impact, and actionable revision direction.
 Report each material uncertainty separately with its class, reason, and the
 evidence needed to resolve it. Low confidence requires at least one uncertainty.
-PASS requires high confidence and empty defect and uncertainty lists."""
+During target_native review, make a separate holistic assessment of the complete
+candidate after ignoring the source: decide whether it reads as original native
+writing, explain the decision, and state whether repair is local, passage-wide or
+whole-text. One corrected spelling or grammar issue never proves that the rest of
+the text is natural. If the complete candidate remains source-shaped, stiff,
+mechanically literal or editorially unnatural, set reads_as_native_original false,
+anchor at least one major defect in the candidate, and require passage or whole-text
+repair. PASS requires high confidence, empty defect and uncertainty lists, and a
+truthful positive holistic target-language assessment."""
 NATIVE_REVIEW = WORKER._TARGET_REVIEW_SYSTEM + "\n" + REPORT
 FIDELITY = FIDELITY + "\n" + REPORT
 LONG_CREATION = """This is one owned segment of a longer original. Rewrite only
@@ -505,6 +513,8 @@ def _review(response, phase, locale, candidate, source):
     """Validate the actionable rewrite-review contract, not prose-shaped claims."""
     fields = {"schema", "phase", "locale", "status", "confidence",
               "blocking_defects", "major_defects", "uncertainties"}
+    if phase == "target_native":
+        fields.add("holistic_assessment")
     if (not isinstance(response, dict) or set(response) != fields
             or response.get("schema") != REVIEW_SCHEMA
             or response.get("phase") != phase or response.get("locale") != locale
@@ -536,7 +546,28 @@ def _review(response, phase, locale, candidate, source):
                 or any(not isinstance(item.get(key), str) or not item[key].strip()
                        or len(item[key]) > 4000 for key in uncertainty_fields)):
             raise NativeRewriteBlocked("review_invalid")
-    passing = not defects and not response["uncertainties"] and response["confidence"] == "high"
+    holistic_pass = True
+    if phase == "target_native":
+        holistic = response["holistic_assessment"]
+        if (not isinstance(holistic, dict)
+                or set(holistic) != {"reads_as_native_original", "reason", "repair_scope"}
+                or type(holistic.get("reads_as_native_original")) is not bool
+                or not isinstance(holistic.get("reason"), str)
+                or not holistic["reason"].strip() or len(holistic["reason"]) > 4000
+                or holistic.get("repair_scope") not in {
+                    "none", "local", "passage", "whole_text"}):
+            raise NativeRewriteBlocked("review_invalid")
+        holistic_pass = (holistic["reads_as_native_original"]
+                         and holistic["repair_scope"] == "none")
+        if (not holistic["reads_as_native_original"]
+                and (not defects or holistic["repair_scope"] not in {
+                    "passage", "whole_text"})):
+            raise NativeRewriteBlocked("review_invalid")
+        if (holistic["reads_as_native_original"]
+                and holistic["repair_scope"] in {"passage", "whole_text"}):
+            raise NativeRewriteBlocked("review_invalid")
+    passing = (not defects and not response["uncertainties"]
+               and response["confidence"] == "high" and holistic_pass)
     if (response["status"] == "PASS") != passing:
         raise NativeRewriteBlocked("review_invalid")
     if response["confidence"] == "low" and not response["uncertainties"]:
@@ -2448,8 +2479,7 @@ class NativeRewriteWorker:
                     instruction += "\n" + LONG_XML_NATIVE_REVIEW
                 if markdown_document and phase == "target_native":
                     instruction += "\n" + LONG_MARKDOWN_NATIVE_REVIEW
-            data = {**base, "candidate": candidate,
-                    "response_schema": {"schema": REVIEW_SCHEMA, "phase": phase,
+            response_schema = {"schema": REVIEW_SCHEMA, "phase": phase,
                                         "locale": self.locale, "status": "PASS or FAIL",
                                         "confidence": "high or low",
                                         "blocking_defects": [{"severity": "blocking",
@@ -2459,7 +2489,15 @@ class NativeRewriteWorker:
                                             "class": "...", "excerpt": "...", "reason": "...",
                                             "impact": "...", "revision_direction": "..."}],
                                         "uncertainties": [{"class": "...", "reason": "...",
-                                                            "evidence_needed": "..."}]}}
+                                                            "evidence_needed": "..."}]}
+            if phase == "target_native":
+                response_schema["holistic_assessment"] = {
+                    "reads_as_native_original": "true or false",
+                    "reason": "whole-candidate target-only editorial judgment",
+                    "repair_scope": "none, local, passage, or whole_text",
+                }
+            data = {**base, "candidate": candidate,
+                    "response_schema": response_schema}
             if phase == "source_fidelity":
                 data.update(source=source_value, glossary=[])
             request = WORKER._request(job, phase, instruction, data)

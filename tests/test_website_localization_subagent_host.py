@@ -167,13 +167,19 @@ class FixtureLauncher:
                 "findings": [], "uncertainties": [],
             }
         else:
-            if task["input"]["response_schema"]["schema"] == "translate-native.native-rewrite-review.v1":
+            if task["input"]["response_schema"]["schema"] == "translate-native.native-rewrite-review.v2":
                 response = {
-                    "schema": "translate-native.native-rewrite-review.v1",
+                    "schema": "translate-native.native-rewrite-review.v2",
                     "phase": task["phase"], "locale": locale, "status": "PASS",
                     "confidence": "high", "blocking_defects": [],
                     "major_defects": [], "uncertainties": [],
                 }
+                if task["phase"] == "target_native":
+                    response["holistic_assessment"] = {
+                        "reads_as_native_original": True,
+                        "reason": "Synthetic fixture marks the complete candidate as native.",
+                        "repair_scope": "none",
+                    }
             else:
                 response = BASE.review(locale, task["phase"], confidence="high")
             if (task["phase"] == HOST.FIDELITY_PHASE
