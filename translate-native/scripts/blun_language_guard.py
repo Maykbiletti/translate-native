@@ -409,7 +409,9 @@ def rewrite_text(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         return SERVICE_CLIENT.call_guard_service(
             SERVICE_ENDPOINT, {**arguments, "operation": "rewrite_text"},
-            auth_token=_service_token(), timeout=190.0,
+            # Two creations and three reviews, each capped at 300 seconds by
+            # the host adapter contract, plus transport overhead.
+            auth_token=_service_token(), timeout=1510.0,
         )
     except (OSError, SERVICE_CLIENT.GuardServiceError):
         return {"status": "BLOCK", "release_allowed": False,

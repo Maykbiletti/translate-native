@@ -98,12 +98,40 @@ No live installation or host configuration is changed by this implementation.
 
 ## Bounds and evidence
 
-One invocation performs one creation and at most two ordered reviews. There are
-no automatic correction loops or repeated model attempts. A changed candidate
-must enter a new request and both reviews again. The durable worker ledger and
-host execution ledger resume completed work; ambiguous creation never silently
-starts a second model call. An unchanged request ID with changed content or
-profile blocks. Operator version changes invalidate prior review/release bindings.
+The worker permits **at most one editorial correction**, configurable by the
+operator as `max_corrections=0` or `1` (default `1`). Only a host-verified,
+high-confidence native review with major defects, no blocking defects, and exact
+excerpts found in the candidate can trigger it. Low confidence, legal content,
+unanchored findings, conflicting or malformed reports, receipt errors and
+original-preservation failures still require independent review; they do not
+trigger another model attempt. This is not a second independent model adapter.
+
+The creator receives the original, the rejected candidate and the structured
+editorial report as untrusted data, without host attestation/control metadata.
+The corrected candidate must change, preserve protected structure and pass a new
+source-blind native review followed by original-versus-result review. Neither
+the original nor the earlier report enters the new native review. A second
+failure blocks; no third draft is generated. Only the final accepted text can
+receive a Guard receipt. The signed evidence digest also commits to the rejected
+candidate hash and its host-verified review, retained internally, not published.
+
+An uncorrected run uses at most three model calls. A corrected run uses at most
+five: two creations, two native reviews and one preservation review. Each call
+keeps the configured timeout/output-token ceiling; creator and host adapters must
+enforce those budgets. At the default 60-second ceiling, model work is bounded
+by 300 seconds; the maximum configured ceiling of 300 seconds permits 1,500
+seconds. MCP transport allows 1,510 seconds to cover that upper bound plus
+overhead. Token/cost reservation must allow up to five calls, not assume three.
+The correction limit and instructions are part of the effective profile hash,
+so changing the policy invalidates previous receipts.
+
+The separate durable correction ledger reserves the sole attempt before invoking
+the creator, then persists its result before starting fresh reviews. Restarts
+reverify the earlier host review and resume a persisted corrected candidate;
+ambiguous creation never silently starts another model call. Concurrent callers
+cannot allocate another correction. An unchanged request ID with changed input
+or profile blocks. Caller edits outside this internal correction require a new
+request and fresh reviews. Operator version changes invalidate prior bindings.
 
 Orthography PASS, heuristic style hints and actual review acceptance are separate.
 Uniform sentence lengths and transition words are only advisory. `NO_SIGNALS`
