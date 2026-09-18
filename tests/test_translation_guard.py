@@ -369,9 +369,51 @@ class VolumeIntegrityTests(unittest.TestCase):
             with self.subTest(malformed=malformed):
                 self.assertEqual("json_invalid", GUARD.detect_content_format(malformed))
         self.assertEqual("html", GUARD.detect_content_format("<main><p>Hello</p></main>"))
+        self.assertEqual("html", GUARD.detect_content_format("<span>Hello</span><span>World</span>"))
+        self.assertEqual("html", GUARD.detect_content_format('<a href="/x">Open</a>'))
+        for fragment in ("<abbr>A</abbr><abbr>B</abbr>",
+                         "<aside>Text</aside>", "<figure>Text</figure>"):
+            self.assertEqual("html", GUARD.detect_content_format(fragment))
+        self.assertEqual("xml", GUARD.detect_content_format("<product-card>Text</product-card>"))
+        self.assertEqual("html", GUARD.detect_content_format("<span title=\"unfinished"))
+        self.assertEqual("html", GUARD.detect_content_format("<unknown>unfinished"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text <product-card>One</product-card>"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text </unknown> trailing text"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text <!-- fixed comment --> trailing text"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text <?processing fixed?> trailing text"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text <product-card"))
         self.assertEqual("xml", GUARD.detect_content_format("<resources><string>Hello</string></resources>"))
         self.assertEqual("po", GUARD.detect_content_format('msgid "Hello"\nmsgstr "Hallo"\n'))
         self.assertEqual("subtitle", GUARD.detect_content_format("00:00:01,000 --> 00:00:03,000\nHello"))
+
+    def test_multi_root_html_is_not_routed_through_plain_text(self) -> None:
+        source = "<abbr>First value 42</abbr><abbr>Second value 84</abbr>"
+        target = "<abbr>Second value 84</abbr><abbr>First value 42</abbr>"
+        self.assertEqual("html", GUARD.detect_content_format(source))
+        self.assertEqual(["First value 42", "Second value 84"],
+                         GUARD.linguistic_segments(source, "html"))
+        self.assertEqual(["Second value 84", "First value 42"],
+                         GUARD.linguistic_segments(target, "html"))
+
+    def test_html_code_descendants_are_opaque(self) -> None:
+        source = ('<main><p>Original text</p><code title="fixed-code"><span title="fixed">'
+                  'rm -rf /</span></code><pre><b>SELECT * FROM users</b></pre></main>')
+        translated = ('<main><p>Ny text</p><code title="fixed-code"><span title="fixed">'
+                      'rm -rf /</span></code><pre><b>SELECT * FROM users</b></pre></main>')
+        self.assertEqual([], GUARD.compare_html(source, translated))
+        changed_code = translated.replace("rm -rf /", "rm -rf /tmp")
+        changed_nested_attribute = translated.replace('title="fixed"', 'title="ändrad"')
+        changed_code_attribute = translated.replace('title="fixed-code"', 'title="ändrad"')
+        changed_pre = translated.replace("SELECT * FROM users", "DROP TABLE users")
+        self.assertTrue(GUARD.compare_html(source, changed_code))
+        self.assertTrue(GUARD.compare_html(source, changed_nested_attribute))
+        self.assertTrue(GUARD.compare_html(source, changed_code_attribute))
+        self.assertTrue(GUARD.compare_html(source, changed_pre))
 
     def test_cli_returns_nonzero_for_seventy_percent_omission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -35,20 +35,29 @@ or relax translation identity checks. For original writing with no input draft,
 the existing mandatory response review remains applicable.
 
 For a long original, pass the complete text unchanged. The trusted worker may use
-its bounded durable plain-text plan or its lossless JSON string-value plan, but
+its bounded durable plain-text plan, its lossless JSON string-value plan, or its
+strict lossless HTML linguistic-span plan, but
 only a fully assembled result may enter the source-blind native review and
 subsequent original-preservation review. JSON keys, structure, non-string values
 and source bytes outside rewritten value tokens remain host-owned; unchanged
 escaped values retain their original raw token. Creator requests expose opaque
 value IDs and bounded context from the same value, never decoded key paths. Treat
 valid top-level JSON scalars as JSON, but do not misclassify `[Refrain]` or
-`{name}` prose as malformed JSON. Enforce the policy-bound combined source-plus-
+`{name}` prose as malformed JSON. For long HTML, every markup, URL, comment,
+doctype, entity, placeholder, script, style and code/pre descendant remains
+host-owned. Only visible text and explicitly approved linguistic attributes may
+reach the creator under opaque ordered IDs. The first version accepts only
+strictly balanced bounded HTML without mixed inline content, foreign namespaces,
+duplicate attributes, non-ASCII tag whitespace, `plaintext`, executable template
+delimiters, structural template attributes, ambiguous script tokenizer states or
+browser error recovery;
+anything ambiguous blocks before creator access. Enforce the policy-bound combined source-plus-
 target whole-document review text limit before creation and again after assembly. Do not
 summarize to fit a model limit, publish a partial segment or value batch, or treat
 per-segment fluency as document acceptance. The native reviewer must receive no
 source-derived manifest or segment metadata. Unsupported long structured
 containers block until a structure-aware plan is available. Any changed segment,
-value part or final assembly requires fresh reviews of the exact complete result.
+value part, HTML span or final assembly requires fresh reviews of the exact complete result.
 
 The repository deployment guide is `docs/native-rewrite.md`; the standalone skill
 does not install a model or host service. The Claude plugin accepts a rewrite

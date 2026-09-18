@@ -153,23 +153,25 @@ class HostSubagentProvider:
             ordinary = expected_schema == "blun.website-localization-candidate.v1"
             chunk = expected_schema == "translate-native.native-rewrite-chunk.v1"
             json_chunk = expected_schema == "translate-native.native-rewrite-json-chunk.v1"
+            html_chunk = expected_schema == "translate-native.native-rewrite-html-chunk.v1"
+            structured_chunk = json_chunk or html_chunk
             fields = ({"schema", "phase", "locale", "candidate"} if ordinary else
                       {"schema", "phase", "locale", "chunk_id",
                        "completion_status", "candidate"} if chunk else
                       {"schema", "phase", "locale", "chunk_id",
-                       "completion_status", "values"} if json_chunk else set())
+                       "completion_status", "values"} if structured_chunk else set())
             if (not isinstance(response, dict) or set(response) != fields
                     or response.get("schema") != expected_schema
                     or response.get("phase") != phase
                     or response.get("locale") != data["target"]["locale"]
-                    or (not json_chunk and (
+                    or (not structured_chunk and (
                         not isinstance(response.get("candidate"), str)
                         or not response.get("candidate")))
-                    or ((chunk or json_chunk) and (
+                    or ((chunk or structured_chunk) and (
                         response.get("chunk_id") != data.get("chunk_id")
                         or response.get("completion_status") != "complete"))):
                 raise SubagentReviewBlocked("candidate_invalid")
-            if json_chunk:
+            if structured_chunk:
                 expected_values = data.get("owned_values")
                 values = response.get("values")
                 if (not isinstance(expected_values, list) or not isinstance(values, list)
@@ -181,7 +183,7 @@ class HostSubagentProvider:
                                or not item["candidate"]
                                for index, item in enumerate(values))):
                     raise SubagentReviewBlocked("candidate_invalid")
-            if chunk or json_chunk:
+            if chunk or structured_chunk:
                 completion = getattr(self._creator, "verified_completion", None)
                 if not callable(completion):
                     raise SubagentReviewBlocked("creator_completion_unavailable")

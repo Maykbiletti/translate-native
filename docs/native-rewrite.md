@@ -215,7 +215,7 @@ timeout determines how many segments fit the fixed 1,500-second aggregate bound.
 At defaults this permits ten segments of up to 3,072 Unicode characters, for at
 most 23 calls in the worst plain-text correction path. A document beyond the
 computed bound returns `rewrite.long_document_too_large` before model access.
-Long HTML, XML and other unsupported structured containers return
+Inputs classified as XML and other unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
 summarized or routed through the short path. Token/cost reservation must use the
 computed long plan, not assume five calls. Segment policy, budget, correction
@@ -248,6 +248,39 @@ Automatic correction is deliberately
 disabled for long JSON until review findings carry a host-verifiable unique value
 identity; an actionable finding therefore routes to independent review rather
 than risking the wrong repeated value.
+
+Long HTML uses a separate bounded raw-span plan and never reparses then
+serializes a DOM. Standard HTML vocabulary has explicit precedence over XML in
+the syntax detector; a well-formed custom-element-only document is classified as
+XML and remains blocked until the trusted API carries an explicit container
+format. Before any creator call, the parser requires balanced explicit start/end
+tags, single- or double-quoted linguistic attributes, ASCII HTML whitespace,
+unique attributes, bounded depth
+and span counts, and one representation that does not depend on browser error
+recovery. It rejects mixed inline content, foreign SVG/MathML namespaces,
+templates, textareas, `plaintext`, unsafe declarations, structural template
+attributes and executable template delimiters in this first policy version.
+Script bodies using legacy escaped/double-escaped or nested-script states also
+block instead of relying on an incomplete browser-tokenizer approximation.
+Script and style raw text plus code, pre, kbd, samp and
+var subtrees stay entirely host-owned. Comments, doctypes, tags, attribute names,
+technical attributes, quoting, whitespace, entities, placeholders, URLs and
+printf tokens also remain exact source bytes. Only visible text pieces and the
+approved linguistic attributes (`alt`, `title`, `placeholder`, ARIA copy and
+recognized social/description metadata) enter creator batches under opaque,
+ordered span IDs.
+
+The worker accepts only the exact ordered ID set and trusted complete-provider
+evidence for every batch. It rejects markup, entities and attribute-quote
+injection in candidate values, replaces only the original raw spans, and proves
+the immutable skeleton again after assembly. The source-blind reviewer sees only
+the complete assembled HTML and allowed target profile; the separate fidelity
+reviewer then sees the complete original and target. Combined source-plus-target
+review text is capped at 262,144 UTF-8 bytes before creator access and after
+assembly. The Guard independently rebuilds the plan, every request/response hash,
+completion record and exact assembly before signing. Automatic correction is
+disabled because a document-wide finding is not yet bound to one exact HTML
+span; actionable findings therefore remain fail-closed for independent review.
 
 Segment cuts are allowed only at explicit whitespace or recognized sentence
 terminators. If a long unspaced input has no such safe boundary, the worker

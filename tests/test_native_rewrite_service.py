@@ -96,6 +96,37 @@ class RewriteServiceTests(unittest.TestCase):
                 service, result, source_text=source, language=locale,
                 request_id=request_id)["valid"])
 
+    def test_long_html_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä teksti säilyttää ääkköset ja numeron 42. "),
+            ("mt-MT", "Test ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42. "),
+            ("ar", "نص واضح يحافظ على الرقم 42 وعلامات الترقيم. "),
+        )
+        for index, (locale, seed) in enumerate(cases):
+            source = ('<!doctype html><html><head><meta name="description" '
+                      'content="Kuvaus 42."><script>const fixed = 42;</script>'
+                      '</head><body><main><p>' + (seed * 300) +
+                      '</p><a href="https://example.test/x">Avaa</a>'
+                      '<pre><code>const fixed = 42;</code></pre>'
+                      '</main></body></html>')
+            creator = FIX.Creator("fixture-keeps-html-spans")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-html-" + str(index)
+            result = self.rewrite(client, source_text=source, language=locale,
+                                  request_id=request_id,
+                                  content_type="documentation")
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            self.assertEqual([task["phase"] for task, _control in host.calls],
+                             ["target_native", "source_fidelity"])
+            self.assertNotIn("source", host.calls[0][0]["input"])
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id, content_type="documentation")["valid"])
+
     def test_guard_recomputes_long_json_manifest_and_rejects_tampering(self):
         source = json.dumps({"copy": "Täsmällinen arvo 42 säilyy. " * 180,
                              "count": 42, "enabled": True}, ensure_ascii=False,
@@ -110,6 +141,24 @@ class RewriteServiceTests(unittest.TestCase):
         worker.run = mock.Mock(return_value=reviewed)
         request = self.prepared_request(
             service, source_text=source, request_id="tampered-json")
+        result = service.handle(request)
+        self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
+                                  "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_long_html_manifest_and_rejects_tampering(self):
+        source = "<main><p>" + ("Täsmällinen arvo 42 säilyy. " * 240) + "</p></main>"
+        creator = FIX.Creator("fixture-keeps-html-spans")
+        service, _client, _host, _creator = self.setup_pipeline(
+            creator=creator, max_output_tokens=8192)
+        worker = service.rewrite_workers["standard"]
+        reviewed = json.loads(json.dumps(
+            worker.run(source, "prose", "tampered-html")))
+        reviewed["evidence"]["document"]["groups"][0][
+            "creation_response_sha256"] = "0" * 64
+        reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+        worker.run = mock.Mock(return_value=reviewed)
+        request = self.prepared_request(
+            service, source_text=source, request_id="tampered-html")
         result = service.handle(request)
         self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
                                   "reason": "rewrite.worker_failed"})

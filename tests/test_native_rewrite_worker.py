@@ -38,6 +38,16 @@ class Creator:
                     "completion_status": "complete",
                     "values": [{"value_id": item["value_id"], "candidate": value}
                                for item, value in zip(request.input["owned_values"], values)]}
+        if request.input["response_schema"]["schema"] == RW.LONG_HTML_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_HTML_SCHEMA, "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         return {"schema": RW.WORKER.CANDIDATE_SCHEMA, "phase": "transcreation",
                 "locale": request.input["target"]["locale"], "candidate": candidate}
 
@@ -355,6 +365,23 @@ class RewriteTests(unittest.TestCase):
             legacy_long.run("Pitkä teksti. " * 500, "prose", "legacy-long")
         self.assertFalse(creator.calls)
 
+    def test_html_effective_policy_changes_release_binding(self):
+        first, _ = self.worker()
+        original = set(RW.HTMLRW.TRANSLATABLE_ATTRIBUTES)
+        original_end_tag = RW.HTMLRW._END_TAG
+        try:
+            RW.HTMLRW.TRANSLATABLE_ATTRIBUTES.add("data-rewrite-copy")
+            second, _ = self.worker()
+            self.assertNotEqual(first.profile_sha256, second.profile_sha256)
+            RW.HTMLRW._END_TAG = RW.re.compile(
+                RW.HTMLRW.END_TAG_PATTERN + "(?:)")
+            third, _ = self.worker()
+            self.assertNotEqual(second.profile_sha256, third.profile_sha256)
+        finally:
+            RW.HTMLRW._END_TAG = original_end_tag
+            RW.HTMLRW.TRANSLATABLE_ATTRIBUTES.clear()
+            RW.HTMLRW.TRANSLATABLE_ATTRIBUTES.update(original)
+
     def test_long_document_completion_capacity_structure_and_manifest_fail_closed(self):
         class LengthLimitedCreator(Creator):
             def verified_completion(self, request, response):
@@ -659,6 +686,218 @@ class RewriteTests(unittest.TestCase):
         self.assertGreater(groups, 1)
         self.assertEqual(len(second_creator.calls), groups - 1)
         self.assertEqual(result["target_text"], source)
+
+    def test_long_html_preserves_container_and_uses_whole_document_reviews(self):
+        source = ('<!doctype html><html><head><meta name="description" '
+                  'content="Selkeä kuvaus 42."><script>const fixed = 42;</script>'
+                  '</head><body><main><p>' + ("Selkeä teksti {{name}} 42. " * 280) +
+                  '</p><a href="https://example.test/x">Avaa</a>'
+                  '<code><span title="fixed">rm -rf /</span></code>'
+                  '</main></body></html>')
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-html-spans"), host=host,
+            max_output_tokens=8192)
+        result = worker.run(source, "documentation", "long-html-lossless")
+        self.assertEqual(result["target_text"], source)
+        self.assertEqual(result["evidence"]["document"]["schema"],
+                         RW.LONG_HTML_EVIDENCE_SCHEMA)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "html"
+                            for call in creator.calls))
+        self.assertTrue(all("<" not in json.dumps(call.input["owned_values"])
+                            and "https://" not in json.dumps(call.input["owned_values"])
+                            and "rm -rf" not in json.dumps(call.input["owned_values"])
+                            for call in creator.calls))
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(native["input"]["candidate"], source)
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], result["evidence"]["document"],
+            content_type="documentation", request_id="long-html-lossless",
+            correction_history=[]))
+
+    def test_long_html_before_after_changes_only_owned_text(self):
+        source = ('<main data-id="fixed"><p>On tärkeää huomata, että tämä on selkeä. '
+                  + ("Lisätieto säilyy 42. " * 400) +
+                  '</p><img alt="Vanha kuvaus" src="fixed.png"></main>')
+
+        def revise(request):
+            return [item["text"].replace(
+                "On tärkeää huomata, että tämä on selkeä.", "Tämä on selkeä.")
+                    .replace("Vanha kuvaus", "Selkeä kuvaus")
+                    for item in request.input["owned_values"]]
+
+        worker, _creator = self.worker(
+            creator=Creator(revise), max_output_tokens=8192)
+        result = worker.run(source, "marketing", "long-html-before-after")
+        self.assertIn("<p>Tämä on selkeä. ", result["target_text"])
+        self.assertIn('alt="Selkeä kuvaus" src="fixed.png"', result["target_text"])
+        self.assertIn('data-id="fixed"', result["target_text"])
+        self.assertEqual(RW.integrity_errors(source, result["target_text"]), [])
+
+    def test_long_html_rejects_partial_reordered_and_extra_value_responses(self):
+        class MutatingHtmlCreator(Creator):
+            def __init__(self, mutation):
+                super().__init__("unchanged")
+                self.mutation = mutation
+
+            def invoke(self, request):
+                response = super().invoke(request)
+                if response.get("schema") == RW.LONG_HTML_SCHEMA:
+                    self.mutation(response["values"])
+                return response
+
+        source = "<main>" + "".join(
+            f"<p>Selkeä kappale {index} säilyttää numeron 42. "
+            + ("Lisätieto jatkuu. " * 5) + "</p>"
+            for index in range(40)) + "</main>"
+        mutations = (
+            lambda values: values.pop(),
+            lambda values: values.reverse(),
+            lambda values: values.append(dict(values[-1])),
+        )
+        for index, mutation in enumerate(mutations):
+            worker, creator = self.worker(creator=MutatingHtmlCreator(mutation))
+            with self.subTest(index=index), self.assertRaises(RW.NativeRewriteBlocked):
+                worker.run(source, "prose", "html-response-" + str(index))
+            self.assertEqual(len(creator.calls), 1)
+
+    def test_embedded_custom_html_never_exposes_markup_to_plain_creator(self):
+        source = ("Introductory copy 42. " * 180
+                  + "<product-card><p>First product value 84. "
+                  + ("Additional detail. " * 180)
+                  + "</p></product-card><product-card><p>Second product value 126. "
+                  + ("More detail. " * 180) + "</p></product-card>")
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-html-spans"), max_output_tokens=8192)
+        result = worker.run(source, "marketing", "embedded-custom-html")
+        self.assertEqual(result["target_text"], source)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "html"
+                            for call in creator.calls))
+        self.assertTrue(all("<" not in json.dumps(call.input["owned_values"])
+                            for call in creator.calls))
+
+    def test_embedded_html_comment_remains_host_owned(self):
+        source = (("Visible introductory copy 42. " * 300)
+                  + "<!-- fixed host comment SECRET -->")
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-html-spans"), max_output_tokens=8192)
+        result = worker.run(source, "marketing", "embedded-html-comment")
+        self.assertEqual(result["target_text"], source)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "html"
+                            for call in creator.calls))
+        self.assertTrue(all("fixed host comment" not in json.dumps(
+            call.input["owned_values"]) for call in creator.calls))
+
+    def test_long_html_restart_reuses_completed_batches(self):
+        class SimulatedCrash(BaseException):
+            pass
+
+        class CrashAfterFirstBatch(RW.NativeRewriteWorker):
+            def _create_long_segment(self, *args, **kwargs):
+                result = super()._create_long_segment(*args, **kwargs)
+                if not getattr(self, "_crashed", False):
+                    self._crashed = True
+                    raise SimulatedCrash()
+                return result
+
+        source = "<main>" + "".join(
+            f"<p>Selkeä kappale {index} säilyttää numeron 42. "
+            + ("Lisätieto jatkuu. " * 8) + "</p>"
+            for index in range(60)) + "</main>"
+        first_creator = Creator("unchanged")
+        first = CrashAfterFirstBatch(
+            first_creator, Host(), ledger_path=self.path,
+            creator_id="writer", creator_session_id="writer-session",
+            model_id="fixture-model", model_version="fixture-model-1",
+            host_policy_version="fixture-host-v1", profile=profile())
+        with self.assertRaises(SimulatedCrash):
+            first.run(source, "prose", "html-resume")
+        self.assertEqual(len(first_creator.calls), 1)
+
+        resumed, second_creator = self.worker(creator=Creator("unchanged"))
+        result = resumed.run(source, "prose", "html-resume")
+        groups = len(result["evidence"]["document"]["groups"])
+        self.assertGreater(groups, 1)
+        self.assertEqual(len(second_creator.calls), groups - 1)
+        self.assertEqual(result["target_text"], source)
+
+    def test_long_html_review_budget_blocks_before_creator(self):
+        source = "<main><p>" + ("Selkeä arvo 42. " * 9000) + "</p></main>"
+        worker, creator = self.worker(creator=Creator("unused"))
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "long_html_review_budget_exceeded"):
+            worker.run(source, "prose", "html-review-budget")
+        self.assertFalse(creator.calls)
+
+    def test_long_html_invalid_or_ambiguous_blocks_before_creator(self):
+        cases = (
+            "<main><p>Teksti</main>" + (" x" * 5000),
+            "<main><p>Teksti <strong>vahva</strong></p></main>" + (" " * 9000),
+            "<main><p title=Teksti>Teksti</p></main>" + (" " * 9000),
+            "<main><svg><text>Teksti</text></svg></main>" + (" " * 9000),
+            "<main><p\u00a0title=\"Teksti\">Sisältö</p></main>" + (" " * 9000),
+            "<main><p\vtitle=\"Teksti\">Sisältö</p></main>" + (" " * 9000),
+            "<main><script>fixed</ script><p>SECRET</p></main>" + (" " * 9000),
+            ("<main><script><!--<script></script><p>" + ("SECRET 42. " * 700)
+             + "</p></main>"),
+            "<main><plaintext>fixed</plaintext><p>SECRET</p></main>" + (" " * 9000),
+            ("Visible copy 42. " * 600) + "<product-card",
+        )
+        for index, source in enumerate(cases):
+            worker, creator = self.worker(creator=Creator("unused"))
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(RW.NativeRewriteBlocked, "long_html_"):
+                    worker.run(source, "prose", "invalid-html-" + str(index))
+                self.assertFalse(creator.calls)
+
+    def test_long_html_finding_never_triggers_unsafe_automatic_correction(self):
+        failed = False
+
+        def review_factory(task, response):
+            nonlocal failed
+            if task["phase"] == "target_native" and not failed:
+                failed = True
+                response.update(status="FAIL", major_defects=[{
+                    "severity": "major", "class": "formulaic_opening",
+                    "excerpt": "Selkeä teksti", "reason": "Synthetic fixture finding.",
+                    "impact": "The opening is repetitive.",
+                    "revision_direction": "Make the opening direct.",
+                }])
+            return response
+
+        source = "<main><p>" + ("Selkeä teksti säilyy 42. " * 400) + "</p></main>"
+        host = Host(review_factory=review_factory)
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-html-spans"), host=host,
+            max_output_tokens=8192)
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "independent_review_required"):
+            worker.run(source, "prose", "html-no-correction")
+        self.assertEqual(len(creator.calls), len({call.input["chunk_id"]
+                                                  for call in creator.calls}))
+        self.assertEqual([task["phase"] for task, _ in host.calls], ["target_native"])
+
+    def test_long_html_evidence_and_target_mutation_fail(self):
+        source = "<main><p>" + ("Selkeä arvo 42. " * 500) + "</p></main>"
+        worker, _creator = self.worker(
+            creator=Creator("fixture-keeps-html-spans"), max_output_tokens=8192)
+        result = worker.run(source, "prose", "html-evidence")
+        document = result["evidence"]["document"]
+        changed = json.loads(json.dumps(document))
+        changed["groups"][0]["creation_request_sha256"] = "0" * 64
+        self.assertFalse(worker.validate_document_evidence(
+            source, result["target_text"], changed, content_type="prose",
+            request_id="html-evidence", correction_history=[]))
+        changed_target = result["target_text"].replace("<main>", '<main id="added">', 1)
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed_target, document, content_type="prose",
+            request_id="html-evidence", correction_history=[]))
 
     def test_unsegmented_unicode_blocks_instead_of_splitting_grapheme_clusters(self):
         self.assertEqual(sum(last - first + 1 for first, last in

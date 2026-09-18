@@ -42,7 +42,7 @@ TRANSLATABLE_HTML_ATTRIBUTES = {
     "placeholder",
     "title",
 }
-HTML_CODE_ELEMENTS = {"script", "style"}
+HTML_CODE_ELEMENTS = {"code", "kbd", "pre", "samp", "script", "style", "var"}
 JSONLD_LINGUISTIC_KEYS = {
     "alternativeHeadline", "articleBody", "caption", "description", "headline",
     "keywords", "name", "text",
@@ -61,6 +61,32 @@ TRANSLATABLE_META_PROPERTIES = {
     "twitter:description",
     "twitter:title",
 }
+HTML_DETECTION_POLICY = "standard-html-vocabulary-before-xml-v1"
+HTML_STANDARD_ELEMENTS = frozenset({
+    "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base",
+    "bdi", "bdo", "blockquote", "body", "br", "button", "canvas", "caption",
+    "cite", "code", "col", "colgroup", "data", "datalist", "dd", "del",
+    "details", "dfn", "dialog", "div", "dl", "dt", "em", "embed", "fieldset",
+    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+    "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img",
+    "input", "ins", "kbd", "label", "legend", "li", "link", "main", "map",
+    "mark", "menu", "meta", "meter", "nav", "object", "ol", "optgroup",
+    "option", "output", "p", "picture", "pre", "progress", "q", "rp", "rt",
+    "ruby", "s", "samp", "script", "search", "section", "select", "slot",
+    "small", "source", "span", "strong", "style", "sub", "summary", "sup",
+    "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead",
+    "time", "title", "tr", "track", "u", "ul", "var", "video", "wbr",
+})
+HTML_DETECTION_PATTERN = re.compile(
+    r"<(?:!doctype[ \t\n\f\r]+html|"
+    + "|".join(sorted(HTML_STANDARD_ELEMENTS, key=lambda item: (-len(item), item)))
+    + r")\b",
+    re.IGNORECASE,
+)
+HTML_TAGLIKE_FALLBACK_PATTERN = re.compile(
+    r"(?:</?[A-Za-z][A-Za-z0-9._:-]*(?=[ \t\n\f\r/>]|$)"
+    r"|<!--|<!\[CDATA\[|<![A-Za-z]|<\?)",
+)
 MIN_TOTAL_SOURCE_UNITS = 80
 MIN_SEGMENT_SOURCE_UNITS = 24
 MIN_IDENTITY_SOURCE_CHARACTERS = 200
@@ -484,12 +510,14 @@ class LinguisticHTMLParser(HTMLParser):
         })
         meta_name = attribute_map.get("name", "").casefold()
         meta_property = attribute_map.get("property", "").casefold()
+        opaque_parent = any(item["tag"] in HTML_CODE_ELEMENTS for item in self.stack)
         for name, value in attrs:
             normalized = name.casefold()
             linguistic_meta = normalized == "content" and (
                 meta_name in TRANSLATABLE_META_NAMES or meta_property in TRANSLATABLE_META_PROPERTIES
             )
-            if value and (normalized in TRANSLATABLE_HTML_ATTRIBUTES or linguistic_meta):
+            if (not opaque_parent and value
+                    and (normalized in TRANSLATABLE_HTML_ATTRIBUTES or linguistic_meta)):
                 self._append_segment(value, f"{element_path}/@{normalized}")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -504,10 +532,13 @@ class LinguisticHTMLParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         current = self.stack[-1] if self.stack else None
+        opaque = next((item for item in reversed(self.stack)
+                       if item["tag"] in HTML_CODE_ELEMENTS), None)
         current_tag = current["tag"] if current else ""
         current_type = current["type"] if current else ""
-        if current_tag in HTML_CODE_ELEMENTS:
-            if current_tag == "script" and current_type == "application/ld+json":
+        if opaque is not None:
+            if (opaque is current and current_tag == "script"
+                    and current_type == "application/ld+json"):
                 try:
                     for index, segment in enumerate(jsonld_segments(json.loads(data))):
                         self._append_segment(segment, f"{current['path']}/jsonld[{index}]")
@@ -681,11 +712,21 @@ class TranslationHTMLParser(HTMLParser):
         return tuple(signature)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.events.append(("start", tag, self.attribute_signature(tag, attrs)))
+        signature = (tuple((name, "fixed", value) for name, value in attrs)
+                     if tag.casefold() in HTML_CODE_ELEMENTS
+                     or any(item[0].casefold() in HTML_CODE_ELEMENTS
+                            for item in self.open_elements)
+                     else self.attribute_signature(tag, attrs))
+        self.events.append(("start", tag, signature))
         self.open_elements.append((tag, dict(attrs)))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.events.append(("empty", tag, self.attribute_signature(tag, attrs)))
+        signature = (tuple((name, "fixed", value) for name, value in attrs)
+                     if tag.casefold() in HTML_CODE_ELEMENTS
+                     or any(item[0].casefold() in HTML_CODE_ELEMENTS
+                            for item in self.open_elements)
+                     else self.attribute_signature(tag, attrs))
+        self.events.append(("empty", tag, signature))
 
     def handle_endtag(self, tag: str) -> None:
         self.events.append(("end", tag))
@@ -696,15 +737,18 @@ class TranslationHTMLParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         current = self.open_elements[-1] if self.open_elements else None
+        opaque = next((item for item in reversed(self.open_elements)
+                       if item[0].casefold() in HTML_CODE_ELEMENTS), None)
         current_element = current[0] if current else None
-        if current_element == "script" and (current[1].get("type") or "").casefold() == "application/ld+json":
+        if (opaque is current and current_element == "script"
+                and (current[1].get("type") or "").casefold() == "application/ld+json"):
             try:
                 self.events.append(("json-ld", jsonld_signature(json.loads(data))))
             except json.JSONDecodeError:
                 self.events.append(("invalid json-ld", data))
             return
-        if current_element in HTML_CODE_ELEMENTS:
-            self.events.append(("code", current_element, data))
+        if opaque is not None:
+            self.events.append(("code", opaque[0], data))
             return
         signature = token_signature(data)
         if signature:
@@ -864,11 +908,7 @@ def detect_content_format(text: str) -> str:
     json_state = json_document_state(stripped)
     if json_state != "text":
         return json_state
-    if re.search(
-        r"<(?:!doctype\s+html|html|head|body|main|section|article|nav|header|footer|div|p|h[1-6])\b",
-        stripped,
-        re.IGNORECASE,
-    ):
+    if HTML_DETECTION_PATTERN.search(stripped):
         return "html"
     if stripped.startswith("<"):
         try:
@@ -876,6 +916,10 @@ def detect_content_format(text: str) -> str:
             return "xml"
         except ET.ParseError:
             pass
+    # Never let malformed or embedded tag-shaped input fall through to the
+    # plain-text segmenter where markup could become model-owned.
+    if HTML_TAGLIKE_FALLBACK_PATTERN.search(stripped):
+        return "html"
     if re.search(r"^msg(?:id|str|ctxt)\b", text, re.MULTILINE):
         return "po"
     if APPLE_STRING.search(text):
