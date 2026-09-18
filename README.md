@@ -46,7 +46,8 @@ the original; translations check fidelity against the source.
 The [natural-rewrite pipeline](docs/native-rewrite.md) revises original writing
 and AI drafts through a provider-neutral creator, isolated target-only review,
 separate meaning-preservation review, and the existing Guard. It has MCP/API
-entry points, persistent request identity and a verified-delivery adapter.
+entry points, persistent request identity, a verified-delivery adapter, and a
+Claude Stop/SubagentStop path bound to the host-selected locale and profile.
 Rewrite reviewers must return schema-validated defects with severity, exact
 passage, impact and revision direction, plus explicit uncertainties and required
 evidence. Incomplete reports cannot authorize correction or release.

@@ -106,10 +106,17 @@ Never trim, normalize, or edit the approved text. A transport error after send
 requires reconciliation, not blind retry. Internal tool results are not a license
 to bypass the user's output interception boundary.
 
-Existing Claude response/translation hooks remain compatible and unchanged.
-They do not recognize rewrite receipts as final-output grants. Use the dedicated
-trusted delivery adapter; hosts without rewrite-aware delivery remain blocked.
-No live installation or host configuration is changed by this implementation.
+The Claude plugin requires the trusted host to set
+`BLUN_LANGUAGE_GUARD_TASK_KIND=rewrite`, an exact
+`BLUN_LANGUAGE_GUARD_LANGUAGE`, and the registered
+`BLUN_LANGUAGE_GUARD_PROFILE_ID`. PreToolUse prevents model-selected task or
+profile choice. PostToolUse takes the final candidate only from the authenticated
+Guard result—not the tool input—then obtains a one-time rewrite delivery grant.
+Stop/SubagentStop accepts only the byte-identical target for the same session,
+agent, original hash, locale, profile, and content type. Missing policy, a failed
+tool call, a changed result, or an unavailable Guard blocks delivery. Existing
+response and translation paths remain compatible. No live installation or host
+configuration is changed by this implementation.
 
 ## Bounds and evidence
 

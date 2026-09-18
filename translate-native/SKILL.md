@@ -31,10 +31,11 @@ or relax translation identity checks. For original writing with no input draft,
 the existing mandatory response review remains applicable.
 
 The repository deployment guide is `docs/native-rewrite.md`; the standalone skill
-does not install a model or host service. The rewrite receipt is not a Claude
-Stop/SubagentStop grant: existing hook modes remain unchanged and fail closed.
-Hosts must use the rewrite-aware adapter or explicitly integrate that purpose
-before delivering the result through those channels.
+does not install a model or host service. The Claude plugin accepts a rewrite
+receipt only when the trusted host classifies the turn as `rewrite` and binds an
+exact language plus registered `profile_id`. Its PostToolUse hook extracts only
+the Guard-returned target, exchanges the receipt for a one-time rewrite delivery
+grant, and Stop/SubagentStop consumes that grant for the byte-identical output.
 
 ## Mandatory host enforcement
 

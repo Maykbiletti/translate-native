@@ -49,7 +49,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__.*__(release_response|release_translation)$",
+        "matcher": "mcp__.*__(release_response|release_translation|rewrite_text)$",
         "hooks": [
           {
             "type": "command",
@@ -65,7 +65,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__.*__(release_response|release_translation)$",
+        "matcher": "mcp__.*__(release_response|release_translation|rewrite_text)$",
         "hooks": [
           {
             "type": "command",
@@ -95,7 +95,7 @@
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "mcp__.*__(release_response|release_translation)$",
+        "matcher": "mcp__.*__(release_response|release_translation|rewrite_text)$",
         "hooks": [
           {
             "type": "command",

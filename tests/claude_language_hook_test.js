@@ -30,6 +30,11 @@ function runHook(mode, input, environment) {
 }
 
 async function main() {
+  const hookConfiguration = JSON.parse(fs.readFileSync(path.join(ROOT, "hooks", "hooks.json"), "utf8"));
+  for (const eventName of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
+    const matchers = hookConfiguration.hooks[eventName].map((entry) => entry.matcher || "");
+    assert(matchers.some((matcher) => matcher.includes("rewrite_text")), `${eventName} must intercept rewrite_text`);
+  }
   assert.deepStrictEqual(hookIdentity({ session_id: "session", agent_id: "agent" }), {
     session: "session",
     agent: "agent"
@@ -1233,7 +1238,9 @@ async function main() {
         const grant = `grant-${crypto.randomUUID()}`;
         if (valid) grants.set(grant, {
           source_sha256: crypto.createHash("sha256").update(
-            String(request.source_text || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").normalize("NFC"),
+            request.task_kind === "rewrite"
+              ? String(request.source_text || "")
+              : String(request.source_text || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").normalize("NFC"),
             "utf8"
           ).digest("hex"),
           target_text: request.target_text,
@@ -1241,6 +1248,7 @@ async function main() {
           task_kind: request.task_kind,
           content_type: request.content_type || "prose",
           short_text_reviewed: request.short_text_reviewed === true,
+          profile_id: request.task_kind === "rewrite" ? request.profile_id : undefined,
           session_id: request.session_id,
           session_epoch: request.session_epoch,
           agent_id: request.agent_id,
@@ -1260,6 +1268,7 @@ async function main() {
           && expected.task_kind === request.task_kind
           && expected.content_type === request.content_type
           && expected.short_text_reviewed === request.short_text_reviewed
+          && expected.profile_id === request.profile_id
           && expected.session_id === request.session_id
           && expected.session_epoch === request.session_epoch
           && sessionEpochs.get(request.session_id) === request.session_epoch
@@ -1457,6 +1466,7 @@ async function main() {
   }
 
   const environment = { BLUN_LANGUAGE_GUARD_RUNTIME: temporary };
+  const stateDirectory = path.join(temporary, "claude-hooks");
   const previousRuntime = process.env.BLUN_LANGUAGE_GUARD_RUNTIME;
   process.env.BLUN_LANGUAGE_GUARD_RUNTIME = temporary;
   try {
@@ -2671,6 +2681,314 @@ async function main() {
   }, policyEnvironment);
   assert.strictEqual(policyEnded.stdout, "");
 
+  const unclassifiedRewrite = await runHook("pre-tool", {
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
+    tool_input: {
+      source_text: "Original text.", language: "en-GB", profile_id: "model-chosen",
+      request_id: "rewrite-unclassified", content_type: "prose"
+    }
+  }, environment);
+  assert.strictEqual(
+    JSON.parse(unclassifiedRewrite.stdout).hookSpecificOutput.permissionDecision,
+    "deny",
+    "the model must not classify its own output as a rewrite"
+  );
+
+  const incompleteRewritePolicy = await runHook("pre-tool", {
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
+    tool_input: { source_text: "Original text.", language: "en-GB" }
+  }, {
+    ...environment,
+    BLUN_LANGUAGE_GUARD_TASK_KIND: "rewrite",
+    BLUN_LANGUAGE_GUARD_LANGUAGE: "en-GB"
+  });
+  assert.match(incompleteRewritePolicy.stdout, /invalid host release policy/);
+
+  const rewriteCases = [
+    {
+      session_id: "rewrite-maltese-main",
+      language: "mt-MT",
+      profile_id: "native-mt-general-v1",
+      source: "Huwa importanti li ngħidu li t-test huwa ċar.",
+      target: "It-test huwa ċar.\r\nDin hija fixture teknika."
+    },
+    {
+      session_id: "rewrite-finnish-child",
+      agent_id: "native-fi-review-child",
+      language: "fi-FI",
+      profile_id: "native-fi-general-v1",
+      source: "On tärkeää huomata, että teksti on selkeä.",
+      target: "Teksti on selkeä. Tämä on tekninen testifixture."
+    },
+    {
+      session_id: "rewrite-arabic-main",
+      language: "ar-SA",
+      profile_id: "native-ar-general-v1",
+      source: "من المهم أن نلاحظ أن النص واضح.",
+      target: "النص واضح. هذا مثال تقني للاختبار."
+    }
+  ];
+  for (const fixture of rewriteCases) {
+    const rewriteEnvironment = {
+      ...environment,
+      BLUN_LANGUAGE_GUARD_TASK_KIND: "rewrite",
+      BLUN_LANGUAGE_GUARD_LANGUAGE: fixture.language,
+      BLUN_LANGUAGE_GUARD_PROFILE_ID: fixture.profile_id
+    };
+    const identity = {
+      session_id: fixture.session_id,
+      cwd: temporary,
+      ...(fixture.agent_id ? { agent_id: fixture.agent_id } : {})
+    };
+    const startedRewrite = await runHook("session-start", {
+      session_id: fixture.session_id,
+      cwd: temporary,
+      hook_event_name: "SessionStart",
+      source: "startup"
+    }, rewriteEnvironment);
+    const rewriteContext = JSON.parse(startedRewrite.stdout).hookSpecificOutput.additionalContext;
+    assert.match(rewriteContext, /requires rewrite_text/);
+    assert(rewriteContext.includes(JSON.stringify(fixture.profile_id)));
+
+    const preparedRewrite = await runHook("pre-tool", {
+      ...identity,
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
+      tool_input: {
+        source_text: fixture.source,
+        language: "en",
+        profile_id: "model-selected-profile",
+        request_id: `request-${fixture.session_id}`,
+        content_type: "prose"
+      }
+    }, rewriteEnvironment);
+    const preparedRewriteOutput = JSON.parse(preparedRewrite.stdout).hookSpecificOutput;
+    assert.strictEqual(preparedRewriteOutput.updatedInput.language, fixture.language);
+    assert.strictEqual(preparedRewriteOutput.updatedInput.profile_id, fixture.profile_id);
+    assert.strictEqual(preparedRewriteOutput.updatedInput.source_text, fixture.source);
+
+    const rewriteTool = {
+      ...identity,
+      hook_event_name: "PostToolUse",
+      tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
+      tool_use_id: `tool-${fixture.session_id}`,
+      tool_input: preparedRewriteOutput.updatedInput,
+      tool_response: {
+        structuredContent: {
+          status: "PASS", release_allowed: true, task_kind: "rewrite",
+          target_text: fixture.target, release_token: "valid-token",
+          style_review: { status: "NO_SIGNALS", assessment: "NOT_ASSESSED" }
+        }
+      }
+    };
+    const authorizedRewrite = await runHook("post-tool", rewriteTool, rewriteEnvironment);
+    assert.strictEqual(authorizedRewrite.stdout, "");
+    const rewriteStateName = fs.readdirSync(stateDirectory).find((name) => {
+      if (!name.endsWith(".json")) return false;
+      const record = JSON.parse(fs.readFileSync(path.join(stateDirectory, name), "utf8"));
+      return record.task_kind === "rewrite" && record.profile_id === fixture.profile_id;
+    });
+    assert(rewriteStateName, "rewrite authorization must create purpose-bound protected state");
+    const rewriteState = fs.readFileSync(path.join(stateDirectory, rewriteStateName), "utf8");
+    assert(!rewriteState.includes(fixture.source), "rewrite state must not persist the original text");
+    assert(!rewriteState.includes(fixture.target), "rewrite state must not persist the revised text");
+
+    const stopMode = fixture.agent_id ? "subagent-stop" : "stop";
+    const eventName = fixture.agent_id ? "SubagentStop" : "Stop";
+    const deliveredRewrite = await runHook(stopMode, {
+      ...identity,
+      hook_event_name: eventName,
+      last_assistant_message: fixture.target,
+      stop_hook_active: false
+    }, rewriteEnvironment);
+    assert.strictEqual(deliveredRewrite.stdout, "", `${fixture.language} exact rewrite must pass`);
+
+    assert.strictEqual((await runHook("post-tool", rewriteTool, rewriteEnvironment)).stdout, "");
+    const editedTarget = fixture.target.includes("\r\n")
+      ? fixture.target.replace("\r\n", "\n")
+      : `${fixture.target} `;
+    const editedRewrite = await runHook(stopMode, {
+      ...identity,
+      hook_event_name: eventName,
+      last_assistant_message: editedTarget,
+      stop_hook_active: false
+    }, rewriteEnvironment);
+    assert.strictEqual(JSON.parse(editedRewrite.stdout).decision, "block", `${fixture.language} edited rewrite must block`);
+
+    assert.strictEqual((await runHook("post-tool", rewriteTool, rewriteEnvironment)).stdout, "");
+    const originalInsteadOfRewrite = await runHook(stopMode, {
+      ...identity,
+      hook_event_name: eventName,
+      last_assistant_message: fixture.source,
+      stop_hook_active: false
+    }, rewriteEnvironment);
+    assert.strictEqual(JSON.parse(originalInsteadOfRewrite.stdout).decision, "block");
+
+    const endedRewrite = await runHook("session-end", {
+      session_id: fixture.session_id,
+      cwd: temporary,
+      hook_event_name: "SessionEnd",
+      reason: "rewrite fixture complete"
+    }, rewriteEnvironment);
+    assert.strictEqual(endedRewrite.stdout, "");
+  }
+
+  const wrongRewriteProfileEnvironment = {
+    ...environment,
+    BLUN_LANGUAGE_GUARD_TASK_KIND: "rewrite",
+    BLUN_LANGUAGE_GUARD_LANGUAGE: "fi-FI",
+    BLUN_LANGUAGE_GUARD_PROFILE_ID: "native-fi-general-v1"
+  };
+  const wrongRewriteProfileSession = { ...common, session_id: "rewrite-wrong-profile" };
+  await runHook("session-start", wrongRewriteProfileSession, wrongRewriteProfileEnvironment);
+  const wrongRewriteProfile = await runHook("post-tool", {
+    ...wrongRewriteProfileSession,
+    hook_event_name: "PostToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
+    tool_input: {
+      source_text: "Alkuperäinen teksti.", language: "fi-FI",
+      profile_id: "native-mt-general-v1", request_id: "wrong-profile", content_type: "prose"
+    },
+    tool_response: {
+      structuredContent: {
+        release_allowed: true, task_kind: "rewrite", target_text: "Luonteva teksti.",
+        release_token: "valid-token"
+      }
+    }
+  }, wrongRewriteProfileEnvironment);
+  assert.strictEqual(JSON.parse(wrongRewriteProfile.stdout).decision, "block");
+  assert(!wrongRewriteProfile.stdout.includes("Alkuperäinen"));
+  assert(!wrongRewriteProfile.stdout.includes("Luonteva"));
+
+  const missingRewriteResult = await runHook("post-tool", {
+    ...wrongRewriteProfileSession,
+    hook_event_name: "PostToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
+    tool_input: {
+      source_text: "Alkuperäinen teksti.", language: "fi-FI",
+      profile_id: "native-fi-general-v1", request_id: "missing-result", content_type: "prose"
+    },
+    tool_response: { structuredContent: { release_allowed: true, task_kind: "rewrite", release_token: "valid-token" } }
+  }, wrongRewriteProfileEnvironment);
+  assert.strictEqual(JSON.parse(missingRewriteResult.stdout).decision, "block");
+
+  const rewritePolicyDriftSession = { ...common, session_id: "rewrite-policy-drift" };
+  await runHook("session-start", rewritePolicyDriftSession, wrongRewriteProfileEnvironment);
+  const rewritePolicyDriftTool = {
+    ...rewritePolicyDriftSession,
+    hook_event_name: "PostToolUse",
+    tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
+    tool_input: {
+      source_text: "On tärkeää huomata, että teksti on selkeä.", language: "fi-FI",
+      profile_id: "native-fi-general-v1", request_id: "policy-drift", content_type: "prose"
+    },
+    tool_response: {
+      structuredContent: {
+        release_allowed: true, task_kind: "rewrite", target_text: "Teksti on selkeä.",
+        release_token: "valid-token"
+      }
+    }
+  };
+  for (const driftEnvironment of [
+    environment,
+    { ...wrongRewriteProfileEnvironment, BLUN_LANGUAGE_GUARD_PROFILE_ID: "native-fi-other-v1" },
+    { ...wrongRewriteProfileEnvironment, BLUN_LANGUAGE_GUARD_LANGUAGE: "fi" },
+    {
+      ...environment,
+      BLUN_LANGUAGE_GUARD_TASK_KIND: "translation",
+      BLUN_LANGUAGE_GUARD_LANGUAGE: "fi-FI"
+    }
+  ]) {
+    assert.strictEqual(
+      (await runHook("post-tool", rewritePolicyDriftTool, wrongRewriteProfileEnvironment)).stdout,
+      ""
+    );
+    const policyDriftStop = await runHook("stop", {
+      ...rewritePolicyDriftSession,
+      hook_event_name: "Stop",
+      last_assistant_message: "Teksti on selkeä.",
+      stop_hook_active: false
+    }, driftEnvironment);
+    assert.strictEqual(JSON.parse(policyDriftStop.stdout).decision, "block");
+  }
+  const rewritePolicyDriftChildTool = {
+    ...rewritePolicyDriftTool,
+    agent_id: "rewrite-policy-drift-child",
+    tool_use_id: "rewrite-policy-drift-child-tool"
+  };
+  assert.strictEqual(
+    (await runHook("post-tool", rewritePolicyDriftChildTool, wrongRewriteProfileEnvironment)).stdout,
+    ""
+  );
+  const childPolicyDriftStop = await runHook("subagent-stop", {
+    ...rewritePolicyDriftSession,
+    agent_id: "rewrite-policy-drift-child",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: "Teksti on selkeä.",
+    stop_hook_active: false
+  }, { ...wrongRewriteProfileEnvironment, BLUN_LANGUAGE_GUARD_PROFILE_ID: "native-fi-other-v1" });
+  assert.strictEqual(JSON.parse(childPolicyDriftStop.stdout).decision, "block");
+
+  const responseToRewriteSession = { ...common, session_id: "response-to-rewrite-policy-drift" };
+  await runHook("session-start", responseToRewriteSession, environment);
+  const responseBeforeRewritePolicy = {
+    ...tool,
+    ...responseToRewriteSession,
+    tool_use_id: "response-before-rewrite-policy"
+  };
+  assert.strictEqual((await runHook("post-tool", responseBeforeRewritePolicy, environment)).stdout, "");
+  const responseUnderRewritePolicy = await runHook("stop", {
+    ...responseToRewriteSession,
+    hook_event_name: "Stop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, wrongRewriteProfileEnvironment);
+  assert.strictEqual(JSON.parse(responseUnderRewritePolicy.stdout).decision, "block");
+
+  const responseBeforeRewriteChild = {
+    ...responseBeforeRewritePolicy,
+    agent_id: "response-before-rewrite-child",
+    tool_use_id: "response-before-rewrite-child-tool"
+  };
+  assert.strictEqual((await runHook("post-tool", responseBeforeRewriteChild, environment)).stdout, "");
+  const responseChildUnderRewritePolicy = await runHook("subagent-stop", {
+    ...responseToRewriteSession,
+    agent_id: "response-before-rewrite-child",
+    hook_event_name: "SubagentStop",
+    last_assistant_message: clean,
+    stop_hook_active: false
+  }, wrongRewriteProfileEnvironment);
+  assert.strictEqual(JSON.parse(responseChildUnderRewritePolicy.stdout).decision, "block");
+  await runHook("session-end", {
+    ...responseToRewriteSession,
+    hook_event_name: "SessionEnd",
+    reason: "response to rewrite policy drift fixtures complete"
+  }, environment);
+  await runHook("session-end", {
+    ...rewritePolicyDriftSession,
+    hook_event_name: "SessionEnd",
+    reason: "rewrite policy drift fixtures complete"
+  }, wrongRewriteProfileEnvironment);
+
+  const rewriteFailure = await runHook("post-tool-failure", {
+    ...wrongRewriteProfileSession,
+    hook_event_name: "PostToolUseFailure",
+    tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
+    tool_use_id: "rewrite-tool-failure",
+    error: "connection closed"
+  }, wrongRewriteProfileEnvironment);
+  assert.strictEqual(JSON.parse(rewriteFailure.stdout).decision, "block");
+  assert.match(rewriteFailure.stdout, /rewrite_text/);
+  await runHook("session-end", {
+    ...wrongRewriteProfileSession,
+    hook_event_name: "SessionEnd",
+    reason: "rewrite rejection fixtures complete"
+  }, wrongRewriteProfileEnvironment);
+
   const otherSessionStarted = await runHook("session-start", {
     ...common,
     session_id: "session-two",
@@ -2687,7 +3005,6 @@ async function main() {
   assert.strictEqual(JSON.parse(releaseWithoutSessionStart.stdout).decision, "block");
   assert.match(releaseWithoutSessionStart.stdout, /no valid epoch/);
 
-  const stateDirectory = path.join(temporary, "claude-hooks");
   const brokenSessionHash = crypto.createHash("sha256").update("session-broken").digest("hex");
   const brokenEpochPath = path.join(stateDirectory, `session-${brokenSessionHash}.epoch`);
   fs.mkdirSync(brokenEpochPath);
