@@ -454,11 +454,13 @@ def _integrity_errors(source: str, target: str) -> list[str]:
     selected_format = _GUARD.detect_content_format(source)
     errors.extend(_GUARD.translation_identity_errors(source, target))
     errors.extend(_GUARD.translation_volume_errors(source, target))
-    if selected_format == "json":
+    if selected_format == "json_invalid":
+        errors.append("JSON source is invalid under the strict structure policy")
+    elif selected_format == "json":
         try:
-            source_data = json.loads(source.lstrip("\ufeff"))
-            target_data = json.loads(target.lstrip("\ufeff"))
-        except json.JSONDecodeError:
+            source_data = _GUARD.strict_json_loads(source.lstrip("\ufeff"))
+            target_data = _GUARD.strict_json_loads(target.lstrip("\ufeff"))
+        except (json.JSONDecodeError, ValueError, UnicodeError):
             errors.append("JSON structure is invalid")
         else:
             errors.extend(_GUARD.compare_json(source_data, target_data))

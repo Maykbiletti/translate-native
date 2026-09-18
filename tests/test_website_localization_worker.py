@@ -276,6 +276,19 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "integrity.failed")
         self.assertTrue(caught.exception.finding_hashes)
 
+    def test_local_integrity_never_downgrades_invalid_or_extreme_json_to_text(self):
+        cases = (
+            ('{"copy":"Hello","copy":"Other"}', '{"copy":"Hej"}'),
+            ('{"n":1e1000000,"copy":"Hello"}',
+             '{"n":1e9999999,"copy":"Hej"}'),
+        )
+        for index, (source, target) in enumerate(cases):
+            provider = self.successful_provider(target)
+            with self.subTest(index=index), self.assertRaises(
+                    WORKER.LocalizationWorkerBlocked) as caught:
+                WORKER.run_localization_job(job(source, "marketing"), assets(), provider)
+            self.assertEqual(caught.exception.code, "integrity.failed")
+
     def test_asset_version_mismatch_blocks_before_provider_call(self):
         provider = self.successful_provider()
         with self.assertRaises(WORKER.LocalizationWorkerBlocked) as caught:

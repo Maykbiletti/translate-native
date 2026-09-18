@@ -360,6 +360,13 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
             )
         if not whole_identity_errors:
             selected_format = TRANSLATION.detect_content_format(source)
+            if selected_format == "json_invalid":
+                report["findings"].append(
+                    asdict(Finding(
+                        "invalid-json-structure",
+                        "Source resembles JSON but violates the strict JSON structure policy.",
+                    ))
+                )
             for error in TRANSLATION.structured_identity_errors(
                 source, target, selected_format
             ):

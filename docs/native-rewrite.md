@@ -213,15 +213,41 @@ than a risky automatic edit.
 The output-token ceiling determines the segment size; the configured per-call
 timeout determines how many segments fit the fixed 1,500-second aggregate bound.
 At defaults this permits ten segments of up to 3,072 Unicode characters, for at
-most 23 calls in the worst correction path. A document beyond the computed bound
-returns `rewrite.long_document_too_large` before model access. Long HTML, XML,
-JSON and other structured containers return
-`rewrite.long_document_structured_unsupported` until a container-aware segmenter
-can preserve structure across boundaries. They are never silently summarized or
-routed through the short path. Token/cost reservation must use the computed long
-plan, not assume five calls. Segment policy, budget, correction limit and all
-instructions are part of the effective profile hash, so a policy change
-invalidates previous receipts.
+most 23 calls in the worst plain-text correction path. A document beyond the
+computed bound returns `rewrite.long_document_too_large` before model access.
+Long HTML, XML and other unsupported structured containers return
+`rewrite.long_document_structured_unsupported`; they are never silently
+summarized or routed through the short path. Token/cost reservation must use the
+computed long plan, not assume five calls. Segment policy, budget, correction
+limit and all instructions are part of the effective profile hash, so a policy
+change invalidates previous receipts.
+
+Long JSON uses a separate raw-token plan. A bounded strict parser rejects
+duplicate decoded keys (including Unicode-escape aliases), non-finite numbers,
+lone surrogates, excessive depth, excessive string-value count and trailing data
+before model access. Extreme finite exponents are compared without host-float
+overflow or underflow. Typed, escaped JSON-pointer identities cannot collide when
+keys contain dots, brackets, slashes or tildes. Only decoded string-value parts,
+opaque value IDs and bounded read-only context from the same string value enter
+creator requests. Decoded keys and paths, delimiters, indentation, member order,
+array order, number lexemes, booleans and null remain host-owned. Valid top-level
+JSON scalars use this plan; bracketed prose such as `[Refrain]` or `{name}` is
+not guessed to be JSON, while unambiguously JSON-shaped strict-parser failures
+remain fail-closed.
+The creator must return the exact ordered value-ID set for each bounded batch;
+missing, additional, duplicated or reordered values and incomplete provider
+completion evidence block. The trusted worker JSON-escapes each changed value;
+an unchanged value retains its original escape token and casing byte-for-byte.
+It replaces only its original value token and proves the immutable container
+skeleton again in the Guard. The source-blind reviewer then receives only the
+complete assembled target JSON and the allowed target profile; fidelity receives
+the complete original and target afterward. Combined source-plus-target fidelity
+review text is capped at 262,144 UTF-8 bytes: capacity is reserved before creator
+access and the exact result is checked again after assembly.
+Automatic correction is deliberately
+disabled for long JSON until review findings carry a host-verifiable unique value
+identity; an actionable finding therefore routes to independent review rather
+than risking the wrong repeated value.
 
 Segment cuts are allowed only at explicit whitespace or recognized sentence
 terminators. If a long unspaced input has no such safe boundary, the worker

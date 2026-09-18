@@ -28,6 +28,16 @@ class Creator:
                     "locale": request.input["target"]["locale"],
                     "chunk_id": request.input["chunk_id"],
                     "completion_status": "complete", "candidate": candidate}
+        if request.input["response_schema"]["schema"] == RW.LONG_JSON_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_JSON_SCHEMA, "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         return {"schema": RW.WORKER.CANDIDATE_SCHEMA, "phase": "transcreation",
                 "locale": request.input["target"]["locale"], "candidate": candidate}
 
@@ -37,7 +47,7 @@ class Creator:
             "request_sha256": RW.SUBAGENTS._hash(request.as_payload()),
             "response_sha256": RW.SUBAGENTS._hash(response),
             "finish_reason": "complete",
-            "output_tokens": max(1, len(response["candidate"]) // 4),
+            "output_tokens": max(1, len(json.dumps(response, ensure_ascii=False)) // 4),
             "provider_execution_id": "fixture-" + request.request_id[-48:],
         }
 
@@ -375,11 +385,16 @@ class RewriteTests(unittest.TestCase):
         self.assertFalse(creator.calls)
 
         structured = json.dumps({"content": "pitkä " * 1000}, ensure_ascii=False)
-        worker, creator = self.worker(creator=Creator("unused"))
-        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
-                                    "long_document_structured_unsupported"):
-            worker.run(structured, "prose", "structured-long")
-        self.assertFalse(creator.calls)
+        worker, creator = self.worker(creator=Creator("unchanged-json-values"))
+        structured_result = worker.run(structured, "prose", "structured-long")
+        self.assertEqual(structured_result["target_text"], structured)
+        self.assertEqual(structured_result["evidence"]["document"]["schema"],
+                         RW.LONG_JSON_EVIDENCE_SCHEMA)
+        self.assertGreater(len(creator.calls), 1)
+        self.assertTrue(worker.validate_document_evidence(
+            structured, structured_result["target_text"],
+            structured_result["evidence"]["document"], content_type="prose",
+            request_id="structured-long", correction_history=[]))
 
         clean_worker, _ = self.worker(
             creator=Creator(lambda request: request.input["owned_source"]["text"]),
@@ -420,6 +435,230 @@ class RewriteTests(unittest.TestCase):
         ) + suffix, japanese)
         for _item, body in chunks[:-1]:
             self.assertIn(body[-1], ".!?。！？｡؟।॥")
+
+    def test_long_json_preserves_container_bytes_and_uses_whole_document_reviews(self):
+        source = ("\ufeff{\n"
+                  '  "a/b~c": "' + ("Selkeä arvo 42 ja ääkköset. " * 80) + '",\n'
+                  '  "a": {"b": "Toinen arvo säilyy."},\n'
+                  '  "array": [true, null, -0, 1e+02, "اقتباس واضح"],\n'
+                  '  "placeholder": "{{name}} https://example.test/"\n'
+                  "}\n")
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-owned-values"), host=host,
+            max_output_tokens=2048)
+        result = worker.run(source, "documentation", "long-json-lossless")
+        self.assertEqual(result["target_text"], source)
+        document = result["evidence"]["document"]
+        self.assertEqual(document["schema"], RW.LONG_JSON_EVIDENCE_SCHEMA)
+        paths = [item["path"] for item in document["manifest"]["values"]]
+        self.assertIn("#/k:a~1b~0c", paths)
+        self.assertIn("#/k:a/k:b", paths)
+        self.assertEqual([task["phase"] for task, _control in host.calls],
+                         ["target_native", "source_fidelity"])
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="documentation",
+            request_id="long-json-lossless", correction_history=[]))
+        self.assertGreaterEqual(len(creator.calls), 1)
+
+    def test_json_duplicate_keys_nonfinite_and_surrogates_block_before_model(self):
+        cases = (
+            '{"a":"eins","a":"zwei"}',
+            '{"a":"eins","\\u0061":"zwei"}',
+            '{"a":"eins","a":"zwei"} trailing',
+            '{"a":NaN}',
+            '{"a":"\\ud800"}',
+        )
+        for index, source in enumerate(cases):
+            worker, creator = self.worker(creator=Creator("unused"))
+            with self.subTest(source=source), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, "long_json_invalid"):
+                worker.run(source, "prose", "invalid-json-" + str(index))
+            self.assertFalse(creator.calls)
+
+    def test_bracketed_refrain_and_placeholder_prose_remain_plain_text(self):
+        sources = (
+            "[Refrain]\n" + ("Sing this intentional refrain again. " * 220),
+            "{name} starts this line. " + ("Keep the simple wording and number 42. " * 220),
+        )
+        for index, source in enumerate(sources):
+            worker, creator = self.worker(
+                creator=Creator(lambda request: request.input["owned_source"]["text"]))
+            result = worker.run(source, "prose", "bracketed-prose-" + str(index))
+            self.assertEqual(source, result["target_text"])
+            self.assertTrue(creator.calls)
+            self.assertEqual(result["evidence"]["document"]["schema"],
+                             RW.LONG_EVIDENCE_SCHEMA)
+
+    def test_top_level_json_string_uses_json_plan_and_retains_quotes(self):
+        source = json.dumps(("Selkeä pitkä arvo 42. " * 400).strip(), ensure_ascii=False)
+        worker, creator = self.worker(creator=Creator("unchanged"))
+        result = worker.run(source, "prose", "top-level-json-string")
+        self.assertEqual(source, result["target_text"])
+        self.assertEqual(result["evidence"]["document"]["schema"],
+                         RW.LONG_JSON_EVIDENCE_SCHEMA)
+        self.assertEqual(json.loads(result["target_text"]), json.loads(source))
+        for call in creator.calls:
+            for item in call.input["owned_values"]:
+                self.assertNotIn("path", item)
+                self.assertEqual(
+                    set(item),
+                    {"value_id", "text", "sha256", "previous_context", "next_context"},
+                )
+
+    def test_long_json_noop_retains_original_escape_tokens_byte_exactly(self):
+        source = ('{"copy":"\\u00E4\\/x\\u0061", "padding":"'
+                  + ("Selkeä arvo. " * 350) + '"}')
+        worker, _creator = self.worker(creator=Creator("unchanged"))
+        result = worker.run(source, "prose", "json-escaped-noop")
+        self.assertEqual(source, result["target_text"])
+        self.assertIn('"\\u00E4\\/x\\u0061"', result["target_text"])
+
+    def test_extreme_json_number_change_is_blocked_and_planner_bounds_errors(self):
+        source = '{"n":1e1000000,"copy":"Selkeä arvo 42."}'
+        target = '{"n":1e9999999,"copy":"Selkeä arvo 42."}'
+        worker, _creator = self.worker(creator=Creator(target))
+        with self.assertRaises(RW.NativeRewriteBlocked):
+            worker.run(source, "prose", "extreme-number")
+        huge, changed = "9" * 5000, "8" * 5000
+        short_worker, _creator = self.worker(
+            creator=Creator(changed), max_output_tokens=8192)
+        with self.assertRaises(RW.NativeRewriteBlocked):
+            short_worker.run(huge, "prose", "huge-top-level-integer")
+        self.assertEqual([], RW.JSONRW.parse_leaves(huge))
+
+        long_huge = "9" * 8000
+        long_worker, long_creator = self.worker(
+            creator=Creator("unused"), max_output_tokens=8192)
+        result = long_worker.run(long_huge, "prose", "long-top-level-integer")
+        self.assertEqual(long_huge, result["target_text"])
+        self.assertEqual(result["evidence"]["document"]["schema"],
+                         RW.LONG_JSON_EVIDENCE_SCHEMA)
+        self.assertFalse(long_creator.calls)
+
+    def test_long_json_review_input_budget_blocks_before_creator(self):
+        source = '{"padding":[' + ("0," * 150000) + '0],"copy":"Selkeä arvo."}'
+        worker, creator = self.worker(creator=Creator("unused"), max_output_tokens=8192)
+        with self.assertRaisesRegex(
+                RW.NativeRewriteBlocked, "long_json_review_budget_exceeded"):
+            worker.run(source, "prose", "json-review-budget")
+        self.assertFalse(creator.calls)
+
+    def test_multibyte_json_cannot_bypass_long_document_capacity(self):
+        source = json.dumps("😀" * 7000, ensure_ascii=False)
+        worker, creator = self.worker(creator=Creator("😀" * 4000),
+                                      max_output_tokens=8192)
+        self.assertTrue(worker.is_long_document(source))
+        with self.assertRaises(RW.NativeRewriteBlocked):
+            worker.run(source, "prose", "multibyte-capacity")
+        self.assertFalse(creator.calls)
+
+    def test_long_json_rejects_partial_reordered_and_extra_value_responses(self):
+        class MutatingJsonCreator(Creator):
+            def __init__(self, mutation):
+                super().__init__("unchanged")
+                self.mutation = mutation
+
+            def invoke(self, request):
+                response = super().invoke(request)
+                if response.get("schema") == RW.LONG_JSON_SCHEMA:
+                    self.mutation(response["values"])
+                return response
+
+        source = json.dumps({
+            "first": "Ensimmäinen selkeä arvo. " * 20,
+            "second": "Toinen selkeä arvo. " * 20,
+            "padding": [0] * 1200,
+        }, ensure_ascii=False)
+        mutations = (
+            lambda values: values.pop(),
+            lambda values: values.reverse(),
+            lambda values: values.append(dict(values[-1])),
+        )
+        for index, mutation in enumerate(mutations):
+            worker, creator = self.worker(creator=MutatingJsonCreator(mutation))
+            with self.subTest(index=index), self.assertRaises(RW.NativeRewriteBlocked):
+                worker.run(source, "prose", "json-response-" + str(index))
+            self.assertEqual(len(creator.calls), 1)
+
+    def test_long_json_evidence_tampering_and_container_changes_fail(self):
+        source = json.dumps({"copy": "Pitkä selkeä arvo 42. " * 180,
+                             "number": 17, "enabled": True}, ensure_ascii=False,
+                            indent=2)
+        worker, _creator = self.worker(creator=Creator("unchanged"))
+        result = worker.run(source, "prose", "json-evidence")
+        document = result["evidence"]["document"]
+        mutations = (
+            lambda value: value["manifest"].__setitem__("skeleton_sha256", "0" * 64),
+            lambda value: value["groups"][0].__setitem__(
+                "creation_response_sha256", "0" * 64),
+            lambda value: value["groups"][0]["values"][0].__setitem__(
+                "target_chars", value["groups"][0]["values"][0]["target_chars"] + 1),
+        )
+        for mutation in mutations:
+            changed = json.loads(json.dumps(document))
+            mutation(changed)
+            self.assertFalse(worker.validate_document_evidence(
+                source, result["target_text"], changed, content_type="prose",
+                request_id="json-evidence", correction_history=[]))
+        changed_target = result["target_text"].replace('"number": 17', '"number": 18')
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed_target, document, content_type="prose",
+            request_id="json-evidence", correction_history=[]))
+
+    def test_long_json_synthetic_before_after_changes_only_value_tokens(self):
+        opening = "On tärkeää huomata, että teksti on selkeä. "
+        source = ("{\n  \"copy\": "
+                  + json.dumps(opening + ("Lisätieto säilyy 42. " * 180),
+                               ensure_ascii=False)
+                  + ",\n  \"count\": 42,\n  \"enabled\": true\n}\n")
+
+        def revise(request):
+            return [item["text"].replace(opening, "Teksti on selkeä. ", 1)
+                    for item in request.input["owned_values"]]
+
+        worker, _creator = self.worker(creator=Creator(revise))
+        result = worker.run(source, "prose", "json-before-after")
+        self.assertNotEqual(result["target_text"], source)
+        self.assertIn('"copy": "Teksti on selkeä.', result["target_text"])
+        self.assertIn('"count": 42', result["target_text"])
+        self.assertIn('"enabled": true', result["target_text"])
+        self.assertEqual(RW.integrity_errors(source, result["target_text"]), [])
+
+    def test_long_json_restart_reuses_completed_batches(self):
+        class SimulatedCrash(BaseException):
+            pass
+
+        class CrashAfterFirstBatch(RW.NativeRewriteWorker):
+            def _create_long_segment(self, *args, **kwargs):
+                result = super()._create_long_segment(*args, **kwargs)
+                if not getattr(self, "_crashed", False):
+                    self._crashed = True
+                    raise SimulatedCrash()
+                return result
+
+        source = json.dumps({"copy": "Pitkä arvo säilyy 42. " * 500},
+                            ensure_ascii=False)
+        first_creator = Creator("unchanged")
+        first = CrashAfterFirstBatch(
+            first_creator, Host(), ledger_path=self.path,
+            creator_id="writer", creator_session_id="writer-session",
+            model_id="fixture-model", model_version="fixture-model-1",
+            host_policy_version="fixture-host-v1", profile=profile())
+        with self.assertRaises(SimulatedCrash):
+            first.run(source, "prose", "json-resume")
+        self.assertEqual(len(first_creator.calls), 1)
+
+        resumed, second_creator = self.worker(creator=Creator("unchanged"))
+        result = resumed.run(source, "prose", "json-resume")
+        groups = len(result["evidence"]["document"]["groups"])
+        self.assertGreater(groups, 1)
+        self.assertEqual(len(second_creator.calls), groups - 1)
+        self.assertEqual(result["target_text"], source)
 
     def test_unsegmented_unicode_blocks_instead_of_splitting_grapheme_clusters(self):
         self.assertEqual(sum(last - first + 1 for first, last in

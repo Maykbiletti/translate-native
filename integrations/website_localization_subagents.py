@@ -152,19 +152,36 @@ class HostSubagentProvider:
             expected_schema = data.get("response_schema", {}).get("schema")
             ordinary = expected_schema == "blun.website-localization-candidate.v1"
             chunk = expected_schema == "translate-native.native-rewrite-chunk.v1"
+            json_chunk = expected_schema == "translate-native.native-rewrite-json-chunk.v1"
             fields = ({"schema", "phase", "locale", "candidate"} if ordinary else
                       {"schema", "phase", "locale", "chunk_id",
-                       "completion_status", "candidate"} if chunk else set())
+                       "completion_status", "candidate"} if chunk else
+                      {"schema", "phase", "locale", "chunk_id",
+                       "completion_status", "values"} if json_chunk else set())
             if (not isinstance(response, dict) or set(response) != fields
                     or response.get("schema") != expected_schema
                     or response.get("phase") != phase
                     or response.get("locale") != data["target"]["locale"]
-                    or not isinstance(response.get("candidate"), str)
-                    or not response.get("candidate")
-                    or (chunk and (response.get("chunk_id") != data.get("chunk_id")
-                                   or response.get("completion_status") != "complete"))):
+                    or (not json_chunk and (
+                        not isinstance(response.get("candidate"), str)
+                        or not response.get("candidate")))
+                    or ((chunk or json_chunk) and (
+                        response.get("chunk_id") != data.get("chunk_id")
+                        or response.get("completion_status") != "complete"))):
                 raise SubagentReviewBlocked("candidate_invalid")
-            if chunk:
+            if json_chunk:
+                expected_values = data.get("owned_values")
+                values = response.get("values")
+                if (not isinstance(expected_values, list) or not isinstance(values, list)
+                        or len(values) != len(expected_values)
+                        or any(not isinstance(item, dict)
+                               or set(item) != {"value_id", "candidate"}
+                               or item.get("value_id") != expected_values[index].get("value_id")
+                               or not isinstance(item.get("candidate"), str)
+                               or not item["candidate"]
+                               for index, item in enumerate(values))):
+                    raise SubagentReviewBlocked("candidate_invalid")
+            if chunk or json_chunk:
                 completion = getattr(self._creator, "verified_completion", None)
                 if not callable(completion):
                     raise SubagentReviewBlocked("creator_completion_unavailable")
@@ -204,7 +221,7 @@ class HostSubagentProvider:
                 if verified is not True:
                     raise SubagentReviewBlocked("creator_completion_unverified")
                 self._creation_evidence = completion_evidence
-            self._candidate = response["candidate"]
+            self._candidate = response.get("candidate")
             return response
         if self._creation is None or self._candidate is None or self._finished:
             raise SubagentReviewBlocked("phase_order")
