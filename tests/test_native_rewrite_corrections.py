@@ -343,10 +343,14 @@ class CorrectionTests(unittest.TestCase):
         service = API.SERVICE.GuardService(self.path / "key", self.path / "audit.jsonl",
                                          rewrite_workers={"standard": worker})
         client = API.ADAPTER.NativeRewriteClient(service.handle)
+        client.register_session(session_id="session", session_epoch="a" * 64)
         result = client.rewrite(source_text=source, language="fi-FI", profile_id="standard",
-                                request_id="deliver", content_type="prose")
+                                request_id="deliver", content_type="prose",
+                                session_id="session", session_epoch="a" * 64,
+                                agent_id="writer")
         sent = []
-        args = dict(source_text=source, language="fi-FI", profile_id="standard", content_type="prose",
+        args = dict(source_text=source, language="fi-FI", profile_id="standard", request_id="deliver",
+                    content_type="prose",
                     session_id="session", session_epoch="a" * 64, agent_id="writer", channel="test", send=sent.append)
         with self.assertRaises(API.ADAPTER.RewriteDeliveryBlocked):
             client.deliver({**result, "target_text": bad}, **args)

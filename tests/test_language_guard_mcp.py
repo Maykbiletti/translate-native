@@ -117,6 +117,8 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.assertIn("release_response", instructions)
         self.assertIn("translate-native skill/plugin", instructions)
         self.assertIn("release_translation", instructions)
+        self.assertIn("rewrite_text", instructions)
+        self.assertIn("one-time rewrite context", instructions)
 
     def test_mcp_advertises_translate_native_prompt(self) -> None:
         listed = MODULE.handle_message({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"})
@@ -128,6 +130,13 @@ class LanguageGuardMCPTests(unittest.TestCase):
         })
         assert fetched is not None
         self.assertIn("release_translation", fetched["result"]["messages"][0]["content"]["text"])
+        self.assertIn("rewrite_text", fetched["result"]["messages"][0]["content"]["text"])
+
+    def test_rewrite_tool_requires_trusted_host_context_and_identity(self) -> None:
+        tool = next(item for item in MODULE.TOOLS if item["name"] == "rewrite_text")
+        required = set(tool["inputSchema"]["required"])
+        self.assertTrue({"rewrite_context_token", "session_id", "session_epoch", "agent_id"} <= required)
+        self.assertFalse(tool["inputSchema"]["additionalProperties"])
 
     def test_release_response_blocks_damaged_german_answer(self) -> None:
         report = MODULE.release_response_verified({

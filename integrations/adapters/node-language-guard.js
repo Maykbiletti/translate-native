@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const net = require("node:net");
 
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -9,9 +10,16 @@ const TRANSLATION_OPERATIONS = new Set([
   "translation-review", "translation-proofread", "i18n", "l10n",
 ]);
 const RESPONSE_OPERATIONS = new Set(["respond", "response", "chat", "answer", "compose"]);
+const REWRITE_OPERATIONS = new Set([
+  "rewrite", "revise", "revision", "proofread", "proofreading", "naturalize", "same-language-edit",
+]);
+const REWRITE_CONTENT_TYPES = new Set([
+  "prose", "headline", "cta", "marketing", "ui", "documentation", "seo", "legal",
+]);
 const HOST_FIELDS = new Set([
   "task_kind", "language", "source_text", "content_type",
-  "short_text_reviewed", "key_path", "delivery_channel",
+  "short_text_reviewed", "key_path", "delivery_channel", "profile_id",
+  "request_id", "session_id", "session_epoch", "agent_id",
 ]);
 
 class LanguageGuardBlocked extends Error {
@@ -37,17 +45,18 @@ function routeHostContext(context = {}) {
   const operation = strictString(context.operation, "operation").trim().toLowerCase();
   const sourceText = strictString(context.source_text, "source_text");
   const contentType = strictString(context.content_type, "content_type").trim() || "prose";
-  if (!new Set(["prose", "title", "meta_description", "ui"]).has(contentType)) {
+  if (!new Set(["prose", "title", "meta_description", "ui", ...REWRITE_CONTENT_TYPES]).has(contentType)) {
     throw new LanguageGuardBlocked("invalid content_type", "invalid_host_context");
   }
   const translationEvidence = Boolean(sourceText.trim()) || TRANSLATION_OPERATIONS.has(operation);
   let taskKind;
   if (explicit) {
-    if (!new Set(["response", "translation"]).has(explicit)) {
+    if (!new Set(["response", "translation", "rewrite"]).has(explicit)) {
       throw new LanguageGuardBlocked("invalid task_kind", "invalid_host_context");
     }
     taskKind = explicit;
-  } else if (translationEvidence) taskKind = "translation";
+  } else if (REWRITE_OPERATIONS.has(operation)) taskKind = "rewrite";
+  else if (translationEvidence) taskKind = "translation";
   else if (!operation || RESPONSE_OPERATIONS.has(operation)) taskKind = "response";
   else throw new LanguageGuardBlocked("unknown host operation", "invalid_host_context");
 
@@ -63,17 +72,50 @@ function routeHostContext(context = {}) {
   if (taskKind === "translation" && RESPONSE_OPERATIONS.has(operation)) {
     throw new LanguageGuardBlocked("response operation conflicts with translation source", "mode_confusion");
   }
+  if (taskKind === "rewrite") {
+    if (!sourceText.trim()) {
+      throw new LanguageGuardBlocked("rewrite route requires complete source_text", "invalid_host_context");
+    }
+    if (TRANSLATION_OPERATIONS.has(operation) || RESPONSE_OPERATIONS.has(operation)) {
+      throw new LanguageGuardBlocked("host operation conflicts with rewrite task", "mode_confusion");
+    }
+  } else if (REWRITE_OPERATIONS.has(operation)) {
+    throw new LanguageGuardBlocked("rewrite operation conflicts with non-rewrite task", "mode_confusion");
+  }
   const language = strictString(
     taskKind === "translation"
       ? (context.target_language || context.language)
+      : taskKind === "rewrite"
+        ? context.language
       : (context.response_language || context.language),
-    taskKind === "translation" ? "target_language" : "response_language",
+    taskKind === "translation" ? "target_language" : taskKind === "rewrite" ? "language" : "response_language",
     true,
   ).trim();
   if (["auto", "all"].includes(language.toLowerCase()) || !EXACT_LANGUAGE.test(language)) {
     throw new LanguageGuardBlocked("exact language or locale is required", "invalid_host_context");
   }
-  return { taskKind, language, sourceText: taskKind === "translation" ? sourceText : "", contentType };
+  const profileId = strictString(context.profile_id, "profile_id").trim();
+  const requestId = strictString(context.request_id, "request_id").trim();
+  const sessionId = strictString(context.session_id, "session_id").trim();
+  const sessionEpoch = strictString(context.session_epoch, "session_epoch").trim();
+  if (taskKind === "rewrite") {
+    if (!profileId || !requestId || !sessionId || !/^[a-f0-9]{64}$/.test(sessionEpoch)) {
+      throw new LanguageGuardBlocked(
+        "rewrite route requires host profile_id, stable request_id, session_id and session_epoch",
+        "invalid_host_context",
+      );
+    }
+    if (!REWRITE_CONTENT_TYPES.has(contentType)) {
+      throw new LanguageGuardBlocked("rewrite route has invalid content_type", "invalid_host_context");
+    }
+  } else if (profileId || requestId || sessionEpoch) {
+    throw new LanguageGuardBlocked("rewrite-only fields conflict with non-rewrite task", "mode_confusion");
+  }
+  return {
+    taskKind, language,
+    sourceText: ["translation", "rewrite"].includes(taskKind) ? sourceText : "",
+    contentType, profileId, requestId, sessionId, sessionEpoch,
+  };
 }
 
 function parseAgentEnvelope(raw) {
@@ -166,7 +208,7 @@ function callGuardService(endpoint, request, { serviceToken = "", timeoutMs = 10
 async function verifyForDelivery({ rawEnvelope, hostContext, endpoint, serviceToken = "", agentId = "", channel = "" }) {
   const envelope = parseAgentEnvelope(rawEnvelope);
   const route = routeHostContext(hostContext);
-  const result = await callGuardService(endpoint, {
+  const request = {
     operation: "verify",
     task_kind: route.taskKind,
     source_text: route.sourceText,
@@ -177,7 +219,39 @@ async function verifyForDelivery({ rawEnvelope, hostContext, endpoint, serviceTo
     short_text_reviewed: hostContext.short_text_reviewed === true,
     agent_id: String(agentId || ""),
     channel: String(channel || ""),
-  }, { serviceToken });
+    ...(route.taskKind === "rewrite" ? { profile_id: route.profileId } : {}),
+  };
+  let result;
+  if (route.taskKind === "rewrite") {
+    const authorized = await callGuardService(endpoint, {
+      ...request,
+      operation: "authorize_delivery",
+      session_id: route.sessionId,
+      session_epoch: route.sessionEpoch,
+      request_id: route.requestId,
+    }, { serviceToken });
+    if (authorized?.valid !== true || typeof authorized.delivery_grant !== "string") {
+      throw new LanguageGuardBlocked("isolated guard rejected rewrite authorization", "receipt_rejected");
+    }
+    result = await callGuardService(endpoint, {
+      operation: "consume_delivery",
+      task_kind: "rewrite",
+      source_sha256: crypto.createHash("sha256").update(route.sourceText, "utf8").digest("hex"),
+      target_text: envelope.target_text,
+      language: route.language,
+      profile_id: route.profileId,
+      request_id: route.requestId,
+      content_type: route.contentType,
+      short_text_reviewed: hostContext.short_text_reviewed === true,
+      session_id: route.sessionId,
+      session_epoch: route.sessionEpoch,
+      agent_id: String(agentId || ""),
+      channel: String(channel || ""),
+      delivery_grant: authorized.delivery_grant,
+    }, { serviceToken });
+  } else {
+    result = await callGuardService(endpoint, request, { serviceToken });
+  }
   if (result?.valid !== true) {
     const failedChecks = result?.checks && typeof result.checks === "object"
       ? Object.entries(result.checks).filter(([, passed]) => passed !== true).map(([name]) => name)

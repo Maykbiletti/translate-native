@@ -21,13 +21,31 @@ class NativeRewriteClient:
             raise TypeError("trusted service transport is required")
         self._call = call_service
 
+    def register_session(self, *, session_id: str, session_epoch: str) -> None:
+        try:
+            result = self._call({"operation": "register_session_epoch",
+                                 "session_id": session_id,
+                                 "session_epoch": session_epoch})
+            if result.get("registered") is not True:
+                raise RewriteDeliveryBlocked("session_registration_failed")
+        except Exception:
+            raise RewriteDeliveryBlocked("session_registration_failed") from None
+
     def rewrite(self, *, source_text: str, language: str, profile_id: str,
-                request_id: str, content_type: str = "prose") -> dict:
+                request_id: str, session_id: str, session_epoch: str,
+                agent_id: str, content_type: str = "prose") -> dict:
         request = {"operation": "rewrite_text", "source_text": source_text,
                    "language": language, "profile_id": profile_id,
-                   "request_id": request_id, "content_type": content_type}
+                   "request_id": request_id, "content_type": content_type,
+                   "session_id": session_id, "session_epoch": session_epoch,
+                   "agent_id": agent_id}
         try:
-            result = self._call(request)
+            prepared = self._call({**request, "operation": "prepare_rewrite_context",
+                                   "task_kind": "rewrite"})
+            token = prepared.get("rewrite_context_token")
+            if prepared.get("status") != "PASS" or not isinstance(token, str):
+                raise RewriteDeliveryBlocked("rewrite_context_not_issued")
+            result = self._call({**request, "rewrite_context_token": token})
             if (not isinstance(result, dict) or result.get("release_allowed") is not True
                     or result.get("task_kind") != "rewrite"
                     or not isinstance(result.get("target_text"), str)
@@ -38,7 +56,7 @@ class NativeRewriteClient:
             raise RewriteDeliveryBlocked("rewrite_unavailable_or_blocked") from None
 
     def deliver(self, result: dict, *, source_text: str, language: str,
-                profile_id: str, content_type: str, session_id: str,
+                profile_id: str, request_id: str, content_type: str, session_id: str,
                 session_epoch: str, agent_id: str, channel: str,
                 send: Callable[[str], None]) -> None:
         if not callable(send):
@@ -49,7 +67,8 @@ class NativeRewriteClient:
             target = frozen["target_text"]
             common = {"task_kind": "rewrite", "source_text": source_text,
                       "target_text": target, "language": language,
-                      "profile_id": profile_id, "content_type": content_type,
+                      "profile_id": profile_id, "request_id": request_id,
+                      "content_type": content_type,
                       "session_id": session_id, "session_epoch": session_epoch,
                       "agent_id": agent_id, "channel": channel}
             authorized = self._call({**common, "operation": "authorize_delivery",

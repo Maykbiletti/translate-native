@@ -1112,10 +1112,18 @@ function hostReleasePolicy(environment = process.env) {
   const hasLanguage = Object.prototype.hasOwnProperty.call(environment, "BLUN_LANGUAGE_GUARD_LANGUAGE");
   const hasTaskKind = Object.prototype.hasOwnProperty.call(environment, "BLUN_LANGUAGE_GUARD_TASK_KIND");
   const hasProfile = Object.prototype.hasOwnProperty.call(environment, "BLUN_LANGUAGE_GUARD_PROFILE_ID");
-  if (!hasLanguage && !hasTaskKind && !hasProfile) return null;
+  const hasRewriteSource = Object.prototype.hasOwnProperty.call(environment, "BLUN_LANGUAGE_GUARD_REWRITE_SOURCE_B64");
+  const hasRewriteRequest = Object.prototype.hasOwnProperty.call(environment, "BLUN_LANGUAGE_GUARD_REWRITE_REQUEST_ID");
+  const hasRewriteContentType = Object.prototype.hasOwnProperty.call(environment, "BLUN_LANGUAGE_GUARD_REWRITE_CONTENT_TYPE");
+  if (!hasLanguage && !hasTaskKind && !hasProfile && !hasRewriteSource
+      && !hasRewriteRequest && !hasRewriteContentType) return null;
   const language = hasLanguage ? String(environment.BLUN_LANGUAGE_GUARD_LANGUAGE || "").trim() : "";
   const taskKind = hasTaskKind ? String(environment.BLUN_LANGUAGE_GUARD_TASK_KIND || "").trim().toLowerCase() : "";
   const profileId = hasProfile ? String(environment.BLUN_LANGUAGE_GUARD_PROFILE_ID || "").trim() : "";
+  const rewriteRequestId = hasRewriteRequest
+    ? String(environment.BLUN_LANGUAGE_GUARD_REWRITE_REQUEST_ID || "").trim() : "";
+  const rewriteContentType = hasRewriteContentType
+    ? String(environment.BLUN_LANGUAGE_GUARD_REWRITE_CONTENT_TYPE || "").trim() : "";
   if (hasLanguage && (!EXACT_LANGUAGE.test(language) || ["auto", "all"].includes(language.toLowerCase()))) {
     throw new Error("host release language must be an exact language or locale tag");
   }
@@ -1131,7 +1139,34 @@ function hostReleasePolicy(environment = process.env) {
   if (taskKind === "rewrite" && !hasLanguage) {
     throw new Error("host rewrite policy must bind an exact language or locale");
   }
-  return { language, taskKind, profileId };
+  const rewriteBindingsPresent = hasRewriteSource && hasRewriteRequest && hasRewriteContentType;
+  if ((taskKind === "rewrite") !== rewriteBindingsPresent) {
+    throw new Error("host rewrite policy must bind the exact original, request ID and content type together");
+  }
+  let rewriteSource = "";
+  if (taskKind === "rewrite") {
+    const encoded = String(environment.BLUN_LANGUAGE_GUARD_REWRITE_SOURCE_B64 || "");
+    if (!encoded || encoded.length > Math.ceil(MAX_INPUT_BYTES * 4 / 3) + 4
+        || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+      throw new Error("host rewrite original must be canonical bounded base64");
+    }
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.length === 0 || bytes.length > MAX_INPUT_BYTES || bytes.toString("base64") !== encoded) {
+      throw new Error("host rewrite original must be canonical bounded base64");
+    }
+    rewriteSource = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (!rewriteSource || rewriteSource.includes("\0")) {
+      throw new Error("host rewrite original must be non-empty UTF-8 text");
+    }
+    if (!rewriteRequestId || rewriteRequestId.length > 256 || rewriteRequestId.includes("\0")) {
+      throw new Error("host rewrite request ID must be a non-empty bounded string");
+    }
+    if (!new Set(["prose", "headline", "cta", "marketing", "ui", "documentation", "seo", "legal"])
+      .has(rewriteContentType)) {
+      throw new Error("host rewrite content type is invalid");
+    }
+  }
+  return { language, taskKind, profileId, rewriteSource, rewriteRequestId, rewriteContentType };
 }
 
 function releaseToolForTask(taskKind) {
@@ -1158,6 +1193,9 @@ function hostPolicyInstruction() {
   }
   if (policy.profileId) {
     parts.push(`Pass profile_id exactly as ${JSON.stringify(policy.profileId)}. The host, not the model, selected this rewrite profile.`);
+  }
+  if (policy.taskKind === "rewrite") {
+    parts.push("The host fixed the exact original, request identity and content type; rewrite_text inputs are replaced with those trusted values.");
   }
   return parts.join(" ");
 }
@@ -1210,7 +1248,12 @@ async function preTool(input) {
   const updatedInput = {
     ...toolInput,
     ...(policy?.language ? { language: policy.language } : {}),
-    ...(policy?.profileId ? { profile_id: policy.profileId } : {})
+    ...(policy?.profileId ? { profile_id: policy.profileId } : {}),
+    ...(purpose === "rewrite" ? {
+      source_text: policy?.rewriteSource,
+      request_id: policy?.rewriteRequestId,
+      content_type: policy?.rewriteContentType,
+    } : {})
   };
   if (purpose === "rewrite") {
     if (!policy || policy.taskKind !== "rewrite" || !policy.profileId) {
@@ -1229,6 +1272,40 @@ async function preTool(input) {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
           permissionDecisionReason: "The complete original text is required for meaning-preserving rewrite review.",
+        }
+      });
+      return;
+    }
+    try {
+      const { session, agent } = hookIdentity(input);
+      const { epoch } = readSessionEpoch(input);
+      const contentType = updatedInput.content_type;
+      const prepared = await callGuard({
+        operation: "prepare_rewrite_context",
+        task_kind: "rewrite",
+        source_text: updatedInput.source_text,
+        language: policy.language,
+        profile_id: policy.profileId,
+        request_id: updatedInput.request_id,
+        content_type: contentType,
+        session_id: session,
+        session_epoch: epoch,
+        agent_id: agent,
+        channel: "claude-pre-tool"
+      });
+      if (prepared.status !== "PASS" || typeof prepared.rewrite_context_token !== "string") {
+        throw new Error("rewrite context was not issued");
+      }
+      updatedInput.rewrite_context_token = prepared.rewrite_context_token;
+      updatedInput.session_id = session;
+      updatedInput.session_epoch = epoch;
+      updatedInput.agent_id = agent;
+    } catch (_) {
+      emit({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "BLUN Language Guard could not bind this rewrite to the trusted host, exact original, profile, session and writer identity. Repair the host integration and retry."
         }
       });
       return;
@@ -1485,6 +1562,9 @@ async function postTool(input) {
   if (purpose === "rewrite") {
     if (!policy || policy.taskKind !== "rewrite" || !policy.profileId
         || args.profile_id !== policy.profileId || release.task_kind !== "rewrite"
+        || source !== policy.rewriteSource
+        || args.request_id !== policy.rewriteRequestId
+        || args.content_type !== policy.rewriteContentType
         || !source || !target) {
       rejectRelease(input, "The rewrite result is not bound to the trusted host task, original, profile, and exact Guard-returned target. Retry through rewrite_text.");
       return;
@@ -1499,7 +1579,10 @@ async function postTool(input) {
     release_token: release.release_token,
     content_type: typeof args.content_type === "string" ? args.content_type : "prose",
     short_text_reviewed: args.short_text_reviewed === true,
-    ...(purpose === "rewrite" ? { profile_id: policy.profileId } : {}),
+    ...(purpose === "rewrite" ? {
+      profile_id: policy.profileId,
+      request_id: policy.rewriteRequestId,
+    } : {}),
     agent_id: agent,
     session_id: session,
     session_epoch: sessionEpoch,
@@ -1521,7 +1604,10 @@ async function postTool(input) {
       task_kind: purpose,
       content_type: typeof args.content_type === "string" ? args.content_type : "prose",
       short_text_reviewed: args.short_text_reviewed === true,
-      ...(purpose === "rewrite" ? { profile_id: policy.profileId } : {}),
+      ...(purpose === "rewrite" ? {
+        profile_id: policy.profileId,
+        request_id: policy.rewriteRequestId,
+      } : {}),
       channel: "claude-hook",
       authorized_at: Date.now()
     });
@@ -1593,7 +1679,10 @@ async function stop(input, expectedEvent) {
         if (record.task_kind === "rewrite" || policy?.taskKind === "rewrite") {
           if (!policy || policy.taskKind !== "rewrite"
               || policy.language !== record.language
-              || policy.profileId !== record.profile_id) {
+              || policy.profileId !== record.profile_id
+              || policy.rewriteRequestId !== record.request_id
+              || policy.rewriteContentType !== record.content_type
+              || exactTextHash(policy.rewriteSource) !== record.source_sha256) {
             throw new Error("current host rewrite policy does not match the authorized result");
           }
         }
@@ -1606,7 +1695,10 @@ async function stop(input, expectedEvent) {
           task_kind: record.task_kind,
           content_type: record.content_type,
           short_text_reviewed: record.short_text_reviewed === true,
-          ...(record.task_kind === "rewrite" ? { profile_id: record.profile_id } : {}),
+          ...(record.task_kind === "rewrite" ? {
+            profile_id: record.profile_id,
+            request_id: record.request_id,
+          } : {}),
           session_id: session,
           agent_id: agent,
           session_epoch: sessionEpoch,

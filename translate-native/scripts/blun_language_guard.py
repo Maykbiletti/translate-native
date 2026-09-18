@@ -29,9 +29,9 @@ MCP_INSTRUCTIONS = (
     "source-target pair and truthful seven-pass attestations. Never use release_response to bypass "
     "the translation gate. Release only after the exact current text receives a valid token. "
     "For same-language revision of an original or AI draft, apply translate-native and use rewrite_text "
-    "with the complete original, explicit host profile and stable request ID. Its isolated native review "
-    "precedes meaning-preservation review; missing host support blocks. Rewrite receipts require the "
-    "trusted rewrite-aware delivery adapter and are not response/translation Stop-hook grants. "
+    "with the complete original, host-injected one-time rewrite context, explicit host profile and stable request ID. Its isolated native review "
+    "precedes meaning-preservation review; missing host support blocks. Rewrite receipts cross only a "
+    "rewrite-aware trusted delivery adapter or the protected Claude Stop/SubagentStop path. "
     "When BLUN_LANGUAGE_GUARD_MANDATORY=1, final stdout must be exactly one JSON object containing "
     "only target_text and release_token; never call a delivery channel directly or include host-owned policy fields."
 )
@@ -402,7 +402,8 @@ def rewrite_text(arguments: dict[str, Any]) -> dict[str, Any]:
     if not SERVICE_ENDPOINT:
         return {"status": "BLOCK", "release_allowed": False,
                 "reason": "rewrite.host_unavailable"}
-    allowed = {"source_text", "language", "content_type", "request_id", "profile_id"}
+    allowed = {"source_text", "language", "content_type", "request_id", "profile_id",
+               "rewrite_context_token", "session_id", "session_epoch", "agent_id"}
     if not isinstance(arguments, dict) or set(arguments) - allowed:
         return {"status": "BLOCK", "release_allowed": False,
                 "reason": "rewrite.invalid_request"}
@@ -508,8 +509,13 @@ TOOLS = [
                 "profile_id": {"type": "string", "description": "Explicit host-registered profile; dialect only when requested."},
                 "request_id": {"type": "string"},
                 "content_type": {"type": "string", "default": "prose"},
+                "rewrite_context_token": {"type": "string", "description": "Opaque one-time context injected by the trusted host; never invent or reuse it."},
+                "session_id": {"type": "string", "description": "Trusted-host session binding."},
+                "session_epoch": {"type": "string", "description": "Trusted-host session epoch binding."},
+                "agent_id": {"type": "string", "description": "Trusted-host writer identity binding."},
             },
-            "required": ["source_text", "language", "profile_id", "request_id"],
+            "required": ["source_text", "language", "profile_id", "request_id",
+                         "rewrite_context_token", "session_id", "session_epoch", "agent_id"],
             "additionalProperties": False,
         },
     },

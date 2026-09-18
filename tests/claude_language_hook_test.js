@@ -11,7 +11,7 @@ const { spawn } = require("child_process");
 const ROOT = path.resolve(__dirname, "..");
 const HOOK = path.join(ROOT, "integrations", "claude_language_hook.js");
 const NON_LANGUAGE_HTML_ENTITIES = require(path.join(ROOT, "integrations", "non_language_html_entities.js"));
-const { beginSessionEpoch, hasNaturalLanguage, hookIdentity, invalidateAgentRecord, invalidateSessionRecords, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
+const { beginSessionEpoch, hasNaturalLanguage, hookIdentity, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, writeRecord } = require(HOOK);
 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
@@ -30,6 +30,24 @@ function runHook(mode, input, environment) {
 }
 
 async function main() {
+  const exactHostOriginal = "Alkuperäinen teksti.\r\nSäilytä nämä tavut.";
+  const exactRewritePolicy = hostReleasePolicy({
+    BLUN_LANGUAGE_GUARD_TASK_KIND: "rewrite",
+    BLUN_LANGUAGE_GUARD_LANGUAGE: "fi-FI",
+    BLUN_LANGUAGE_GUARD_PROFILE_ID: "native-fi-general-v1",
+    BLUN_LANGUAGE_GUARD_REWRITE_SOURCE_B64: Buffer.from(exactHostOriginal, "utf8").toString("base64"),
+    BLUN_LANGUAGE_GUARD_REWRITE_REQUEST_ID: "host-request",
+    BLUN_LANGUAGE_GUARD_REWRITE_CONTENT_TYPE: "prose",
+  });
+  assert.strictEqual(exactRewritePolicy.rewriteSource, exactHostOriginal);
+  assert.throws(() => hostReleasePolicy({
+    BLUN_LANGUAGE_GUARD_TASK_KIND: "rewrite",
+    BLUN_LANGUAGE_GUARD_LANGUAGE: "fi-FI",
+    BLUN_LANGUAGE_GUARD_PROFILE_ID: "native-fi-general-v1",
+    BLUN_LANGUAGE_GUARD_REWRITE_SOURCE_B64: "not base64",
+    BLUN_LANGUAGE_GUARD_REWRITE_REQUEST_ID: "host-request",
+    BLUN_LANGUAGE_GUARD_REWRITE_CONTENT_TYPE: "prose",
+  }), /canonical bounded base64/);
   const hookConfiguration = JSON.parse(fs.readFileSync(path.join(ROOT, "hooks", "hooks.json"), "utf8"));
   for (const eventName of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
     const matchers = hookConfiguration.hooks[eventName].map((entry) => entry.matcher || "");
@@ -1216,6 +1234,19 @@ async function main() {
         response = {
           status: valid ? "PASS" : "BLOCK",
           ...(valid ? { review_context_token: `fixture-review-${crypto.randomUUID()}` } : {})
+        };
+      } else if (request.operation === "prepare_rewrite_context") {
+        const valid = request.service_token === token
+          && sessionEpochs.get(request.session_id) === request.session_epoch
+          && request.task_kind === "rewrite"
+          && typeof request.source_text === "string" && request.source_text.length > 0
+          && typeof request.language === "string" && request.language.length > 0
+          && typeof request.profile_id === "string" && request.profile_id.length > 0
+          && typeof request.request_id === "string" && request.request_id.length > 0
+          && typeof request.agent_id === "string" && request.agent_id.length > 0;
+        response = {
+          status: valid ? "PASS" : "BLOCK",
+          ...(valid ? { rewrite_context_token: `fixture-rewrite-${crypto.randomUUID()}` } : {})
         };
       } else if (request.operation === "authorize_delivery") {
         if (request.release_token === "restart-valid-token") {
@@ -2737,7 +2768,10 @@ async function main() {
       ...environment,
       BLUN_LANGUAGE_GUARD_TASK_KIND: "rewrite",
       BLUN_LANGUAGE_GUARD_LANGUAGE: fixture.language,
-      BLUN_LANGUAGE_GUARD_PROFILE_ID: fixture.profile_id
+      BLUN_LANGUAGE_GUARD_PROFILE_ID: fixture.profile_id,
+      BLUN_LANGUAGE_GUARD_REWRITE_SOURCE_B64: Buffer.from(fixture.source, "utf8").toString("base64"),
+      BLUN_LANGUAGE_GUARD_REWRITE_REQUEST_ID: `request-${fixture.session_id}`,
+      BLUN_LANGUAGE_GUARD_REWRITE_CONTENT_TYPE: "prose"
     };
     const identity = {
       session_id: fixture.session_id,
@@ -2759,17 +2793,23 @@ async function main() {
       hook_event_name: "PreToolUse",
       tool_name: "mcp__plugin_translate-native_guard__rewrite_text",
       tool_input: {
-        source_text: fixture.source,
+        source_text: "Model-substituted original must not survive.",
         language: "en",
         profile_id: "model-selected-profile",
-        request_id: `request-${fixture.session_id}`,
-        content_type: "prose"
+        request_id: "model-selected-request",
+        content_type: "marketing"
       }
     }, rewriteEnvironment);
     const preparedRewriteOutput = JSON.parse(preparedRewrite.stdout).hookSpecificOutput;
     assert.strictEqual(preparedRewriteOutput.updatedInput.language, fixture.language);
     assert.strictEqual(preparedRewriteOutput.updatedInput.profile_id, fixture.profile_id);
     assert.strictEqual(preparedRewriteOutput.updatedInput.source_text, fixture.source);
+    assert.strictEqual(preparedRewriteOutput.updatedInput.request_id, `request-${fixture.session_id}`);
+    assert.strictEqual(preparedRewriteOutput.updatedInput.content_type, "prose");
+    assert.match(preparedRewriteOutput.updatedInput.rewrite_context_token, /^fixture-rewrite-/);
+    assert.strictEqual(preparedRewriteOutput.updatedInput.session_id, fixture.session_id);
+    assert.match(preparedRewriteOutput.updatedInput.session_epoch, /^[a-f0-9]{64}$/);
+    assert.strictEqual(preparedRewriteOutput.updatedInput.agent_id, fixture.agent_id || "main");
 
     const rewriteTool = {
       ...identity,
@@ -2841,7 +2881,12 @@ async function main() {
     ...environment,
     BLUN_LANGUAGE_GUARD_TASK_KIND: "rewrite",
     BLUN_LANGUAGE_GUARD_LANGUAGE: "fi-FI",
-    BLUN_LANGUAGE_GUARD_PROFILE_ID: "native-fi-general-v1"
+    BLUN_LANGUAGE_GUARD_PROFILE_ID: "native-fi-general-v1",
+    BLUN_LANGUAGE_GUARD_REWRITE_SOURCE_B64: Buffer.from(
+      "On tärkeää huomata, että teksti on selkeä.", "utf8",
+    ).toString("base64"),
+    BLUN_LANGUAGE_GUARD_REWRITE_REQUEST_ID: "policy-drift",
+    BLUN_LANGUAGE_GUARD_REWRITE_CONTENT_TYPE: "prose"
   };
   const wrongRewriteProfileSession = { ...common, session_id: "rewrite-wrong-profile" };
   await runHook("session-start", wrongRewriteProfileSession, wrongRewriteProfileEnvironment);

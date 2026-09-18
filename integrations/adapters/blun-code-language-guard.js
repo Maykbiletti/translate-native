@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const {
   LanguageGuardBlocked,
+  callGuardService,
   routeHostContext,
   verifyForDelivery,
 } = require("./node-language-guard");
@@ -400,24 +401,40 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
     const prompt = String(messages?.[messages.length - 1]?.content || "");
     const languageResolution = resolveLanguage(meta, getConfig?.() || {});
     const language = languageResolution.language;
+    const rewriteRequested = String(meta.languageGuardTaskKind || "").trim().toLowerCase() === "rewrite";
     const route = routeHostContext({
       // Keep host evidence and types intact. The shared router infers a
       // translation from source text and rejects an explicit downgrade.
       task_kind: meta.languageGuardTaskKind,
       source_text: meta.languageGuardSourceText,
+      language,
       target_language: language,
       response_language: language,
       content_type: meta.languageGuardContentType || "prose",
+      ...(rewriteRequested ? {
+        profile_id: meta.languageGuardProfileId,
+        request_id: meta.languageGuardRequestId,
+        session_id: meta.languageGuardSessionId || meta.sessionId,
+        session_epoch: meta.languageGuardSessionEpoch,
+      } : {}),
     });
     const connection = resolveGuardConnection({ store, environment });
     return {
       hostContext: {
         task_kind: route.taskKind,
-        operation: route.taskKind === "translation" ? "translation" : "chat",
+        operation: route.taskKind === "translation" ? "translation"
+          : route.taskKind === "rewrite" ? "rewrite" : "chat",
         source_text: route.sourceText,
+        language: route.taskKind === "rewrite" ? route.language : undefined,
         target_language: route.taskKind === "translation" ? route.language : undefined,
         response_language: route.taskKind === "response" ? route.language : undefined,
         content_type: route.contentType,
+        ...(route.taskKind === "rewrite" ? {
+          profile_id: route.profileId,
+          request_id: route.requestId,
+          session_id: route.sessionId,
+          session_epoch: route.sessionEpoch,
+        } : {}),
       },
       endpoint: connection.endpoint,
       serviceToken: connection.serviceToken,
@@ -429,10 +446,59 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
     };
   }
 
+  async function prepareContext(guardContext) {
+    if (guardContext?.route?.taskKind !== "rewrite") return guardContext;
+    const request = {
+      operation: "prepare_rewrite_context",
+      task_kind: "rewrite",
+      source_text: guardContext.route.sourceText,
+      language: guardContext.route.language,
+      profile_id: guardContext.route.profileId,
+      request_id: guardContext.route.requestId,
+      content_type: guardContext.route.contentType,
+      session_id: guardContext.route.sessionId,
+      session_epoch: guardContext.route.sessionEpoch,
+      agent_id: guardContext.agentId,
+      channel: guardContext.channel,
+    };
+    let prepared = await callGuardService(
+      guardContext.endpoint, request, { serviceToken: guardContext.serviceToken },
+    );
+    if (prepared?.status !== "PASS" && prepared?.error === "session epoch is not current") {
+      const registered = await callGuardService(
+        guardContext.endpoint,
+        { operation: "register_session_epoch", session_id: guardContext.route.sessionId,
+          session_epoch: guardContext.route.sessionEpoch },
+        { serviceToken: guardContext.serviceToken },
+      );
+      if (registered?.registered !== true) {
+        throw new LanguageGuardBlocked("rewrite session could not be registered", "guard_unavailable");
+      }
+      prepared = await callGuardService(
+        guardContext.endpoint, request, { serviceToken: guardContext.serviceToken },
+      );
+    }
+    if (prepared?.status !== "PASS" || typeof prepared.rewrite_context_token !== "string") {
+      throw new LanguageGuardBlocked("trusted rewrite context was not issued", "guard_unavailable");
+    }
+    return {
+      ...guardContext,
+      hostContext: { ...guardContext.hostContext,
+        rewrite_context_token: prepared.rewrite_context_token },
+      rewriteContextToken: prepared.rewrite_context_token,
+    };
+  }
+
   function mandatoryInstruction(guardContext) {
-    const tool = guardContext.route.taskKind === "translation" ? "release_translation" : "release_response";
+    const tool = guardContext.route.taskKind === "translation" ? "release_translation"
+      : guardContext.route.taskKind === "rewrite" ? "rewrite_text" : "release_response";
+    if (guardContext.route.taskKind === "rewrite" && !guardContext.rewriteContextToken) {
+      throw new LanguageGuardBlocked("rewrite context must be prepared before model execution", "guard_unavailable");
+    }
     const translationRule = guardContext.route.taskKind === "translation"
       ? "Load and apply the installed translate-native skill/plugin before drafting. Use the complete trusted source supplied by the host."
+      : guardContext.route.taskKind === "rewrite"
+        ? `Use the complete host original and these exact host bindings: profile_id ${JSON.stringify(guardContext.route.profileId)}, request_id ${JSON.stringify(guardContext.route.requestId)}, rewrite_context_token ${JSON.stringify(guardContext.rewriteContextToken)}, session_id ${JSON.stringify(guardContext.route.sessionId)}, session_epoch ${JSON.stringify(guardContext.route.sessionEpoch)}, agent_id ${JSON.stringify(guardContext.agentId)}, content_type ${JSON.stringify(guardContext.route.contentType)}. Do not change or reuse them.`
       : "If the request is actually a translation but the host did not mark it as translation, do not translate; explain that trusted translation routing is required.";
     return [
       "[BLUN LANGUAGE GUARD — MANDATORY]",
@@ -441,6 +507,8 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
       translationRule,
       guardContext.route.taskKind === "translation"
         ? `Before final output, call ${tool} for the complete final candidate with truthful seven-pass attestations.`
+        : guardContext.route.taskKind === "rewrite"
+          ? `Call ${tool} once with the complete original and all host bindings. Return only the exact Guard target and rewrite-purpose token.`
         : `Before final output, call ${tool} for the complete final candidate; the trusted host performs the separate source-blind review.`,
       "Final output must be exactly one JSON object with only target_text and release_token.",
       "Do not stream, print, or send the candidate through another channel.",
@@ -496,6 +564,7 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
   return {
     mandatory: true,
     context,
+    prepareContext,
     mandatoryInstruction,
     decorateMessages,
     bufferedEmitter,

@@ -24,6 +24,13 @@
 - Never fabricate a release token or mark a quality attestation complete without performing that review. Correct every `BLOCK` result and run the gate again.
 - For structured files, preserve keys, placeholders, markup, links, code, types, and hierarchy. Run the bundled structural guard and the diacritics linter before completion.
 
+## Same-language natural rewriting
+
+- Route an original or AI draft that stays in the same language through `task_kind: rewrite` and `rewrite_text`, never through response or translation merely because it has source text.
+- The trusted host must bind the complete original, exact locale, registered profile, stable request ID, session epoch and writer identity in a one-time rewrite context before any creator or reviewer starts. The model must not select its own profile or dialect.
+- Use a dialect profile only when the user requested that variety. Missing, forged, replayed, stale or conflicting context blocks before model work.
+- Deliver only the exact Guard-returned target with its rewrite-purpose receipt. The target-only native review runs before the separate original-preservation review; any later edit requires both reviews again.
+
 ## Repository changes
 
 - Run `python3 -m unittest discover -s tests -v` after changing the skill, references, scripts, or tests.

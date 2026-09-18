@@ -48,6 +48,12 @@ and AI drafts through a provider-neutral creator, isolated target-only review,
 separate meaning-preservation review, and the existing Guard. It has MCP/API
 entry points, persistent request identity, a verified-delivery adapter, and a
 Claude Stop/SubagentStop path bound to the host-selected locale and profile.
+The shared Python, Node and BLUN Code routers also carry explicit rewrite purpose,
+profile/request/session bindings; source text alone remains translation evidence.
+Before model work, a one-time trusted-host context binds the exact original and
+prevents model-selected profiles, requests, originals or dialects. The signed
+rewrite receipt retains its session, writer, request and Guard-boot identity and
+may authorize only one exact delivery grant.
 Rewrite reviewers must return schema-validated defects with severity, exact
 passage, impact and revision direction, plus explicit uncertainties and required
 evidence. Incomplete reports cannot authorize correction or release.

@@ -43,6 +43,47 @@ class TaskRouterTests(unittest.TestCase):
         })
         self.assertEqual(route.task_kind, "response")
         self.assertEqual(route.source_text, "")
+        route = MODULE.route_host_context({
+            "operation": "chat",
+            "response_language": "de-AT",
+            "session_id": "ordinary-chat-session",
+        })
+        self.assertEqual(route.task_kind, "response")
+
+    def test_explicit_same_language_rewrite_requires_host_profile_and_request(self) -> None:
+        route = MODULE.route_host_context({
+            "task_kind": "rewrite",
+            "operation": "rewrite",
+            "source_text": "On tärkeää huomata, että teksti on selkeä.",
+            "language": "fi-FI",
+            "profile_id": "native-fi-general-v1",
+            "request_id": "document-42-revision-1",
+            "session_id": "rewrite-session",
+            "session_epoch": "a" * 64,
+            "content_type": "marketing",
+        })
+        self.assertEqual(route.task_kind, "rewrite")
+        self.assertEqual(route.source_text, "On tärkeää huomata, että teksti on selkeä.")
+        self.assertEqual(route.profile_id, "native-fi-general-v1")
+        self.assertEqual(route.request_id, "document-42-revision-1")
+
+    def test_source_alone_stays_translation_and_rewrite_conflicts_block(self) -> None:
+        inferred = MODULE.route_host_context({
+            "source_text": "Same-language text is not enough evidence.",
+            "target_language": "en-GB",
+        })
+        self.assertEqual(inferred.task_kind, "translation")
+        cases = (
+            {"task_kind": "rewrite", "source_text": "Text", "language": "en-GB"},
+            {"task_kind": "rewrite", "operation": "translate", "source_text": "Text",
+             "language": "en-GB", "profile_id": "profile", "request_id": "one"},
+            {"task_kind": "translation", "operation": "rewrite", "source_text": "Text",
+             "target_language": "de-DE"},
+            {"task_kind": "response", "response_language": "de-DE", "profile_id": "profile"},
+        )
+        for context in cases:
+            with self.subTest(context=context), self.assertRaises(MODULE.RoutingBlocked):
+                MODULE.route_host_context(context)
 
     def test_auto_all_unknown_operation_and_wrong_types_block(self) -> None:
         cases = (

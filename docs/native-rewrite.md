@@ -86,20 +86,34 @@ The authenticated service accepts:
   "profile_id": "project-fi-standard",
   "language": "fi-FI",
   "content_type": "prose",
-  "source_text": "The complete original Finnish text goes here."
+  "source_text": "The complete original Finnish text goes here.",
+  "rewrite_context_token": "host-issued one-time token",
+  "session_id": "host-session",
+  "session_epoch": "64 lowercase hexadecimal characters",
+  "agent_id": "writer identity"
 }
 ```
 
 The placeholder above describes the field; it is not a Finnish quality fixture.
-MCP `rewrite_text` accepts the same fields except `operation`. The existing
+Before this call, the trusted host invokes `prepare_rewrite_context` outside the
+model with the exact original, locale, profile, request/content type, current
+registered session epoch and writer identity. The resulting token is valid once
+and for 180 seconds. Missing, forged, replayed, stale or modified bindings block
+before the creator or reviewers receive text. MCP `rewrite_text` accepts the same
+fields except `operation`; its context token must be host-injected. The existing
 language gateway accepts `task_kind: rewrite` with those fields. No candidate,
 attestation or reviewer identity supplied by the caller can grant release.
 
 Success returns `target_text`, `release_token` with purpose `rewrite`, profile
 and evidence hashes, and an advisory style report. Failed reviews return no draft.
+Portable `verify_release_token` confirms the receipt's cryptographic and exact-text
+binding only; it does not authorize delivery. Rewrite delivery still requires the
+current host-bound session identity and a fresh one-time authorization grant.
 Use `integrations/adapters/native_rewrite.py` from a trusted host: construct
 `NativeRewriteClient(call_service)` with the existing authenticated service
-transport. `rewrite(...)` creates/reviews; `deliver(...)` verifies the receipt
+transport. Register the current session epoch once, then pass that session,
+epoch and writer identity to `rewrite(...)`; the adapter prepares the one-time
+context before `rewrite_text`. `deliver(...)` verifies the receipt
 against the current profile, authorizes and consumes a fresh session-bound
 one-time grant immediately before passing unchanged text to the send callback.
 Never trim, normalize, or edit the approved text. A transport error after send
@@ -109,14 +123,24 @@ to bypass the user's output interception boundary.
 The Claude plugin requires the trusted host to set
 `BLUN_LANGUAGE_GUARD_TASK_KIND=rewrite`, an exact
 `BLUN_LANGUAGE_GUARD_LANGUAGE`, and the registered
-`BLUN_LANGUAGE_GUARD_PROFILE_ID`. PreToolUse prevents model-selected task or
-profile choice. PostToolUse takes the final candidate only from the authenticated
+`BLUN_LANGUAGE_GUARD_PROFILE_ID`. It must also set the complete original as
+canonical UTF-8 base64 in `BLUN_LANGUAGE_GUARD_REWRITE_SOURCE_B64`, a stable
+`BLUN_LANGUAGE_GUARD_REWRITE_REQUEST_ID`, and one supported
+`BLUN_LANGUAGE_GUARD_REWRITE_CONTENT_TYPE`. PreToolUse replaces model-supplied
+source, request, content type, task, locale and profile with those host-owned
+bindings. PostToolUse takes the final candidate only from the authenticated
 Guard result—not the tool input—then obtains a one-time rewrite delivery grant.
 Stop/SubagentStop accepts only the byte-identical target for the same session,
-agent, original hash, locale, profile, and content type. Missing policy, a failed
+agent, request, original hash, locale, profile, content type and Guard boot. Each
+rewrite receipt may authorize only one delivery grant. Missing policy, a failed
 tool call, a changed result, or an unavailable Guard blocks delivery. Existing
 response and translation paths remain compatible. No live installation or host
 configuration is changed by this implementation.
+
+If the authorization response is lost, an exact retry with the same bound
+request returns the same grant rather than minting another one. A changed retry
+blocks. Grant consumption remains one-time; an ambiguous transport result after
+consumption requires reconciliation instead of automatic resend.
 
 ## Bounds and evidence
 

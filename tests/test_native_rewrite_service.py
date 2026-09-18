@@ -26,6 +26,10 @@ ADAPTER = load("rewrite_test_client", "integrations/adapters/native_rewrite.py")
 
 
 class RewriteServiceTests(unittest.TestCase):
+    SESSION_ID = "rewrite-session"
+    SESSION_EPOCH = "a" * 64
+    AGENT_ID = "writer"
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -41,29 +45,50 @@ class RewriteServiceTests(unittest.TestCase):
             host_policy_version="fixture-v1", profile=FIX.profile(locale), **options)
         service = SERVICE.GuardService(self.root / "key", self.root / "audit.jsonl",
                                        rewrite_workers={"standard": worker})
-        return service, ADAPTER.NativeRewriteClient(service.handle), host, creator
+        client = ADAPTER.NativeRewriteClient(service.handle)
+        client.register_session(session_id=self.SESSION_ID, session_epoch=self.SESSION_EPOCH)
+        return service, client, host, creator
 
     def request(self, **extra):
         return {"source_text": "On tärkeää huomata, että teksti on selkeä.",
                 "language": "fi-FI", "profile_id": "standard", "request_id": "one",
                 "content_type": "prose", **extra}
 
+    def rewrite(self, client, **extra):
+        return client.rewrite(**self.request(**extra), session_id=self.SESSION_ID,
+                              session_epoch=self.SESSION_EPOCH, agent_id=self.AGENT_ID)
+
+    def prepared_request(self, service, **extra):
+        request = self.request(**extra)
+        prepared = service.handle({"operation": "prepare_rewrite_context",
+                                   "task_kind": "rewrite", **request,
+                                   "session_id": self.SESSION_ID,
+                                   "session_epoch": self.SESSION_EPOCH,
+                                   "agent_id": self.AGENT_ID})
+        return {"operation": "rewrite_text", **request,
+                "rewrite_context_token": prepared["rewrite_context_token"],
+                "session_id": self.SESSION_ID, "session_epoch": self.SESSION_EPOCH,
+                "agent_id": self.AGENT_ID}
+
     def verify(self, service, result, **changes):
         data = self.request()
-        data.pop("request_id")
         return service.handle({**data, "operation": "verify", "task_kind": "rewrite",
+                               "session_id": self.SESSION_ID,
+                               "session_epoch": self.SESSION_EPOCH,
+                               "agent_id": self.AGENT_ID,
                                "target_text": result["target_text"],
                                "release_token": result["release_token"], **changes})
 
     def test_full_api_receipt_delivery_and_content_free_audit(self):
         service, client, host, creator = self.setup_pipeline()
-        result = client.rewrite(**self.request())
+        result = self.rewrite(client)
         self.assertTrue(result["release_allowed"], result)
         self.assertTrue(self.verify(service, result)["valid"])
         sent = []
         client.deliver(result, source_text=self.request()["source_text"], language="fi-FI",
-                       profile_id="standard", content_type="prose", session_id="session",
-                       session_epoch="a" * 64, agent_id="writer", channel="test", send=sent.append)
+                       profile_id="standard", request_id="one", content_type="prose",
+                       session_id=self.SESSION_ID, session_epoch=self.SESSION_EPOCH,
+                       agent_id=self.AGENT_ID, channel="test", send=sent.append)
         self.assertEqual(sent, [result["target_text"]])
         audit = (self.root / "audit.jsonl").read_text()
         for secret in (self.request()["source_text"], result["target_text"], result["release_token"]):
@@ -73,7 +98,7 @@ class RewriteServiceTests(unittest.TestCase):
 
     def test_mutation_locale_source_purpose_and_profile_invalidate(self):
         service, client, _, _ = self.setup_pipeline()
-        result = client.rewrite(**self.request())
+        result = self.rewrite(client)
         for changes in ({"target_text": result["target_text"] + "\r\n"},
                         {"source_text": self.request()["source_text"] + "\r\n"},
                         {"language": "mt-MT"}, {"profile_id": "missing"},
@@ -83,6 +108,31 @@ class RewriteServiceTests(unittest.TestCase):
         newer, _, _, _ = self.setup_pipeline(model_version="fixture-v2")
         self.assertFalse(self.verify(newer, result)["valid"])
 
+    def test_rewrite_context_blocks_missing_forged_mutated_replayed_and_stale_calls(self):
+        service, _, host, creator = self.setup_pipeline()
+        with self.assertRaises(SERVICE.GuardProtocolError):
+            service.handle({"operation": "rewrite_text", **self.request()})
+        bound = self.prepared_request(service)
+        for changes in ({"source_text": bound["source_text"] + " "},
+                        {"language": "fi"}, {"profile_id": "missing"},
+                        {"content_type": "marketing"}, {"request_id": "other"},
+                        {"agent_id": "other-writer"}, {"session_id": "other-session"},
+                        {"rewrite_context_token": "forged"}):
+            with self.subTest(changes=changes), self.assertRaises(SERVICE.GuardProtocolError):
+                service.handle({**bound, **changes})
+        self.assertEqual(creator.calls, [])
+        self.assertEqual(host.calls, [])
+        accepted = service.handle(bound)
+        self.assertTrue(accepted["release_allowed"])
+        with self.assertRaises(SERVICE.GuardProtocolError):
+            service.handle(bound)
+
+        fresh = self.prepared_request(service, request_id="stale")
+        service.handle({"operation": "retire_session_epoch", "session_id": self.SESSION_ID,
+                        "session_epoch": self.SESSION_EPOCH})
+        with self.assertRaises(SERVICE.GuardProtocolError):
+            service.handle(fresh)
+
     def test_mcp_calls_actual_service_and_missing_host_blocks(self):
         service, _, host, _ = self.setup_pipeline()
         guard = SERVICE.GATEWAY.GUARD
@@ -91,8 +141,14 @@ class RewriteServiceTests(unittest.TestCase):
                 mock.patch.object(guard, "_service_token", return_value=""), \
                 mock.patch.object(guard.SERVICE_CLIENT, "call_guard_service",
                                   side_effect=lambda endpoint, request, **kw: service.handle(request)):
+            prepared = service.handle({"operation": "prepare_rewrite_context", "task_kind": "rewrite",
+                                       **args, "session_id": self.SESSION_ID,
+                                       "session_epoch": self.SESSION_EPOCH, "agent_id": self.AGENT_ID})
+            tool_args = {**args, "rewrite_context_token": prepared["rewrite_context_token"],
+                         "session_id": self.SESSION_ID, "session_epoch": self.SESSION_EPOCH,
+                         "agent_id": self.AGENT_ID}
             response = guard.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                            "params": {"name": "rewrite_text", "arguments": args}})
+                                            "params": {"name": "rewrite_text", "arguments": tool_args}})
             result = json.loads(response["result"]["content"][0]["text"])
             self.assertTrue(result["release_allowed"], result)
             self.assertEqual(len(host.calls), 2)
@@ -109,21 +165,32 @@ class RewriteServiceTests(unittest.TestCase):
             with self.assertRaises(SERVICE.GuardProtocolError):
                 service.handle({"operation": "rewrite_text", **self.request(), **extra})
         with self.assertRaises(ADAPTER.RewriteDeliveryBlocked):
-            client.rewrite(**self.request())
-        failed = service.handle({"operation": "rewrite_text", **self.request()})
-        self.assertFalse(failed["release_allowed"])
-        self.assertNotIn("target_text", failed)
+            self.rewrite(client)
+        with self.assertRaises(SERVICE.GuardProtocolError):
+            service.handle({"operation": "rewrite_text", **self.request()})
 
     def test_one_time_grants_raw_bytes_and_delivery_outage(self):
         service, client, _, _ = self.setup_pipeline()
-        result = client.rewrite(**self.request())
+        result = self.rewrite(client)
         base = {"task_kind": "rewrite", "language": "fi-FI", "profile_id": "standard",
+                "request_id": "one",
                 "content_type": "prose", "target_text": result["target_text"],
-                "session_id": "session", "session_epoch": "b" * 64,
+                "session_id": self.SESSION_ID, "session_epoch": self.SESSION_EPOCH,
                 "agent_id": "writer", "channel": "test"}
         grant = service.handle({**base, "operation": "authorize_delivery",
                                 "source_text": self.request()["source_text"],
                                 "release_token": result["release_token"]})
+        replayed_authorization = service.handle({**base, "operation": "authorize_delivery",
+                                                 "source_text": self.request()["source_text"],
+                                                 "release_token": result["release_token"]})
+        self.assertTrue(replayed_authorization["valid"])
+        self.assertEqual(replayed_authorization["delivery_grant"], grant["delivery_grant"])
+        for changes in ({"agent_id": "other-writer"}, {"request_id": "other-request"},
+                        {"session_id": "other-session"}):
+            rejected = service.handle({**base, **changes, "operation": "authorize_delivery",
+                                       "source_text": self.request()["source_text"],
+                                       "release_token": result["release_token"]})
+            self.assertFalse(rejected["valid"])
         consume = {**base, "operation": "consume_delivery", "delivery_grant": grant["delivery_grant"],
                    "source_sha256": hashlib.sha256(self.request()["source_text"].encode()).hexdigest()}
         self.assertTrue(service.handle(consume)["valid"])
@@ -132,17 +199,17 @@ class RewriteServiceTests(unittest.TestCase):
         broken = ADAPTER.NativeRewriteClient(lambda _: {"valid": False})
         with self.assertRaises(ADAPTER.RewriteDeliveryBlocked):
             broken.deliver(result, source_text=self.request()["source_text"], language="fi-FI",
-                           profile_id="standard", content_type="prose", session_id="session",
+                           profile_id="standard", request_id="one", content_type="prose", session_id="session",
                            session_epoch="b" * 64, agent_id="writer", channel="test", send=sent.append)
         self.assertEqual(sent, [])
 
     def test_maltese_and_non_latin_reach_actual_guard(self):
         service, client, _, _ = self.setup_pipeline("It-test huwa ċar u jinftiehem.", "mt-MT")
-        self.assertTrue(client.rewrite(**self.request(language="mt-MT", source_text=
-            "Huwa importanti li ngħidu li t-test huwa ċar u jinftiehem."))["release_allowed"])
+        self.assertTrue(self.rewrite(client, language="mt-MT", source_text=
+            "Huwa importanti li ngħidu li t-test huwa ċar u jinftiehem.")["release_allowed"])
         service, client, _, _ = self.setup_pipeline("這段文字很清楚。", "zh-Hant-TW")
-        self.assertTrue(client.rewrite(**self.request(language="zh-Hant-TW", request_id="chinese",
-            source_text="需要指出的是，這段文字很清楚。"))["release_allowed"])
+        self.assertTrue(self.rewrite(client, language="zh-Hant-TW", request_id="chinese",
+            source_text="需要指出的是，這段文字很清楚。")["release_allowed"])
 
     def test_short_ui_and_marketing_over_socket_and_mcp_verifier(self):
         service, _, _, _ = self.setup_pipeline("Avaa asetukset.")
@@ -160,7 +227,8 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertIn(content_type, verifier["inputSchema"]["properties"]["content_type"]["enum"])
             request = self.request(content_type=content_type, request_id=content_type,
                                    source_text="Voit avata asetukset tästä.")
-            result = client.rewrite(**request)
+            result = client.rewrite(**request, session_id=self.SESSION_ID,
+                                    session_epoch=self.SESSION_EPOCH, agent_id=self.AGENT_ID)
             with mock.patch.object(guard, "SERVICE_ENDPOINT", endpoint), \
                     mock.patch.object(guard, "_service_token", return_value=""):
                 verified = guard.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
