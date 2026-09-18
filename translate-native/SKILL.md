@@ -35,8 +35,9 @@ or relax translation identity checks. For original writing with no input draft,
 the existing mandatory response review remains applicable.
 
 For a long original, pass the complete text unchanged. The trusted worker may use
-its bounded durable plain-text plan, its lossless JSON string-value plan, or its
-strict lossless HTML linguistic-span plan, but
+its bounded durable plain-text plan, its lossless JSON string-value plan, its
+strict lossless HTML linguistic-span plan, or its strict Android-resource XML
+text plan, but
 only a fully assembled result may enter the source-blind native review and
 subsequent original-preservation review. JSON keys, structure, non-string values
 and source bytes outside rewritten value tokens remain host-owned; unchanged
@@ -56,8 +57,25 @@ target whole-document review text limit before creation and again after assembly
 summarize to fit a model limit, publish a partial segment or value batch, or treat
 per-segment fluency as document acceptance. The native reviewer must receive no
 source-derived manifest or segment metadata. Unsupported long structured
-containers block until a structure-aware plan is available. Any changed segment,
-value part, HTML span or final assembly requires fresh reviews of the exact complete result.
+containers block until a structure-aware plan is available. Long XML is enabled
+only for the versioned Android resource selector: unnamespaced direct
+`<string>` values and unnamespaced `<plurals>/<item>` or
+`<string-array>/<item>` values under an unnamespaced `<resources>` root.
+Selected resources require nonempty Android `name` attributes; plural items
+require a standard Android quantity and string-array items may not impersonate
+plural items. Source XML must already be NFC so immutable container bytes cannot
+make the final Unicode gate impossible after model work.
+Android outer double-quote wrappers and their whitespace semantics remain
+host-owned. An unquoted selected value with an unescaped ASCII apostrophe or
+quote blocks; a revised unquoted value may not introduce one. Opaque controls
+apply only to recognized selector elements, never to arbitrary XML nodes.
+DTD/entities, XInclude, CDATA, mixed content, `xml:space="preserve"`,
+namespaced selector lookalikes, unclassified non-whitespace text and generic XML
+remain fail-closed. Attributes, declarations, namespaces, comments, processing
+instructions, predefined/numeric references, email addresses, Android resource
+and theme references (including escaped literals), and backslash escapes stay
+host-owned. Any changed segment, value part, HTML/XML
+span or final assembly requires fresh reviews of the exact complete result.
 
 The repository deployment guide is `docs/native-rewrite.md`; the standalone skill
 does not install a model or host service. The Claude plugin accepts a rewrite

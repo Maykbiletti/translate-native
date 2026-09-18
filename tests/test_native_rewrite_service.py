@@ -127,6 +127,60 @@ class RewriteServiceTests(unittest.TestCase):
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
 
+    def test_long_xml_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä teksti säilyttää ääkköset ja numeron 42. "),
+            ("mt-MT", "Test ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42. "),
+            ("ar", "نص واضح يحافظ على الرقم 42 وعلامات الترقيم. "),
+        )
+        for index, (locale, seed) in enumerate(cases):
+            source = ('<?xml version="1.0" encoding="UTF-8"?>\n<resources>'
+                      '<string name="copy">' + (seed * 300)
+                      + '</string><string name="placeholder">{{name}}</string>'
+                      '<string name="fixed" translatable="false">'
+                      'SECRET</string></resources>')
+            creator = FIX.Creator("fixture-keeps-xml-spans")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-xml-" + str(index)
+            result = self.rewrite(client, source_text=source, language=locale,
+                                  request_id=request_id,
+                                  content_type="documentation")
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            self.assertEqual([task["phase"] for task, _control in host.calls],
+                             ["target_native", "source_fidelity"])
+            self.assertNotIn("source", host.calls[0][0]["input"])
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id, content_type="documentation")["valid"])
+
+    def test_malformed_or_semantically_unsafe_long_xml_never_releases(self):
+        cases = (
+            '<resources><!--x---><string name="x">Text. {pad}</string></resources>',
+            '<resources><string name="x"other="y">Text. {pad}</string></resources>',
+            '<resources><string name="x">Text. {pad}</string></resources>\u00a0',
+            '<resources xmlns:xi="http://www.w3.org/2001/XIncl&#117;de">'
+            '<string name="x">Text. {pad}</string>'
+            '<xi:include href="file:///etc/passwd"/></resources>',
+            '<resources><string>Text. {pad}</string></resources>',
+            '<resources><plurals name="count"><item quantity="singular">'
+            'Text. {pad}</item></plurals></resources>',
+        )
+        for index, template in enumerate(cases):
+            source = template.format(pad="More text. " * 1000)
+            creator = FIX.Creator("unused")
+            _service, client, _host, creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            with self.assertRaises(ADAPTER.RewriteDeliveryBlocked):
+                self.rewrite(
+                    client, source_text=source, language="fi-FI",
+                    request_id="blocked-xml-" + str(index),
+                    content_type="documentation")
+            self.assertFalse(creator.calls)
+
     def test_guard_recomputes_long_json_manifest_and_rejects_tampering(self):
         source = json.dumps({"copy": "Täsmällinen arvo 42 säilyy. " * 180,
                              "count": 42, "enabled": True}, ensure_ascii=False,
@@ -159,6 +213,26 @@ class RewriteServiceTests(unittest.TestCase):
         worker.run = mock.Mock(return_value=reviewed)
         request = self.prepared_request(
             service, source_text=source, request_id="tampered-html")
+        result = service.handle(request)
+        self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
+                                  "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_long_xml_manifest_and_rejects_tampering(self):
+        source = ('<resources><string name="copy">'
+                  + ("Täsmällinen arvo 42 säilyy. " * 240)
+                  + "</string></resources>")
+        creator = FIX.Creator("fixture-keeps-xml-spans")
+        service, _client, _host, _creator = self.setup_pipeline(
+            creator=creator, max_output_tokens=8192)
+        worker = service.rewrite_workers["standard"]
+        reviewed = json.loads(json.dumps(
+            worker.run(source, "prose", "tampered-xml")))
+        reviewed["evidence"]["document"]["groups"][0][
+            "creation_response_sha256"] = "0" * 64
+        reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+        worker.run = mock.Mock(return_value=reviewed)
+        request = self.prepared_request(
+            service, source_text=source, request_id="tampered-xml")
         result = service.handle(request)
         self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
                                   "reason": "rewrite.worker_failed"})

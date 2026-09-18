@@ -48,6 +48,16 @@ class Creator:
                     "completion_status": "complete",
                     "values": [{"value_id": item["value_id"], "candidate": value}
                                for item, value in zip(request.input["owned_values"], values)]}
+        if request.input["response_schema"]["schema"] == RW.LONG_XML_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_XML_SCHEMA, "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         return {"schema": RW.WORKER.CANDIDATE_SCHEMA, "phase": "transcreation",
                 "locale": request.input["target"]["locale"], "candidate": candidate}
 
@@ -898,6 +908,260 @@ class RewriteTests(unittest.TestCase):
         self.assertFalse(worker.validate_document_evidence(
             source, changed_target, document, content_type="prose",
             request_id="html-evidence", correction_history=[]))
+
+    def test_long_xml_preserves_container_and_uses_whole_document_reviews(self):
+        source = ('<?xml version="1.0" encoding="UTF-8"?>\n<resources>'
+                  '<!-- fixed --><string name="copy">'
+                  + ("Selkeä teksti {{name}} &amp; numero 42. " * 280)
+                  + '</string><string name="secret" translatable="false">'
+                  'fixed-api-key</string></resources>')
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-xml-spans"), host=host,
+            max_output_tokens=8192)
+        result = worker.run(source, "documentation", "long-xml-lossless")
+        self.assertEqual(result["target_text"], source)
+        self.assertEqual(result["evidence"]["document"]["schema"],
+                         RW.LONG_XML_EVIDENCE_SCHEMA)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "xml"
+                            and call.input["selector_profile"]
+                            == RW.XMLRW.SELECTOR_PROFILE
+                            for call in creator.calls))
+        owned = json.dumps(
+            [call.input["owned_values"] for call in creator.calls],
+            ensure_ascii=False)
+        self.assertNotIn("{{name}}", owned)
+        self.assertNotIn("&amp;", owned)
+        self.assertNotIn("fixed-api-key", owned)
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(native["input"]["candidate"], source)
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], result["evidence"]["document"],
+            content_type="documentation", request_id="long-xml-lossless",
+            correction_history=[]))
+
+    def test_long_xml_before_after_changes_only_selected_text(self):
+        source = ('<resources><string name="copy">'
+                  'On tärkeää huomata, että tämä on selkeä. '
+                  '@string/app_name @+id/button @*android:color/accent '
+                  '?attr/colorPrimary \\@string/literal \\?attr/literal '
+                  'Line\\nnext \\u00E4. '
+                  + ("Lisätieto säilyy 42. " * 400)
+                  + '</string><string name="fixed" translatable="false">'
+                  'Do not change</string></resources>')
+
+        def revise(request):
+            return [item["text"].replace(
+                "On tärkeää huomata, että tämä on selkeä.", "Tämä on selkeä.")
+                    for item in request.input["owned_values"]]
+
+        worker, _creator = self.worker(
+            creator=Creator(revise), max_output_tokens=8192)
+        result = worker.run(source, "marketing", "long-xml-before-after")
+        self.assertIn('name="copy">Tämä on selkeä. ', result["target_text"])
+        self.assertIn('name="fixed" translatable="false">Do not change',
+                      result["target_text"])
+        self.assertIn('@string/app_name @+id/button @*android:color/accent '
+                      '?attr/colorPrimary \\@string/literal \\?attr/literal '
+                      'Line\\nnext \\u00E4.',
+                      result["target_text"])
+        self.assertEqual(RW.integrity_errors(source, result["target_text"]), [])
+
+    def test_long_xml_rejects_response_and_evidence_tampering(self):
+        class ReorderingXmlCreator(Creator):
+            def invoke(self, request):
+                response = super().invoke(request)
+                if response.get("schema") == RW.LONG_XML_SCHEMA:
+                    response["values"].reverse()
+                return response
+
+        source = "<resources>" + "".join(
+            f'<string name="x{index}">Selkeä arvo {index} säilyy 42. '
+            + ("Lisätieto jatkuu. " * 6) + "</string>"
+            for index in range(40)) + "</resources>"
+        worker, creator = self.worker(creator=ReorderingXmlCreator("unchanged"))
+        with self.assertRaises(RW.NativeRewriteBlocked):
+            worker.run(source, "prose", "xml-response-reordered")
+        self.assertEqual(len(creator.calls), 1)
+
+        worker, _creator = self.worker(
+            creator=Creator("fixture-keeps-xml-spans"))
+        result = worker.run(source, "prose", "xml-evidence")
+        document = json.loads(json.dumps(result["evidence"]["document"]))
+        document["groups"][0]["creation_request_sha256"] = "0" * 64
+        self.assertFalse(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="prose",
+            request_id="xml-evidence", correction_history=[]))
+        changed_target = result["target_text"].replace(
+            "<resources>", '<resources xmlns:x="urn:changed">', 1)
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed_target, result["evidence"]["document"],
+            content_type="prose", request_id="xml-evidence",
+            correction_history=[]))
+
+    def test_long_xml_unsafe_or_unclassified_blocks_before_creator(self):
+        cases = (
+            '<!DOCTYPE resources [<!ENTITY x "SECRET">]><resources>'
+            '<string name="x">&x;</string></resources>',
+            '<resources><string name="x"><![CDATA[Text]]></string></resources>',
+            '<resources><string name="x">Text <b>bold</b></string></resources>',
+            '<resources><apiKey>SECRET</apiKey></resources>',
+            '<resources xmlns:x="urn:secret">'
+            '<x:string name="api">SECRET</x:string></resources>',
+            '<resources><string xmlns="urn:secret" name="api">'
+            'SECRET</string></resources>',
+            '<resources><string name="x" xml:space="preserve"> Text </string></resources>',
+            '<?xml version="1.0"?><catalog><title>'
+            'Generic XML is unsupported.</title></catalog>',
+            '<resources><!--x---><string name="x">Text</string></resources>',
+            '<resources><string name="x"other="y">Text</string></resources>',
+            '<resources><string name="x">Text</string></resources>\u00a0',
+            '\u202f<resources><string name="x">Text</string></resources>',
+            '<resources xmlns:xi="http://www.w3.org/2001/XIncl&#117;de">'
+            '<xi:include href="file:///etc/passwd"/></resources>',
+            '<resources><string name="x" xml:space="pres&#101;rve">'
+            'Secret</string></resources>',
+        )
+        for index, source in enumerate(cases):
+            source += " " * 9000
+            worker, creator = self.worker(creator=Creator("unused"))
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(RW.NativeRewriteBlocked, "long_xml_"):
+                    worker.run(source, "prose", "invalid-xml-" + str(index))
+                self.assertFalse(creator.calls)
+
+    def test_xml_declaration_scanner_ignores_inert_content(self):
+        xml_source = ('<resources><!-- literal <!ENTITY x> documentation -->'
+                      '<string name="x">' + ("Selkeä teksti. " * 700)
+                      + '</string></resources>')
+        worker, creator = self.worker(creator=Creator("fixture-keeps-xml-spans"))
+        self.assertEqual(worker.run(
+            xml_source, "documentation", "xml-inert-declaration")["target_text"],
+            xml_source)
+        self.assertTrue(creator.calls)
+
+        legacy = ('<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">'
+                  '<html><body>Legacy</body></html>')
+        self.assertFalse(RW._has_unsafe_xml_declaration(legacy))
+        html_source = ('<!doctype html>'
+                       '<html><body><script>const x="<!ENTITY harmless>";</script><p>'
+                       + ("Clear text. " * 800) + '</p></body></html>')
+        worker, creator = self.worker(creator=Creator("fixture-keeps-html-spans"))
+        self.assertEqual(worker.run(
+            html_source, "documentation", "html-inert-declaration")["target_text"],
+            html_source)
+        self.assertTrue(creator.calls)
+
+    def test_xml_protected_non_nfc_blocks_early_and_email_remains_exact(self):
+        non_nfc = ('<resources data-note="cafe\u0301"><!-- cafe\u0301 -->'
+                   '<string name="fixed" translatable="false">cafe\u0301</string>'
+                   '<string name="x">' + ("Selkeä teksti. " * 700)
+                   + '</string></resources>')
+        worker, creator = self.worker(creator=Creator("fixture-keeps-xml-spans"))
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "long_xml_source_not_nfc"):
+            worker.run(non_nfc, "documentation", "xml-protected-nfd")
+        self.assertFalse(creator.calls)
+
+        source = ('<resources><string name="x">Email support@example.com. '
+                  + ("Selkeä teksti. " * 700) + '</string></resources>')
+        worker, creator = self.worker(creator=Creator("fixture-keeps-xml-spans"))
+        result = worker.run(source, "documentation", "xml-protected-email")
+        self.assertEqual(result["target_text"], source)
+        owned = json.dumps([call.input["owned_values"] for call in creator.calls])
+        self.assertNotIn("support@example.com", owned)
+        self.assertEqual(RW.integrity_errors(source, source), [])
+
+    def test_xml_android_quote_wrapper_survives_guarded_rewrite(self):
+        source = ('<resources><string name="x">"  This is clear. '
+                  + ("More clear text. " * 700) + '  "</string></resources>')
+
+        def revise(request):
+            return [item["text"].replace("This is clear.", "It's clearer.")
+                    for item in request.input["owned_values"]]
+
+        worker, _creator = self.worker(creator=Creator(revise))
+        result = worker.run(source, "documentation", "xml-android-quotes")
+        self.assertIn('>"  It\'s clearer. ', result["target_text"])
+        self.assertTrue(result["target_text"].endswith('  "</string></resources>'))
+        self.assertEqual(RW.integrity_errors(source, result["target_text"]), [])
+
+    def test_long_xml_review_budget_blocks_before_creator(self):
+        source = ('<resources><string name="x">'
+                  + ("Selkeä arvo 42. " * 9000)
+                  + "</string></resources>")
+        worker, creator = self.worker(creator=Creator("unused"))
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "long_xml_review_budget_exceeded"):
+            worker.run(source, "prose", "xml-review-budget")
+        self.assertFalse(creator.calls)
+
+    def test_long_xml_finding_never_triggers_automatic_correction(self):
+        failed = False
+
+        def review_factory(task, response):
+            nonlocal failed
+            if task["phase"] == "target_native" and not failed:
+                failed = True
+                response.update(status="FAIL", major_defects=[{
+                    "severity": "major", "class": "formulaic_opening",
+                    "excerpt": "Selkeä teksti", "reason": "Synthetic fixture finding.",
+                    "impact": "The opening is repetitive.",
+                    "revision_direction": "Make the opening direct.",
+                }])
+            return response
+
+        source = ('<resources><string name="x">'
+                  + ("Selkeä teksti säilyy 42. " * 400)
+                  + "</string></resources>")
+        host = Host(review_factory=review_factory)
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-xml-spans"), host=host,
+            max_output_tokens=8192)
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "independent_review_required"):
+            worker.run(source, "prose", "xml-no-correction")
+        self.assertEqual(len(creator.calls), len({
+            call.input["chunk_id"] for call in creator.calls}))
+        self.assertEqual([task["phase"] for task, _ in host.calls],
+                         ["target_native"])
+
+    def test_long_xml_restart_reuses_completed_batches(self):
+        class SimulatedCrash(BaseException):
+            pass
+
+        class CrashAfterFirstBatch(RW.NativeRewriteWorker):
+            def _create_long_segment(self, *args, **kwargs):
+                result = super()._create_long_segment(*args, **kwargs)
+                if not getattr(self, "_crashed", False):
+                    self._crashed = True
+                    raise SimulatedCrash()
+                return result
+
+        source = "<resources>" + "".join(
+            f'<string name="x{index}">Selkeä kappale {index} säilyttää numeron 42. '
+            + ("Lisätieto jatkuu. " * 8) + "</string>"
+            for index in range(60)) + "</resources>"
+        first_creator = Creator("unchanged")
+        first = CrashAfterFirstBatch(
+            first_creator, Host(), ledger_path=self.path,
+            creator_id="writer", creator_session_id="writer-session",
+            model_id="fixture-model", model_version="fixture-model-1",
+            host_policy_version="fixture-host-v1", profile=profile())
+        with self.assertRaises(SimulatedCrash):
+            first.run(source, "prose", "xml-resume")
+        self.assertEqual(len(first_creator.calls), 1)
+
+        resumed, second_creator = self.worker(creator=Creator("unchanged"))
+        result = resumed.run(source, "prose", "xml-resume")
+        groups = len(result["evidence"]["document"]["groups"])
+        self.assertGreater(groups, 1)
+        self.assertEqual(len(second_creator.calls), groups - 1)
+        self.assertEqual(result["target_text"], source)
 
     def test_unsegmented_unicode_blocks_instead_of_splitting_grapheme_clusters(self):
         self.assertEqual(sum(last - first + 1 for first, last in

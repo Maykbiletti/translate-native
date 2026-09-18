@@ -215,9 +215,10 @@ timeout determines how many segments fit the fixed 1,500-second aggregate bound.
 At defaults this permits ten segments of up to 3,072 Unicode characters, for at
 most 23 calls in the worst plain-text correction path. A document beyond the
 computed bound returns `rewrite.long_document_too_large` before model access.
-Inputs classified as XML and other unsupported structured containers return
+Unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
-summarized or routed through the short path. Token/cost reservation must use the
+summarized or routed through the short path. Long XML has the separate bounded
+Android-resource path described below. Token/cost reservation must use the
 computed long plan, not assume five calls. Segment policy, budget, correction
 limit and all instructions are part of the effective profile hash, so a policy
 change invalidates previous receipts.
@@ -281,6 +282,55 @@ assembly. The Guard independently rebuilds the plan, every request/response hash
 completion record and exact assembly before signing. Automatic correction is
 disabled because a document-wide finding is not yet bound to one exact HTML
 span; actionable findings therefore remain fail-closed for independent review.
+
+Long XML is deliberately narrower than generic XML because element names do not
+prove that a value is prose rather than a key, checksum, credential or program
+fragment. The first version therefore binds one trusted selector profile:
+unnamespaced Android `<resources>` containing direct `<string>` values and
+`<item>` values directly under unnamespaced `<plurals>` or
+`<string-array>`. `translatable="false"` values remain opaque. Any other
+non-whitespace text is unclassified and blocks before creator access; a generic
+XML document is never guessed to be linguistic.
+
+Direct strings and both collection types require a nonempty `name`. Plural
+items require one of Android's `zero`, `one`, `two`, `few`, `many` or `other`
+quantities; string-array items cannot carry a plural quantity. XML character
+and attribute references are decoded only for these trusted semantic checks,
+while their raw spelling remains immutable. Source XML must be NFC before the
+creator starts; this makes the final Unicode requirement achievable without
+normalizing protected container bytes after the fact.
+
+Android's outer double-quote wrapper is part of the trusted skeleton, including
+the whitespace it preserves. The creator sees only its interior and may use an
+apostrophe there; it cannot remove the wrapper or introduce an unescaped double
+quote. In an unquoted value, an unescaped ASCII apostrophe or quote blocks
+before creation and cannot be introduced by a candidate. `translatable=false`
+and a namespace-qualified `translate=no` are treated as opaque only on the
+recognized string or collection selector elements. They never make an unknown
+element such as a script, key or color exempt from linguistic classification.
+
+The raw scanner accepts XML 1.0 UTF-8 source only and preserves the BOM and
+declaration, tags, namespace prefixes and bindings, attributes and quote style,
+empty-element spelling, whitespace and line endings, comments, processing
+instructions, predefined/numeric references, placeholders, URLs, Android
+resource/theme references (including `@+id`, private-framework forms and
+escaped literals), email addresses and Android backslash escapes as exact
+host-owned bytes. It never resolves resources. DTD/DOCTYPE and entity
+declarations are rejected before semantic XML validation or generic format
+detection. A conforming non-resolving tree parse cross-checks the raw scanner.
+XInclude—including a namespace URI written with numeric references—CDATA, unknown named
+entities, mixed/inline content, `xml:space="preserve"`, undeclared or duplicate
+expanded attributes, namespaced selector lookalikes and malformed XML also
+block before creator access.
+
+Only selected raw text pieces enter bounded creator batches under opaque ordered
+IDs. The worker requires exact value ordering and trusted provider-completion
+evidence, reassembles against the source skeleton, and applies the same
+262,144-byte combined source/target review ceiling. The complete XML then
+receives the source-blind native review followed by the separate original
+preservation review. The Guard independently rebuilds the policy-bound selector,
+manifest, requests, completions and exact assembly. Automatic XML correction is
+disabled until a finding can be safely assigned to one exact selected value.
 
 Segment cuts are allowed only at explicit whitespace or recognized sentence
 terminators. If a long unspaced input has no such safe boundary, the worker
