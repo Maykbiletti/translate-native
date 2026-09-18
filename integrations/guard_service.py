@@ -97,11 +97,20 @@ def _decision_audit(request: dict[str, Any], result: dict[str, Any], event: str)
 
 class GuardService:
     def __init__(self, key_path: Path, audit_path: Path, service_token: str = "",
-                 response_reviewer: Any | None = None) -> None:
+                 response_reviewer: Any | None = None,
+                 rewrite_workers: dict[str, Any] | None = None) -> None:
         self.key_path = key_path
         self.audit_path = audit_path
         self.service_token = service_token
         self.response_reviewer = response_reviewer
+        # Operator-owned registry, never populated from an agent request.
+        self.rewrite_workers = dict(rewrite_workers or {})
+        if any(not isinstance(name, str) or not name.strip()
+               or not callable(getattr(worker, "run", None))
+               or not isinstance(getattr(worker, "locale", None), str)
+               or re.fullmatch(r"[0-9a-f]{64}", getattr(worker, "profile_sha256", "")) is None
+               for name, worker in self.rewrite_workers.items()):
+            raise ValueError("invalid trusted rewrite worker registry")
         self.key = QUALITY.load_or_create_key(key_path)
         self.boot_id = QUALITY._b64encode(os.urandom(12))
         self.consumed_delivery_nonces: dict[str, int] = {}
@@ -287,8 +296,107 @@ class GuardService:
     def _identity_hash(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
+    def _rewrite_worker(self, request: dict[str, Any]) -> Any:
+        worker = self.rewrite_workers.get(_exact_string(request, "profile_id"))
+        if worker is None or worker.locale != _exact_string(request, "language"):
+            raise GuardProtocolError("rewrite profile unavailable or locale mismatch")
+        return worker
+
+    def _rewrite_text(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Create and review internally. No caller-supplied candidate or attestations."""
+        allowed = {"source_text", "language", "content_type", "request_id", "profile_id"}
+        if set(request) - allowed:
+            raise GuardProtocolError("invalid rewrite request fields")
+        worker = self._rewrite_worker(request)
+        source = _exact_string(request, "source_text")
+        content_type = _content_type(request)
+        profile_hash = worker.profile_sha256
+        try:
+            reviewed = worker.run(source, content_type, _exact_string(request, "request_id"))
+            target = _exact_string(reviewed, "target_text")
+            digest = _exact_hash(reviewed, "evidence_sha256")
+            evidence = reviewed.get("evidence")
+            if (not isinstance(evidence, dict)
+                    or hashlib.sha256(json.dumps(evidence, ensure_ascii=False, allow_nan=False,
+                        sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest() != digest
+                    or reviewed.get("profile_sha256") != profile_hash
+                    or worker.profile_sha256 != profile_hash):
+                raise GuardProtocolError("rewrite evidence mismatch")
+            expected_evidence = {
+                "source_sha256": self._identity_hash(source),
+                "target_sha256": self._identity_hash(target), "locale": worker.locale,
+                "content_type": content_type, "profile_sha256": profile_hash,
+                "request_id": request["request_id"], "integrity": "PASS",
+            }
+            if (any(evidence.get(key) != value for key, value in expected_evidence.items())
+                    or not isinstance(evidence.get("reviews"), list)
+                    or [item.get("phase") for item in evidence["reviews"]]
+                    != ["target_native", "source_fidelity"]):
+                raise GuardProtocolError("rewrite evidence binding mismatch")
+            # Re-run deterministic validation in the sole signing authority.
+            module = _load("blun_guard_native_rewrite", ROOT / "integrations" / "native_rewrite_worker.py")
+            integrity = module.integrity_errors(source, target)
+            report = GATEWAY.GUARD.validate_text(target, worker.locale, content_type=content_type,
+                                               short_text_reviewed=True)
+            if integrity or report["findings"]:
+                return {"status": "BLOCK", "release_allowed": False,
+                        "reason": "rewrite.deterministic_check_failed"}
+            now = int(time.time())
+            payload = {
+                "schema": "translate-native.rewrite-release.v1", "v": QUALITY.VERSION,
+                "purpose": "rewrite", "source_sha256": self._identity_hash(source),
+                "target_sha256": self._identity_hash(target), "language": worker.locale,
+                "content_type": content_type, "profile_id": request["profile_id"],
+                "profile_sha256": profile_hash, "evidence_sha256": digest,
+                "iat": now, "exp": now + 3600,
+            }
+            encoded = QUALITY._b64encode(json.dumps(payload, sort_keys=True,
+                separators=(",", ":")).encode("utf-8"))
+            signature = QUALITY._b64encode(hmac.new(self.key, encoded.encode("ascii"), hashlib.sha256).digest())
+            return {"status": "PASS", "release_allowed": True, "task_kind": "rewrite",
+                    "target_text": target, "release_token": f"blrw1.{encoded}.{signature}",
+                    "evidence_sha256": digest, "profile_sha256": profile_hash,
+                    "style_review": report["style_review"],
+                    "limitations": "Reviewed output; not proof of human authorship or comparative quality."}
+        except Exception as error:
+            # Adapter errors must not expose source, candidate, or model reasoning.
+            code = getattr(error, "code", "rewrite.worker_failed")
+            if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_.-]{0,127}", code) is None:
+                code = "rewrite.worker_failed"
+            return {"status": "BLOCK", "release_allowed": False, "reason": code}
+
+    def _verify_rewrite(self, request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            worker = self._rewrite_worker(request)
+            prefix, encoded, signature = _exact_string(request, "release_token").split(".")
+            expected = QUALITY._b64encode(hmac.new(self.key, encoded.encode("ascii"), hashlib.sha256).digest())
+            if prefix != "blrw1" or not hmac.compare_digest(expected, signature):
+                raise ValueError
+            payload = json.loads(QUALITY._b64decode(encoded))
+            now = int(time.time())
+            checks = {
+                "schema": payload.get("schema") == "translate-native.rewrite-release.v1",
+                "version": payload.get("v") == QUALITY.VERSION,
+                "purpose": payload.get("purpose") == "rewrite",
+                "source": payload.get("source_sha256") == self._identity_hash(_exact_string(request, "source_text")),
+                "target": payload.get("target_sha256") == self._identity_hash(_exact_string(request, "target_text")),
+                "language": payload.get("language") == worker.locale,
+                "content_type": payload.get("content_type") == _content_type(request),
+                "profile": payload.get("profile_id") == request["profile_id"]
+                           and payload.get("profile_sha256") == worker.profile_sha256,
+                "evidence": isinstance(payload.get("evidence_sha256"), str)
+                            and re.fullmatch(r"[0-9a-f]{64}", payload["evidence_sha256"]) is not None,
+                "time": type(payload.get("iat")) is int and type(payload.get("exp")) is int
+                        and payload["iat"] <= now <= payload["exp"] <= payload["iat"] + 3600,
+            }
+            return {"valid": all(checks.values()), "checks": checks, "payload": payload}
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return {"valid": False, "checks": {"rewrite_receipt": False}}
+
     def _verify_release(self, request: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
         task_kind = _exact_string(request, "task_kind")
+        if task_kind == "rewrite":
+            return task_kind, _exact_string(request, "source_text"), self._verify_rewrite(request)
         if task_kind not in {"response", "translation"}:
             raise GuardProtocolError("invalid task_kind")
         source = _exact_string(request, "source_text", required=False)
@@ -351,6 +459,13 @@ class GuardService:
             "exp": now + 600,
             "nonce": QUALITY._b64encode(os.urandom(16)),
         }
+        if task_kind == "rewrite":
+            payload.update(
+                source_sha256=self._identity_hash(_exact_string(request, "source_text")),
+                target_sha256=self._identity_hash(_exact_string(request, "target_text")),
+                rewrite_profile_id=request["profile_id"],
+                rewrite_profile_sha256=self._rewrite_worker(request).profile_sha256,
+            )
         encoded = QUALITY._b64encode(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
@@ -460,6 +575,13 @@ class GuardService:
                 "service_boot": payload.get("boot") == self.boot_id,
                 "not_expired": int(payload.get("exp", 0)) >= now,
             }
+            if payload.get("purpose") == "rewrite":
+                worker = self._rewrite_worker(request)
+                checks["target"] = payload.get("target_sha256") == self._identity_hash(_exact_string(request, "target_text"))
+                checks["rewrite_profile"] = (
+                    payload.get("rewrite_profile_id") == request["profile_id"]
+                    and payload.get("rewrite_profile_sha256") == worker.profile_sha256
+                )
             with self.delivery_lock:
                 checks["session_epoch_current"] = self.session_epochs.get(session_hash) == epoch_hash
                 self.consumed_delivery_nonces = {
@@ -507,6 +629,12 @@ class GuardService:
             token = self._issue_response_review_context(request)
             return {"status": "PASS", "review_context_token": token,
                     "expires_in": 180}
+        if operation == "rewrite_text":
+            result = self._rewrite_text(request)
+            AUDIT.append_audit(self.audit_path, _decision_audit(
+                {**request, "task_kind": "rewrite",
+                 "target_text": result.get("target_text", "")}, result, "rewrite"))
+            return result
         if operation == "release":
             result = (
                 self._release_reviewed_response(request)
@@ -611,6 +739,23 @@ def _response_reviewer_from_config(path: Path | None) -> Any | None:
     return reviewer
 
 
+def _rewrite_workers_from_factory(reference: str | None) -> dict[str, Any]:
+    """Only a trusted operator may install executable model/host configuration."""
+    if reference is None:
+        return {}
+    if (not isinstance(reference, str)
+            or re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*", reference) is None):
+        raise ValueError("rewrite factory must be package.module:callable")
+    module_name, attribute = reference.split(":")
+    factory = getattr(importlib.import_module(module_name), attribute, None)
+    if not callable(factory):
+        raise ValueError("rewrite factory is not callable")
+    workers = factory()
+    if not isinstance(workers, dict) or not workers:
+        raise ValueError("rewrite factory must return a nonempty profile registry")
+    return workers
+
+
 def build_server(endpoint: str, service: GuardService):
     transport, address = CLIENT.parse_endpoint(endpoint)
     if transport == "unix":
@@ -640,6 +785,8 @@ def main() -> int:
     parser.add_argument("--key-file", type=Path, default=default_runtime / "signing.key")
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--audit-file", type=Path, default=default_runtime / "audit.jsonl")
+    parser.add_argument("--rewrite-worker-factory",
+                        help="Trusted package.module:callable returning profile-ID to NativeRewriteWorker mapping")
     review_source = parser.add_mutually_exclusive_group()
     review_source.add_argument(
         "--response-review-factory",
@@ -661,6 +808,7 @@ def main() -> int:
         )
         service = GuardService(
             args.key_file, args.audit_file, _token_from_file(args.token_file), reviewer,
+            rewrite_workers=_rewrite_workers_from_factory(args.rewrite_worker_factory),
         )
         server = build_server(args.endpoint, service)
     except (ImportError, OSError, RuntimeError, ValueError) as error:

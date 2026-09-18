@@ -612,7 +612,7 @@ class LanguageGuardMCPTests(unittest.TestCase):
         names = {tool["name"] for tool in response["result"]["tools"]}
         self.assertEqual(
             names,
-            {"validate_text", "release_response", "release_translation", "verify_release_token"},
+            {"validate_text", "release_response", "release_translation", "verify_release_token", "rewrite_text"},
         )
         release = next(
             tool for tool in response["result"]["tools"]

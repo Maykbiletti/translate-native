@@ -22,12 +22,16 @@ SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", PROTOCOL_VERSION}
 EXACT_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$")
 MCP_INSTRUCTIONS = (
     "Treat every user-visible natural-language answer as an untrusted candidate. "
-    "Before delivery, call release_response with the complete answer and exact language tag; "
+    "For original answers without an input draft, call release_response with the complete answer and exact language tag; "
     "the trusted host must inject a one-time context and run a separate source-blind native review. "
-    "For every translation, localization, transcreation, or target-language rewrite, first apply "
+    "For every translation, localization, or transcreation, first apply "
     "the installed translate-native skill/plugin and then call release_translation with the complete "
     "source-target pair and truthful seven-pass attestations. Never use release_response to bypass "
     "the translation gate. Release only after the exact current text receives a valid token. "
+    "For same-language revision of an original or AI draft, apply translate-native and use rewrite_text "
+    "with the complete original, explicit host profile and stable request ID. Its isolated native review "
+    "precedes meaning-preservation review; missing host support blocks. Rewrite receipts require the "
+    "trusted rewrite-aware delivery adapter and are not response/translation Stop-hook grants. "
     "When BLUN_LANGUAGE_GUARD_MANDATORY=1, final stdout must be exactly one JSON object containing "
     "only target_text and release_token; never call a delivery channel directly or include host-owned policy fields."
 )
@@ -393,6 +397,25 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def rewrite_text(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Execute the operator-configured rewrite pipeline, never a local fallback."""
+    if not SERVICE_ENDPOINT:
+        return {"status": "BLOCK", "release_allowed": False,
+                "reason": "rewrite.host_unavailable"}
+    allowed = {"source_text", "language", "content_type", "request_id", "profile_id"}
+    if not isinstance(arguments, dict) or set(arguments) - allowed:
+        return {"status": "BLOCK", "release_allowed": False,
+                "reason": "rewrite.invalid_request"}
+    try:
+        return SERVICE_CLIENT.call_guard_service(
+            SERVICE_ENDPOINT, {**arguments, "operation": "rewrite_text"},
+            auth_token=_service_token(), timeout=190.0,
+        )
+    except (OSError, SERVICE_CLIENT.GuardServiceError):
+        return {"status": "BLOCK", "release_allowed": False,
+                "reason": "rewrite.guard_unavailable"}
+
+
 def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
     """Validate an agent's own final answer and bind a receipt to the exact text."""
     isolated = _isolated_release("response", arguments)
@@ -473,6 +496,22 @@ def release_response_verified(
 
 TOOLS = [
     {
+        "name": "rewrite_text",
+        "description": "Naturally revise an original or AI draft in its own language using a host-configured locale/register profile. Isolated native review runs before meaning-preservation review. Returns only Guard-approved exact text and a rewrite-purpose receipt; missing host support blocks. Not an AI-authorship detector. Keep request_id stable when retrying unchanged input; never route translations here.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_text": {"type": "string"},
+                "language": {"type": "string"},
+                "profile_id": {"type": "string", "description": "Explicit host-registered profile; dialect only when requested."},
+                "request_id": {"type": "string"},
+                "content_type": {"type": "string", "default": "prose"},
+            },
+            "required": ["source_text", "language", "profile_id", "request_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "verify_release_token",
         "description": "Cryptographically verify that a BLUN release receipt is authentic, unexpired, and bound to the exact purpose, source when applicable, target, locale, and guard version. Never accept a receipt based on its appearance.",
         "inputSchema": {
@@ -482,8 +521,9 @@ TOOLS = [
                 "source_text": {"type": "string"},
                 "target_text": {"type": "string"},
                 "language": {"type": "string"},
-                "purpose": {"type": "string", "enum": ["translation", "response"], "default": "translation"},
-                "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
+                "purpose": {"type": "string", "enum": ["translation", "response", "rewrite"], "default": "translation"},
+                "profile_id": {"type": "string", "description": "Required for rewrite-purpose verification."},
+                "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui", "headline", "cta", "marketing", "documentation", "seo", "legal"], "default": "prose"},
                 "short_text_reviewed": {"type": "boolean", "default": False},
             },
             "required": ["release_token", "source_text", "target_text", "language"],
@@ -648,6 +688,8 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
             payload = release_translation(arguments)
         elif name == "release_response":
             payload = release_response(arguments)
+        elif name == "rewrite_text":
+            payload = rewrite_text(arguments)
         elif name == "verify_release_token":
             if SERVICE_ENDPOINT:
                 try:
@@ -660,6 +702,7 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
                             "target_text": arguments.get("target_text", ""),
                             "language": arguments.get("language", ""),
                             "release_token": arguments.get("release_token", ""),
+                            "profile_id": arguments.get("profile_id", ""),
                             "content_type": arguments.get("content_type", "prose"),
                             "short_text_reviewed": arguments.get("short_text_reviewed") is True,
                             "agent_id": os.environ.get("BLUN_LANGUAGE_GUARD_AGENT_ID", ""),

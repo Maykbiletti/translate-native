@@ -41,7 +41,15 @@ It reconstructs the meaning, discards the source sentence structure, and writes 
 ## One skill. Every human language.
 
 Original writing, rewriting and proofreading use the same target-language native
-review as translations; only translations add a source-aware fidelity check.
+review as translations. Revisions additionally check meaning preservation against
+the original; translations check fidelity against the source.
+The [natural-rewrite pipeline](docs/native-rewrite.md) revises original writing
+and AI drafts through a provider-neutral creator, isolated target-only review,
+separate meaning-preservation review, and the existing Guard. It has MCP/API
+entry points, persistent request identity and a verified-delivery adapter.
+Locale/dialect evidence and real model/host configuration remain operator
+requirements; synthetic tests do not establish native quality in every language.
+
 The [prose-style report](docs/prose-style-review.md) separates surface signals
 (repetition, sentence rhythm and supported stock transitions) from the Unicode
 gate. A deterministic `PASS` never certifies human authorship or native style.

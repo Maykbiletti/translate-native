@@ -468,12 +468,18 @@ def script_report(text: str, language: str) -> dict[str, Any]:
     expected = explicit or LANGUAGE_SCRIPTS.get(base)
     if not expected:
         return {"status": "not-evaluated", "reason": "no deterministic script expectation"}
+    # Han variants share Unicode blocks. Block membership cannot decide whether
+    # Chinese is Simplified or Traditional; the locale-aware reviewer must.
+    measured = "Hani" if expected in {"Hans", "Hant"} else expected
+    if measured not in SCRIPT_RANGES:
+        return {"status": "not-evaluated", "expected_script": expected,
+                "reason": "no deterministic coverage for this script"}
     letters = [c for c in text if unicodedata.category(c).startswith("L")]
     if not letters:
         return {"status": "fail", "expected_script": expected, "ratio": 0.0}
-    matching = sum(_in_script(c, expected) for c in letters)
+    matching = sum(_in_script(c, measured) for c in letters)
     ratio = matching / len(letters)
-    threshold = 0.45 if expected in {"Hani", "Jpan"} else 0.70
+    threshold = 0.45 if measured in {"Hani", "Jpan"} else 0.70
     return {"status": "pass" if ratio >= threshold else "fail", "expected_script": expected, "ratio": round(ratio, 3)}
 
 

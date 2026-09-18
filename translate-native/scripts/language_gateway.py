@@ -20,6 +20,9 @@ SPEC.loader.exec_module(GUARD)
 
 def gate(request: dict, *, response_review_sha256: str | None = None,
          response_context_binding: dict | None = None) -> dict:
+    if request.get("task_kind") == "rewrite":
+        return GUARD.rewrite_text({key: value for key, value in request.items()
+                                  if key != "task_kind"})
     required = ("task_kind", "target_text", "language")
     missing = [
         key for key in required
