@@ -60,6 +60,18 @@ Low confidence or conflicting findings block for independent model or qualified
 native-speaker review; two instances of the same model do not provide independent
 model evidence.
 
+For long plain-text work, the provider-neutral creator adapter has two additional
+trusted methods outside model output. `verified_completion(request, response)`
+returns exactly `schema`, the canonical request and response SHA-256 values,
+normalized `finish_reason`, measured `output_tokens`, and an opaque
+`provider_execution_id`. `verify_completion(evidence, request, response)` must
+locally verify the provider receipt or other authenticated execution record and
+return the exact boolean `true`. A model-authored field, guessed token count or
+unsigned copy is not sufficient. Both methods are mandatory only for the long
+segment contract; legacy short-rewrite adapters remain compatible. Deployments
+with output ceilings below 2,048 tokens keep the short path but block long input
+before model access with `rewrite.long_document_budget_insufficient`.
+
 Rewrite reviews use the strict
 `translate-native.native-rewrite-review.v1` result schema. Every defect is in a
 severity-specific list and repeats its `severity`, `class`, exact `excerpt`,
@@ -161,15 +173,64 @@ failure blocks; no third draft is generated. Only the final accepted text can
 receive a Guard receipt. The signed evidence digest also commits to the rejected
 candidate hash and its host-verified review, retained internally, not published.
 
-An uncorrected run uses at most three model calls. A corrected run uses at most
-five: two creations, two native reviews and one preservation review. Each call
-keeps the configured timeout/output-token ceiling; creator and host adapters must
-enforce those budgets. At the default 60-second ceiling, model work is bounded
-by 300 seconds; the maximum configured ceiling of 300 seconds permits 1,500
-seconds. MCP transport allows 1,510 seconds to cover that upper bound plus
-overhead. Token/cost reservation must allow up to five calls, not assume three.
-The correction limit and instructions are part of the effective profile hash,
-so changing the policy invalidates previous receipts.
+For a short original, an uncorrected run uses at most three model calls. A
+corrected run uses at most five: two creations, two native reviews and one
+preservation review. Each call keeps the configured timeout/output-token ceiling;
+creator and host adapters must enforce those budgets. At the default 60-second
+ceiling, short model work is bounded by 300 seconds. MCP transport allows 1,510
+seconds for the maximum configured long-document budget plus overhead.
+
+Plain long originals use a separate policy-bound pipeline. Before model access,
+the trusted worker creates at most ten ordered, source-owned segments and keeps
+their exact whitespace separators outside model control. Each segment response
+must carry the exact segment ID and `completion_status: complete`; truncation,
+wrong order, a missing segment, changed separator, stale response or ambiguous
+in-flight result blocks. A separate trusted creator-adapter record must bind the
+exact request and response hashes, normalized `finish_reason: complete`, output
+token count and provider execution ID. Model JSON cannot attest its own finish
+reason; missing, length-limited or forged provider completion metadata blocks.
+Segment responses and completion records are reserved and persisted before the
+next call, so restart reuses only an exact completed response and never launches
+it twice. The worker assembles the whole revision once, then sends that complete
+target to the source-blind native reviewer. That reviewer receives no source
+text, source hash, source-derived manifest, segment count or creator context—only
+the complete target plus the allowed locale profile. Its host receipt and worker
+evidence bind the exact reviewed target hash without exposing source metadata.
+A distinct fidelity reviewer then receives the complete original and assembled
+revision. Per-segment model judgments never authorize release.
+
+The deterministic manifest binds every source range, source hash, separator,
+target range, target hash, creation request/response hash and trusted completion
+record. It remains internal to the worker and Guard. The Guard reconstructs every
+segment request and response, then recomputes the plan and exact assembly and
+requires both final reviews to bind the same assembled-target hash before it can
+sign. One document-wide correction may recreate only segments unambiguously
+owning a concrete native-review excerpt; all reused segment evidence is retained,
+and the complete newly assembled result receives both reviews again. Findings
+that cannot be assigned to exactly one segment require independent review rather
+than a risky automatic edit.
+
+The output-token ceiling determines the segment size; the configured per-call
+timeout determines how many segments fit the fixed 1,500-second aggregate bound.
+At defaults this permits ten segments of up to 3,072 Unicode characters, for at
+most 23 calls in the worst correction path. A document beyond the computed bound
+returns `rewrite.long_document_too_large` before model access. Long HTML, XML,
+JSON and other structured containers return
+`rewrite.long_document_structured_unsupported` until a container-aware segmenter
+can preserve structure across boundaries. They are never silently summarized or
+routed through the short path. Token/cost reservation must use the computed long
+plan, not assume five calls. Segment policy, budget, correction limit and all
+instructions are part of the effective profile hash, so a policy change
+invalidates previous receipts.
+
+Segment cuts are allowed only at explicit whitespace or recognized sentence
+terminators. If a long unspaced input has no such safe boundary, the worker
+returns `rewrite.long_document_safe_boundary_unavailable` before model access.
+It uses the complete, policy-bound Unicode 17.0 `Extend`, `SpacingMark` and `ZWJ`
+Grapheme_Cluster_Break table rather than general-category guesses; an Indic
+conjunct, Hangul Jamo syllable, Thai spacing mark or emoji tag sequence cannot be
+divided between model calls. The corresponding Unicode 17.0 `Prepend` table also
+protects leading and trailing document-whitespace boundaries.
 
 The separate durable correction ledger reserves the sole attempt before invoking
 the creator, then persists its result before starting fresh reviews. Restarts
@@ -187,7 +248,10 @@ Tests use labeled synthetic creator/reviewer fixtures through the actual adapter
 and Guard API. They prove isolation, ordering, binding and failure behavior, not
 native quality or improvement over DeepL. Real native-speaker acceptance and real
 provider configuration remain required. The user's 29,705-character original
-has not been supplied and is not represented as evaluated.
+has not been supplied and is not represented as evaluated. A separate synthetic
+29,705-character Finnish-like fixture proves only that all characters cross the
+segmented creator, whole-document reviews, Guard signature and receipt verifier
+without truncation.
 
 Examples in the synthetic adapter tests include Finnish
 “On tärkeää huomata, että teksti on selkeä.” → “Teksti on selkeä.” and Maltese

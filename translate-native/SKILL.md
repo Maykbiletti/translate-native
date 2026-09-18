@@ -34,6 +34,15 @@ must block explicitly; never silently send rewriting through `release_response`
 or relax translation identity checks. For original writing with no input draft,
 the existing mandatory response review remains applicable.
 
+For a plain long original, pass the complete text unchanged. The trusted worker
+may use its bounded durable segment plan, but only a fully reassembled result may
+enter the source-blind native review and subsequent original-preservation review.
+Do not summarize to fit a model limit, publish a partially completed segment, or
+treat per-segment fluency as document acceptance. The native reviewer must receive
+no source-derived manifest or segment metadata. Long structured containers block
+until a structure-aware plan is available. Any changed segment or final assembly
+requires fresh reviews of the exact complete result.
+
 The repository deployment guide is `docs/native-rewrite.md`; the standalone skill
 does not install a model or host service. The Claude plugin accepts a rewrite
 receipt only when the trusted host classifies the turn as `rewrite` and binds an

@@ -15,6 +15,7 @@ from typing import Any, Mapping, Protocol
 
 SCHEMA = "translate-native.host-subagent-review.v1"
 NATIVE_REWRITE_REVIEW_SCHEMA = "translate-native.native-rewrite-review.v1"
+CREATOR_COMPLETION_SCHEMA = "translate-native.creator-completion.v1"
 PROVIDER_PREFIX = "host-subagents-v1-"
 MAX_BYTES = 4_000_000
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
@@ -109,6 +110,7 @@ class HostSubagentProvider:
         self.provider_id = PROVIDER_PREFIX + _hash(self._policy)
         self._creation = None
         self._candidate = None
+        self._creation_evidence = None
         self._native_receipt = None
         self._finished = False
         self._evidence: dict[str, tuple[str, dict]] = {}
@@ -147,14 +149,61 @@ class HostSubagentProvider:
             # Reserve before external work. A failure requires a new queue attempt.
             self._creation = payload
             response = _copy(self._creator.invoke(request))
-            if (not isinstance(response, dict)
-                    or set(response) != {"schema", "phase", "locale", "candidate"}
-                    or response["schema"] != "blun.website-localization-candidate.v1"
-                    or response["phase"] != phase
-                    or response["locale"] != data["target"]["locale"]
-                    or not isinstance(response["candidate"], str)
-                    or not response["candidate"]):
+            expected_schema = data.get("response_schema", {}).get("schema")
+            ordinary = expected_schema == "blun.website-localization-candidate.v1"
+            chunk = expected_schema == "translate-native.native-rewrite-chunk.v1"
+            fields = ({"schema", "phase", "locale", "candidate"} if ordinary else
+                      {"schema", "phase", "locale", "chunk_id",
+                       "completion_status", "candidate"} if chunk else set())
+            if (not isinstance(response, dict) or set(response) != fields
+                    or response.get("schema") != expected_schema
+                    or response.get("phase") != phase
+                    or response.get("locale") != data["target"]["locale"]
+                    or not isinstance(response.get("candidate"), str)
+                    or not response.get("candidate")
+                    or (chunk and (response.get("chunk_id") != data.get("chunk_id")
+                                   or response.get("completion_status") != "complete"))):
                 raise SubagentReviewBlocked("candidate_invalid")
+            if chunk:
+                completion = getattr(self._creator, "verified_completion", None)
+                if not callable(completion):
+                    raise SubagentReviewBlocked("creator_completion_unavailable")
+                try:
+                    completion_evidence = _copy(completion(request, _copy(response)))
+                except Exception as error:
+                    if (getattr(error, "localization_provider_failure", False) is True
+                            and isinstance(getattr(error, "code", None), str)
+                            and HOST_ERROR_CODE.fullmatch(error.code) is not None):
+                        raise SubagentReviewBlocked(error.code) from None
+                    raise SubagentReviewBlocked("creator_completion_unavailable") from None
+                expected_completion = {
+                    "schema", "request_sha256", "response_sha256", "finish_reason",
+                    "output_tokens", "provider_execution_id",
+                }
+                if (not isinstance(completion_evidence, dict)
+                        or set(completion_evidence) != expected_completion
+                        or completion_evidence.get("schema") != CREATOR_COMPLETION_SCHEMA
+                        or completion_evidence.get("request_sha256") != _hash(payload)
+                        or completion_evidence.get("response_sha256") != _hash(response)
+                        or completion_evidence.get("finish_reason") != "complete"
+                        or type(completion_evidence.get("output_tokens")) is not int
+                        or not 0 < completion_evidence["output_tokens"]
+                               <= self._policy["max_output_tokens"]
+                        or not isinstance(completion_evidence.get("provider_execution_id"), str)
+                        or IDENTIFIER.fullmatch(
+                            completion_evidence["provider_execution_id"]) is None):
+                    raise SubagentReviewBlocked("creator_completion_invalid")
+                verifier = getattr(self._creator, "verify_completion", None)
+                if not callable(verifier):
+                    raise SubagentReviewBlocked("creator_completion_unavailable")
+                try:
+                    verified = verifier(
+                        _copy(completion_evidence), request, _copy(response))
+                except Exception:
+                    raise SubagentReviewBlocked("creator_completion_unavailable") from None
+                if verified is not True:
+                    raise SubagentReviewBlocked("creator_completion_unverified")
+                self._creation_evidence = completion_evidence
             self._candidate = response["candidate"]
             return response
         if self._creation is None or self._candidate is None or self._finished:
@@ -308,3 +357,14 @@ class HostSubagentProvider:
         if saved is None or saved[0] != _hash(response):
             raise SubagentReviewBlocked("evidence_missing")
         return _copy(saved[1])
+
+    def verified_creation_evidence(self, request: Any, response: Any) -> dict | None:
+        """Return trusted provider finish metadata for a long creator segment."""
+        payload = self._request(request)
+        if payload["phase"] != "transcreation" or self._creation_evidence is None:
+            return None
+        if (self._creation != payload or self._candidate != response.get("candidate")
+                or self._creation_evidence.get("request_sha256") != _hash(payload)
+                or self._creation_evidence.get("response_sha256") != _hash(response)):
+            raise SubagentReviewBlocked("creator_completion_missing")
+        return _copy(self._creation_evidence)

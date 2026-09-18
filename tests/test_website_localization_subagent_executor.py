@@ -13,6 +13,7 @@ from pathlib import Path
 
 import test_website_localization_subagent_host as HOST_TEST
 import test_website_localization_subagents as BASE
+import test_native_rewrite_worker as REWRITE
 
 
 EXECUTOR = BASE.load(
@@ -60,6 +61,14 @@ class FixtureBackend:
                 "phase": "target_native", "locale": locale,
                 "status": "PASS", "confidence": "high",
                 "findings": [], "uncertainties": [],
+            }
+        response_schema = model_input["input"].get("response_schema", {}).get("schema")
+        if response_schema == REWRITE.RW.REVIEW_SCHEMA:
+            return {
+                "schema": REWRITE.RW.REVIEW_SCHEMA,
+                "phase": model_input["phase"], "locale": locale,
+                "status": "PASS", "confidence": "high",
+                "blocking_defects": [], "major_defects": [], "uncertainties": [],
             }
         return BASE.review(locale, model_input["phase"], confidence="high")
 
@@ -222,6 +231,51 @@ class ExecutorTests(unittest.TestCase):
         self.assertFalse(self.backend.completed[control["execution_key"]][
             "execution"]["inherit_context"])
         self.assertEqual(budgets["max_concurrent_executions"], 4)
+
+    def test_long_rewrite_crosses_real_http_host_launcher_and_executor(self):
+        # Synthetic protocol fixture only: it proves the real isolated route,
+        # not Finnish native quality or improvement over another system.
+        source = ("Pitkä synteettinen teksti säilyttää ääkköset ja numeron 42.\n\n"
+                  * 120).strip()
+        echo = lambda request: request.input["owned_source"]["text"]
+        capture = REWRITE.Host()
+        capture_worker = REWRITE.RW.NativeRewriteWorker(
+            REWRITE.Creator(echo), capture,
+            ledger_path=Path(self.temporary.name) / "capture-rewrite.sqlite",
+            creator_id="writer", creator_session_id="writer-session",
+            model_id="fixture-model", model_version="fixture-model-1",
+            host_policy_version="fixture-host-v1", profile=REWRITE.profile())
+        capture_worker.run(source, "prose", "capture-long-route")
+        routes = []
+        for task, _control in capture.calls:
+            routes.append(HOST.PinnedReviewRoute(
+                route_id="long-rewrite-" + task["phase"], schema=task["schema"],
+                phase=task["phase"], target_locale="fi-FI", content_type="prose",
+                task_policy_sha256=HOST.task_policy_sha256(task),
+                model_id="fixture-model", model_version="fixture-model-1",
+                host_policy_version="fixture-host-v1",
+                reviewer_agent_id="reviewer:" + task["phase"],
+                reviewer_role=("target-native-reviewer"
+                               if task["phase"] == "target_native"
+                               else "source-fidelity-reviewer")))
+        executor = self.executor(routes)
+        host = self.review_host(routes, self.launcher(executor))
+        client = self.review_client(host)
+        worker = REWRITE.RW.NativeRewriteWorker(
+            REWRITE.Creator(echo), client,
+            ledger_path=Path(self.temporary.name) / "actual-rewrite.sqlite",
+            creator_id="writer", creator_session_id="writer-session",
+            model_id="fixture-model", model_version="fixture-model-1",
+            host_policy_version="fixture-host-v1", profile=REWRITE.profile())
+        result = worker.run(source, "prose", "actual-long-route")
+        self.assertEqual(result["target_text"], source)
+        self.assertEqual(len(self.backend.starts), 2)
+        native = self.backend.starts[0][1]
+        fidelity = self.backend.starts[1][1]
+        self.assertEqual(native["input"]["candidate"], source)
+        self.assertNotIn("source", native["input"])
+        self.assertNotIn("review_scope", native["input"])
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
 
     def test_finnish_reconcile_only_blocks_execute_before_reservation(self):
         task, control = HOST_TEST.response_request("fi-FI")

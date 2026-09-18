@@ -37,7 +37,7 @@ class RewriteServiceTests(unittest.TestCase):
 
     def setup_pipeline(self, target="Teksti on selkeä.", locale="fi-FI", **options):
         host = options.pop("host", FIX.Host())
-        creator = FIX.Creator(target)
+        creator = options.pop("creator", FIX.Creator(target))
         worker = FIX.RW.NativeRewriteWorker(
             creator, host, ledger_path=self.root / "rewrite.sqlite",
             creator_id="writer", creator_session_id="writer-session",
@@ -48,6 +48,45 @@ class RewriteServiceTests(unittest.TestCase):
         client = ADAPTER.NativeRewriteClient(service.handle)
         client.register_session(session_id=self.SESSION_ID, session_epoch=self.SESSION_EPOCH)
         return service, client, host, creator
+
+    def test_29705_character_document_crosses_adapter_reviews_and_guard(self):
+        # Synthetic protocol fixture only; this is not the user's unavailable
+        # original and provides no Finnish native-quality evidence.
+        seed = "Tämä on synteettinen pitkä kappale, jossa säilyvät ääkköset ja numerot 42.\n\n"
+        source = (seed * ((29_705 // len(seed)) + 2))[:29_705]
+        creator = FIX.Creator(lambda request: request.input["owned_source"]["text"])
+        service, client, host, creator = self.setup_pipeline(creator=creator)
+        result = self.rewrite(client, source_text=source, request_id="synthetic-long-29705")
+        self.assertTrue(result["release_allowed"], result)
+        self.assertEqual(result["target_text"], source)
+        self.assertGreater(len(creator.calls), 1)
+        self.assertLessEqual(len(creator.calls), FIX.RW.LONG_MAX_CHUNKS)
+        self.assertEqual([task["phase"] for task, _control in host.calls],
+                         ["target_native", "source_fidelity"])
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertNotIn("review_scope", native["input"])
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(self.verify(service, result, source_text=source,
+                                    request_id="synthetic-long-29705")["valid"])
+
+    def test_guard_recomputes_long_manifest_and_rejects_tampered_worker_evidence(self):
+        source = ("Täsmällinen pitkä alku 42 säilyy.\n\n" * 180).strip()
+        creator = FIX.Creator(lambda request: request.input["owned_source"]["text"])
+        service, _client, _host, _creator = self.setup_pipeline(creator=creator)
+        worker = service.rewrite_workers["standard"]
+        reviewed = worker.run(source, "prose", "tampered-long")
+        reviewed = json.loads(json.dumps(reviewed))
+        reviewed["evidence"]["document"]["chunks"][0][
+            "creation_response_sha256"] = "0" * 64
+        reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+        worker.run = mock.Mock(return_value=reviewed)
+        request = self.prepared_request(
+            service, source_text=source, request_id="tampered-long")
+        result = service.handle(request)
+        self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
+                                  "reason": "rewrite.worker_failed"})
+        worker.run.assert_called_once_with(source, "prose", "tampered-long")
 
     def request(self, **extra):
         return {"source_text": "On tärkeää huomata, että teksti on selkeä.",

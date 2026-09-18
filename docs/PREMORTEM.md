@@ -1,5 +1,41 @@
 # Version 6 premortem
 
+## Long same-language originals (18 September 2026)
+
+Assume a complete long original enters the natural-rewrite path, but the
+provider's bounded output silently returns only a polished summary.
+
+- The existing single creator call can accept far more input than its output
+  budget can reproduce, while a syntactically valid short candidate still
+  reaches the two model reviews.
+- Naive byte slicing can split Unicode, placeholders, code, sentences or
+  structured containers and then make the Guard certify damaged assembly.
+- A crash between segment calls can start the same paid creation twice, skip a
+  segment, or reorder two individually valid results.
+- Per-segment fluency can hide document-wide repetition, voice drift or a
+  missing proposition; per-segment fidelity can miss cross-segment omissions.
+- A correction loop can multiply cost by segment count or apply findings to the
+  wrong segment.
+- A manifest can look complete while its ranges, source hash, separators or
+  assembled target no longer match the exact reviewed text.
+
+The trusted worker will therefore switch plain long text to a policy-bound,
+finite segment plan before model access. The plan preserves exact separators,
+binds ordered source ranges and hashes, caps segment count and total calls, and
+reserves each external creation durably before invocation. Every segment must
+return an explicit complete status for its exact identifier. Restart may reuse
+only persisted exact responses; an ambiguous in-flight segment remains blocked.
+The worker then assembles once, records target ranges and hashes, and runs a
+fresh source-blind review of the complete assembled target followed by a
+separate complete-original fidelity review. One document-wide correction may
+touch only unambiguously affected segments and must repeat both final reviews.
+The Guard recomputes the plan and exact assembly binding before signing.
+
+Structured long inputs remain fail-closed until a container-aware segmenter is
+implemented. Synthetic Finnish, Maltese and non-Latin fixtures prove routing,
+isolation, recovery and binding only; they do not prove native long-form quality,
+human authorship or superiority over DeepL.
+
 ## Protected facility-to-backend bootstrap (17 September 2026)
 
 Assume the isolated facility is correctly configured, but its deployment

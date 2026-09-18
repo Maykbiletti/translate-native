@@ -446,6 +446,20 @@ class GuardService:
                 raise GuardProtocolError("rewrite evidence binding mismatch")
             # Re-run deterministic validation in the sole signing authority.
             module = _load("blun_guard_native_rewrite", ROOT / "integrations" / "native_rewrite_worker.py")
+            long_document = worker.is_long_document(source)
+            if long_document:
+                if (not worker.validate_document_evidence(
+                        source, target, evidence.get("document"),
+                        content_type=content_type, request_id=request["request_id"],
+                        correction_history=evidence.get("correction_history"))
+                        or [item.get("scope") for item in evidence["reviews"]]
+                        != ["assembled_document", "assembled_document"]
+                        or [item.get("reviewed_target_sha256")
+                            for item in evidence["reviews"]]
+                        != [self._identity_hash(target), self._identity_hash(target)]):
+                    raise GuardProtocolError("long rewrite evidence binding mismatch")
+            elif "document" in evidence or any("scope" in item for item in evidence["reviews"]):
+                raise GuardProtocolError("unexpected long rewrite evidence")
             integrity = module.integrity_errors(source, target)
             report = GATEWAY.GUARD.validate_text(target, worker.locale, content_type=content_type,
                                                short_text_reviewed=True)

@@ -30,6 +30,7 @@
 - The trusted host must bind the complete original, exact locale, registered profile, stable request ID, session epoch and writer identity in a one-time rewrite context before any creator or reviewer starts. The model must not select its own profile or dialect.
 - Use a dialect profile only when the user requested that variety. Missing, forged, replayed, stale or conflicting context blocks before model work.
 - Deliver only the exact Guard-returned target with its rewrite-purpose receipt. The target-only native review runs before the separate original-preservation review; any later edit requires both reviews again.
+- Never shorten or summarize a long original to fit one model call. Only the trusted worker may segment plain text; release requires exact reassembly evidence plus fresh whole-document native and preservation reviews. Long structured input blocks until a structure-aware segmenter exists.
 
 ## Repository changes
 

@@ -57,6 +57,16 @@ may authorize only one exact delivery grant.
 Rewrite reviewers must return schema-validated defects with severity, exact
 passage, impact and revision direction, plus explicit uncertainties and required
 evidence. Incomplete reports cannot authorize correction or release.
+Plain long originals are revised through bounded, crash-resumable segments and
+then reassembled for one complete source-blind native review and one complete
+original-preservation review. The Guard recomputes the exact segment manifest
+before signing; truncation, omission, reordering or an ambiguous segment blocks.
+Segments end only at explicit whitespace or recognized sentence terminators;
+an unspaced long input without a safe boundary blocks before model access rather
+than risking a split inside a native-script grapheme cluster.
+Long structured containers remain explicitly unsupported rather than being
+silently shortened. A synthetic 29,705-character fixture exercises this route;
+it is not the user's unavailable text and not evidence of native quality.
 Locale/dialect evidence and real model/host configuration remain operator
 requirements; synthetic tests do not establish native quality in every language.
 
