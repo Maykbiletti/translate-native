@@ -1,5 +1,6 @@
 """Synthetic correction fixtures: protocol tests, not native-quality evidence."""
 import json
+import copy
 import tempfile
 import threading
 import unittest
@@ -14,10 +15,19 @@ RW = FIX.RW
 def defect(candidate, *, confidence="high", blocking=False, excerpt=None):
     return {"status": "FAIL", "confidence": confidence,
             "major_defects": [] if blocking else [{
-                "class": "idiom", "excerpt": excerpt or candidate,
-                "reason": "Synthetic editorial finding: remove the empty introductory formula."}],
-            "blocking_defects": [{"class": "meaning", "excerpt": candidate,
-                                  "reason": "Synthetic blocking defect."}] if blocking else []}
+                "severity": "major", "class": "idiom", "excerpt": excerpt or candidate,
+                "reason": "Synthetic editorial finding.",
+                "impact": "The introduction delays the point.",
+                "revision_direction": "Remove the empty introductory formula."}],
+            "blocking_defects": [{"severity": "blocking", "class": "meaning",
+                                  "excerpt": candidate, "reason": "Synthetic blocking defect.",
+                                  "impact": "The intended meaning cannot be trusted.",
+                                  "revision_direction": "Escalate instead of revising automatically."}]
+                                 if blocking else [],
+            "uncertainties": ([{"class": "fixture_uncertainty",
+                                "reason": "Synthetic confidence is low.",
+                                "evidence_needed": "Independent native evidence."}]
+                              if confidence == "low" else [])}
 
 
 class Creator(FIX.Creator):
@@ -107,9 +117,52 @@ class CorrectionTests(unittest.TestCase):
         )):
             creator, host = Creator(bad, "Teksti on selkeä."), Host(bad, change=change)
             worker = self.worker(creator, host, **options)
-            with self.assertRaisesRegex(RW.NativeRewriteBlocked, "independent_review_required"):
+            reason = ("uncertainty_requires_review" if i == 0 else
+                      "review_invalid" if i == 2 else "independent_review_required")
+            with self.assertRaisesRegex(RW.NativeRewriteBlocked, reason):
                 worker.run("Teksti on selkeä.", kind, "blocked-" + str(i))
             self.assertEqual(len(creator.calls), 1)
+
+    def test_structured_findings_and_uncertainties_are_strictly_validated(self):
+        candidate = "On tärkeää huomata, että teksti on selkeä."
+        base = defect(candidate)
+        cases = []
+        missing_impact = copy.deepcopy(base)
+        missing_impact["major_defects"][0].pop("impact")
+        cases.append(missing_impact)
+        wrong_severity = copy.deepcopy(base)
+        wrong_severity["major_defects"][0]["severity"] = "blocking"
+        cases.append(wrong_severity)
+        low_without_uncertainty = copy.deepcopy(base)
+        low_without_uncertainty.update(confidence="low", uncertainties=[])
+        cases.append(low_without_uncertainty)
+        pass_with_defect = copy.deepcopy(base)
+        pass_with_defect["status"] = "PASS"
+        cases.append(pass_with_defect)
+        malformed_uncertainty = defect(candidate, confidence="low")
+        malformed_uncertainty["uncertainties"][0].pop("evidence_needed")
+        cases.append(malformed_uncertainty)
+        for index, change in enumerate(cases):
+            creator, host = Creator(candidate, "Teksti on selkeä."), Host(candidate, change=change)
+            with self.assertRaisesRegex(RW.NativeRewriteBlocked, "review_invalid"):
+                self.worker(creator, host).run("Teksti on selkeä.", "prose", "schema-" + str(index))
+            self.assertEqual(len(creator.calls), 1)
+
+    def test_high_confidence_uncertainty_escalates_without_correction(self):
+        candidate = "On tärkeää huomata, että teksti on selkeä."
+        change = defect(candidate)
+        change["uncertainties"] = [{
+            "class": "dialect_evidence",
+            "reason": "Synthetic regional evidence is insufficient.",
+            "evidence_needed": "Independent qualified native review.",
+        }]
+        creator = Creator(candidate, "Teksti on selkeä.")
+        host = Host(candidate, change=change)
+        with self.assertRaisesRegex(
+                RW.NativeRewriteBlocked, "uncertainty_requires_review"):
+            self.worker(creator, host).run(
+                "Teksti on selkeä.", "prose", "high-uncertainty")
+        self.assertEqual(len(creator.calls), 1)
 
     def test_second_failure_unchanged_and_invalid_syntax_never_loop_or_release(self):
         bad = "On tärkeää huomata, että teksti on selkeä {{name}}."
@@ -258,6 +311,30 @@ class CorrectionTests(unittest.TestCase):
             self.assertNotIn("editorial_feedback", corrected[1]["input"])
             self.assertNotIn(bad, json.dumps(corrected[1], ensure_ascii=False))
             self.assertEqual(fidelity[1]["input"]["source"]["text"], good)
+
+    def test_real_host_rejects_incomplete_actionable_review_before_attestation(self):
+        import test_website_localization_subagent_host as ENDPOINT
+        candidate = "On tärkeää huomata, että teksti on selkeä."
+        capture = Host(candidate, change=defect(candidate))
+        worker = self.worker(Creator(candidate, "Teksti on selkeä."), capture)
+        worker.run("Teksti on selkeä.", "prose", "host-schema-capture")
+        task, _control = capture.calls[0]
+        route = ENDPOINT.HOST.PinnedReviewRoute(
+            route_id="rewrite-structured-contract", schema=task["schema"],
+            phase=task["phase"], target_locale="fi-FI", content_type="prose",
+            task_policy_sha256=ENDPOINT.HOST.task_policy_sha256(task),
+            model_id="fixture-model", model_version="fixture-model-1",
+            host_policy_version="fixture-host-v1", reviewer_agent_id="reviewer:target_native",
+            reviewer_role="target-native-reviewer")
+        valid = defect(candidate)
+        valid.update(schema=RW.REVIEW_SCHEMA, phase="target_native", locale="fi-FI")
+        self.assertEqual(
+            ENDPOINT.HOST.ReviewHostApplication._validate_review_response(valid, route, task),
+            valid)
+        invalid = copy.deepcopy(valid)
+        invalid["major_defects"][0].pop("revision_direction")
+        with self.assertRaises(ENDPOINT.HOST.ReviewHostBlocked):
+            ENDPOINT.HOST.ReviewHostApplication._validate_review_response(invalid, route, task)
 
     def test_guard_signs_only_final_revision_and_delivery_rejects_old_candidate(self):
         source, bad, good = "Teksti on selkeä.", "On tärkeää huomata, että teksti on selkeä.", "Teksti on selkeä."

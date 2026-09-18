@@ -14,6 +14,7 @@ from typing import Any, Mapping, Protocol
 
 
 SCHEMA = "translate-native.host-subagent-review.v1"
+NATIVE_REWRITE_REVIEW_SCHEMA = "translate-native.native-rewrite-review.v1"
 PROVIDER_PREFIX = "host-subagents-v1-"
 MAX_BYTES = 4_000_000
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
@@ -214,19 +215,31 @@ class HostSubagentProvider:
             raise SubagentReviewBlocked("receipt_invalid")
         response, receipt = reply["response"], reply["receipt"]
         host_evidence = self._validate_receipt(receipt, response, control)
+        expected_schema = data.get("response_schema", {}).get("schema")
+        expected_fields = {"schema", "phase", "locale", "status", "confidence",
+                           "blocking_defects", "major_defects"}
+        if expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA:
+            expected_fields.add("uncertainties")
+        elif expected_schema != "blun.website-localization-review.v2":
+            raise SubagentReviewBlocked("review_invalid")
         if (not isinstance(response, dict)
-                or response.get("schema") != "blun.website-localization-review.v2"
+                or (expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA
+                    and set(response) != expected_fields)
+                or response.get("schema") != expected_schema
                 or response.get("phase") != phase
                 or response.get("locale") != data["target"]["locale"]
                 or response.get("status") not in {"PASS", "FAIL"}
                 or response.get("confidence") not in {"high", "low"}
                 or not isinstance(response.get("blocking_defects"), list)
-                or not isinstance(response.get("major_defects"), list)):
+                or not isinstance(response.get("major_defects"), list)
+                or (expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA
+                    and not isinstance(response.get("uncertainties"), list))):
             raise SubagentReviewBlocked("review_invalid")
         # Existing worker validates full findings and commercial evidence.
         self._evidence[_hash(payload)] = (_hash(response), host_evidence)
         if (phase == "target_native" and response["status"] == "PASS"
-                and not response["blocking_defects"] and not response["major_defects"]):
+                and not response["blocking_defects"] and not response["major_defects"]
+                and not response.get("uncertainties", [])):
             self._native_receipt = receipt
             self._finished = False
         return response

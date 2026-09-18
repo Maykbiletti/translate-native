@@ -167,7 +167,15 @@ class FixtureLauncher:
                 "findings": [], "uncertainties": [],
             }
         else:
-            response = BASE.review(locale, task["phase"], confidence="high")
+            if task["input"]["response_schema"]["schema"] == "translate-native.native-rewrite-review.v1":
+                response = {
+                    "schema": "translate-native.native-rewrite-review.v1",
+                    "phase": task["phase"], "locale": locale, "status": "PASS",
+                    "confidence": "high", "blocking_defects": [],
+                    "major_defects": [], "uncertainties": [],
+                }
+            else:
+                response = BASE.review(locale, task["phase"], confidence="high")
             if (task["phase"] == HOST.FIDELITY_PHASE
                     and task["input"]["content_type"] == "commercial"):
                 from test_commercial_localization import evidence
@@ -568,6 +576,60 @@ class HostEndpointTests(unittest.TestCase):
             self.client(app).run_isolated(fidelity_task, control=fidelity_control)
         self.assertEqual(ledger.count(), 0)
         self.assertEqual(launcher.calls, [])
+
+    def test_legacy_native_receipt_cannot_precede_rewrite_fidelity(self):
+        routes, captures = website_routes(["fi-FI"])
+        native_task, native_control = captures["fi-FI"].calls[0]
+        legacy_fidelity, legacy_control = captures["fi-FI"].calls[1]
+        rewrite_fidelity = HOST._copy(legacy_fidelity)
+        rewrite_fidelity["input"]["response_schema"] = {
+            "schema": HOST.NATIVE_REWRITE_RESPONSE_SCHEMA,
+            "phase": HOST.FIDELITY_PHASE,
+            "locale": "fi-FI", "status": "PASS or FAIL",
+            "confidence": "high or low",
+            "blocking_defects": [{
+                "severity": "blocking", "class": "...", "excerpt": "...",
+                "reason": "...", "impact": "...",
+                "revision_direction": "...",
+            }],
+            "major_defects": [{
+                "severity": "major", "class": "...", "excerpt": "...",
+                "reason": "...", "impact": "...",
+                "revision_direction": "...",
+            }],
+            "uncertainties": [{
+                "class": "...", "reason": "...", "evidence_needed": "...",
+            }],
+        }
+        routes.append(HOST.PinnedReviewRoute(
+            route_id="rewrite-fi-FI-source_fidelity",
+            schema=rewrite_fidelity["schema"], phase=HOST.FIDELITY_PHASE,
+            target_locale="fi-FI",
+            content_type=rewrite_fidelity["input"]["content_type"],
+            task_policy_sha256=HOST.task_policy_sha256(rewrite_fidelity),
+            model_id=legacy_control["model_id"],
+            model_version=legacy_control["model_version"],
+            host_policy_version=legacy_control["host_policy_version"],
+            reviewer_agent_id="reviewer:rewrite-fidelity",
+            reviewer_role="source-fidelity-reviewer",
+        ))
+        app, launcher, ledger = self.application(routes)
+        client = self.client(app)
+        native_result = client.run_isolated(native_task, control=native_control)
+        rewrite_control = HOST._copy(legacy_control)
+        rewrite_control.update(
+            task_sha256=HTTP._sha(rewrite_fidelity),
+            previous_receipt_sha256=HOST._sha(native_result["receipt"]),
+        )
+        rewrite_control["execution_key"] = HOST._sha({
+            "cross_schema_replay": rewrite_fidelity,
+            "previous_receipt_sha256": rewrite_control["previous_receipt_sha256"],
+        })
+        with self.assertRaises(HTTP.HTTPReviewHostFailed) as blocked:
+            client.run_isolated(rewrite_fidelity, control=rewrite_control)
+        self.assertFalse(blocked.exception.retryable)
+        self.assertEqual(ledger.count(), 1)
+        self.assertEqual(len(launcher.calls), 1)
 
     def test_same_execution_key_with_changed_candidate_conflicts(self):
         task, control = response_request()

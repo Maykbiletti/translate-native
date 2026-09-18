@@ -60,6 +60,21 @@ Low confidence or conflicting findings block for independent model or qualified
 native-speaker review; two instances of the same model do not provide independent
 model evidence.
 
+Rewrite reviews use the strict
+`translate-native.native-rewrite-review.v1` result schema. Every defect is in a
+severity-specific list and repeats its `severity`, `class`, exact `excerpt`,
+`reason`, reader/meaning `impact`, and actionable `revision_direction`.
+An excerpt must occur in the reviewed candidate, or—for an omission found by
+the fidelity reviewer—in the bound original. Unanchored passages are invalid.
+Uncertainty is not hidden in a score: each entry requires `class`, `reason`, and
+`evidence_needed`. `confidence: low` without an uncertainty is invalid; any
+uncertainty makes `PASS` invalid and returns
+`rewrite.uncertainty_requires_review`. Missing or inapplicable configured native
+evidence returns `rewrite.native_evidence_required`. Malformed, incomplete, or
+severity-inconsistent reports return `rewrite.review_invalid`. These states never
+trigger a correction or release. Review reports remain internal evidence, not
+user-facing text.
+
 ## API and delivery
 
 The authenticated service accepts:

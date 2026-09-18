@@ -37,6 +37,7 @@ RESPONSE_REVIEW_SCHEMA = "translate-native.response-subagent-review.v1"
 WEBSITE_REVIEW_SCHEMA = "translate-native.host-subagent-review.v1"
 RESPONSE_NATIVE_SCHEMA = "translate-native.response-native-review.v1"
 WEBSITE_RESPONSE_SCHEMA = "blun.website-localization-review.v2"
+NATIVE_REWRITE_RESPONSE_SCHEMA = "translate-native.native-rewrite-review.v1"
 NATIVE_PHASE = "target_native"
 FIDELITY_PHASE = "source_fidelity"
 
@@ -180,8 +181,21 @@ def review_sequence_sha256(task: Mapping[str, Any], control: Mapping[str, Any]) 
     inputs = task.get("input")
     if not isinstance(inputs, Mapping):
         raise _blocked("task_invalid", 400)
-    required = {"candidate", "target", "content_type", "quality_profile"}
+    required = {
+        "candidate", "target", "content_type", "quality_profile",
+        "response_schema",
+    }
     if not required.issubset(inputs):
+        raise _blocked("task_invalid", 400)
+    response_schema = inputs["response_schema"]
+    if isinstance(response_schema, str):
+        response_contract = response_schema
+    elif (isinstance(response_schema, Mapping)
+          and isinstance(response_schema.get("schema"), str)):
+        response_contract = response_schema["schema"]
+    else:
+        raise _blocked("task_invalid", 400)
+    if TOKEN.fullmatch(response_contract) is None:
         raise _blocked("task_invalid", 400)
     return _sha({
         "schema": task.get("schema"),
@@ -191,6 +205,7 @@ def review_sequence_sha256(task: Mapping[str, Any], control: Mapping[str, Any]) 
         "target": inputs["target"],
         "content_type": inputs["content_type"],
         "quality_profile": inputs["quality_profile"],
+        "response_schema": response_contract,
         "commercial_quality_profile": inputs.get("commercial_quality_profile"),
         "provider_id": control.get("provider_id"),
         "host_policy_version": control.get("host_policy_version"),
@@ -782,6 +797,55 @@ class ReviewHostApplication:
             "blocking_defects", "major_defects",
         }
         inputs = task.get("input")
+        response_schema = (
+            inputs.get("response_schema", {}).get("schema")
+            if isinstance(inputs, Mapping) else None
+        )
+        if response_schema == NATIVE_REWRITE_RESPONSE_SCHEMA:
+            expected.add("uncertainties")
+            if (not isinstance(response, dict) or set(response) != expected
+                    or response.get("schema") != response_schema
+                    or response.get("phase") != route.phase
+                    or response.get("locale") != route.target_locale
+                    or response.get("status") not in {"PASS", "FAIL"}
+                    or response.get("confidence") not in {"high", "low"}
+                    or not isinstance(response.get("uncertainties"), list)):
+                raise _blocked("review_invalid", 422)
+            defect_fields = {"severity", "class", "excerpt", "reason", "impact",
+                             "revision_direction"}
+            has_findings = False
+            for field, severity in (("blocking_defects", "blocking"),
+                                    ("major_defects", "major")):
+                findings = response.get(field)
+                if not isinstance(findings, list):
+                    raise _blocked("review_invalid", 422)
+                has_findings = has_findings or bool(findings)
+                for finding in findings:
+                    if (not isinstance(finding, dict) or set(finding) != defect_fields
+                            or finding.get("severity") != severity
+                            or any(not isinstance(finding.get(name), str)
+                                   or not finding[name].strip()
+                                   for name in defect_fields - {"severity"})
+                            or (finding["excerpt"] not in _candidate(task)
+                                and (route.phase != FIDELITY_PHASE
+                                     or not isinstance(inputs.get("source"), Mapping)
+                                     or not isinstance(inputs["source"].get("text"), str)
+                                     or finding["excerpt"] not in inputs["source"]["text"]))):
+                        raise _blocked("review_invalid", 422)
+            uncertainty_fields = {"class", "reason", "evidence_needed"}
+            for uncertainty in response["uncertainties"]:
+                if (not isinstance(uncertainty, dict)
+                        or set(uncertainty) != uncertainty_fields
+                        or any(not isinstance(uncertainty.get(name), str)
+                               or not uncertainty[name].strip()
+                               for name in uncertainty_fields)):
+                    raise _blocked("review_invalid", 422)
+            passing = (not has_findings and not response["uncertainties"]
+                       and response["confidence"] == "high")
+            if ((response["status"] == "PASS") != passing
+                    or response["confidence"] == "low" and not response["uncertainties"]):
+                raise _blocked("review_invalid", 422)
+            return response
         commercial = (
             route.phase == FIDELITY_PHASE
             and isinstance(inputs, Mapping)
@@ -860,9 +924,16 @@ class ReviewHostApplication:
             raise _blocked("native_predecessor_invalid", 409)
         envelope = json.loads(bytes(previous["response_body"]).decode("utf-8"))
         response = envelope.get("result", {}).get("response", {})
-        if (response.get("status") != "PASS"
+        response_schema = task["input"].get("response_schema")
+        expected_schema = (response_schema.get("schema")
+                           if isinstance(response_schema, dict) else None)
+        if (not isinstance(expected_schema, str)
+                or response.get("schema") != expected_schema
+                or response.get("status") != "PASS"
                 or response.get("blocking_defects") != []
-                or response.get("major_defects") != []):
+                or response.get("major_defects") != []
+                or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
+                    and response.get("uncertainties") != [])):
             raise _blocked("native_predecessor_invalid", 409)
 
     @staticmethod

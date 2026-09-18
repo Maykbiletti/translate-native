@@ -38,9 +38,14 @@ class Host:
             raise self.error
         key = control["execution_key"]
         if key not in self.ledger:
-            response = {"schema": RW.WORKER.REVIEW_SCHEMA, "phase": task["phase"],
+            response = {"schema": RW.REVIEW_SCHEMA, "phase": task["phase"],
                         "locale": task["input"]["target"]["locale"], "status": "PASS",
-                        "confidence": self.confidence, "blocking_defects": [], "major_defects": []}
+                        "confidence": self.confidence, "blocking_defects": [], "major_defects": [],
+                        "uncertainties": ([] if self.confidence == "high" else [{
+                            "class": "fixture_uncertainty", "reason": "Synthetic low confidence.",
+                            "evidence_needed": "Independent native fixture evidence."}])}
+            if self.confidence == "low":
+                response["status"] = "FAIL"
             fields = {"schema", "execution_key", "request_sha256", "task_sha256",
                       "phase", "previous_receipt_sha256", "model_id", "model_version",
                       "inherit_context", "tools", "max_delegation_depth"}
@@ -151,7 +156,7 @@ class RewriteTests(unittest.TestCase):
                 worker.run("Original.", "prose", "invalid-" + str(index))
         host = Host(confidence="low")
         worker, _ = self.worker(host=host)
-        with self.assertRaisesRegex(RW.NativeRewriteBlocked, "independent_review_required"):
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked, "uncertainty_requires_review"):
             worker.run("Original.", "prose", "low")
         self.assertEqual(len(host.calls), 1)
 
@@ -249,7 +254,7 @@ class RewriteTests(unittest.TestCase):
             else:
                 configured["native_evidence"].update(change)
             worker, creator = self.worker(profile=configured)
-            with self.assertRaisesRegex(RW.NativeRewriteBlocked, "independent_review_required"):
+            with self.assertRaisesRegex(RW.NativeRewriteBlocked, "native_evidence_required"):
                 worker.run("Original.", "prose", "evidence-" + str(index))
             self.assertFalse(creator.calls)
 
