@@ -218,7 +218,8 @@ computed bound returns `rewrite.long_document_too_large` before model access.
 Unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
 summarized or routed through the short path. Long XML has the separate bounded
-Android-resource path described below. Token/cost reservation must use the
+Android-resource path described below, and Markdown has a separate conservative
+raw-span path. Token/cost reservation must use the
 computed long plan, not assume five calls. Segment policy, budget, correction
 limit and all instructions are part of the effective profile hash, so a policy
 change invalidates previous receipts.
@@ -282,6 +283,54 @@ assembly. The Guard independently rebuilds the plan, every request/response hash
 completion record and exact assembly before signing. Automatic correction is
 disabled because a document-wide finding is not yet bound to one exact HTML
 span; actionable findings therefore remain fail-closed for independent review.
+
+Long Markdown uses a versioned conservative raw-span plan. It preserves the
+source bytes instead of rendering or serializing a Markdown tree. YAML front
+matter, fenced and indented code, complete blockquotes (including lazy
+continuations), inline code, link and image syntax, link destinations,
+reference definitions, autolinks, URLs, email addresses, entities, escapes,
+placeholders, printf tokens, delimiters, list/heading markers, structural and
+outer whitespace, hard-break spacing, and line endings remain host-owned. The
+first profile intentionally keeps complete
+links and bracket labels opaque; it does not rewrite link labels independently.
+Only unambiguous prose in headings, ordinary paragraphs and list items enters
+creator batches under opaque ordered IDs with bounded context from the same
+prose span.
+
+Recognized JSON, PO, Apple strings, subtitles and XML keep their established
+format precedence even when their values contain Markdown-like characters.
+Validated block HTML that begins at a CommonMark line start keeps precedence
+within each balanced region that contains no terminating blank line; ordinary
+punctuation in visible HTML and protected `script`, `style`, `pre` and `code`
+subtrees therefore causes no heuristic block. Outside those regions, Markdown intent is checked over
+a position-faithful projection of all creator-owned HTML spans, so links or MDX
+expressions split across inline tags still block before creator access.
+Markdown intent detection, flags and that routing order are version-bound in the
+effective policy; a change invalidates earlier evidence.
+
+Before creator access, the planner rejects raw HTML, tables, CommonMark and
+extension directives, template/MDX statements and expressions, ambiguous front matter,
+unclosed front matter/fences/inline code, escaped, multiline, nested or
+malformed links, unknown entities, dangling escapes, non-NFC source and
+documents beyond the bounded span/group limits. A leading UTF-8 BOM remains
+host-owned and is ignored only while recognizing front matter. CommonMark tab
+stops determine indented code. Lines containing emphasis-capable delimiters are
+kept completely host-owned because delimiter flanking can change rendering.
+Reference definitions and their possible continuation/title line, including an
+unindented title, remain host-owned. A candidate cannot add Markdown control
+characters, a nested block marker at paragraph/list start or line breaks. The
+trusted worker reparses the complete assembled target and requires the exact
+immutable skeleton. The Guard independently rebuilds the
+manifest, every creator request/response and completion record, target mapping
+and exact assembly. The same 262,144-byte combined source/target review ceiling
+applies before creation and after assembly.
+
+The source-blind reviewer receives only the complete assembled Markdown and the
+allowed target profile; the separate preservation reviewer receives the
+complete original and target afterward. Automatic document correction is
+disabled because a document-wide finding is not yet bound to one unique prose
+span. Unsupported or ambiguous Markdown remains fail-closed rather than falling
+back to plain-text segmentation.
 
 Long XML is deliberately narrower than generic XML because element names do not
 prove that a value is prose rather than a key, checksum, credential or program

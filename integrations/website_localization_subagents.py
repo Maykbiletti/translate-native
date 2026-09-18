@@ -155,7 +155,8 @@ class HostSubagentProvider:
             json_chunk = expected_schema == "translate-native.native-rewrite-json-chunk.v1"
             html_chunk = expected_schema == "translate-native.native-rewrite-html-chunk.v1"
             xml_chunk = expected_schema == "translate-native.native-rewrite-xml-chunk.v1"
-            structured_chunk = json_chunk or html_chunk or xml_chunk
+            markdown_chunk = expected_schema == "translate-native.native-rewrite-markdown-chunk.v1"
+            structured_chunk = json_chunk or html_chunk or xml_chunk or markdown_chunk
             fields = ({"schema", "phase", "locale", "candidate"} if ordinary else
                       {"schema", "phase", "locale", "chunk_id",
                        "completion_status", "candidate"} if chunk else

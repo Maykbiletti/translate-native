@@ -58,6 +58,16 @@ class Creator:
                     "completion_status": "complete",
                     "values": [{"value_id": item["value_id"], "candidate": value}
                                for item, value in zip(request.input["owned_values"], values)]}
+        if request.input["response_schema"]["schema"] == RW.LONG_MARKDOWN_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_MARKDOWN_SCHEMA, "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         return {"schema": RW.WORKER.CANDIDATE_SCHEMA, "phase": "transcreation",
                 "locale": request.input["target"]["locale"], "candidate": candidate}
 
@@ -392,6 +402,23 @@ class RewriteTests(unittest.TestCase):
             RW.HTMLRW.TRANSLATABLE_ATTRIBUTES.clear()
             RW.HTMLRW.TRANSLATABLE_ATTRIBUTES.update(original)
 
+    def test_markdown_effective_policy_changes_release_binding(self):
+        first, _ = self.worker()
+        original = RW.MDRW.MARKDOWN_INTENT_PATTERN
+        original_protected = RW.MDRW.PROTECTED
+        try:
+            RW.MDRW.MARKDOWN_INTENT_PATTERN = RW.re.compile(
+                original.pattern + "(?:)", original.flags)
+            second, _ = self.worker()
+            self.assertNotEqual(first.profile_sha256, second.profile_sha256)
+            RW.MDRW.PROTECTED = RW.re.compile(
+                original_protected.pattern, RW.re.ASCII)
+            third, _ = self.worker()
+            self.assertNotEqual(second.profile_sha256, third.profile_sha256)
+        finally:
+            RW.MDRW.MARKDOWN_INTENT_PATTERN = original
+            RW.MDRW.PROTECTED = original_protected
+
     def test_long_document_completion_capacity_structure_and_manifest_fail_closed(self):
         class LengthLimitedCreator(Creator):
             def verified_completion(self, request, response):
@@ -697,6 +724,33 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(len(second_creator.calls), groups - 1)
         self.assertEqual(result["target_text"], source)
 
+    def test_json_precedes_markdown_intent_characters(self):
+        source = json.dumps({
+            "copy_value": "Use `fixed_code()` and keep \\* literal. " * 300,
+            "count": 42,
+        }, ensure_ascii=False)
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-json-values"),
+            max_output_tokens=8192)
+        result = worker.run(source, "documentation", "json-markdown-markers")
+        self.assertEqual(result["target_text"], source)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "json"
+                            for call in creator.calls))
+
+    def test_established_structured_guards_precede_markdown_detection(self):
+        cases = (
+            ('msgid "Use `code`."\nmsgstr "Use `code`."\n',
+             'msgid "Changed `code`."\nmsgstr "Use `code`."\n'),
+            ('"welcome_key" = "Use `code`.";\n',
+             '"changed_key" = "Use `code`.";\n'),
+            ("00:00:01,000 --> 00:00:03,000\nUse `code`.\n",
+             "00:00:01,000 --> 00:00:04,000\nUse `code`.\n"),
+        )
+        for source, candidate in cases:
+            with self.subTest(source=source):
+                self.assertTrue(RW.integrity_errors(source, candidate))
+
     def test_long_html_preserves_container_and_uses_whole_document_reviews(self):
         source = ('<!doctype html><html><head><meta name="description" '
                   'content="Selkeä kuvaus 42."><script>const fixed = 42;</script>'
@@ -803,6 +857,123 @@ class RewriteTests(unittest.TestCase):
                             for call in creator.calls))
         self.assertTrue(all("fixed host comment" not in json.dumps(
             call.input["owned_values"]) for call in creator.calls))
+
+    def test_html_protected_markdown_is_opaque_but_owned_markdown_blocks(self):
+        source = ("<main><script>import Widget from './Widget';\n# fixed</script>"
+                  "<style>* { color: red; }</style>"
+                  "<pre><code># SECRET\n- fixed_item</code></pre>"
+                  "<p>Configuration key foo_bar remains unchanged. "
+                  "All plans include support.* Terms apply. "
+                  "Install from C:\\Program Files\\Tool. "
+                  "Use `code` in this HTML documentation.</p><p>"
+                  + ("Visible text remains clear. " * 400) + "</p></main>")
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-html-spans"), max_output_tokens=8192)
+        result = worker.run(source, "documentation", "html-protected-markdown")
+        self.assertEqual(result["target_text"], source)
+        self.assertTrue(all(call.input["container_format"] == "html"
+                            for call in creator.calls))
+
+        for index, clear_html in enumerate((
+            "<main>\n\n<p>Configuration key foo_bar remains literal HTML.</p>"
+            "\n\n<p>" + ("Long visible prose. " * 150) + "</p>\n</main>",
+            "<div><div>Configuration key foo_bar remains literal HTML.</div>"
+            "<p>" + ("Long visible prose. " * 150) + "</p></div>",
+        )):
+            with self.subTest(clear_html=index):
+                self.assertFalse(RW._html_model_owned_markdown_intent(clear_html))
+                self.assertEqual(RW._long_container_kind(clear_html), "html")
+                self.assertEqual(RW.integrity_errors(clear_html, clear_html), [])
+
+        for index, expression in enumerate((
+            "{42}", '{"hello"}', "{\n  user.name()\n}",
+            "{{foo:{bar:42}}}",
+        )):
+            mdx_html = ("<main><p>Hello " + expression + ".</p><p>"
+                        + ("Long visible prose. " * 500) + "</p></main>")
+            blocked, unused = self.worker(
+                creator=Creator("unused"), max_output_tokens=8192)
+            with self.subTest(mdx=index), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, "long_html_markdown_ambiguous"):
+                blocked.run(mdx_html, "documentation",
+                            "html-mdx-expression-" + str(index))
+            self.assertFalse(unused.calls)
+
+        for index, (attribute, expression) in enumerate((
+            ("title", "Hello {{foo:{bar:42}}}"),
+            ("aria-label", "Hello {\n foo()\n}"),
+        )):
+            mdx_attribute = (
+                '<div ' + attribute + '="' + expression + '"><p>'
+                + ("Long visible prose. " * 3000) + "</p></div>")
+            blocked, unused = self.worker(
+                creator=Creator("unused"), max_output_tokens=8192)
+            with self.subTest(mdx_attribute=index), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, "long_html_markdown_ambiguous"):
+                blocked.run(mdx_attribute, "documentation",
+                            "html-mdx-attribute-" + str(index))
+            self.assertFalse(unused.calls)
+
+        block_html = (
+            "<main><p>Use *emphasis* and [label](https://example.test).</p><p>"
+            + ("Long visible prose. " * 500) + "</p></main>")
+        html_worker, html_creator = self.worker(
+            creator=Creator("fixture-keeps-html-spans"), max_output_tokens=8192)
+        html_result = html_worker.run(
+            block_html, "documentation", "html-block-inline-punctuation")
+        self.assertEqual(html_result["target_text"], block_html)
+        self.assertTrue(html_creator.calls)
+        self.assertEqual(RW.integrity_errors(block_html, block_html), [])
+
+        top_level = (
+            "<span>Intro text is sufficiently long for rewriting safely.</span> "
+            "Use *emphasis* and [label](https://example.test). "
+            + ("More natural prose. " * 500))
+        blocked, unused = self.worker(
+            creator=Creator("unused"), max_output_tokens=8192)
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "long_html_markdown_ambiguous"):
+            blocked.run(top_level, "documentation", "html-markdown-top-level")
+        self.assertFalse(unused.calls)
+
+        for index, split_link in enumerate((
+            "[hello <span>world long enough text here</span> label]"
+            "(https://example.test). ",
+            "![alt <em>world long enough text here</em> label]"
+            "(https://example.test/image.png). ",
+            "Hello {items.map(item => <span>{item}</span>)}. ",
+        )):
+            source = split_link + ("Long prose remains visible. " * 500)
+            blocked, unused = self.worker(
+                creator=Creator("unused"), max_output_tokens=8192)
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, "long_html_markdown_ambiguous"):
+                blocked.run(source, "documentation",
+                            "html-markdown-split-link-" + str(index))
+            self.assertFalse(unused.calls)
+
+        blank_ended_raw_block = (
+            "<div>\n\n[hello](https://example.test)\n\n"
+            + ("Long prose remains here. " * 500) + "\n</div>")
+        blocked, unused = self.worker(
+            creator=Creator("unused"), max_output_tokens=8192)
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "long_html_markdown_ambiguous"):
+            blocked.run(blank_ended_raw_block, "documentation",
+                        "html-commonmark-blank-line")
+        self.assertFalse(unused.calls)
+
+        for index, eol in enumerate(("\n", "\r\n", "\r")):
+            inline_block = (
+                "Prefix <div>[hello](https://example.test)</div> suffix. "
+                + ("Long prose. " * 3000) + eol)
+            blocked, unused = self.worker(
+                creator=Creator("unused"), max_output_tokens=8192)
+            with self.subTest(inline_block=index), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, "long_html_markdown_ambiguous"):
+                blocked.run(inline_block, "documentation",
+                            "html-inline-block-" + str(index))
+            self.assertFalse(unused.calls)
 
     def test_long_html_restart_reuses_completed_batches(self):
         class SimulatedCrash(BaseException):
@@ -1162,6 +1333,233 @@ class RewriteTests(unittest.TestCase):
         self.assertGreater(groups, 1)
         self.assertEqual(len(second_creator.calls), groups - 1)
         self.assertEqual(result["target_text"], source)
+
+    def test_long_markdown_preserves_syntax_and_uses_whole_document_reviews(self):
+        source = (
+            "---\ntitle: fixed deployment metadata\n---\n"
+            "# Selkeä ohje\n\n"
+            + ("Selkeä teksti säilyttää numeron 42. " * 280)
+            + "Nimi {{name}} säilyy. "
+            + "\n\nLue `rm -rf /` vain esimerkkinä ja avaa "
+            "[ohje](https://example.test/fixed).\n\n"
+            "> Tämä lainaus säilyy täsmälleen.\n"
+            "> Myös toinen lainausrivi.\n\n"
+            "```python\nSECRET = 'do-not-send'\n```\n"
+        )
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-markdown-spans"), host=host,
+            max_output_tokens=8192)
+        result = worker.run(source, "documentation", "long-markdown-lossless")
+        self.assertEqual(result["target_text"], source)
+        self.assertEqual(result["evidence"]["document"]["schema"],
+                         RW.LONG_MARKDOWN_EVIDENCE_SCHEMA)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "markdown"
+                            and call.input["selector_profile"] == RW.MDRW.PROFILE
+                            for call in creator.calls))
+        owned = json.dumps(
+            [call.input["owned_values"] for call in creator.calls],
+            ensure_ascii=False)
+        self.assertNotIn("{{name}}", owned)
+        self.assertNotIn("rm -rf", owned)
+        self.assertNotIn("https://", owned)
+        self.assertNotIn("lainaus", owned)
+        self.assertNotIn("SECRET", owned)
+        self.assertNotIn("fixed deployment", owned)
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(native["input"]["candidate"], source)
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], result["evidence"]["document"],
+            content_type="documentation", request_id="long-markdown-lossless",
+            correction_history=[]))
+
+    def test_long_markdown_before_after_changes_only_owned_prose(self):
+        source = (
+            "# On tärkeää huomata, että tämä on selkeä\n\n"
+            "- Avaa nyt. " + ("Lisätieto säilyy 42. " * 400)
+            + "\n\n> Älä muuta tätä lainausta.\n\n"
+            "Lue `fixed_code()` ja [ohje](https://example.test/fixed).\n\n"
+            "```sh\necho SECRET\n```\n"
+        )
+
+        def revise(request):
+            return [item["text"].replace(
+                "On tärkeää huomata, että tämä on selkeä", "Tämä on selkeä")
+                    .replace("Avaa nyt.", "Avaa.")
+                    for item in request.input["owned_values"]]
+
+        worker, _creator = self.worker(
+            creator=Creator(revise), max_output_tokens=8192)
+        result = worker.run(
+            source, "marketing", "long-markdown-before-after")
+        self.assertTrue(result["target_text"].startswith(
+            "# Tämä on selkeä\n\n- Avaa. "))
+        self.assertIn("> Älä muuta tätä lainausta.", result["target_text"])
+        self.assertIn("`fixed_code()`", result["target_text"])
+        self.assertIn("[ohje](https://example.test/fixed)", result["target_text"])
+        self.assertIn("```sh\necho SECRET\n```", result["target_text"])
+        self.assertEqual(RW.integrity_errors(source, result["target_text"]), [])
+
+    def test_long_markdown_rejects_response_evidence_and_target_tampering(self):
+        class ReorderingMarkdownCreator(Creator):
+            def invoke(self, request):
+                response = super().invoke(request)
+                if response.get("schema") == RW.LONG_MARKDOWN_SCHEMA:
+                    response["values"].reverse()
+                return response
+
+        source = "# Ohje\n\n" + "\n\n".join(
+            f"Kappale {index} säilyttää numeron 42. "
+            + ("Lisätieto jatkuu. " * 8) for index in range(40))
+        worker, creator = self.worker(
+            creator=ReorderingMarkdownCreator("unchanged"))
+        with self.assertRaises(RW.NativeRewriteBlocked):
+            worker.run(source, "documentation", "markdown-response-reordered")
+        self.assertEqual(len(creator.calls), 1)
+
+        worker, _creator = self.worker(
+            creator=Creator("fixture-keeps-markdown-spans"))
+        result = worker.run(source, "documentation", "markdown-evidence")
+        document = json.loads(json.dumps(result["evidence"]["document"]))
+        document["groups"][0]["creation_request_sha256"] = "0" * 64
+        self.assertFalse(worker.validate_document_evidence(
+            source, result["target_text"], document,
+            content_type="documentation", request_id="markdown-evidence",
+            correction_history=[]))
+        changed_target = result["target_text"].replace("# Ohje", "## Ohje", 1)
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed_target, result["evidence"]["document"],
+            content_type="documentation", request_id="markdown-evidence",
+            correction_history=[]))
+
+    def test_long_markdown_unsafe_or_ambiguous_blocks_before_creator(self):
+        cases = (
+            "# Otsikko\n\n```python\nunclosed\n",
+            "# Otsikko\n\n<div>raw html</div>\n",
+            "| a | b |\n|---|---|\n",
+            ":::note\ntext\n:::\n",
+            "# Otsikko\n\nUse [broken](https://example.test/a(b)).\n",
+            "# Otsikko\n\nUse `unclosed code.\n",
+            "# Otsikko\n\nText with &unknown; entity.\n",
+            "# Cafe\u0301\n\nTeksti.\n",
+            "\ufeff--- # frontmatter\ntitle: SECRET\n---\n# Otsikko\n",
+            "<div>fixed</div>\n\n# Heading\n\n```sh\nSECRET=42\n```\n",
+            "# Otsikko\n\nUse [la\\]bel](secret).\n",
+            "--- # frontmatter\ntitle: SECRET\n---\n# Otsikko\n",
+            "Hello {% if user %}SECRET{% endif %}.\n",
+            "{# SECRET COMMENT #}\n",
+            "<% SECRET TEMPLATE %>\n",
+            "Hello {user.name()}.\n",
+            "Total: {count + 1}.\n",
+            "Hello {42}.\n",
+            'Hello {"world"}.\n',
+            "Hello {\n  user.name()\n}.\n",
+            "Hello {{foo:{bar:42}}}.\n",
+            "import Widget from './Widget'\n",
+            "export default Widget\n",
+            "Text with &unknown; entity.\n",
+            "Read [multi\nline](secret) now.\n",
+            "See ![multi\nline](image.png) now.\n",
+        )
+        for index, prefix in enumerate(cases):
+            source = prefix + ("Turvallinen lisäteksti jatkuu 42. " * 400)
+            worker, creator = self.worker(
+                creator=Creator("unused"), max_output_tokens=8192)
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(
+                        RW.NativeRewriteBlocked,
+                        "long_(?:markdown_|html_markdown_)"):
+                    worker.run(source, "documentation",
+                               "invalid-markdown-" + str(index))
+                self.assertFalse(creator.calls)
+
+    def test_markdown_autolinks_and_frontmatter_cannot_fall_back_to_text(self):
+        for autolink in ("<foo@example.test>",
+                         "<mailto:foo@example.test>"):
+            source = "Email " + autolink + " now. " + ("Long prose. " * 500)
+            target = source.replace("<", "", 1).replace(">", "", 1)
+            self.assertEqual(RW._long_container_kind(source), "markdown")
+            self.assertTrue(RW.integrity_errors(source, target))
+
+        for eol in ("\r\n", "\r"):
+            source = eol.join(("---", "title: SECRET FIXED", "---", ""))
+            source += "Ordinary prose remains long. " * 500
+            target = source.replace("SECRET FIXED", "changed", 1)
+            self.assertEqual(RW._long_container_kind(source), "markdown")
+            self.assertTrue(RW.integrity_errors(source, target))
+
+    def test_long_markdown_restart_reuses_completed_batches(self):
+        class SimulatedCrash(BaseException):
+            pass
+
+        class CrashAfterFirstBatch(RW.NativeRewriteWorker):
+            def _create_long_segment(self, *args, **kwargs):
+                result = super()._create_long_segment(*args, **kwargs)
+                if not getattr(self, "_crashed", False):
+                    self._crashed = True
+                    raise SimulatedCrash()
+                return result
+
+        source = "# Ohje\n\n" + "\n\n".join(
+            f"Kappale {index} säilyttää numeron 42. "
+            + ("Lisätieto jatkuu. " * 8) for index in range(60))
+        first_creator = Creator("unchanged")
+        first = CrashAfterFirstBatch(
+            first_creator, Host(), ledger_path=self.path,
+            creator_id="writer", creator_session_id="writer-session",
+            model_id="fixture-model", model_version="fixture-model-1",
+            host_policy_version="fixture-host-v1", profile=profile())
+        with self.assertRaises(SimulatedCrash):
+            first.run(source, "documentation", "markdown-resume")
+        self.assertEqual(len(first_creator.calls), 1)
+
+        resumed, second_creator = self.worker(creator=Creator("unchanged"))
+        result = resumed.run(source, "documentation", "markdown-resume")
+        groups = len(result["evidence"]["document"]["groups"])
+        self.assertGreater(groups, 1)
+        self.assertEqual(len(second_creator.calls), groups - 1)
+        self.assertEqual(result["target_text"], source)
+
+    def test_long_markdown_review_budget_blocks_before_creator(self):
+        source = "# Ohje\n\n" + ("Selkeä arvo 42. " * 9000)
+        worker, creator = self.worker(creator=Creator("unused"))
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "long_markdown_review_budget_exceeded"):
+            worker.run(source, "documentation", "markdown-review-budget")
+        self.assertFalse(creator.calls)
+
+    def test_long_markdown_finding_never_triggers_automatic_correction(self):
+        failed = False
+
+        def review_factory(task, response):
+            nonlocal failed
+            if task["phase"] == "target_native" and not failed:
+                failed = True
+                response.update(status="FAIL", major_defects=[{
+                    "severity": "major", "class": "formulaic_opening",
+                    "excerpt": "Selkeä teksti",
+                    "reason": "Synthetic fixture finding.",
+                    "impact": "The opening is repetitive.",
+                    "revision_direction": "Make the opening direct.",
+                }])
+            return response
+
+        source = "# Ohje\n\n" + ("Selkeä teksti säilyy 42. " * 400)
+        host = Host(review_factory=review_factory)
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-markdown-spans"), host=host,
+            max_output_tokens=8192)
+        with self.assertRaisesRegex(RW.NativeRewriteBlocked,
+                                    "independent_review_required"):
+            worker.run(source, "documentation", "markdown-no-correction")
+        self.assertEqual(len(creator.calls), len({
+            call.input["chunk_id"] for call in creator.calls}))
+        self.assertEqual([task["phase"] for task, _ in host.calls],
+                         ["target_native"])
 
     def test_unsegmented_unicode_blocks_instead_of_splitting_grapheme_clusters(self):
         self.assertEqual(sum(last - first + 1 for first, last in

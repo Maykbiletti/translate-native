@@ -37,7 +37,7 @@ the existing mandatory response review remains applicable.
 For a long original, pass the complete text unchanged. The trusted worker may use
 its bounded durable plain-text plan, its lossless JSON string-value plan, its
 strict lossless HTML linguistic-span plan, or its strict Android-resource XML
-text plan, but
+text plan, or its conservative lossless Markdown prose-span plan, but
 only a fully assembled result may enter the source-blind native review and
 subsequent original-preservation review. JSON keys, structure, non-string values
 and source bytes outside rewritten value tokens remain host-owned; unchanged
@@ -74,7 +74,18 @@ namespaced selector lookalikes, unclassified non-whitespace text and generic XML
 remain fail-closed. Attributes, declarations, namespaces, comments, processing
 instructions, predefined/numeric references, email addresses, Android resource
 and theme references (including escaped literals), and backslash escapes stay
-host-owned. Any changed segment, value part, HTML/XML
+host-owned. Long Markdown exposes only unambiguous prose in headings, paragraphs
+and list items. Front matter, complete blockquotes, fenced/indented/inline code,
+complete links and bracket labels, reference definitions, autolinks, URLs,
+entities, escapes, placeholders, delimiters, markers and line endings remain
+host-owned. Emphasis-capable lines remain wholly opaque because adjacent edits
+can change delimiter roles. Raw HTML and ambiguous Markdown intent outside a
+line-start, still-open CommonMark block-HTML region, tables,
+directives, templates/MDX statements or expressions, ambiguous front matter, escaped/multiline/malformed
+or nested links, unclosed constructs, unknown entities and non-NFC Markdown
+block before creator access;
+never route those documents through plain-text segmentation. Any changed
+segment, value part, HTML/XML/Markdown
 span or final assembly requires fresh reviews of the exact complete result.
 
 The repository deployment guide is `docs/native-rewrite.md`; the standalone skill

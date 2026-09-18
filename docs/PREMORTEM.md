@@ -2000,6 +2000,17 @@ Assume the Version 6 response-and-translation gateway and automatic updater ship
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
 
+## Long Markdown native rewriting (2026-09-18)
+
+| Failure mode | Earliest warning | Mitigation | Verification |
+|---|---|---|---|
+| Markdown code or link destinations become ordinary creator prose | A long documentation request contains fences, inline code, autolinks, reference definitions or inline links, but routing still selects the plain-text segmenter | Detect a narrow versioned Markdown profile before plain-text planning; keep code, destinations, escapes, placeholders and syntax in the host-owned skeleton | Long Finnish, Maltese and Arabic fixtures inspect creator payloads and prove protected bytes never become owned values |
+| The raw planner and a Markdown renderer would assign different structure | An unclosed fence, lazy blockquote continuation, nested link, raw HTML, table, directive or ambiguous indentation is accepted | Support only an explicit CommonMark-compatible subset and reject ambiguous or unsupported constructs before any creator access | Adversarial fence, indentation, raw-HTML, nested-link, table, directive and line-ending cases make zero creator calls |
+| A candidate injects Markdown structure while preserving the original delimiters | Revised prose introduces a fence, heading, list marker, inline-code delimiter, link boundary or raw HTML | Forbid Markdown control characters inside model-owned spans, reparse the complete target, and require the exact source skeleton hash | Candidate-injection and post-review mutation fixtures fail closed in the worker and Guard |
+| A quotation is rewritten although the user intended it to remain verbatim | Blockquote content is treated as normal paragraph prose | Keep complete blockquote blocks, including lazy continuation lines, host-owned in the first profile | Quoted legal, testimonial and lyric fixtures remain byte-identical while surrounding prose can change |
+| Restart or replay binds revised prose to another line or inline label | A completed group is reused after source, path, ordering, policy or protected-token drift | Bind exact line/part paths, source and skeleton hashes, group IDs and provider completion evidence; recompute every request and assembly in the Guard | Crash-resume, reordered, missing, replayed and tampered evidence fixtures fail closed |
+| Per-span fluency hides document-wide rhythm or meaning loss | Individual headings and paragraphs pass but the assembled documentation is inconsistent | Reassemble first, then run one source-blind native review of the complete Markdown and a separate original-preservation review; only the Guard releases | Full-document review-order and source-isolation tests cover all supported lanes; uncertainty remains blocked |
+
 ## Long XML native rewriting (2026-09-18)
 
 | Failure mode | Earliest warning | Mitigation | Verification |
