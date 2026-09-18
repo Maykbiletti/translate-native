@@ -129,6 +129,7 @@ class HostSubagentProvider:
                 "job_id": payload["input"]["job_id"],
                 "phase": payload["phase"],
                 "input_sha256": _hash(payload["input"]),
+                "system_instruction_sha256": hashlib.sha256(payload["system_instruction"].encode("utf-8")).hexdigest(),
             })
             if payload["request_id"] != expected:
                 raise ValueError

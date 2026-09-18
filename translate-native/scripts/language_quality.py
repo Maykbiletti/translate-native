@@ -13,6 +13,8 @@ import re
 import stat
 import time
 import unicodedata
+from collections import defaultdict
+from statistics import mean, pstdev
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +48,91 @@ def canonical_text(text: str) -> str:
 
 def canonical_hash(text: str) -> str:
     return hashlib.sha256(canonical_text(text).encode("utf-8")).hexdigest()
+
+
+def prose_style_report(text: str, language: str, content_type: str,
+                       masked_text: str) -> dict[str, Any]:
+    """Advisory surface measurements, never authorship or semantic proof.
+
+    Offsets refer to the exact original text. Callers supply the existing
+    length-preserving technical mask; unsupported formats are not assessed.
+    """
+    report = {
+        "profile_version": "prose-style-v1",
+        "target_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "language": language, "content_type": content_type,
+        "status": "NOT_ASSESSED", "authorship": "NOT_ASSESSED",
+        "semantic_repetition": "REQUIRES_NATIVE_REVIEW",
+        "native_quality": "REQUIRES_NATIVE_REVIEW",
+        "findings": [], "metrics": {},
+    }
+    base = language.lower().replace("_", "-").split("-")[0]
+    # The lexical measurements need word-delimited prose. Other languages still
+    # receive mandatory semantic native review, never an invented clean score.
+    word_delimited = {"bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr",
+                      "de", "el", "hu", "ga", "it", "lv", "lt", "mt", "pl",
+                      "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk", "tr",
+                      "ca", "eu", "nb", "nn", "is", "id", "ms", "vi"}
+    if (base not in word_delimited
+            or content_type not in {"prose", "marketing", "documentation"}
+            or len(masked_text) != len(text)
+            or re.search(r"<[/!A-Za-z]|^\s*[\[{]", text)):
+        return report
+    # Avoid scoring quoted blocks, lists, headings and tables as narrative.
+    prose = re.sub(r"(?m)^\s*(?:>|#|[-*+]\s|\d+[.)]\s|\|)[^\n]*",
+                   lambda match: " " * len(match[0]), masked_text)
+    # Protect common German abbreviations and decimals from sentence splitting.
+    prose = re.sub(r"\b(?:z\.\s*B\.|d\.\s*h\.|u\.\s*a\.|bzw\.|Dr\.|Prof\.|ca\.)|(?<=\d)\.(?=\d)",
+                   lambda match: match[0].replace(".", "·"), prose)
+    sentences = []
+    offset = 0
+    for boundary in re.finditer(r"[.!?]+[\"”’»]*", prose):
+        segment = prose[offset:boundary.end()]
+        start = offset + len(segment) - len(segment.lstrip())
+        offset = boundary.end()
+        words = re.findall(r"[^\W_]+", segment, re.UNICODE)
+        if len(words) >= 4:
+            sentences.append((start, boundary.end(), tuple(w.casefold() for w in words)))
+    lengths = [len(s[2]) for s in sentences]
+    report["metrics"] = {"sentence_count": len(sentences),
+                         "word_count": sum(lengths)}
+    if len(sentences) < 8 or sum(lengths) < 100:
+        return report
+    report["status"] = "NO_SIGNALS"
+    findings = report["findings"]
+
+    def add(code: str, indices: list[int], reason: str) -> None:
+        findings.append({"code": code, "severity": "advisory",
+                         "reason": reason, "count": len(indices),
+                         "spans": [{"start": sentences[i][0], "end": sentences[i][1]}
+                                   for i in indices[:10]],
+                         "requires_context_review": True})
+
+    repeated = defaultdict(list)
+    for i, (_, _, words) in enumerate(sentences):
+        if len(words) >= 8:
+            repeated[words].append(i)
+    for indices in repeated.values():
+        if len(indices) >= 3 and len(findings) < 10:
+            add("style-repeated-sentence", indices,
+                "The same lexical sentence occurs at least three times; check whether repetition serves the genre.")
+    transitions = ("darüber hinaus", "des weiteren", "nicht zuletzt",
+                   "es ist wichtig zu betonen", "in diesem zusammenhang",
+                   "zusammenfassend lässt sich sagen", "an dieser stelle") if base == "de" else ()
+    report["metrics"]["stock_transition_profile"] = "de-v1" if base == "de" else "NOT_ASSESSED"
+    indices = [i for i, (_, _, words) in enumerate(sentences)
+               if any(" ".join(words).startswith(p + " ") for p in transitions)]
+    if len(indices) >= 4 and len(indices) / len(sentences) >= .25:
+        add("style-formulaic-transitions", indices,
+            "At least a quarter of sentences begin with stock transitions; check their actual logical contribution.")
+    cv = pstdev(lengths) / mean(lengths)
+    report["metrics"]["sentence_length_cv"] = round(cv, 4)
+    if len(lengths) >= 12 and mean(lengths) >= 10 and cv <= .12:
+        add("style-uniform-sentence-length", list(range(len(sentences))),
+            "Sentence lengths vary little; this is a rhythm hint, not proof of poor writing or AI authorship.")
+    if findings:
+        report["status"] = "REVIEW_RECOMMENDED"
+    return report
 
 
 def _b64encode(data: bytes) -> str:

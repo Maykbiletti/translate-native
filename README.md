@@ -40,6 +40,12 @@ It reconstructs the meaning, discards the source sentence structure, and writes 
 
 ## One skill. Every human language.
 
+Original writing, rewriting and proofreading use the same target-language native
+review as translations; only translations add a source-aware fidelity check.
+The [prose-style report](docs/prose-style-review.md) separates surface signals
+(repetition, sentence rhythm and supported stock transitions) from the Unicode
+gate. A deterministic `PASS` never certifies human authorship or native style.
+
 The skill has no language allowlist. It applies equally to:
 
 - Swedish, German, Czech, Spanish, Catalan, Basque, and every other Latin-script language;

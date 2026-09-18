@@ -277,7 +277,10 @@ def validate_text(
             "native-diacritics-heuristics",
         ],
         "findings": [asdict(finding) for finding in findings],
+        "style_review": QUALITY.prose_style_report(text, language, content_type, prose),
         "limitations": (
+            "PASS covers deterministic language checks, not style or human authorship. "
+            "Style signals are advisory; NO_SIGNALS is not a quality approval. "
             "Deterministic checks cannot prove semantic fidelity or native fluency. "
             "The release gate therefore also requires explicit seven-pass attestations."
         ),

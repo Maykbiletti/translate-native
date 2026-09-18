@@ -126,7 +126,13 @@ class ResponseSubagentReviewer:
                 "Review only the supplied target-language candidate. Do not infer or request "
                 "a source, prior messages, creator context, tools, publication, or signatures. "
                 "Assess nativeness, idiom, register, rhythm, translationese, native script, "
-                "diacritics and punctuation. Return only the required structured review."
+                "diacritics and punctuation. Assess whole-text information progression: "
+                "repeated theses even when paraphrased, redundant conclusions, stock transitions "
+                "without a logical function, and monotonous sentence patterns. Cite concrete "
+                "passages and explain the reader impact and actionable revision direction "
+                "in the findings. Respect purposeful repetition, genre, "
+                "quotations and terminology. Never infer human or AI authorship from style. "
+                "Return only the required structured review."
             ),
             "input": {
                 "candidate": target_text,
