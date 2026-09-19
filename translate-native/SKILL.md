@@ -51,6 +51,8 @@ attributes, non-string scalars, layout or creator context.
 For HTML it is the ordered decoded visible text plus approved linguistic
 attributes; tags, comments, scripts, code, link destinations, IDs and technical
 attributes remain unavailable to the native reviewer.
+For SRT/WebVTT it is the ordered complete cue payloads; headers, cue IDs,
+timestamps, settings and metadata blocks remain unavailable.
 The subsequent original-preservation review receives the exact assembled container and original.
 The Guard recomputes both the projection hash and full-target binding. JSON keys,
 structure, non-string values

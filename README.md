@@ -78,6 +78,10 @@ attributes, never tags, comments, scripts, code, link destinations, IDs or
 technical attributes. The later preservation reviewer still receives the exact
 original and complete assembled HTML, and the Guard recomputes both projection
 and full-target bindings before release.
+For SRT/WebVTT, the native reviewer receives ordered cue payloads without the
+subtitle header, cue identifiers, timestamps, settings or metadata blocks. The
+later preservation reviewer retains the exact full subtitle pair under the same
+Guard-recomputed projection and full-target binding.
 
 The [prose-style report](docs/prose-style-review.md) separates surface signals
 (repetition, sentence rhythm and supported stock transitions) from the Unicode

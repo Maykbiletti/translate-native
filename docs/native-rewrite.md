@@ -338,10 +338,13 @@ syntax, unambiguous blank lines and no unsupported cue-edge whitespace. Missing,
 values, marker changes, line-count changes, timestamp edits, unsupported syntax
 or incomplete completion evidence block fail-closed. ASS/SSA `Dialogue:` input
 is explicitly unsupported in this rewrite profile and never falls back to plain
-text. The complete assembled subtitle receives the source-blind native review in
-playback order and then the separate original-preservation review. The Guard
-rebuilds the plan, request and response hashes, exact assembly and immutable
-container skeleton before signing. Deterministic language checks inspect only
+text. The source-blind native reviewer receives only an ordered projection of
+the complete cue payloads in playback order; headers, cue identifiers,
+timestamps, settings and metadata blocks stay absent. The separate
+original-preservation reviewer then receives the exact original and complete
+assembled subtitle. Projection policy, projection hash and full-target hash are
+bound into evidence and recomputed by the Guard alongside the plan, request and
+response hashes, exact assembly and immutable container skeleton. Deterministic language checks inspect only
 cue prose: ASCII-heavy timing, identifiers, settings and protected technical
 syntax cannot create a false script mismatch, while their separate structural
 checks remain mandatory. The combined source/target review ceiling is 262,144
