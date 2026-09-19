@@ -1365,12 +1365,93 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
-        self.assertEqual(native["input"]["candidate"], source)
+        self.assertEqual(native["input"]["candidate"],
+                         RW.HTMLRW.native_review_text(source))
+        for forbidden in ("<script>", "https://example.test/x", "rm -rf",
+                          "href=", "<main>"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.HTMLRW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.HTMLRW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], result["evidence"]["document"],
             content_type="documentation", request_id="long-html-lossless",
             correction_history=[]))
+
+    def test_html_native_review_projection_is_markup_and_metadata_blind(self):
+        source = ('<!doctype html><!-- SECRET_COMMENT --><html data-id="SECRET_ID">'
+                  '<head><meta name="description" '
+                  'content="Selkeä &amp; luonteva kuvaus 42.">'
+                  '<script>SECRET_SCRIPT</script></head><body><main>'
+                  '<p title="Hyödyllinen vihje">Näkyvä teksti säilyy.</p>'
+                  '<a href="https://example.test/SECRET_LINK">Avaa palvelu</a>'
+                  '<pre>SECRET_CODE</pre></main></body></html>')
+        projection = RW.HTMLRW.native_review_text(source)
+        self.assertEqual(
+            projection,
+            "Selkeä & luonteva kuvaus 42.\n\nHyödyllinen vihje\n\n"
+            "Näkyvä teksti säilyy.\n\nAvaa palvelu")
+        for forbidden in ("SECRET_COMMENT", "SECRET_ID", "SECRET_SCRIPT",
+                          "SECRET_LINK", "SECRET_CODE", "<html", "href="):
+            self.assertNotIn(forbidden, projection)
+        self.assertEqual(RW.HTMLRW.language_validation_text(source), projection)
+
+    def test_short_html_native_review_is_metadata_blind(self):
+        source = ('<main id="SOURCE_SENTINEL"><!-- SECRET comment -->'
+                  '<p>Luonteva teksti säilyttää luvun 42.</p>'
+                  '<a href="https://example.test/SECRET">Avaa</a></main>')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-html-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva teksti säilyttää luvun 42.\n\nAvaa")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.HTMLRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_html_identity_projection(self):
+        source = ('<main id="SOURCE_SENTINEL"><p>Luonteva kohdeteksti.'
+                  '</p></main>')
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-html-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_long_html_before_after_changes_only_owned_text(self):
         source = ('<main data-id="fixed"><p>On tärkeää huomata, että tämä on selkeä. '

@@ -373,8 +373,12 @@ The worker accepts only the exact ordered ID set and trusted complete-provider
 evidence for every batch. It rejects markup, entities and attribute-quote
 injection in candidate values, replaces only the original raw spans, and proves
 the immutable skeleton again after assembly. The source-blind reviewer sees only
-the complete assembled HTML and allowed target profile; the separate fidelity
-reviewer then sees the complete original and target. Combined source-plus-target
+an ordered decoded projection of visible target text and approved linguistic
+attributes plus the allowed target profile. Markup, comments, scripts, code,
+link destinations, IDs and technical attributes remain absent; the separate
+fidelity reviewer then sees the complete original and target. Projection policy,
+projection hash and full-target hash are bound into evidence and independently
+recomputed by the Guard. Combined source-plus-target
 review text is capped at 262,144 UTF-8 bytes before creator access and after
 assembly. The Guard independently rebuilds the plan, every request/response hash,
 completion record and exact assembly before signing. Automatic correction is

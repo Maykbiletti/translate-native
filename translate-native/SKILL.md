@@ -48,6 +48,9 @@ it is the ordered decoded selected string, plural and string-array values; for
 JSON/ARB it is the ordered decoded non-empty string values. The projection never
 contains source fields, resource names, keys, paths, comments, headers,
 attributes, non-string scalars, layout or creator context.
+For HTML it is the ordered decoded visible text plus approved linguistic
+attributes; tags, comments, scripts, code, link destinations, IDs and technical
+attributes remain unavailable to the native reviewer.
 The subsequent original-preservation review receives the exact assembled container and original.
 The Guard recomputes both the projection hash and full-target binding. JSON keys,
 structure, non-string values

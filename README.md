@@ -72,6 +72,13 @@ it is not the user's unavailable text and not evidence of native quality.
 Locale/dialect evidence and real model/host configuration remain operator
 requirements; synthetic tests do not establish native quality in every language.
 
+Source-bearing structured results use target-only review projections. For HTML,
+the native reviewer receives ordered decoded visible copy and approved linguistic
+attributes, never tags, comments, scripts, code, link destinations, IDs or
+technical attributes. The later preservation reviewer still receives the exact
+original and complete assembled HTML, and the Guard recomputes both projection
+and full-target bindings before release.
+
 The [prose-style report](docs/prose-style-review.md) separates surface signals
 (repetition, sentence rhythm and supported stock transitions) from the Unicode
 gate. A deterministic `PASS` never certifies human authorship or native style.
