@@ -259,11 +259,14 @@ missing, additional, duplicated or reordered values and incomplete provider
 completion evidence block. The trusted worker JSON-escapes each changed value;
 an unchanged value retains its original escape token and casing byte-for-byte.
 It replaces only its original value token and proves the immutable container
-skeleton again in the Guard. The source-blind reviewer then receives only the
-complete assembled target JSON and the allowed target profile; fidelity receives
-the complete original and target afterward. Combined source-plus-target fidelity
-review text is capped at 262,144 UTF-8 bytes: capacity is reserved before creator
-access and the exact result is checked again after assembly.
+skeleton again in the Guard. The source-blind reviewer receives one ordered
+decoded projection of all non-empty string values from the complete assembled
+target. Keys, paths, delimiters, structure and non-string scalars are absent.
+Fidelity receives the complete original and target afterward. Review evidence
+binds the projection and full-target hashes, and the Guard recomputes both.
+Combined source-plus-target fidelity review text is capped at 262,144 UTF-8 bytes:
+capacity is reserved before creator access and the exact result is checked again
+after assembly.
 Automatic correction is deliberately
 disabled for long JSON until review findings carry a host-verifiable unique value
 identity; an actionable finding therefore routes to independent review rather

@@ -577,11 +577,88 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(native["input"]["candidate"],
+                         RW.JSONRW.native_review_text(source))
+        for forbidden in ('"a/b~c"', '"a"', '"array"', '"placeholder"',
+                          '"enabled"', '1e+02'):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.JSONRW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.JSONRW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
+        self.assertEqual(fidelity_evidence["review_input_kind"],
+                         RW.ASSEMBLED_REVIEW_INPUT)
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], document, content_type="documentation",
             request_id="long-json-lossless", correction_history=[]))
         self.assertGreaterEqual(len(creator.calls), 1)
+
+    def test_json_native_review_projection_is_key_and_structure_blind(self):
+        source = ('{"SOURCE_SENTINEL.title":"Selkeä otsikko 42.",'
+                  '"nested":{"SECRET.key":"Toinen arvo {name}."},'
+                  '"empty":"","count":42,"enabled":true}')
+        self.assertEqual(
+            RW.JSONRW.native_review_text(source),
+            "Selkeä otsikko 42.\n\nToinen arvo {name}.")
+        projection = RW.JSONRW.native_review_text(source)
+        for forbidden in ("SOURCE_SENTINEL", "SECRET", "nested", "count",
+                          "enabled", "true", "42,"):
+            self.assertNotIn(forbidden, projection)
+        self.assertEqual(RW.JSONRW.language_validation_text(source), projection)
+
+    def test_short_json_native_review_is_metadata_blind(self):
+        source = ('{"SOURCE_SENTINEL.key":"Luonteva teksti säilyttää luvun 42.",'
+                  '"SECRET.enabled":true}')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-json-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva teksti säilyttää luvun 42.")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.JSONRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_json_identity_projection(self):
+        source = '{"SOURCE_SENTINEL.key":"Luonteva kohdeteksti."}'
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-json-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_json_duplicate_keys_nonfinite_and_surrogates_block_before_model(self):
         cases = (
