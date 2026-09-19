@@ -3283,6 +3283,13 @@ cannot enforce output validation.
 - SRT, VTT, and ASS subtitle timing;
 - ICU placeholders and plural/select contracts inside supported containers.
 
+Long same-language Apple `.strings` rewriting uses a separate strict lossless
+path: only decoded non-empty values reach the creator, while keys, comments,
+empty values, delimiters, escapes and layout remain host-owned. The complete
+assembled catalog then receives isolated source-blind native review, separate
+original-preservation review and independent Guard reconstruction. Unsupported
+or ambiguous syntax fails closed before creator access.
+
 See [`PREMORTEM.md`](docs/PREMORTEM.md) for the failure modes, mitigations, and proof required before calling this system production-ready.
 
 No deterministic linter can prove that prose is genuinely native. That is why the MCP server supplements the skill's native-language judgment instead of pretending to replace it.

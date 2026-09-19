@@ -244,6 +244,42 @@ class RewriteServiceTests(unittest.TestCase):
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
 
+    def test_long_apple_strings_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä teksti säilyttää ääkköset ja numeron 42. "),
+            ("mt-MT", "Test ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42. "),
+            ("ar", "نص واضح يحافظ على الرقم 42 وعلامات الترقيم. "),
+        )
+        for index, (locale, seed) in enumerate(cases):
+            source = ('/* fixed SECRET */\n"welcome.key" = "'
+                      + (seed * 180) + '{name} %1$@";\n'
+                      '// https://example.test\n"empty.key" = "";\n')
+            creator = FIX.Creator("fixture-keeps-apple-strings-values")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-apple-strings-" + str(index)
+            result = self.rewrite(
+                client, source_text=source, language=locale,
+                request_id=request_id, content_type="ui")
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            self.assertTrue(all(call.input["container_format"] == "apple_strings"
+                                for call in creator.calls))
+            owned = json.dumps(
+                [call.input["owned_values"] for call in creator.calls],
+                ensure_ascii=False)
+            for protected in ("SECRET", "welcome.key", "https://example.test",
+                              "empty.key"):
+                self.assertNotIn(protected, owned)
+            self.assertEqual([task["phase"] for task, _control in host.calls],
+                             ["target_native", "source_fidelity"])
+            self.assertNotIn("source", host.calls[0][0]["input"])
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id, content_type="ui")["valid"])
+
     def test_long_subtitle_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
         cases = (
             ("fi-FI", "Selkeä tekstitys säilyttää ääkköset ja numeron 42."),

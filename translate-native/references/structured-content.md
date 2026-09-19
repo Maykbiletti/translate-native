@@ -28,6 +28,11 @@ Before editing, identify:
 
 Do not assume every string value is translatable. IDs, paths, enum values, SQL, CSS, commands, hashes, telemetry names, and machine prompts may need to remain exact.
 
+The automated long-rewrite Apple `.strings` profile is deliberately stricter:
+it rewrites only non-empty quoted values. Keys, comments, separators, quoting,
+escapes, empty values, whitespace and line endings stay host-owned; unsupported
+or ambiguous syntax blocks instead of falling back to plain prose.
+
 The automated long-rewrite profile is deliberately narrower than the general
 Markdown guidance above. It rewrites only unambiguous prose in headings,
 paragraphs and list items. Front matter, blockquotes, code, complete links and

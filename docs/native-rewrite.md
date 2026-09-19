@@ -235,8 +235,9 @@ Unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
 summarized or routed through the short path. Long XML has the separate bounded
 Android-resource path described below, Markdown has a separate conservative
-raw-span path, GNU PO has a strict non-empty-`msgstr` path, and SRT/WebVTT has a
-strict cue-payload path. Token/cost reservation must use the
+raw-span path, GNU PO has a strict non-empty-`msgstr` path, Apple `.strings` has
+a strict non-empty-value path, and SRT/WebVTT has a strict cue-payload path.
+Token/cost reservation must use the
 computed long plan, not assume five calls. Segment policy, budget, correction
 limit and all instructions are part of the effective profile hash, so a policy
 change invalidates previous receipts.
@@ -292,6 +293,26 @@ independently rebuilds the PO plan, creator requests, completion evidence and
 exact assembly. Combined source-plus-target review input is capped at 262,144
 UTF-8 bytes, and automatic document correction remains disabled until a finding
 can be bound safely to one exact PO value.
+
+Long Apple `.strings` uses a strict raw-token plan. It accepts UTF-8 NFC files
+containing unique quoted keys, quoted values, semicolon terminators and bounded
+line or block comments. Only decoded non-empty values enter creator batches.
+Keys, comments, empty values, separators, quote spelling, whitespace and line
+endings remain host-owned exact bytes; changed values are safely re-escaped.
+The parser supports the documented simple escapes plus four-digit `\\u` and
+`\\U` escapes, validates surrogate pairs, and rejects unknown escapes, raw
+control characters, duplicate decoded keys, comments inside assignments,
+missing delimiters and unterminated constructs before creator access.
+
+Each Apple value part has an opaque ordered ID and bounded context only from
+that same value. The worker rejects missing, extra, reordered or incomplete
+results, rebuilds the immutable skeleton and separately checks placeholders and
+format specifiers inside every decoded value. The isolated native reviewer
+receives the complete assembled catalog without the original; the preservation
+reviewer then receives the exact original and target. The Guard independently
+recomputes the selector, manifest, requests, completion evidence and assembly,
+and applies the same 262,144-byte combined review ceiling. Automatic correction
+remains disabled until a finding can be bound safely to one exact value.
 
 Long SRT and WebVTT use a strict lossless cue-payload plan. Only non-empty cue
 text enters creator batches under opaque ordered IDs with bounded adjacent-cue

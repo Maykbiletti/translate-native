@@ -36,8 +36,10 @@ the existing mandatory response review remains applicable.
 
 For a long original, pass the complete text unchanged. The trusted worker may use
 its bounded durable plain-text plan, its lossless JSON string-value plan, its
-strict lossless HTML linguistic-span plan, or its strict Android-resource XML
-text plan, or its conservative lossless Markdown prose-span plan, but
+strict lossless HTML linguistic-span plan, its strict Android-resource XML
+text plan, its conservative lossless Markdown prose-span plan, its strict GNU
+PO translated-value plan, its strict Apple `.strings` value plan, or its strict
+SRT/WebVTT cue-payload plan, but
 only a fully assembled result may enter the source-blind native review and
 subsequent original-preservation review. JSON keys, structure, non-string values
 and source bytes outside rewritten value tokens remain host-owned; unchanged

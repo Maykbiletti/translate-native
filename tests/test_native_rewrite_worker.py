@@ -78,6 +78,17 @@ class Creator:
                     "completion_status": "complete",
                     "values": [{"value_id": item["value_id"], "candidate": value}
                                for item, value in zip(request.input["owned_values"], values)]}
+        if request.input["response_schema"]["schema"] == RW.LONG_APPLE_STRINGS_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_APPLE_STRINGS_SCHEMA,
+                    "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         if request.input["response_schema"]["schema"] == RW.LONG_SUBTITLE_SCHEMA:
             values = (candidate if isinstance(candidate, list)
                       and len(candidate) == len(request.input["owned_values"])
@@ -925,6 +936,99 @@ class RewriteTests(unittest.TestCase):
                 RW.NativeRewriteBlocked, "long_po_protected_syntax_changed"):
             worker.run(source, "ui", "po-protected-value")
         self.assertTrue(creator.calls)
+
+    def test_long_apple_strings_preserves_container_and_reviews_whole_catalog(self):
+        source = ('\ufeff/* Translator note: SECRET stays host-owned */\r\n'
+                  '"welcome.key"\t=\t"'
+                  + ("Selkeä teksti säilyttää luvun 42 ja nimen {name}. " * 150)
+                  + '";\r\n// fixed URL https://example.test\r\n'
+                  '"empty.key" = "";\r\n')
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-apple-strings-values"), host=host,
+            max_output_tokens=4096)
+        result = worker.run(source, "ui", "long-apple-strings-lossless")
+        self.assertEqual(result["target_text"], source)
+        document = result["evidence"]["document"]
+        self.assertEqual(document["schema"], RW.LONG_APPLE_STRINGS_EVIDENCE_SCHEMA)
+        self.assertEqual(document["manifest"]["selector_profile"],
+                         RW.STRINGSRW.SELECTOR_PROFILE)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "apple_strings"
+                            for call in creator.calls))
+        owned = json.dumps(
+            [call.input["owned_values"] for call in creator.calls],
+            ensure_ascii=False)
+        for protected in ("SECRET", "welcome.key", "https://example.test", "empty.key"):
+            self.assertNotIn(protected, owned)
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="ui",
+            request_id="long-apple-strings-lossless", correction_history=[]))
+
+    def test_long_apple_strings_before_after_and_protected_syntax(self):
+        opening = "On tärkeää huomata, että teksti on selkeä. "
+        source = ('/* fixed */\n"copy.key" = "' + opening
+                  + ("Arvo {name} säilyy numerolla 42 ja muodolla %1$@. " * 120)
+                  + '";\n')
+
+        def revise(request):
+            return [item["text"].replace(opening, "Teksti on selkeä. ", 1)
+                    for item in request.input["owned_values"]]
+
+        worker, _creator = self.worker(creator=Creator(revise))
+        result = worker.run(source, "ui", "long-apple-strings-before-after")
+        target = result["target_text"]
+        self.assertNotEqual(target, source)
+        self.assertTrue(target.startswith('/* fixed */\n"copy.key" = "'))
+        self.assertEqual(target.count("Teksti on selkeä."), 1)
+        self.assertEqual(target.count("{name}"), source.count("{name}"))
+        self.assertEqual(target.count("%1$@"), source.count("%1$@"))
+        self.assertEqual(RW.integrity_errors(source, target), [])
+
+    def test_long_apple_strings_fail_closed_on_syntax_tokens_and_evidence(self):
+        invalid_cases = (
+            ('"a" = "bad\\q";\n' + "// pad\n" * 800,
+             "long_apple_strings_unsupported_escape"),
+            ('"a" = "";\n' + "// pad\n" * 800,
+             "long_apple_strings_no_rewritable_values"),
+            ('"a" /* hidden */ = "Value";\n' + "// pad\n" * 800,
+             "long_apple_strings_equals_expected"),
+        )
+        for index, (source, code) in enumerate(invalid_cases):
+            worker, creator = self.worker(creator=Creator("unused"))
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, code):
+                worker.run(source, "ui", "invalid-strings-" + str(index))
+            self.assertFalse(creator.calls)
+
+        source = ('"copy.key" = "'
+                  + ("Selkeä arvo {name} säilyy numerolla 42. " * 150) + '";\n')
+
+        def remove_token(request):
+            return [item["text"].replace("{name}", "nimen")
+                    for item in request.input["owned_values"]]
+
+        worker, creator = self.worker(creator=Creator(remove_token))
+        with self.assertRaisesRegex(
+                RW.NativeRewriteBlocked,
+                "long_apple_strings_protected_syntax_changed"):
+            worker.run(source, "ui", "strings-protected-token")
+        self.assertTrue(creator.calls)
+
+        worker, _creator = self.worker(creator=Creator("unchanged"))
+        result = worker.run(source, "ui", "strings-evidence")
+        document = json.loads(json.dumps(result["evidence"]["document"]))
+        document["groups"][0]["creation_response_sha256"] = "0" * 64
+        self.assertFalse(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="ui",
+            request_id="strings-evidence", correction_history=[]))
+        changed = result["target_text"].replace('"copy.key"', '"changed.key"', 1)
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed, result["evidence"]["document"], content_type="ui",
+            request_id="strings-evidence", correction_history=[]))
 
     def test_long_subtitle_preserves_container_and_reviews_complete_file(self):
         cues = []
