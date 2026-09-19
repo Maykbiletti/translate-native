@@ -3290,6 +3290,13 @@ assembled catalog then receives isolated source-blind native review, separate
 original-preservation review and independent Guard reconstruction. Unsupported
 or ambiguous syntax fails closed before creator access.
 
+Long and short GNU PO native review is source-blind at the actual adapter
+boundary: the first reviewer receives only the ordered decoded non-empty
+`msgstr` target values. `msgid`, plural source text, comments, headers, contexts
+and creator metadata are absent. The fidelity reviewer still receives the exact
+original and assembled catalog, while the Guard independently recomputes and
+binds the target-only projection and full target before release.
+
 See [`PREMORTEM.md`](docs/PREMORTEM.md) for the failure modes, mitigations, and proof required before calling this system production-ready.
 
 No deterministic linter can prove that prose is genuinely native. That is why the MCP server supplements the skill's native-language judgment instead of pretending to replace it.

@@ -287,9 +287,13 @@ tokens, all directive text and the immutable catalog skeleton are revalidated.
 Protected-token signatures are compared per decoded `msgstr` value, so an
 unchanged placeholder in a `msgid` cannot conceal a dropped placeholder in a
 continued translation string.
-The complete assembled catalog receives a source-blind native review of its
-`msgstr` prose, followed by the separate original-preservation review. The Guard
-independently rebuilds the PO plan, creator requests, completion evidence and
+The native reviewer receives a deterministic ordered projection containing only
+the complete decoded non-empty `msgstr`/`msgstr[n]` prose from the assembled
+candidate. It never receives `msgid`, `msgid_plural`, comments, contexts, catalog
+headers, paths, source hashes or creator context. The separate preservation
+review receives the exact original and complete assembled catalog. Review
+evidence binds both the projection hash and the exact full-target hash; the Guard
+recomputes the projection, PO plan, creator requests, completion evidence and
 exact assembly. Combined source-plus-target review input is capped at 262,144
 UTF-8 bytes, and automatic document correction remains disabled until a finding
 can be bound safely to one exact PO value.

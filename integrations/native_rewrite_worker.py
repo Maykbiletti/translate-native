@@ -60,6 +60,9 @@ LONG_APPLE_STRINGS_SCHEMA = "translate-native.native-rewrite-apple-strings-chunk
 LONG_APPLE_STRINGS_EVIDENCE_SCHEMA = "translate-native.long-apple-strings-rewrite-evidence.v1"
 LONG_SUBTITLE_SCHEMA = "translate-native.native-rewrite-subtitle-chunk.v1"
 LONG_SUBTITLE_EVIDENCE_SCHEMA = "translate-native.long-subtitle-rewrite-evidence.v1"
+NATIVE_REVIEW_PROJECTION_POLICY = "native-rewrite-target-projection-v1"
+IDENTITY_REVIEW_PROJECTION = "identity-v1"
+ASSEMBLED_REVIEW_INPUT = "assembled-document-v1"
 LONG_SEGMENTATION_POLICY = "unicode-safe-boundary-ucd17-v4"
 LONG_MAX_CHUNKS = 10
 LONG_TOTAL_TIMEOUT_SECONDS = 1500
@@ -855,6 +858,12 @@ def deterministic_validation_text(source, candidate):
             return STRINGSRW.language_validation_text(candidate)
         except STRINGSRW.AppleStringsRewritePlanError as error:
             raise NativeRewriteBlocked("apple_strings_integrity_invalid") from error
+    if WORKER._GUARD.detect_content_format(source) == "po":
+        try:
+            PORW.target_value_map(source)
+            return PORW.native_review_text(candidate)
+        except PORW.PoRewritePlanError as error:
+            raise NativeRewriteBlocked("po_integrity_invalid") from error
     if not _subtitle_intent(source):
         return candidate
     try:
@@ -862,6 +871,33 @@ def deterministic_validation_text(source, candidate):
         return SUBRW.language_validation_text(candidate)
     except SUBRW.SubtitleRewritePlanError as error:
         raise NativeRewriteBlocked("subtitle_integrity_invalid") from error
+
+
+def native_review_projection(candidate, projection):
+    """Derive the exact source-blind review input from a released candidate."""
+    if projection == IDENTITY_REVIEW_PROJECTION:
+        return candidate
+    if projection == PORW.NATIVE_REVIEW_PROJECTION:
+        try:
+            return PORW.native_review_text(candidate)
+        except PORW.PoRewritePlanError as error:
+            raise NativeRewriteBlocked("po_review_projection_invalid") from error
+    raise NativeRewriteBlocked("review_projection_invalid")
+
+
+def native_review_projection_kind(source):
+    """Choose a trusted source-blind projection without model-controlled metadata."""
+    return (PORW.NATIVE_REVIEW_PROJECTION
+            if WORKER._GUARD.detect_content_format(source) == "po"
+            else IDENTITY_REVIEW_PROJECTION)
+
+
+def native_review_projection_selector(creation_input):
+    """Select a projection from the host-bound original, never model metadata."""
+    source = creation_input.get("source") if isinstance(creation_input, dict) else None
+    text = source.get("text") if isinstance(source, dict) else None
+    return (native_review_projection_kind(text)
+            if isinstance(text, str) else IDENTITY_REVIEW_PROJECTION)
 
 
 def _android_xml_root_intent(source):
@@ -1294,6 +1330,8 @@ class NativeRewriteWorker:
                                       },
                                       "po": {
                                           "effective_policy": PORW.effective_policy(),
+                                          "native_review_projection":
+                                              PORW.NATIVE_REVIEW_PROJECTION,
                                           "chunk_schema": LONG_PO_SCHEMA,
                                           "evidence_schema": LONG_PO_EVIDENCE_SCHEMA,
                                           "max_review_text_bytes":
@@ -1321,6 +1359,8 @@ class NativeRewriteWorker:
                                           "native": LONG_SUBTITLE_NATIVE_REVIEW,
                                       },
                                   },
+                                  "native_review_projection_policy":
+                                      NATIVE_REVIEW_PROJECTION_POLICY,
                                   "native": NATIVE_REVIEW,
                                   "fidelity": FIDELITY})
         # Public release binding is the entire effective policy, not just labels.
@@ -1360,7 +1400,12 @@ class NativeRewriteWorker:
         return connection
 
     def _adapter(self, creator):
-        return SUBAGENTS.HostSubagentProvider(creator, self._host, **self._options)
+        return SUBAGENTS.HostSubagentProvider(
+            creator, self._host,
+            native_review_projector=native_review_projection,
+            native_review_projection_selector=native_review_projection_selector,
+            native_review_projection_id=NATIVE_REVIEW_PROJECTION_POLICY,
+            **self._options)
 
     def _verify_creator_completion(self, evidence, request, response):
         verifier = getattr(self._creator, "verify_completion", None)
@@ -3315,6 +3360,8 @@ class NativeRewriteWorker:
                                or markdown_document or po_document
                                or apple_strings_document
                                or subtitle_document)
+        review_projection = native_review_projection_kind(source)
+        creation_data["native_review_projection"] = review_projection
         document, document_chunks = None, None
         if long_document:
             if json_document:
@@ -3426,18 +3473,28 @@ class NativeRewriteWorker:
                     "dimensions": {name: "PASS, FAIL, or NOT_ASSESSED"
                                    for name in NATIVE_DIMENSIONS},
                 }
-            data = {**base, "candidate": candidate,
+            review_input_kind = (review_projection if phase == "target_native"
+                                 else ASSEMBLED_REVIEW_INPUT)
+            review_candidate = (native_review_projection(candidate, review_projection)
+                                if phase == "target_native" else candidate)
+            data = {**base, "candidate": review_candidate,
+                    "native_review_projection": review_projection,
                     "response_schema": response_schema}
             if phase == "source_fidelity":
                 data.update(source=source_value, glossary=[])
             request = WORKER._request(job, phase, instruction, data)
             review, request_hash, _ = WORKER._invoke(adapter, request)
             findings, confidence, uncertainties = _review(
-                review, phase, self.locale, candidate, source)
+                review, phase, self.locale, review_candidate, source)
+            scope = ("target_projection"
+                     if phase == "target_native"
+                     and review_projection != IDENTITY_REVIEW_PROJECTION
+                     else "assembled_document")
             verified_review = {"phase": phase,
-                               **({"scope": "assembled_document"} if long_document else {}),
-                               **({"reviewed_target_sha256": _text_hash(candidate)}
-                                  if long_document else {}),
+                               **({"scope": scope} if long_document else {}),
+                               "reviewed_target_sha256": _text_hash(candidate),
+                               "review_input_kind": review_input_kind,
+                               "review_input_sha256": _text_hash(review_candidate),
                                "request_sha256": request_hash,
                                "response": review,
                                "host_evidence": adapter.verified_call_evidence(request, review)}

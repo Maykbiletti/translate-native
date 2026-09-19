@@ -40,8 +40,13 @@ strict lossless HTML linguistic-span plan, its strict Android-resource XML
 text plan, its conservative lossless Markdown prose-span plan, its strict GNU
 PO translated-value plan, its strict Apple `.strings` value plan, or its strict
 SRT/WebVTT cue-payload plan, but
-only a fully assembled result may enter the source-blind native review and
-subsequent original-preservation review. JSON keys, structure, non-string values
+only a fully assembled result may be released. The native review receives the
+complete target-language material but no embedded source: for PO this is a
+deterministic projection of all decoded non-empty `msgstr` values, never the
+catalog's `msgid`, comments, header or creator context. The subsequent
+original-preservation review receives the exact assembled container and original.
+The Guard recomputes both the projection hash and full-target binding. JSON keys,
+structure, non-string values
 and source bytes outside rewritten value tokens remain host-owned; unchanged
 escaped values retain their original raw token. Creator requests expose opaque
 value IDs and bounded context from the same value, never decoded key paths. Treat

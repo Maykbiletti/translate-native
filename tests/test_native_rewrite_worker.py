@@ -842,11 +842,78 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(native["input"]["candidate"],
+                         RW.PORW.native_review_text(source))
+        for forbidden in ("msgid", "msgstr", "SECRET", "Project-Id-Version",
+                          "Open %s"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.PORW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.PORW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
+        self.assertEqual(fidelity_evidence["review_input_kind"],
+                         RW.ASSEMBLED_REVIEW_INPUT)
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], document,
             content_type="documentation", request_id="long-po-lossless",
             correction_history=[]))
+
+    def test_short_po_native_review_is_also_source_blind(self):
+        source = ('# SECRET source comment\n'
+                  'msgid "SOURCE_SENTINEL must never reach native review"\n'
+                  'msgstr "Luonteva kohdeteksti säilyttää numeron 42."\n')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-po-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva kohdeteksti säilyttää numeron 42.")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.PORW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_po_identity_projection_before_model(self):
+        source = ('msgid "SOURCE_SENTINEL"\n'
+                  'msgstr "Luonteva kohdeteksti."\n')
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(
+            job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_long_po_before_after_preserves_comments_msgids_plural_and_placeholders(self):
         opening = "On tärkeää huomata, että teksti on selkeä. "

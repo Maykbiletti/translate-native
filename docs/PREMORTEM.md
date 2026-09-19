@@ -2026,6 +2026,13 @@ Assume the Version 6 response-and-translation gateway and automatic updater ship
 
 No heuristic is allowed to claim that it proves native fluency. Cryptographic proof covers process integrity, not linguistic truth.
 
+## Source-bearing review projection (2026-09-19)
+
+| Failure mode | Earliest warning | Mitigation | Verification |
+|---|---|---|---|
+| A nominally source-blind PO review still contains `msgid` source text inside the candidate container | The isolated task has no `source` field, yet its `candidate` is a full catalog containing `msgid`, comments and headers | Parse the exact assembled PO in trusted host code and send only the ordered decoded non-empty `msgstr` values to the native reviewer; keep the complete catalog for the later preservation review | Short and long PO fixtures place unique sentinels in `msgid`, comments and metadata and prove none reaches the native task while fidelity still receives the exact original and target |
+| A projection is detached from the candidate that will be released | A worker can change the projection kind/hash, reuse a favorable review, or bind it to a different assembled catalog | Bind projection policy into the rewrite profile, bind the exact projection request in the host receipt, record both projection and full-target hashes, and make the Guard recompute both before signing | Hash, kind, scope and full-target mutations are independently rejected by the Guard; post-review text changes still invalidate release |
+
 ## Long Markdown native rewriting (2026-09-18)
 
 | Failure mode | Earliest warning | Mitigation | Verification |
