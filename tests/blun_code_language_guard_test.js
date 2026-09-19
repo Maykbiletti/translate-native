@@ -301,6 +301,8 @@ if (process.platform !== "win32") {
   assert.equal(unsafeStore.servers.length, 0, "unsafe legacy state must block before store mutation");
 }
 
+const registeredEpochs = new Map();
+const rewriteGrants = new Set();
 const server = net.createServer(socket => {
   let raw = "";
   socket.setEncoding("utf8");
@@ -309,7 +311,31 @@ const server = net.createServer(socket => {
     if (!raw.includes("\n")) return;
     const request = JSON.parse(raw.split("\n", 1)[0]);
     records.push(request);
-    socket.end(`${JSON.stringify({ valid: request.release_token === "valid", version: "6.3.0" })}\n`);
+    let response;
+    if (request.operation === "register_session_epoch") {
+      registeredEpochs.set(request.session_id, request.session_epoch);
+      response = { status: "PASS", registered: true };
+    } else if (request.operation === "prepare_rewrite_context") {
+      const valid = registeredEpochs.get(request.session_id) === request.session_epoch
+        && request.profile_id === "native-fi-general-v1";
+      response = { status: valid ? "PASS" : "BLOCK",
+        ...(valid ? { rewrite_context_token: "fixture-rewrite-context" }
+          : { error: registeredEpochs.has(request.session_id)
+            ? "rewrite profile unavailable or locale mismatch" : "session epoch is not current" }) };
+    } else if (request.operation === "authorize_delivery" && request.task_kind === "rewrite") {
+      const valid = request.release_token === "valid" && request.profile_id === "native-fi-general-v1"
+        && request.request_id === "document-42-revision-1";
+      if (valid) rewriteGrants.add("blun-rewrite-grant");
+      response = { valid, ...(valid ? { delivery_grant: "blun-rewrite-grant" } : {}) };
+    } else if (request.operation === "consume_delivery" && request.task_kind === "rewrite") {
+      const valid = rewriteGrants.delete(request.delivery_grant)
+        && request.profile_id === "native-fi-general-v1"
+        && request.request_id === "document-42-revision-1";
+      response = { valid, version: "6.3.0" };
+    } else {
+      response = { valid: request.release_token === "valid", version: "6.3.0" };
+    }
+    socket.end(`${JSON.stringify(response)}\n`);
   });
 });
 
@@ -339,6 +365,11 @@ server.listen(0, "127.0.0.1", async () => {
     assert.equal(context.route.language, "de-DE");
     assert.equal(context.languageSource, "config.language");
     assert.match(guard.mandatoryInstruction(context), /Pass language exactly as "de-DE"/);
+    const responseWithGenericSession = guard.context({
+      messages: [{ role: "user", content: "Antworte bitte." }],
+      meta: { sessionId: "ordinary-chat-session" }, channel: "desktop",
+    });
+    assert.equal(responseWithGenericSession.route.taskKind, "response");
 
     const telegramContext = guard.context({
       messages: [{ role: "user", content: "Antworte bitte." }],
@@ -380,6 +411,53 @@ server.listen(0, "127.0.0.1", async () => {
       context,
       () => assert.fail("blocked text must not emit"),
     ));
+
+    const rewriteBase = guard.context({
+      messages: [{ role: "user", content: "Muokkaa teksti luontevammaksi." }],
+      meta: {
+        languageGuardTaskKind: "rewrite",
+        languageGuardSourceText: "On tärkeää huomata, että teksti on selkeä.",
+        languageGuardLanguage: "fi-FI",
+        languageGuardProfileId: "native-fi-general-v1",
+        languageGuardRequestId: "document-42-revision-1",
+        languageGuardSessionId: "rewrite-session",
+        languageGuardSessionEpoch: "a".repeat(64),
+        agentName: "writer",
+      },
+      channel: "desktop",
+    });
+    assert.equal(rewriteBase.route.taskKind, "rewrite");
+    assert.throws(() => guard.mandatoryInstruction(rewriteBase), /must be prepared/);
+    const rewriteContext = await guard.prepareContext(rewriteBase);
+    assert.match(guard.mandatoryInstruction(rewriteContext), /rewrite_text/);
+    assert.match(guard.mandatoryInstruction(rewriteContext), /fixture-rewrite-context/);
+    const rewritten = await guard.releaseResult({
+      answer: JSON.stringify({ target_text: "Teksti on selkeä.", release_token: "valid" }),
+    }, rewriteContext);
+    assert.equal(rewritten.answer, "Teksti on selkeä.");
+    assert.equal(rewritten.languageGuard.taskKind, "rewrite");
+    assert.equal(records.at(-2).operation, "authorize_delivery");
+    assert.equal(records.at(-1).operation, "consume_delivery");
+    const registrationsBeforeInvalidProfile = records.filter(
+      request => request.operation === "register_session_epoch",
+    ).length;
+    const invalidProfileContext = guard.context({
+      messages: [{ role: "user", content: "Muokkaa teksti luontevammaksi." }],
+      meta: {
+        languageGuardTaskKind: "rewrite",
+        languageGuardSourceText: "On tärkeää huomata, että teksti on selkeä.",
+        languageGuardLanguage: "fi-FI",
+        languageGuardProfileId: "unknown-profile",
+        languageGuardRequestId: "document-42-invalid-profile",
+        languageGuardSessionId: "rewrite-session",
+        languageGuardSessionEpoch: "a".repeat(64),
+      },
+      channel: "desktop",
+    });
+    await assert.rejects(() => guard.prepareContext(invalidProfileContext), /not issued/);
+    assert.equal(records.filter(
+      request => request.operation === "register_session_epoch",
+    ).length, registrationsBeforeInvalidProfile, "profile failures must not mutate session state");
 
     assert.throws(() => guard.context({
       messages: [{ role: "user", content: "Translate this." }],

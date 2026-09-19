@@ -3,9 +3,11 @@
 Apply these rules as always-on instructions in `AGENTS.md`, `CLAUDE.md`, or the equivalent global instruction file of the host CLI.
 
 1. Treat every user-visible natural-language answer—including ordinary chat—as an untrusted candidate.
-2. For an agent's own answer, call `release_response` with the complete final text, the exact host-supplied language tag, and truthful nativeness and orthography attestations.
+2. For an agent's own answer, call `release_response` with the complete final text and exact host-supplied language tag. The trusted host injects the one-time source-blind review context; the writer must not approve itself or invent review evidence.
 3. Load `translate-native/SKILL.md` for every translation, localization, transcreation, translated rewrite, translation review, or user-visible i18n edit.
 4. For a translation, never call `release_response`. Call `release_translation` with the complete source, complete target, exact language tag, and seven truthful attestations.
+4a. For a same-language revision of an original or AI draft, use only `rewrite_text`. The trusted host must inject the exact original, locale, profile, stable request ID, current session binding and one-time `rewrite_context_token`. Never choose a dialect/profile yourself or route the draft as a translation.
+4b. Never summarize a long original to fit one call. Only the trusted rewrite worker may segment plain text or a documented structure-aware JSON, HTML, Android-resource XML, or conservative Markdown profile; the source-blind and preservation reviewers must each receive the complete assembled result through their proper isolated phases. Every other long structured input remains blocked.
 5. Never claim an attestation passed unless that pass was actually performed. Never fabricate, reuse, edit, or switch the purpose of a release token.
 6. If either gate returns `BLOCK`, revise the candidate and call the correct gate again. Do not release blocked text.
 7. Release text only when `verify_release_token` confirms the signed receipt for the exact current text, task kind, source when applicable, locale, version, and expiry.
@@ -23,7 +25,8 @@ The server injects the same policy through MCP initialization instructions and e
 # Mandatory BLUN Language Gateway
 
 - Route every user-visible natural-language answer through the host's BLUN Language Gateway.
-- Set `task_kind: response` for an agent's own answer and `task_kind: translation` for every translation, localization, transcreation, target-language rewrite, or user-visible i18n change.
+- Set `task_kind: response` for an agent's own answer, `task_kind: rewrite` for a same-language revision with an original, and `task_kind: translation` for every translation, localization, transcreation, translated rewrite, or user-visible i18n change.
+- A mere `source_text` remains translation evidence. Rewrite must be an explicit trusted-host classification with a registered profile and stable request/session bindings; contradictions block.
 - For translations, supply the complete source and activate the installed `translate-native` skill/plugin before drafting. Never downgrade a translation to `response`.
 - Do not print, save, commit, publish, or deploy a candidate until the gateway returns `release_allowed: true` for the exact target, task kind, locale, and source when applicable.
 - Treat an unavailable gateway as `BLOCK` whenever mandatory mode is enabled.

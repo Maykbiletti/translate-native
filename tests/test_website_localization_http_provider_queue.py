@@ -50,14 +50,30 @@ class ScriptedTransport:
             }
         else:
             response = {
-                "schema": "blun.website-localization-review.v2",
+                "schema": "blun.website-localization-review.v3",
                 "phase": request["phase"],
                 "locale": locale,
                 "status": "PASS",
                 "confidence": "high",
                 "blocking_defects": [],
                 "major_defects": [],
+                "uncertainties": [],
             }
+            if request["phase"] == "target_native":
+                response["holistic_assessment"] = {
+                    "reads_as_native_original": True,
+                    "reason": "Synthetic whole-text transport fixture.",
+                    "repair_scope": "none",
+                    "dimensions": {
+                        name: "PASS" for name in (
+                            "idiom_and_word_choice",
+                            "syntax_and_information_flow",
+                            "rhythm_and_cohesion",
+                            "register_tone_and_audience",
+                            "voice_genre_and_intentional_repetition",
+                        )
+                    },
+                }
         response_envelope = {
             "schema": HTTP.RESPONSE_SCHEMA,
             "request_id": request_envelope["request_id"],

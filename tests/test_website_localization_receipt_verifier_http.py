@@ -43,6 +43,8 @@ def binding(*, kind="quality"):
     return {
         "schema": HTTP.RECEIPT_BINDING_SCHEMA,
         "review_kind": kind,
+        "evidence_request_id": "blun-l10n-evidence-" + "a" * 64,
+        "evidence_revision": "native-evidence-1",
         "job_id": "job-finnish-1",
         "result_sha256": "1" * 64,
         "source_text": source,
@@ -72,6 +74,9 @@ def binding(*, kind="quality"):
         },
         "commercial_profile": None,
         "commercial_review": None,
+        "commercial_review_routing": None,
+        "commercial_review_routing_contract_sha256": None,
+        "commercial_review_resolution_contract_sha256": None,
         "human_review_required": False,
         "independent_review_required": False,
     }
@@ -161,8 +166,13 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         changed["policy_version"] = "native-web-2"
         verifier.verify(binding=changed, receipt="receipt-one")
         verifier.verify(binding=changed, receipt="receipt-two")
+        changed_context = binding()
+        changed_context["evidence_request_id"] = (
+            "blun-l10n-evidence-" + "b" * 64
+        )
+        verifier.verify(binding=changed_context, receipt="receipt-one")
         ids = [call[1]["Idempotency-Key"] for call in transport.calls]
-        self.assertEqual(len(set(ids)), 3)
+        self.assertEqual(len(set(ids)), 4)
 
     def test_malformed_binding_blocks_before_authentication_or_transport(self):
         auth_calls = []
@@ -179,6 +189,17 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         missing = binding()
         del missing["policy_version"]
         mutations.append(missing)
+        missing_context = binding()
+        del missing_context["evidence_request_id"]
+        mutations.append(missing_context)
+        malformed_context = binding()
+        malformed_context["evidence_request_id"] = (
+            "blun-l10n-evidence-" + "g" * 64
+        )
+        mutations.append(malformed_context)
+        malformed_revision = binding()
+        malformed_revision["evidence_revision"] = " stale "
+        mutations.append(malformed_revision)
         wrong_profile = binding()
         wrong_profile["quality_profile"]["locale"] = "sv-SE"
         mutations.append(wrong_profile)
@@ -283,8 +304,44 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
             "profile": value["commercial_profile"],
             "status": "review_required",
             "review_required_dimensions": ["cancellation"],
+            "offer_count": 1,
+            "review_required_offers": [
+                {"dimension": "cancellation", "offer_indexes": [0]},
+            ],
+            "review_evidence_contract_sha256": (
+                HTTP._COMMERCIAL.public_review_evidence_contract(
+                    value["commercial_profile"],
+                )["sha256"]
+            ),
             "evidence_sha256": "d" * 64,
         }
+        value["commercial_review_routing"] = {
+            "schema": HTTP._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+            "profile": value["commercial_profile"],
+            "contract_sha256": (
+                HTTP._COMMERCIAL.public_review_routing_contract(
+                    value["commercial_profile"],
+                )["sha256"]
+            ),
+            "offer_count": 1,
+            "source_length": len(value["source_text"]),
+            "target_length": len(value["target_text"]),
+            "offers": [{
+                "offer_index": 0,
+                "source_spans": [[0, len(value["source_text"])]],
+                "target_spans": [[0, len(value["target_text"])]],
+            }],
+        }
+        value["commercial_review_routing_contract_sha256"] = (
+            HTTP._COMMERCIAL.public_review_routing_contract(
+                value["commercial_profile"],
+            )["sha256"]
+        )
+        value["commercial_review_resolution_contract_sha256"] = (
+            HTTP._COMMERCIAL.public_review_resolution_contract(
+                value["commercial_profile"],
+            )["sha256"]
+        )
         value["independent_review_required"] = True
         transport = Transport(response_for)
         self.adapter(transport).verify(binding=value, receipt="signed-receipt")
@@ -297,7 +354,24 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
             sent["quality_profile"]["commercial"],
             value["quality_profile"]["commercial"],
         )
+        self.assertEqual(
+            sent["commercial_review_routing_contract_sha256"],
+            HTTP._COMMERCIAL.public_review_routing_contract(
+                value["commercial_profile"],
+            )["sha256"],
+        )
+        self.assertEqual(
+            sent["commercial_review_resolution_contract_sha256"],
+            HTTP._COMMERCIAL.public_review_resolution_contract(
+                value["commercial_profile"],
+            )["sha256"],
+        )
+        self.assertEqual(
+            sent["commercial_review_routing"],
+            value["commercial_review_routing"],
+        )
 
+        valid = json.loads(json.dumps(value))
         value["commercial_review"]["review_required_dimensions"] = [
             "private cancellation text",
         ]
@@ -310,11 +384,53 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         self.assertEqual(invalid_transport.calls, [])
 
         for mutate in (
+            lambda routing: routing.update(contract_sha256="0" * 64),
+            lambda routing: routing["offers"][0].update(
+                target_spans=[[0, len(valid["target_text"]) + 1]],
+            ),
+        ):
+            invalid_routing = json.loads(json.dumps(valid))
+            mutate(invalid_routing["commercial_review_routing"])
+            invalid_transport = Transport(response_for)
+            with self.subTest(mutate=mutate), self.assertRaises(
+                HTTP.HTTPReceiptVerifierFailed,
+            ) as caught:
+                self.adapter(invalid_transport).verify(
+                    binding=invalid_routing, receipt="signed-receipt",
+                )
+            self.assertEqual(caught.exception.code, "binding_invalid")
+            self.assertEqual(invalid_transport.calls, [])
+
+        invalid_scope = json.loads(json.dumps(valid))
+        invalid_scope["commercial_review"]["review_required_offers"] = [{
+            "dimension": "cancellation", "offer_indexes": [1],
+        }]
+        invalid_transport = Transport(response_for)
+        with self.assertRaises(HTTP.HTTPReceiptVerifierFailed) as caught:
+            self.adapter(invalid_transport).verify(
+                binding=invalid_scope, receipt="signed-receipt",
+            )
+        self.assertEqual(caught.exception.code, "binding_invalid")
+        self.assertEqual(invalid_transport.calls, [])
+
+        for mutate in (
             lambda payload: payload["quality_profile"].pop("commercial"),
             lambda payload: payload["quality_profile"]["commercial"].update(
                 profile="another-commercial-profile"
             ),
             lambda payload: payload.update(content_type="marketing"),
+            lambda payload: payload.update(
+                commercial_review_routing_contract_sha256="0" * 64,
+            ),
+            lambda payload: payload.update(
+                commercial_review_routing_contract_sha256=None,
+            ),
+            lambda payload: payload.update(
+                commercial_review_resolution_contract_sha256="0" * 64,
+            ),
+            lambda payload: payload.update(
+                commercial_review_resolution_contract_sha256=None,
+            ),
         ):
             changed = json.loads(json.dumps(value))
             changed["commercial_review"]["review_required_dimensions"] = [
@@ -335,6 +451,15 @@ class HTTPReceiptVerifierTests(unittest.TestCase):
         noncommercial["quality_profile"]["commercial"] = value[
             "quality_profile"
         ]["commercial"]
+        invalid_transport = Transport(response_for)
+        with self.assertRaises(HTTP.HTTPReceiptVerifierFailed):
+            self.adapter(invalid_transport).verify(
+                binding=noncommercial, receipt="signed-receipt",
+            )
+        self.assertEqual(invalid_transport.calls, [])
+
+        noncommercial = binding()
+        noncommercial["commercial_review_resolution_contract_sha256"] = "0" * 64
         invalid_transport = Transport(response_for)
         with self.assertRaises(HTTP.HTTPReceiptVerifierFailed):
             self.adapter(invalid_transport).verify(

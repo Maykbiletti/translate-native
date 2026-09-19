@@ -7,6 +7,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,7 @@ def principal(request):
     scopes = {
         RECEIVER.CAPABILITIES_PATH: RECEIVER.CAPABILITIES_SCOPE,
         RECEIVER.HEALTH_PATH: RECEIVER.HEALTH_SCOPE,
+        RECEIVER.OPENAPI_PATH: RECEIVER.OPENAPI_SCOPE,
         RECEIVER.READINESS_PATH: RECEIVER.READINESS_SCOPE,
         RECEIVER.STATUS_PATH: RECEIVER.STATUS_SCOPE,
     }
@@ -205,6 +207,145 @@ class TerminalReceiverClientTests(unittest.TestCase):
             "body_sha256": hashlib.sha256(b"").hexdigest(),
         }])
 
+    def test_openapi_reconstructs_complete_pinned_document(self):
+        changes = self.runtime._connection.total_changes
+
+        response = self.client.openapi()
+
+        expected = RUNTIME._OPENAPI.build_document(
+            RECEIVER.capabilities_payload()
+        )
+        self.assertEqual(response, {
+            "schema": RECEIVER.OPENAPI_RESPONSE_SCHEMA,
+            "openapi": expected,
+            "openapi_sha256": RUNTIME._OPENAPI.document_sha256(expected),
+            "capabilities_sha256": self.digest,
+        })
+        self.assertGreater(len(canonical(response)), 16_384)
+        self.assertEqual(self.runtime._connection.total_changes, changes)
+        self.assertEqual([call[0] for call in self.transport.calls], [
+            "GET", "GET",
+        ])
+        self.assertTrue(self.transport.calls[1][1].endswith(
+            RECEIVER.OPENAPI_PATH
+        ))
+        self.assertEqual(
+            self.transport.calls[1][2][
+                RECEIVER.CAPABILITIES_PRECONDITION_HEADER
+            ],
+            self.digest,
+        )
+        self.assertEqual(self.authentication_requests[1], {
+            "schema": RECEIVER.AUTH_SCHEMA,
+            "method": "GET",
+            "origin": "https://cms.example.test",
+            "path": RECEIVER.OPENAPI_PATH,
+            "body_sha256": hashlib.sha256(b"").hexdigest(),
+            "capabilities_sha256": self.digest,
+        })
+
+    def test_openapi_preserves_custom_notification_path(self):
+        self.runtime.close()
+        custom = "/receiver/v2/terminal"
+        self.runtime = RUNTIME.open_durable_terminal_notification_receiver(
+            ":memory:", server_authentication,
+            origin="https://cms.example.test", path=custom,
+        )
+        capabilities = RECEIVER.capabilities_payload(custom)
+        transport = WSGITransport(self.runtime)
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", capabilities["sha256"],
+            lambda _request: {"Authorization": "Bearer operator-secret"},
+            transport=transport,
+        )
+
+        response = client.openapi()
+
+        self.assertIn(custom, response["openapi"]["paths"])
+        self.assertNotIn(RECEIVER.DEFAULT_PATH, response["openapi"]["paths"])
+        self.assertEqual(
+            response["openapi"], RUNTIME._OPENAPI.build_document(capabilities)
+        )
+
+    def test_self_rehashed_openapi_substitution_blocks(self):
+        capabilities = RECEIVER.capabilities_payload()
+        document = RUNTIME._OPENAPI.build_document(capabilities)
+        document["info"]["title"] = "Substituted private contract"
+        response = {
+            "schema": RECEIVER.OPENAPI_RESPONSE_SCHEMA,
+            "openapi": document,
+            "openapi_sha256": RUNTIME._OPENAPI.document_sha256(document),
+            "capabilities_sha256": self.digest,
+        }
+        transport = FakeTransport([
+            json_result(200, {
+                "schema": RECEIVER.CAPABILITIES_RESPONSE_SCHEMA,
+                "capabilities": capabilities,
+            }),
+            json_result(200, response),
+        ])
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", self.digest,
+            lambda _request: {"Authorization": "x"}, transport=transport,
+        )
+
+        with self.assertRaises(CLIENT.TerminalReceiverClientBlocked) as caught:
+            client.openapi()
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.openapi_binding"
+        ))
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(transport.calls), 2)
+
+    def test_openapi_capability_race_blocks(self):
+        capabilities = RECEIVER.capabilities_payload()
+        other = RECEIVER.capabilities_payload("/receiver/v2/terminal")
+        document = RUNTIME._OPENAPI.build_document(other)
+        response = {
+            "schema": RECEIVER.OPENAPI_RESPONSE_SCHEMA,
+            "openapi": document,
+            "openapi_sha256": RUNTIME._OPENAPI.document_sha256(document),
+            "capabilities_sha256": other["sha256"],
+        }
+        transport = FakeTransport([
+            json_result(200, {
+                "schema": RECEIVER.CAPABILITIES_RESPONSE_SCHEMA,
+                "capabilities": capabilities,
+            }),
+            json_result(200, response),
+        ])
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", self.digest,
+            lambda _request: {"Authorization": "x"}, transport=transport,
+        )
+
+        with self.assertRaises(CLIENT.TerminalReceiverClientBlocked) as caught:
+            client.openapi()
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.openapi_binding"
+        ))
+        self.assertEqual(len(transport.calls), 2)
+
+    def test_response_over_advertised_limit_blocks(self):
+        transport = FakeTransport([CLIENT.HTTPResult(
+            200,
+            (("Content-Type", "application/json"),),
+            b"x" * (CLIENT.MAX_RESPONSE_BYTES + 1),
+        )])
+        client = CLIENT.HTTPTerminalReceiverClient(
+            "https://cms.example.test", self.digest,
+            lambda _request: {"Authorization": "x"}, transport=transport,
+        )
+
+        with self.assertRaises(CLIENT.TerminalReceiverClientBlocked) as caught:
+            client.capabilities()
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.response_size"
+        ))
+
     def test_health_revalidates_contract_then_returns_exact_snapshot(self):
         payload = notification()
         store(self.runtime, payload)
@@ -278,6 +419,9 @@ class TerminalReceiverClientTests(unittest.TestCase):
         self.assertEqual(headers["X-Localization-Terminal-Status-SHA256"], (
             hashlib.sha256(body).hexdigest()
         ))
+        self.assertEqual(
+            headers[RECEIVER.CAPABILITIES_PRECONDITION_HEADER], self.digest,
+        )
         self.assertEqual(self.authentication_requests[1], {
             "schema": RECEIVER.AUTH_SCHEMA,
             "method": "POST",
@@ -286,6 +430,7 @@ class TerminalReceiverClientTests(unittest.TestCase):
             "body_sha256": hashlib.sha256(body).hexdigest(),
             "event_id": payload["event_id"],
             "site_id": payload["site_id"],
+            "capabilities_sha256": self.digest,
         })
         self.assertEqual(self.runtime._connection.total_changes, changes)
 
@@ -348,6 +493,9 @@ class TerminalReceiverClientTests(unittest.TestCase):
             headers["X-Localization-Terminal-Notification-Sha256"],
             body_sha256,
         )
+        self.assertEqual(
+            headers[RECEIVER.CAPABILITIES_PRECONDITION_HEADER], digest,
+        )
         self.assertEqual(authentication_requests[1], {
             "schema": RECEIVER.AUTH_SCHEMA,
             "method": "POST",
@@ -357,9 +505,30 @@ class TerminalReceiverClientTests(unittest.TestCase):
             "notification_id": payload["notification_id"],
             "event_id": payload["event_id"],
             "site_id": payload["site_id"],
+            "capabilities_sha256": digest,
         })
         stored = self.runtime.inbox.status(payload["event_id"])
         self.assertEqual(stored.payload_sha256, body_sha256)
+
+    def test_capability_race_blocks_notification_before_intake(self):
+        payload = notification()
+        current = RECEIVER.capabilities_payload()
+        changed = RECEIVER.capabilities_payload("/receiver/v2/terminal")
+        with mock.patch.object(
+            RECEIVER, "capabilities_payload", side_effect=(current, changed),
+        ):
+            with self.assertRaises(
+                CLIENT.TerminalReceiverClientBlocked
+            ) as caught:
+                self.client.notify(payload)
+
+        self.assertEqual(caught.exception.code, (
+            "terminal_receiver_client.http_status"
+        ))
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(self.transport.calls), 2)
+        with self.assertRaises(RECEIVER.TerminalNotificationReceiverBlocked):
+            self.runtime.inbox.status(payload["event_id"])
 
     def test_notification_contract_drift_blocks_before_write(self):
         payload = notification()

@@ -64,14 +64,23 @@ class Runtime:
         self.source_ready = False
         self.digest = "a" * 64
         self.binding = {
-            "schema": "blun.cms-source-delivery-runtime-capability-binding.v1",
+            "schema": "blun.cms-source-delivery-runtime-capability-binding.v2",
             "status": "verified",
             "database_role": "source_delivery",
             "delivery_capabilities_sha256": self.digest,
             "runtime_capabilities_sha256": "b" * 64,
             "commercial_rendering_registry_sha256": "c" * 64,
+            "terminal_receiver_capabilities_sha256": "d" * 64,
             "binding_sha256": "d" * 64,
         }
+        self.binding["binding_sha256"] = hashlib.sha256("\x00".join((
+            self.binding["schema"],
+            self.binding["database_role"],
+            self.binding["delivery_capabilities_sha256"],
+            self.binding["runtime_capabilities_sha256"],
+            self.binding["commercial_rendering_registry_sha256"],
+            self.binding["terminal_receiver_capabilities_sha256"],
+        )).encode("utf-8")).hexdigest()
 
     def submission_capabilities(self):
         raise AssertionError("capabilities were not requested")
@@ -228,7 +237,7 @@ class Runtime:
         source_binding = None
         if self.source_ready:
             source_status = {
-                "schema": "blun.cms-source-service-status.v3",
+                "schema": "blun.cms-source-service-status.v4",
                 "event_id": "event-1", "site_id": "site-1",
                 "website_version": "v1", "source_sequence": 1,
                 "change_sha256": "8" * 64,
@@ -243,7 +252,8 @@ class Runtime:
                 "notification_id": None, "notification_sha256": None,
                 "notification_attempts": 0, "notification_max_attempts": None,
                 "notification_error_code": None,
-                "terminal_processing_state": "disabled",
+                "terminal_receiver_capabilities_sha256": "e" * 64,
+                "terminal_processing_state": "awaiting_notification",
                 "terminal_processing_poll_attempts": 0,
                 "terminal_processing_failures": 0,
                 "terminal_processing_error_code": None,
@@ -623,7 +633,32 @@ class SubmissionHTTPTests(unittest.TestCase):
             response["result"]["source_status"]["dispatch_status"],
             "pending",
         )
+        self.assertEqual(
+            response["result"]["source_status"][
+                "terminal_receiver_capabilities_sha256"
+            ],
+            "e" * 64,
+        )
         self.assertNotIn("content", repr(response["result"]))
+
+    def test_lifecycle_rejects_unbound_terminal_receiver_projection(self):
+        self.runtime.source_ready = True
+        original = self.runtime.submission_lifecycle
+
+        def tampered(operation, request_id):
+            value = original(operation, request_id)
+            source = copy.deepcopy(value.source_status)
+            source["terminal_receiver_capabilities_sha256"] = None
+            return dataclasses.replace(value, source_status=source)
+
+        self.runtime.submission_lifecycle = tampered
+
+        status, _metadata, response = self.read_request(HTTP.LIFECYCLE_PATH)
+
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            response["error_code"], "submission_http.runtime_response_invalid",
+        )
 
     def test_lifecycle_rejects_cross_site_source_projection(self):
         self.runtime.source_ready = True

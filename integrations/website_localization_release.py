@@ -21,18 +21,30 @@ from typing import Any, Iterator, Protocol
 
 
 SCHEMA_VERSION = 1
-APPROVAL_SCHEMA = "blun.website-localization-approval.v3"
-RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v3"
+APPROVAL_SCHEMA = "blun.website-localization-approval.v10"
+RECEIPT_BINDING_SCHEMA = "blun.localization-quality-receipt-binding.v9"
 INDEPENDENT_MODEL_REVIEW_SCHEMA = "blun.independent-model-review.v1"
-PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v3"
-COMMERCIAL_REVIEW_RESOLUTION_SCHEMA = (
-    "blun.website-localization-commercial-review-resolution.v1"
+PUBLICATION_EVIDENCE_SCHEMA = "blun.website-localization-release-evidence.v14"
+PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA = (
+    "blun.website-localization-release-evidence-capabilities.v8"
+)
+PUBLICATION_EVIDENCE_FIELDS = (
+    "schema", "release_evidence_contract_sha256", "job_id", "target_locale",
+    "target_sha256", "approval_id",
+    "content_type", "result_sha256", "approval_sha256",
+    "quality_receipt_sha256", "evidence_request_id", "evidence_revision",
+    "quality_profile",
+    "commercial_profile", "commercial_quality_profile", "commercial_review",
+    "commercial_review_routing_contract_sha256",
+    "commercial_review_resolution_contract_sha256",
+    "commercial_review_resolution",
 )
 MAX_TEXT_BYTES = 2_000_000
 MAX_RECEIPT_LENGTH = 16_384
 MAX_TTL_SECONDS = 31_536_000.0
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+EVIDENCE_REQUEST_ID = re.compile(r"^blun-l10n-evidence-[0-9a-f]{64}$")
 _COLUMNS = (
     "approval_id", "job_id", "target_locale", "target_sha256",
     "result_json", "result_sha256", "approval_json", "approval_sha256",
@@ -58,6 +70,9 @@ _QUEUE = _load_module(
 _WORKER = _load_module(
     "blun_website_localization_release_worker",
     _ROOT / "integrations" / "website_localization_worker.py",
+)
+COMMERCIAL_REVIEW_RESOLUTION_SCHEMA = (
+    _WORKER._COMMERCIAL.REVIEW_RESOLUTION_SCHEMA
 )
 
 
@@ -125,19 +140,23 @@ class WebsiteReadiness:
     blocked: tuple[tuple[str, str], ...]
 
 
-def validate_publication_evidence(value: Any) -> dict[str, Any]:
+def validate_publication_evidence(
+    value: Any,
+    *,
+    require_current_locale_quality: bool = True,
+) -> dict[str, Any]:
     """Validate the content-free release proof carried to a CMS."""
 
-    if not isinstance(value, dict) or set(value) != {
-        "schema", "job_id", "target_locale", "target_sha256", "approval_id",
-        "content_type", "result_sha256", "approval_sha256",
-        "quality_receipt_sha256", "commercial_profile",
-        "commercial_quality_profile", "commercial_review",
-        "commercial_review_resolution",
-    }:
+    if (
+        not isinstance(require_current_locale_quality, bool)
+        or not isinstance(value, dict)
+        or set(value) != set(PUBLICATION_EVIDENCE_FIELDS)
+    ):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
     if (
         value.get("schema") != PUBLICATION_EVIDENCE_SCHEMA
+        or value.get("release_evidence_contract_sha256")
+        != publication_evidence_contract()["sha256"]
         or any(
             not isinstance(value.get(field), str)
             or TOKEN.fullmatch(value[field]) is None
@@ -150,14 +169,40 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
                 "quality_receipt_sha256",
             )
         )
+        or not isinstance(value.get("evidence_request_id"), str)
+        or EVIDENCE_REQUEST_ID.fullmatch(value["evidence_request_id"]) is None
+        or not isinstance(value.get("evidence_revision"), str)
+        or TOKEN.fullmatch(value["evidence_revision"]) is None
+    ):
+        raise LocalizationReleaseBlocked("publication.evidence.invalid")
+    quality_profile = value.get("quality_profile")
+    if (
+        not isinstance(quality_profile, dict)
+        or set(quality_profile) != {"locale", "version", "sha256"}
+        or quality_profile.get("locale") != value["target_locale"]
+        or not isinstance(quality_profile.get("version"), str)
+        or TOKEN.fullmatch(quality_profile["version"]) is None
+        or HEX64.fullmatch(str(quality_profile.get("sha256"))) is None
     ):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
     profile = value.get("commercial_profile")
-    quality_profile = value.get("commercial_quality_profile")
+    commercial_quality_profile = value.get("commercial_quality_profile")
     review = value.get("commercial_review")
+    routing_contract_sha256 = value.get(
+        "commercial_review_routing_contract_sha256"
+    )
+    resolution_contract_sha256 = value.get(
+        "commercial_review_resolution_contract_sha256"
+    )
     resolution = value.get("commercial_review_resolution")
     if (
-        len({profile is None, quality_profile is None, review is None}) != 1
+        len({
+            profile is None,
+            commercial_quality_profile is None,
+            review is None,
+        }) != 1
+        or (profile is None) != (routing_contract_sha256 is None)
+        or (profile is None) != (resolution_contract_sha256 is None)
         or (value["content_type"] == "commercial") != (profile is not None)
     ):
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
@@ -165,12 +210,29 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
         if not isinstance(profile, str) or TOKEN.fullmatch(profile) is None:
             raise LocalizationReleaseBlocked("publication.evidence.invalid")
         if (
-            not isinstance(quality_profile, dict)
-            or set(quality_profile) != {"profile", "version", "sha256"}
-            or quality_profile.get("profile") != profile
-            or not isinstance(quality_profile.get("version"), str)
-            or TOKEN.fullmatch(quality_profile["version"]) is None
-            or HEX64.fullmatch(str(quality_profile.get("sha256"))) is None
+            profile != _WORKER._PLANNER.COMMERCIAL_PROFILE
+            or HEX64.fullmatch(str(routing_contract_sha256)) is None
+            or routing_contract_sha256
+            != _WORKER._COMMERCIAL.public_review_routing_contract(profile)[
+                "sha256"
+            ]
+            or HEX64.fullmatch(str(resolution_contract_sha256)) is None
+            or resolution_contract_sha256
+            != _WORKER._COMMERCIAL.public_review_resolution_contract(profile)[
+                "sha256"
+            ]
+        ):
+            raise LocalizationReleaseBlocked("publication.evidence.invalid")
+        if (
+            not isinstance(commercial_quality_profile, dict)
+            or set(commercial_quality_profile)
+            != {"profile", "version", "sha256"}
+            or commercial_quality_profile.get("profile") != profile
+            or not isinstance(commercial_quality_profile.get("version"), str)
+            or TOKEN.fullmatch(commercial_quality_profile["version"]) is None
+            or HEX64.fullmatch(
+                str(commercial_quality_profile.get("sha256"))
+            ) is None
         ):
             raise LocalizationReleaseBlocked("publication.evidence.invalid")
         try:
@@ -184,47 +246,90 @@ def validate_publication_evidence(value: Any) -> dict[str, Any]:
             )
         except _WORKER._COMMERCIAL.CommercialReviewBlocked:
             raise LocalizationReleaseBlocked("publication.evidence.invalid") from None
-        dimensions = review["review_required_dimensions"]
         if review["status"] == "verified":
             if resolution is not None:
                 raise LocalizationReleaseBlocked("publication.evidence.invalid")
-        elif (
-            not isinstance(resolution, dict)
-            or set(resolution) != {
-                "schema", "status", "reviewed_dimensions", "method",
-                "receipt_sha256", "provider",
-            }
-            or resolution.get("schema") != COMMERCIAL_REVIEW_RESOLUTION_SCHEMA
-            or resolution.get("status") != "resolved"
-            or resolution.get("reviewed_dimensions") != dimensions
-            or resolution.get("method") not in {
-                "independent_model", "qualified_human",
-            }
-            or HEX64.fullmatch(str(resolution.get("receipt_sha256"))) is None
-        ):
-            raise LocalizationReleaseBlocked("publication.evidence.invalid")
         else:
-            provider = resolution.get("provider")
-            if resolution["method"] == "qualified_human":
-                if provider is not None:
-                    raise LocalizationReleaseBlocked("publication.evidence.invalid")
-            elif (
-                not isinstance(provider, dict)
-                or set(provider) != {"id", "model_id", "model_version"}
-                or any(
-                    not isinstance(provider.get(field), str)
-                    or TOKEN.fullmatch(provider[field]) is None
-                    for field in provider
+            try:
+                resolution = _WORKER._COMMERCIAL.validate_review_resolution(
+                    resolution, review, profile,
                 )
-            ):
+            except _WORKER._COMMERCIAL.CommercialReviewBlocked:
                 raise LocalizationReleaseBlocked("publication.evidence.invalid")
     elif resolution is not None:
         raise LocalizationReleaseBlocked("publication.evidence.invalid")
-    return json.loads(_canonical_json({
+    evidence = json.loads(_canonical_json({
         **value,
         "commercial_review": review,
         "commercial_review_resolution": resolution,
     }))
+    if require_current_locale_quality:
+        _validate_current_publication_policy(
+            evidence,
+            unavailable_code="publication.evidence.invalid",
+            stale_code="publication.evidence.invalid",
+            unavailable_retryable=False,
+        )
+    return evidence
+
+
+def _validate_current_publication_policy(
+    evidence: dict[str, Any],
+    *,
+    unavailable_code: str,
+    stale_code: str,
+    unavailable_retryable: bool,
+) -> None:
+    try:
+        current_quality = _WORKER._PLANNER.quality_profile_for(
+            evidence["target_locale"],
+        )
+        expected_quality_profile = {
+            "locale": current_quality["locale"],
+            "version": current_quality["version"],
+            "sha256": current_quality["sha256"],
+        }
+    except Exception:
+        raise LocalizationReleaseBlocked(
+            unavailable_code, retryable=unavailable_retryable,
+        ) from None
+    if evidence["quality_profile"] != expected_quality_profile:
+        raise LocalizationReleaseBlocked(stale_code)
+
+    if evidence["commercial_profile"] is None:
+        return
+    try:
+        current_commercial_quality = (
+            _WORKER._PLANNER.commercial_quality_profile_for(
+                evidence["target_locale"],
+            )
+        )
+        expected_commercial_quality = {
+            "profile": current_commercial_quality["commercial_profile"],
+            "version": current_commercial_quality["version"],
+            "sha256": current_commercial_quality["sha256"],
+        }
+    except Exception:
+        raise LocalizationReleaseBlocked(
+            unavailable_code, retryable=unavailable_retryable,
+        ) from None
+    if evidence["commercial_quality_profile"] != expected_commercial_quality:
+        raise LocalizationReleaseBlocked(stale_code)
+
+
+def validate_current_publication_policy(value: Any) -> dict[str, Any]:
+    """Distinguish current policy drift from a transient resolver outage."""
+
+    evidence = validate_publication_evidence(
+        value, require_current_locale_quality=False,
+    )
+    _validate_current_publication_policy(
+        evidence,
+        unavailable_code="publication.evidence.policy_unavailable",
+        stale_code="publication.evidence.policy_stale",
+        unavailable_retryable=True,
+    )
+    return evidence
 
 
 def _commercial_review_resolution(
@@ -249,12 +354,21 @@ def _commercial_review_resolution(
         provider = json.loads(_canonical_json(independent["provider"]))
     return {
         "schema": COMMERCIAL_REVIEW_RESOLUTION_SCHEMA,
+        "profile": review["profile"],
+        "contract_sha256": approval[
+            "commercial_review_resolution_contract_sha256"
+        ],
         "status": "resolved",
         "reviewed_dimensions": json.loads(_canonical_json(
             review["review_required_dimensions"]
         )),
+        "reviewed_offer_count": review["offer_count"],
+        "reviewed_offers": json.loads(_canonical_json(
+            review["review_required_offers"]
+        )),
         "method": method,
         "receipt_sha256": receipt_sha256,
+        "primary_provider": json.loads(_canonical_json(result["provider"])),
         "provider": provider,
     }
 
@@ -290,6 +404,74 @@ def _canonical_json(value: Any) -> str:
 
 def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _publication_evidence_contract_body() -> dict[str, Any]:
+    return {
+        "schema": PUBLICATION_EVIDENCE_CAPABILITIES_SCHEMA,
+        "release_evidence_schema": PUBLICATION_EVIDENCE_SCHEMA,
+        "required_fields": list(PUBLICATION_EVIDENCE_FIELDS),
+        "bindings": {
+            "sha256_fields": [
+                "release_evidence_contract_sha256", "target_sha256",
+                "result_sha256", "approval_sha256", "quality_receipt_sha256",
+                "commercial_review_routing_contract_sha256",
+                "commercial_review_resolution_contract_sha256",
+            ],
+            "lineage_fields": ["evidence_request_id", "evidence_revision"],
+            "target_identity_fields": [
+                "job_id", "target_locale", "target_sha256", "approval_id",
+            ],
+            "quality_profile": "exact-current-target-locale-quality-profile",
+            "signed_container": "blun.cms-localization-publication.v3",
+        },
+        "commercial_scope": {
+            "content_type": "commercial",
+            "required_non_null": [
+                "commercial_profile", "commercial_quality_profile",
+                "commercial_review", "commercial_review_routing_contract_sha256",
+                "commercial_review_resolution_contract_sha256",
+            ],
+            "review_evidence_contract_sha256": (
+                "exact-current-public-commercial-evidence-contract"
+            ),
+            "review_resolution_contract_sha256": (
+                "exact-current-public-commercial-resolution-contract"
+            ),
+            "quality_profile": (
+                "exact-current-target-locale-commercial-quality-profile"
+            ),
+            "resolution": "required-only-when-review-required",
+            "non_commercial_fields": "all-null",
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "raw_receipt": False,
+            "reviewer_identity": False,
+            "reviewer_prose": False,
+            "commercial_review_routing": False,
+            "project_prices": False,
+            "project_brands": False,
+            "authentication_material": False,
+        },
+        "tamper_policy": "reject-complete-publication-before-host-commit",
+    }
+
+
+def publication_evidence_contract() -> dict[str, Any]:
+    """Return the exact content-free contract advertised to CMS adapters."""
+    body = _publication_evidence_contract_body()
+    return {**body, "sha256": _hash_text(_canonical_json(body))}
+
+
+def validate_publication_evidence_contract(value: Any) -> dict[str, Any]:
+    """Reject a partial, reordered, altered, or merely rehashed contract."""
+    body = _publication_evidence_contract_body()
+    expected = {**body, "sha256": _hash_text(_canonical_json(body))}
+    if value != expected:
+        raise LocalizationReleaseBlocked("publication.evidence_contract.invalid")
+    return json.loads(_canonical_json(expected))
 
 
 def _text(value: Any, code: str, *, limit: int = 256) -> str:
@@ -330,12 +512,37 @@ def _independent_model_review(value: Any, primary_provider: dict[str, Any]) -> t
     return normalized, _receipt(value.get("receipt"), "independent_model_review.receipt.required")
 
 
+def _commercial_resolution_contract_sha256(
+    job: dict[str, Any],
+    result: dict[str, Any],
+) -> str | None:
+    commercial_profile = job.get("commercial_profile")
+    commercial_review = result["commercial_review"]
+    if commercial_profile is None or commercial_review["status"] != "review_required":
+        return None
+    try:
+        expected = _WORKER._COMMERCIAL.public_review_resolution_contract(
+            commercial_profile,
+        )["sha256"]
+    except (KeyError, TypeError, ValueError):
+        raise LocalizationReleaseBlocked("approval.binding_mismatch") from None
+    if (
+        job.get("commercial_review_resolution_contract_sha256") != expected
+        or result.get("commercial_review_resolution_contract_sha256")
+        != expected
+    ):
+        raise LocalizationReleaseBlocked("approval.binding_mismatch")
+    return expected
+
+
 def _receipt_binding(
     job_id: str,
     job: dict[str, Any],
     result: dict[str, Any],
     result_sha256: str,
     *,
+    evidence_request_id: str,
+    evidence_revision: str,
     review_kind: str,
     review_provider: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -345,9 +552,23 @@ def _receipt_binding(
         raise LocalizationReleaseBlocked("review.binding.invalid")
     if (review_kind == "independent_model") != (review_provider is not None):
         raise LocalizationReleaseBlocked("review.binding.invalid")
+    if (
+        not isinstance(evidence_request_id, str)
+        or EVIDENCE_REQUEST_ID.fullmatch(evidence_request_id) is None
+        or not isinstance(evidence_revision, str)
+        or TOKEN.fullmatch(evidence_revision) is None
+    ):
+        raise LocalizationReleaseBlocked("review.evidence_context.invalid")
+    commercial_profile = job.get("commercial_profile")
+    commercial_review = result["commercial_review"]
+    resolution_contract_sha256 = _commercial_resolution_contract_sha256(
+        job, result,
+    )
     binding = {
         "schema": RECEIPT_BINDING_SCHEMA,
         "review_kind": review_kind,
+        "evidence_request_id": evidence_request_id,
+        "evidence_revision": evidence_revision,
         "job_id": job_id,
         "result_sha256": result_sha256,
         "source_text": job["source"]["text"],
@@ -364,8 +585,15 @@ def _receipt_binding(
         "software_version": result["software_version"],
         "review_confidence": result["review_confidence"],
         "quality_profile": result["quality_profile"],
-        "commercial_profile": job.get("commercial_profile"),
-        "commercial_review": result["commercial_review"],
+        "commercial_profile": commercial_profile,
+        "commercial_review": commercial_review,
+        "commercial_review_routing": result["commercial_review_routing"],
+        "commercial_review_routing_contract_sha256": result[
+            "commercial_review_routing_contract_sha256"
+        ],
+        "commercial_review_resolution_contract_sha256": (
+            resolution_contract_sha256
+        ),
         "human_review_required": result["human_review_required"],
         "independent_review_required": result["independent_review_required"],
     }
@@ -439,7 +667,10 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
         "source_locale", "target_locale", "content_type", "glossary_version",
         "policy_version", "provider", "software_version", "candidate",
         "quality_passes", "integrity", "review_confidence",
-        "quality_profile", "commercial_review", "human_review_required",
+        "quality_profile", "commercial_review", "commercial_review_routing",
+        "commercial_review_routing_contract_sha256",
+        "commercial_review_resolution_contract_sha256",
+        "human_review_required",
         "independent_review_required", "release_required",
     }
     if set(result) != expected:
@@ -514,16 +745,48 @@ def _validate_result(job: dict[str, Any], result: Any) -> dict[str, Any]:
     ):
         raise LocalizationReleaseBlocked("result.independent_review.invalid")
     commercial_review = result.get("commercial_review")
+    commercial_review_routing = result.get("commercial_review_routing")
+    commercial_routing_contract_sha256 = result.get(
+        "commercial_review_routing_contract_sha256"
+    )
+    commercial_resolution_contract_sha256 = result.get(
+        "commercial_review_resolution_contract_sha256"
+    )
     if job["content_type"] == "commercial":
+        expected_routing_contract_sha256 = job[
+            "commercial_review_routing_contract_sha256"
+        ]
+        if commercial_routing_contract_sha256 != expected_routing_contract_sha256:
+            raise LocalizationReleaseBlocked("result.commercial_review.invalid")
+        if commercial_resolution_contract_sha256 != job[
+            "commercial_review_resolution_contract_sha256"
+        ]:
+            raise LocalizationReleaseBlocked("result.commercial_review.invalid")
         try:
-            _WORKER._COMMERCIAL.validate_summary(
+            commercial_review = _WORKER._COMMERCIAL.validate_summary(
                 commercial_review,
                 job["commercial_profile"],
                 review_required=independent_review_required,
             )
+            if commercial_review["status"] == "review_required":
+                _WORKER._COMMERCIAL.validate_review_routing_context(
+                    commercial_review_routing,
+                    job["source"]["text"],
+                    candidate,
+                    commercial_review,
+                    job["commercial_profile"],
+                )
+            elif commercial_review_routing is not None:
+                raise _WORKER._COMMERCIAL.CommercialReviewBlocked(
+                    "review.commercial.routing_invalid",
+                )
         except _WORKER._COMMERCIAL.CommercialReviewBlocked:
             raise LocalizationReleaseBlocked("result.commercial_review.invalid") from None
-    elif commercial_review is not None:
+    elif any(value is not None for value in (
+        commercial_review, commercial_review_routing,
+        commercial_routing_contract_sha256,
+        commercial_resolution_contract_sha256,
+    )):
         raise LocalizationReleaseBlocked("result.commercial_review.invalid")
     return result
 
@@ -585,6 +848,8 @@ class LocalizationReleaseStore:
         quality_verifier: QualityReceiptVerifier,
         authority: ApprovalAuthority,
         *,
+        evidence_request_id: str,
+        evidence_revision: str,
         now: float | int,
         ttl_seconds: float | int = 2_592_000,
         human_review_receipt: str | None = None,
@@ -602,6 +867,13 @@ class LocalizationReleaseStore:
         result_json = _canonical_json(result)
         result_hash = _hash_text(result_json)
         quality_receipt = _receipt(quality_receipt, "quality.receipt.invalid")
+        if (
+            not isinstance(evidence_request_id, str)
+            or EVIDENCE_REQUEST_ID.fullmatch(evidence_request_id) is None
+            or not isinstance(evidence_revision, str)
+            or TOKEN.fullmatch(evidence_revision) is None
+        ):
+            raise LocalizationReleaseBlocked("review.evidence_context.invalid")
         verifier = getattr(quality_verifier, "verify", None)
         if not callable(verifier):
             raise LocalizationReleaseBlocked("quality.verifier.invalid")
@@ -612,6 +884,8 @@ class LocalizationReleaseStore:
                     job,
                     result,
                     result_hash,
+                    evidence_request_id=evidence_request_id,
+                    evidence_revision=evidence_revision,
                     review_kind="quality",
                 ),
                 receipt=quality_receipt,
@@ -638,6 +912,8 @@ class LocalizationReleaseStore:
                         job,
                         result,
                         result_hash,
+                        evidence_request_id=evidence_request_id,
+                        evidence_revision=evidence_revision,
                         review_kind="qualified_human",
                     ),
                     receipt=human_review_receipt,
@@ -665,6 +941,8 @@ class LocalizationReleaseStore:
                             job,
                             result,
                             result_hash,
+                            evidence_request_id=evidence_request_id,
+                            evidence_revision=evidence_revision,
                             review_kind="independent_model",
                             review_provider=provider,
                         ),
@@ -692,6 +970,8 @@ class LocalizationReleaseStore:
                             job,
                             result,
                             result_hash,
+                            evidence_request_id=evidence_request_id,
+                            evidence_revision=evidence_revision,
                             review_kind="qualified_human",
                         ),
                         receipt=human_review_receipt,
@@ -710,6 +990,11 @@ class LocalizationReleaseStore:
 
         immutable = {
             "schema": APPROVAL_SCHEMA,
+            "release_evidence_contract_sha256": (
+                publication_evidence_contract()["sha256"]
+            ),
+            "evidence_request_id": evidence_request_id,
+            "evidence_revision": evidence_revision,
             "job_id": job_id,
             "source_sha256": result["source_sha256"],
             "target_sha256": result["target_sha256"],
@@ -723,10 +1008,16 @@ class LocalizationReleaseStore:
             "worker_schema": result["worker_schema"],
             "review_confidence": result["review_confidence"],
             "quality_profile": result["quality_profile"],
+            "commercial_review_routing_contract_sha256": result[
+                "commercial_review_routing_contract_sha256"
+            ],
             "result_sha256": result_hash,
             "quality_receipt_sha256": _hash_text(quality_receipt),
             "human_review_receipt_sha256": human_hash,
             "independent_model_review": independent_binding,
+            "commercial_review_resolution_contract_sha256": (
+                _commercial_resolution_contract_sha256(job, result)
+            ),
         }
         approval_id = "blun-l10n-approval-" + _hash_text(_canonical_json(immutable))
         payload = {
@@ -786,9 +1077,14 @@ class LocalizationReleaseStore:
         plan: Any,
         authority: ApprovalAuthority,
         now: float,
+        *,
+        current_policy_errors: bool = False,
     ) -> ApprovedLocalization:
         _, job = _plan_job(plan, row["job_id"])
-        approved, _ = self._verified_row(row, job, authority, now)
+        approved, _ = self._verified_row(
+            row, job, authority, now,
+            current_policy_errors=current_policy_errors,
+        )
         return approved
 
     def _verified_row(
@@ -797,6 +1093,8 @@ class LocalizationReleaseStore:
         job: dict[str, Any],
         authority: ApprovalAuthority,
         now: float,
+        *,
+        current_policy_errors: bool = False,
     ) -> tuple[ApprovedLocalization, dict[str, Any]]:
         if _hash_text(row["result_json"]) != row["result_sha256"]:
             raise LocalizationReleaseBlocked("translation_memory.result_tampered")
@@ -809,19 +1107,28 @@ class LocalizationReleaseStore:
             raise LocalizationReleaseBlocked("translation_memory.json.invalid") from None
         result = _validate_result(job, result)
         expected_keys = {
-            "schema", "job_id", "source_sha256", "target_sha256", "source_locale",
+            "schema", "release_evidence_contract_sha256",
+            "evidence_request_id", "evidence_revision", "job_id",
+            "source_sha256", "target_sha256", "source_locale",
             "target_locale", "content_type", "glossary_version", "policy_version",
             "provider", "software_version", "worker_schema", "result_sha256",
             "review_confidence",
             "quality_profile",
+            "commercial_review_routing_contract_sha256",
             "quality_receipt_sha256", "human_review_receipt_sha256",
             "independent_model_review", "approval_id",
+            "commercial_review_resolution_contract_sha256",
             "approved_at", "expires_at",
         }
         if set(payload) != expected_keys:
             raise LocalizationReleaseBlocked("approval.binding_mismatch")
         binding = {
             "schema": APPROVAL_SCHEMA,
+            "release_evidence_contract_sha256": (
+                publication_evidence_contract()["sha256"]
+            ),
+            "evidence_request_id": payload.get("evidence_request_id"),
+            "evidence_revision": payload.get("evidence_revision"),
             "job_id": row["job_id"],
             "source_sha256": result["source_sha256"],
             "target_sha256": result["target_sha256"],
@@ -835,11 +1142,25 @@ class LocalizationReleaseStore:
             "worker_schema": result["worker_schema"],
             "review_confidence": result["review_confidence"],
             "quality_profile": result["quality_profile"],
+            "commercial_review_routing_contract_sha256": result[
+                "commercial_review_routing_contract_sha256"
+            ],
             "result_sha256": row["result_sha256"],
+            "commercial_review_resolution_contract_sha256": (
+                _commercial_resolution_contract_sha256(job, result)
+            ),
             "approved_at": row["approved_at"],
             "expires_at": row["expires_at"],
         }
         if any(payload.get(name) != value for name, value in binding.items()):
+            raise LocalizationReleaseBlocked("approval.binding_mismatch")
+        if (
+            EVIDENCE_REQUEST_ID.fullmatch(
+                str(payload.get("evidence_request_id"))
+            ) is None
+            or not isinstance(payload.get("evidence_revision"), str)
+            or TOKEN.fullmatch(payload["evidence_revision"]) is None
+        ):
             raise LocalizationReleaseBlocked("approval.binding_mismatch")
         if payload.get("approval_id") != row["approval_id"]:
             raise LocalizationReleaseBlocked("approval.binding_mismatch")
@@ -897,37 +1218,58 @@ class LocalizationReleaseStore:
             raise LocalizationReleaseBlocked("approval.signature.invalid")
         if row["expires_at"] <= now:
             raise LocalizationReleaseBlocked("approval.expired")
+        release_evidence = validate_publication_evidence({
+            "schema": PUBLICATION_EVIDENCE_SCHEMA,
+            "release_evidence_contract_sha256": payload[
+                "release_evidence_contract_sha256"
+            ],
+            "job_id": row["job_id"],
+            "target_locale": row["target_locale"],
+            "target_sha256": row["target_sha256"],
+            "approval_id": row["approval_id"],
+            "content_type": result["content_type"],
+            "result_sha256": row["result_sha256"],
+            "approval_sha256": row["approval_sha256"],
+            "quality_receipt_sha256": payload["quality_receipt_sha256"],
+            "evidence_request_id": payload["evidence_request_id"],
+            "evidence_revision": payload["evidence_revision"],
+            "quality_profile": {
+                "locale": result["quality_profile"]["locale"],
+                "version": result["quality_profile"]["version"],
+                "sha256": result["quality_profile"]["sha256"],
+            },
+            "commercial_profile": job.get("commercial_profile"),
+            "commercial_quality_profile": (
+                json.loads(_canonical_json(
+                    result["quality_profile"].get("commercial")
+                ))
+                if result["content_type"] == "commercial"
+                else None
+            ),
+            "commercial_review": json.loads(
+                _canonical_json(result["commercial_review"])
+            ),
+            "commercial_review_routing_contract_sha256": result[
+                "commercial_review_routing_contract_sha256"
+            ],
+            "commercial_review_resolution_contract_sha256": result[
+                "commercial_review_resolution_contract_sha256"
+            ],
+            "commercial_review_resolution": _commercial_review_resolution(
+                result, payload,
+            ),
+        }, require_current_locale_quality=not current_policy_errors)
+        if current_policy_errors:
+            release_evidence = validate_current_publication_policy(
+                release_evidence,
+            )
         return ApprovedLocalization(
             approval_id=row["approval_id"],
             job_id=row["job_id"],
             target_locale=row["target_locale"],
             target_sha256=row["target_sha256"],
             candidate=result["candidate"],
-            release_evidence=validate_publication_evidence({
-                "schema": PUBLICATION_EVIDENCE_SCHEMA,
-                "job_id": row["job_id"],
-                "target_locale": row["target_locale"],
-                "target_sha256": row["target_sha256"],
-                "approval_id": row["approval_id"],
-                "content_type": result["content_type"],
-                "result_sha256": row["result_sha256"],
-                "approval_sha256": row["approval_sha256"],
-                "quality_receipt_sha256": payload["quality_receipt_sha256"],
-                "commercial_profile": job.get("commercial_profile"),
-                "commercial_quality_profile": (
-                    json.loads(_canonical_json(
-                        result["quality_profile"].get("commercial")
-                    ))
-                    if result["content_type"] == "commercial"
-                    else None
-                ),
-                "commercial_review": json.loads(
-                    _canonical_json(result["commercial_review"])
-                ),
-                "commercial_review_resolution": _commercial_review_resolution(
-                    result, payload,
-                ),
-            }),
+            release_evidence=release_evidence,
             approved_at=float(row["approved_at"]),
             expires_at=float(row["expires_at"]),
         ), result
@@ -970,6 +1312,7 @@ class LocalizationReleaseStore:
         authority: ApprovalAuthority,
         *,
         now: float | int,
+        current_policy_errors: bool = False,
     ) -> ApprovedLocalization:
         job_id = _text(job_id, "job.id.invalid")
         _plan_job(plan, job_id)
@@ -980,7 +1323,10 @@ class LocalizationReleaseStore:
         """, (job_id,)).fetchone()
         if row is None:
             raise LocalizationReleaseBlocked("approval.missing")
-        return self._approved_from_row(row, plan, authority, now)
+        return self._approved_from_row(
+            row, plan, authority, now,
+            current_policy_errors=current_policy_errors,
+        )
 
     def readiness(
         self,
@@ -988,6 +1334,7 @@ class LocalizationReleaseStore:
         authority: ApprovalAuthority,
         *,
         now: float | int,
+        current_policy_errors: bool = False,
     ) -> WebsiteReadiness:
         plan_id = _text(getattr(plan, "plan_id", None), "plan.invalid")
         jobs = getattr(plan, "jobs", None)
@@ -1000,7 +1347,10 @@ class LocalizationReleaseStore:
         for job in jobs:
             locale = job.as_payload()["target"]["locale"]
             try:
-                self.lookup(plan, job.job_id, authority, now=now)
+                self.lookup(
+                    plan, job.job_id, authority, now=now,
+                    current_policy_errors=current_policy_errors,
+                )
             except LocalizationReleaseBlocked as error:
                 blocked.append((locale, error.code))
             else:

@@ -313,6 +313,137 @@ class WebsiteLocalizationQueueTests(unittest.TestCase):
         self.assertEqual(status.status, "failed")
         self.assertEqual(status.last_error_code, "payload_integrity")
 
+    def test_binding_validator_failure_rolls_back_without_consuming_attempt(self) -> None:
+        current = plan(("sv-SE",))
+        self.queue.enqueue_plan(current, now=100)
+
+        def unavailable(_payload):
+            raise RuntimeError("validator deployment unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "validator deployment unavailable"):
+            self.queue.claim(
+                "worker-a", now=100, lease_seconds=10,
+                binding_validator=unavailable,
+            )
+        status = self.queue.status(current.jobs[0].job_id)
+        self.assertEqual(status.status, "pending")
+        self.assertEqual(status.attempts, 0)
+        self.assertIsNone(status.last_error_code)
+
+    def test_binding_validator_cannot_mutate_payload_before_lease(self) -> None:
+        current = plan(("sv-SE",))
+        self.queue.enqueue_plan(current, now=100)
+
+        def mutating(payload):
+            payload["source"]["text"] = "Mutated after integrity check."
+            return True
+
+        with self.assertRaisesRegex(
+            QUEUE.LocalizationQueueBlocked,
+            "must not mutate queued payload",
+        ):
+            self.queue.claim(
+                "worker-a", now=100, lease_seconds=10,
+                binding_validator=mutating,
+            )
+        status = self.queue.status(current.jobs[0].job_id)
+        self.assertEqual(status.status, "pending")
+        self.assertEqual(status.attempts, 0)
+
+    def test_stale_head_jobs_are_quarantined_without_blocking_current_work(self) -> None:
+        current = plan(("de-AT", "sv-SE"))
+        self.queue.enqueue_plan(current, now=100)
+
+        claim = self.queue.claim(
+            "worker-a", now=100, lease_seconds=10,
+            binding_validator=lambda payload: (
+                payload["target"]["locale"] == "sv-SE"
+            ),
+        )
+
+        self.assertEqual(claim.target_locale, "sv-SE")
+        stale = self.queue.status(current.jobs[0].job_id)
+        self.assertEqual((stale.status, stale.attempts), ("failed", 0))
+        self.assertEqual(stale.last_error_code, "job_binding_invalid")
+        self.assertEqual(claim.attempt, 1)
+
+    def test_quarantine_never_crosses_the_eligible_plan_boundary(self) -> None:
+        outside = plan(("de-AT",))
+        eligible = plan(("sv-SE",))
+        self.queue.enqueue_plan(outside, now=90)
+        self.queue.enqueue_plan(eligible, now=100)
+        validated = []
+
+        def validator(payload):
+            validated.append(payload["target"]["locale"])
+            return payload["target"]["locale"] == "sv-SE"
+
+        claim = self.queue.claim(
+            "worker-a", now=100, lease_seconds=10,
+            eligible_plan_ids=(eligible.plan_id,),
+            binding_validator=validator,
+        )
+
+        self.assertEqual((claim.target_locale, validated), ("sv-SE", ["sv-SE"]))
+        outside_status = self.queue.status(outside.jobs[0].job_id)
+        self.assertEqual((outside_status.status, outside_status.attempts), ("pending", 0))
+
+    def test_batch_quarantine_rolls_back_if_later_validation_is_unavailable(self) -> None:
+        current = plan(("de-AT", "sv-SE"))
+        self.queue.enqueue_plan(current, now=100)
+
+        def validator(payload):
+            if payload["target"]["locale"] == "de-AT":
+                return False
+            raise RuntimeError("validator deployment unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "validator deployment unavailable"):
+            self.queue.claim(
+                "worker-a", now=100, lease_seconds=10,
+                binding_validator=validator,
+            )
+
+        for job in current.jobs:
+            status = self.queue.status(job.job_id)
+            self.assertEqual((status.status, status.attempts), ("pending", 0))
+            self.assertIsNone(status.last_error_code)
+
+    def test_all_eu_locale_stale_batch_is_quarantined_in_one_claim(self) -> None:
+        locales = tuple(profile.locale for profile in PLANNER.EU_OFFICIAL_LOCALES)
+        current = PLANNER.plan_website_localization(
+            **request(source_locale="ja-JP", target_locales=list(locales)),
+        )
+        later = PLANNER.plan_website_localization(**request(
+            source_revision="cms-185",
+            source_locale="ja-JP",
+            target_locales=list(locales),
+        ))
+        self.assertEqual(len(current.jobs), 24)
+        self.queue.enqueue_plan(current, now=100)
+        self.queue.enqueue_plan(later, now=101)
+        validated = []
+
+        def stale(payload):
+            validated.append(payload["target"]["locale"])
+            return False
+
+        with self.assertRaisesRegex(
+            QUEUE.LocalizationQueueBlocked,
+            "queued job binding is no longer current",
+        ):
+            self.queue.claim(
+                "worker-a", now=200, lease_seconds=10,
+                binding_validator=stale,
+            )
+
+        self.assertEqual(len(validated), 24)
+        self.assertEqual(self.queue.plan_counts(current.plan_id)["failed"], 24)
+        self.assertEqual(self.queue.plan_counts(later.plan_id)["pending"], 24)
+        for job in current.jobs:
+            status = self.queue.status(job.job_id)
+            self.assertEqual((status.status, status.attempts), ("failed", 0))
+            self.assertEqual(status.last_error_code, "job_binding_invalid")
+
 
 if __name__ == "__main__":
     unittest.main()

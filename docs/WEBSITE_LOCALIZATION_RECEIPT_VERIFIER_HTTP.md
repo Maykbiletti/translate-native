@@ -25,11 +25,17 @@ retry and its attempt limit.
 ## Request
 
 The adapter canonicalizes the complete
-`blun.localization-quality-receipt-binding.v3` object and validates its native
+`blun.localization-quality-receipt-binding.v9` object and validates its native
 Unicode text, hashes, locales, content type, glossary and policy versions,
 provider/model identities, software version, two-pass confidence, locale
 quality profile, exact locale-specific commercial profile when applicable,
-matching targeted-review summary, escalation requirements, and review purpose.
+matching targeted-review summary and its exact review-evidence-contract
+SHA-256, the exact current offer-routing-contract SHA-256, the canonical
+resolution-contract SHA-256
+and the private, text-free mapping from opaque offer indexes to exact source
+and target Unicode code-point spans for unresolved commercial review,
+escalation requirements, review purpose,
+canonical quality-evidence request ID, and evidence revision.
 It then sends HTTP POST with JSON content type and these
 protected headers:
 
@@ -45,15 +51,24 @@ The body is exactly:
   "request_id": "blun-l10n-receipt-<sha256>",
   "binding_sha256": "<canonical binding hash>",
   "receipt_sha256": "<opaque receipt hash>",
-  "binding": {"schema": "blun.localization-quality-receipt-binding.v3"},
+  "binding": {"schema": "blun.localization-quality-receipt-binding.v9"},
   "receipt": "<opaque receipt>"
 }
 ```
 
 The deterministic request ID is derived from both hashes. Identical retries
 therefore address the same verification operation, while any changed receipt
-or binding dimension receives a different identity. The remote service must
+or binding dimension—including the evidence request ID or revision—receives a
+different identity. The remote service must
 treat an idempotency-key collision with different bytes as a terminal error.
+The adapter recomputes the commercial resolution-contract digest from the
+installed profile before authentication or transport. Verified commercial and
+non-commercial bindings require both that digest and the routing object to be
+`null`. For unresolved review, it validates span order, bounds, text lengths,
+offer count, and exact opaque index order before any credential callback or
+network access. It also reconstructs and requires the exact digest of the
+separately advertised machine-readable routing contract. The routing object
+never contains configured offer IDs, text, prices, brands, or reviewer prose.
 
 ## Response
 
@@ -84,4 +99,6 @@ statuses, binding mismatches, and explicit negative verdicts are terminal.
 
 The same adapter can be configured separately for quality, qualified-human,
 and independent-model receipts. Purpose is part of the signed binding, so a
-receipt accepted for one route cannot satisfy another route.
+receipt accepted for one route cannot satisfy another route. Evidence context
+is also part of the binding, so a receipt cannot be relabelled beneath a newer
+provider response envelope.

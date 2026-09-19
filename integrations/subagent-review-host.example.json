@@ -1,0 +1,46 @@
+{
+  "schema": "translate-native.subagent-review-host-runtime.v1",
+  "host_id": "production-review-host-1",
+  "allow_loopback_http": true,
+  "authentication": {
+    "scheme": "bearer",
+    "token_file": "/absolute/protected/path/review-host.token"
+  },
+  "attestation": {
+    "algorithm": "hmac-sha256",
+    "key_id": "production-review-host-key-1",
+    "secret_file": "/absolute/protected/path/review-host-attestation.secret"
+  },
+  "ledger": {
+    "path": "/absolute/protected/path/review-host.sqlite3",
+    "lease_seconds": 65
+  },
+  "launcher": {
+    "factory_file": "/absolute/protected/translate-native/integrations/website_localization_subagent_launcher_http.py",
+    "factory_callable": "build_launcher",
+    "factory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "launcher_id": "deployment-review-launcher",
+    "launcher_version": "immutable-launcher-revision",
+    "config_file": "/absolute/protected/path/review-launcher.json"
+  },
+  "routes": [
+    {
+      "route_id": "ordinary-fi-FI-native",
+      "schema": "translate-native.response-subagent-review.v1",
+      "phase": "target_native",
+      "target_locale": "fi-FI",
+      "content_type": "prose",
+      "task_policy_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "model_id": "deployment-review-model",
+      "model_version": "immutable-model-revision",
+      "host_policy_version": "isolated-host-policy-1",
+      "reviewer_agent_id": "reviewer-fi-native",
+      "reviewer_role": "target-native-reviewer",
+      "max_timeout_seconds": 60,
+      "max_output_tokens": 4096,
+      "max_input_bytes": 2000000,
+      "cost_unit": "deployment-cost-unit",
+      "max_cost_units": 100000
+    }
+  ]
+}

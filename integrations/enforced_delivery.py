@@ -6,9 +6,10 @@ The untrusted agent must return one JSON envelope on stdout:
     {"target_text": "...", "release_token": "blg6...."}
 
 The trusted host supplies task kind, locale, source text, and signing-key
-location as command-line policy. Only the exact text covered by the receipt is
-written to stdout. Diagnostics and rejected candidates are never written to
-stdout.
+location as command-line policy. Rewrite delivery additionally requires the
+host-owned profile and execution context used by the isolated guard. Only the
+exact text covered by the receipt is written to stdout. Diagnostics and
+rejected candidates are never written to stdout.
 """
 
 from __future__ import annotations
@@ -47,7 +48,8 @@ DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 MAX_POLICY_BYTES = 64 * 1024
 FORBIDDEN_AGENT_FIELDS = {
     "task_kind", "language", "source_text", "content_type",
-    "short_text_reviewed", "key_path", "delivery_channel",
+    "short_text_reviewed", "key_path", "delivery_channel", "profile_id",
+    "request_id", "session_id", "session_epoch", "agent_id", "channel",
 }
 
 
@@ -58,6 +60,12 @@ class HostPolicy:
     source_text: str = ""
     content_type: str = "prose"
     short_text_reviewed: bool = False
+    profile_id: str = ""
+    request_id: str = ""
+    session_id: str = ""
+    session_epoch: str = ""
+    agent_id: str = ""
+    channel: str = ""
 
 
 class DeliveryBlocked(ValueError):
@@ -74,14 +82,26 @@ def _exact_language(language: str) -> bool:
 
 
 def validate_policy(policy: HostPolicy) -> None:
-    if policy.task_kind not in {"response", "translation"}:
+    if policy.task_kind not in {"response", "translation", "rewrite"}:
         raise DeliveryBlocked("host policy has an invalid task kind")
     if not _exact_language(policy.language):
         raise DeliveryBlocked("host policy requires an exact language or locale tag")
-    if policy.task_kind == "translation" and not policy.source_text.strip():
-        raise DeliveryBlocked("translation policy requires the complete source text")
+    if policy.task_kind in {"translation", "rewrite"} and not policy.source_text.strip():
+        label = "translation source" if policy.task_kind == "translation" else "rewrite original"
+        raise DeliveryBlocked(f"{policy.task_kind} policy requires the complete {label}")
     if policy.task_kind == "response" and policy.source_text:
         raise DeliveryBlocked("response policy cannot contain translation source text")
+    rewrite_context = (
+        policy.profile_id, policy.request_id, policy.session_id,
+        policy.session_epoch, policy.agent_id, policy.channel,
+    )
+    if policy.task_kind == "rewrite":
+        if not all(isinstance(value, str) and value.strip() for value in rewrite_context):
+            raise DeliveryBlocked("rewrite policy requires complete host-owned delivery context")
+        if re.fullmatch(r"[0-9a-f]{64}", policy.session_epoch) is None:
+            raise DeliveryBlocked("rewrite policy requires a valid session epoch")
+    elif any(rewrite_context):
+        raise DeliveryBlocked("rewrite delivery context is valid only for rewrite tasks")
 
 
 def parse_envelope(raw: str, max_bytes: int = DEFAULT_MAX_BYTES) -> dict[str, Any]:
@@ -109,6 +129,10 @@ def parse_envelope(raw: str, max_bytes: int = DEFAULT_MAX_BYTES) -> dict[str, An
 
 def verify_envelope(envelope: dict[str, Any], policy: HostPolicy, key: bytes) -> str:
     validate_policy(policy)
+    if policy.task_kind in {"response", "rewrite"}:
+        raise DeliveryBlocked(
+            f"{policy.task_kind} delivery requires the isolated guard's current session context"
+        )
     target = envelope["target_text"]
     verification = QUALITY.verify_receipt(
         envelope["release_token"],
@@ -136,7 +160,48 @@ def verify_envelope_with_service(
     timeout: float = 10.0,
 ) -> str:
     validate_policy(policy)
+    if policy.task_kind == "response":
+        raise DeliveryBlocked(
+            "response delivery requires the isolated guard authorization and one-time grant path"
+        )
     target = envelope["target_text"]
+    if policy.task_kind == "rewrite":
+        common = {
+            "task_kind": "rewrite",
+            "source_text": policy.source_text,
+            "target_text": target,
+            "language": policy.language,
+            "profile_id": policy.profile_id,
+            "request_id": policy.request_id,
+            "content_type": policy.content_type,
+            "short_text_reviewed": policy.short_text_reviewed,
+            "session_id": policy.session_id,
+            "session_epoch": policy.session_epoch,
+            "agent_id": policy.agent_id,
+            "channel": policy.channel,
+        }
+        authorized = SERVICE_CLIENT.call_guard_service(
+            endpoint,
+            {**common, "operation": "authorize_delivery",
+             "release_token": envelope["release_token"]},
+            auth_token=service_token,
+            timeout=timeout,
+        )
+        grant = authorized.get("delivery_grant")
+        if authorized.get("valid") is not True or not isinstance(grant, str) or not grant:
+            raise DeliveryBlocked("isolated guard rejected rewrite delivery authorization")
+        consume = {key: value for key, value in common.items() if key != "source_text"}
+        consumed = SERVICE_CLIENT.call_guard_service(
+            endpoint,
+            {**consume, "operation": "consume_delivery",
+             "source_sha256": hashlib.sha256(policy.source_text.encode("utf-8")).hexdigest(),
+             "delivery_grant": grant},
+            auth_token=service_token,
+            timeout=timeout,
+        )
+        if consumed.get("valid") is not True:
+            raise DeliveryBlocked("isolated guard rejected rewrite delivery grant consumption")
+        return target
     result = SERVICE_CLIENT.call_guard_service(
         endpoint,
         {
@@ -424,15 +489,57 @@ async def guarded_send_async(
     return await send(target)
 
 
+def guarded_send_with_service(
+    raw_envelope: str,
+    policy: HostPolicy,
+    endpoint: str,
+    send: Callable[[str], ResultT],
+    *,
+    service_token: str = "",
+    timeout: float = 10.0,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> ResultT:
+    """Authorize and consume with the isolated guard before one synchronous send."""
+    target = verify_envelope_with_service(
+        parse_envelope(raw_envelope, max_bytes),
+        policy,
+        endpoint,
+        service_token=service_token,
+        timeout=timeout,
+    )
+    return send(target)
+
+
+async def guarded_send_async_with_service(
+    raw_envelope: str,
+    policy: HostPolicy,
+    endpoint: str,
+    send: Callable[[str], Awaitable[ResultT]],
+    *,
+    service_token: str = "",
+    timeout: float = 10.0,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> ResultT:
+    """Authorize and consume with the isolated guard before one asynchronous send."""
+    target = verify_envelope_with_service(
+        parse_envelope(raw_envelope, max_bytes),
+        policy,
+        endpoint,
+        service_token=service_token,
+        timeout=timeout,
+    )
+    return await send(target)
+
+
 def _read_source(path: Path | None, task_kind: str) -> str:
     if path is None:
         return ""
-    if task_kind != "translation":
-        raise DeliveryBlocked("--source-file is valid only for translation tasks")
+    if task_kind not in {"translation", "rewrite"}:
+        raise DeliveryBlocked("--source-file is valid only for translation or rewrite tasks")
     try:
         return path.read_text(encoding="utf-8-sig")
     except OSError as error:
-        raise DeliveryBlocked("cannot read the trusted translation source") from error
+        raise DeliveryBlocked("cannot read the trusted translation source or rewrite original") from error
 
 
 def _untrusted_environment(policy: HostPolicy) -> dict[str, str]:
@@ -478,11 +585,17 @@ def _run_agent(command: Sequence[str], timeout: float, max_bytes: int, policy: H
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deliver only language-guarded agent output")
-    parser.add_argument("--task-kind", required=True, choices=("response", "translation"))
+    parser.add_argument("--task-kind", required=True, choices=("response", "translation", "rewrite"))
     parser.add_argument("--language", required=True, help="Trusted exact BCP-47 language tag")
-    parser.add_argument("--source-file", type=Path, help="Trusted complete source for translations")
+    parser.add_argument("--source-file", type=Path, help="Trusted complete source or rewrite original")
     parser.add_argument("--content-type", default="prose")
     parser.add_argument("--short-text-reviewed", action="store_true")
+    parser.add_argument("--profile-id", default="", help="Trusted rewrite profile identifier")
+    parser.add_argument("--request-id", default="", help="Trusted rewrite request identifier")
+    parser.add_argument("--session-id", default="", help="Trusted rewrite session identifier")
+    parser.add_argument("--session-epoch", default="", help="Trusted current rewrite session epoch")
+    parser.add_argument("--agent-id", default="", help="Trusted rewrite creator identifier")
+    parser.add_argument("--channel", default="", help="Trusted final rewrite delivery channel")
     parser.add_argument("--key-file", type=Path, default=DEFAULT_KEY_PATH)
     parser.add_argument("--service-endpoint", default=os.environ.get("BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT", ""))
     parser.add_argument("--service-token-file", type=Path)
@@ -506,6 +619,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_text=source,
             content_type=args.content_type,
             short_text_reviewed=args.short_text_reviewed,
+            profile_id=args.profile_id,
+            request_id=args.request_id,
+            session_id=args.session_id,
+            session_epoch=args.session_epoch,
+            agent_id=args.agent_id,
+            channel=args.channel,
         )
         validate_policy(policy)
         raw = _run_agent(args.command, args.timeout, args.max_bytes, policy)
@@ -528,7 +647,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout=min(args.timeout, 30.0),
             )
         else:
-            if require_service:
+            if require_service or policy.task_kind == "rewrite":
                 raise DeliveryBlocked("isolated guard service is required")
             key = load_verification_key(args.key_file)
             target = verify_envelope(envelope, policy, key)

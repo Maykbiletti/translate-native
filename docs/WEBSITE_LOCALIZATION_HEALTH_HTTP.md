@@ -71,6 +71,106 @@ scope. It does not include principal or credential values in the response.
 Invalid principals return `401`; an authenticator outage returns a retryable
 `503`, with no exception text.
 
+## Provider-neutral reference client
+
+`integrations/website_localization_health_client.py` consumes this endpoint
+without choosing an identity provider or retry scheduler. The host supplies a
+credential-header callback; the client calls it once per read and performs one
+bounded request:
+
+```python
+import time
+
+from integrations.website_localization_health_client import (
+    WebsiteLocalizationHealthClient,
+)
+
+client = WebsiteLocalizationHealthClient(
+    "https://localization.example",
+    lambda: {"Authorization": operator_token()},
+    clock=time.time,
+)
+snapshot = client.read()
+```
+
+`snapshot.http_status` is `200` for a valid healthy or degraded assessment and
+`503` for a valid blocked assessment. In both cases `snapshot.as_payload()` is
+the complete validated content-free report, so callers retain per-component
+and per-locale reasons such as `release.policy_unavailable`,
+`release.policy_stale`, and `release.integrity_failed`.
+
+The client requires HTTPS except for an explicitly enabled loopback test
+origin, refuses redirects, caps one response at four megabytes, checks the
+declared byte length and security headers, rejects duplicate JSON keys, and
+requires the report timestamp to fall within a configurable age and future
+skew. Remote contract errors retain their exact stable code and retry flag;
+local credential-provider, network, stale-report, and response-validation
+failures are normalized without exception text. The client never retries,
+repairs state, publishes content, or logs credentials; those responsibilities
+remain with the host.
+
+## Durable polling scheduler
+
+`integrations/website_localization_health_monitor.py` provides the optional
+host-side retry and crash-resume layer. It wraps the same one-request client;
+each durable lease therefore authorizes at most one authenticated health read.
+The SQLite row records a poll attempt before network access, so a process crash
+cannot lose or duplicate ownership. Another process waits for the live lease
+and may recover it only after the configured expiry.
+
+```python
+import sqlite3
+import time
+
+from integrations.website_localization_health_monitor import (
+    DurableWebsiteLocalizationHealthMonitor,
+)
+
+monitor = DurableWebsiteLocalizationHealthMonitor(
+    sqlite3.connect("operator-health.sqlite3"),
+    client,
+    poll_interval_seconds=30,
+    lease_seconds=30,
+    max_consecutive_failures=5,
+)
+outcome = monitor.run_once("operator-worker-1", now=time.time())
+```
+
+Explicitly retryable client failures use capped exponential backoff. A
+non-retryable failure, or exhaustion of the configured consecutive-failure
+ceiling, moves the scheduler to `failed`; it makes no further request until an
+operator calls `rearm()` after remediation. A valid `blocked` report is not a
+transport failure: its status and reasons are recorded and the next ordinary
+poll remains scheduled.
+
+The durable database never stores the report payload. It retains only the
+canonical SHA-256, aggregate report status and timestamp, sorted stable reason
+codes, component/provider/website-version counts, scheduling state and the
+last stable client error. In particular, it stores no site, event, version,
+plan, locale or provider identifiers, no credential, and no source or target
+content. Schema or row tampering blocks before a client call. `status()` is
+read-only and marks an expired lease without implicitly claiming it.
+
+`run_forever(worker_id, clock=..., stop_event=...)` supplies the corresponding
+long-running synchronous loop. It performs at most one client read per claimed
+lease, derives its next wait from the durable poll or lease deadline, clamps
+that wait to the configured host wake interval, and uses the host event's
+interruptible `wait()` rather than sleeping. A stop event that is already set
+returns before schema or row access. Invalid clocks and stop-event contracts
+fail closed. The method does not create a thread, daemonize, install a signal
+handler, close SQLite, or choose process ownership; those remain explicit host
+responsibilities.
+
+`health(now=...)` returns
+`blun.website-localization-health-poller.v1`. Initial operation without a
+validated report, overdue scheduled poll, retry wait, and an expired lease are
+`degraded`; a terminal scheduler state or last valid blocked service
+assessment is `blocked`.
+Otherwise a current scheduled or live-lease state backed by a healthy report
+is `healthy`. The snapshot contains due/lease state, bounded attempts, next
+action time, last stable client error and the same content-free report summary
+stored durably. It never returns the complete remote report.
+
 ## Response and status semantics
 
 A valid report is wrapped without changing the monitor's signed-state

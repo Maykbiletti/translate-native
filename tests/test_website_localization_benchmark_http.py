@@ -145,6 +145,7 @@ class BenchmarkHTTPTests(unittest.TestCase):
         status, headers, payload, _ = self.call(app, HTTP.STATUS_PATH)
         self.assertTrue(status.startswith("200 "))
         self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         self.assertEqual(payload, {
             "schema": HTTP.STATUS_RESPONSE_SCHEMA,
             "campaign": campaign_status(),
@@ -186,6 +187,35 @@ class BenchmarkHTTPTests(unittest.TestCase):
                 ["authorization", "Bearer private-reader-token"],
                 request["headers"],
             )
+
+    def test_authenticated_reader_gets_origin_free_exact_openapi_contract(self):
+        runtime = Runtime()
+        app = HTTP.BenchmarkReportHTTPApplication(
+            runtime, lambda _: self.principal(),
+        )
+        status, headers, payload, encoded = self.call(app, HTTP.OPENAPI_PATH)
+        self.assertTrue(status.startswith("200 "))
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+        contract = HTTP._openapi_contract()
+        document = HTTP._OPENAPI.build_document(contract)
+        self.assertEqual(payload, {
+            "schema": HTTP.OPENAPI_RESPONSE_SCHEMA,
+            "contract_sha256": HTTP._OPENAPI.document_sha256(contract),
+            "openapi_sha256": HTTP._OPENAPI.document_sha256(document),
+            "openapi": document,
+        })
+        self.assertEqual(set(document["paths"]), {
+            HTTP.STATUS_PATH, HTTP.REPORT_PATH, HTTP.OPENAPI_PATH,
+        })
+        self.assertNotIn("servers", document)
+        rendered = encoded.decode("utf-8")
+        for private in (
+            CAMPAIGN_ID, POLICY_SHA256, SUITE_SHA256,
+            "private-reader-token", "signed",
+        ):
+            self.assertNotIn(private, rendered)
+        self.assertEqual(runtime.status_calls, 1)
+        self.assertEqual(runtime.report_calls, 0)
 
     def test_campaign_scope_and_incomplete_report_block_before_loading(self):
         runtime = Runtime()

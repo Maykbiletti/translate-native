@@ -282,6 +282,7 @@ class WebsiteLocalizationAPI:
             "cms.cancellation.delivery_in_flight",
             "cms.tombstone.idempotency_collision",
             "cms.tombstone.not_published",
+            "cms.release.integrity_failed",
         }:
             return "409 Conflict"
         if code == "cms.event.not_enqueued":
@@ -290,7 +291,7 @@ class WebsiteLocalizationAPI:
             "cms.queue.rejected", "cms.transaction.external", "cms.schema.altered",
             "cms.queue.integrity_failed", "cms.queue.identity_lost",
             "cms.event.tampered", "cms.event.topic_invalid",
-            "cms.lifecycle.unavailable", "cms.release.integrity_failed",
+            "cms.lifecycle.unavailable", "cms.release.policy_unavailable",
             "cms.delivery.tampered", "cms.delivery.signature_invalid",
             "cms.capabilities.registry_invalid",
             "cms.tombstone.tampered", "cms.tombstone.publication_invalid",

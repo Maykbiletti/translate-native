@@ -380,7 +380,18 @@ def open_durable_cms_receiver(
             "CMS receiver database could not be opened"
         ) from error
     try:
-        store = _STORE.DurableCMSReceiverStore(connection, clock=clock)
+        store = _STORE.DurableCMSReceiverStore(
+            connection,
+            release_evidence_validator=(
+                _RECEIVER.release_evidence_is_current
+            ),
+            publication_signature_validator=lambda payload, signature: (
+                _RECEIVER.message_signature_is_valid(
+                    payload, signature, publication_authority,
+                )
+            ),
+            clock=clock,
+        )
         database_guard()
         synchronized_store = _SynchronizedStore(
             connection, store, database_guard,

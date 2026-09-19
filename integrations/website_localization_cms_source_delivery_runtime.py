@@ -231,19 +231,33 @@ def preflight_existing_durable_cms_source_delivery(
         return
 
     delivery_digest = getattr(client, "expected_capabilities_sha256", None)
+    legacy_delivery_digest = getattr(
+        client, "legacy_expected_capabilities_sha256", delivery_digest,
+    )
     runtime_digest = getattr(
         client, "expected_runtime_capabilities_sha256", None,
     )
     rendering_digest = getattr(
         client, "expected_commercial_rendering_registry_sha256", None,
     )
+    terminal_receiver_digest = getattr(
+        client, "expected_terminal_receiver_capabilities_sha256", None,
+    )
     if not all(
         isinstance(value, str) and _DELIVERY.SHA256.fullmatch(value) is not None
-        for value in (delivery_digest, runtime_digest, rendering_digest)
+        for value in (
+            delivery_digest, legacy_delivery_digest, runtime_digest,
+            rendering_digest,
+            terminal_receiver_digest,
+        )
     ):
         raise _blocked("source_delivery_runtime.configuration_invalid")
     expected_binding = _DELIVERY._capability_binding_row(
         delivery_digest, runtime_digest, rendering_digest,
+        terminal_receiver_digest,
+    )
+    legacy_binding = _DELIVERY._legacy_capability_binding_row(
+        legacy_delivery_digest, runtime_digest, rendering_digest,
     )
 
     connection = None
@@ -295,19 +309,29 @@ def preflight_existing_durable_cms_source_delivery(
         ):
             raise _blocked("source_delivery_runtime.database_schema_altered")
 
+        has_work = connection.execute(
+            "SELECT 1 FROM cms_source_delivery_outbox LIMIT 1"
+        ).fetchone()
         if not binding_objects:
-            has_work = connection.execute(
-                "SELECT 1 FROM cms_source_delivery_outbox LIMIT 1"
-            ).fetchone()
             if has_work is not None:
                 raise _blocked("source_delivery_runtime.database_generation_unbound")
             return
-        if len(binding_objects) != 1 or tuple(binding_objects[0]) != (
+        if len(binding_objects) != 1:
+            raise _blocked("source_delivery_runtime.database_generation_invalid")
+        binding_object = tuple(binding_objects[0])
+        current_object = (
             "table",
             _DELIVERY.CAPABILITY_BINDING_TABLE,
             _DELIVERY.CAPABILITY_BINDING_TABLE,
             _DELIVERY.CAPABILITY_BINDING_SQL,
-        ):
+        )
+        legacy_object = (
+            "table",
+            _DELIVERY.CAPABILITY_BINDING_TABLE,
+            _DELIVERY.CAPABILITY_BINDING_TABLE,
+            _DELIVERY.LEGACY_CAPABILITY_BINDING_SQL,
+        )
+        if binding_object not in {current_object, legacy_object}:
             raise _blocked("source_delivery_runtime.database_generation_invalid")
         columns = tuple(
             (row[1], row[2], row[3], row[5])
@@ -315,10 +339,35 @@ def preflight_existing_durable_cms_source_delivery(
                 f"PRAGMA table_info({_DELIVERY.CAPABILITY_BINDING_TABLE})"
             ).fetchall()
         )
+        if binding_object == legacy_object:
+            rows = connection.execute(
+                f"SELECT singleton, schema, database_role, "
+                f"delivery_capabilities_sha256, runtime_capabilities_sha256, "
+                f"commercial_rendering_registry_sha256, binding_sha256 "
+                f"FROM {_DELIVERY.CAPABILITY_BINDING_TABLE}"
+            ).fetchall()
+            if (
+                columns != _DELIVERY.LEGACY_CAPABILITY_BINDING_COLUMNS
+                or len(rows) != 1
+            ):
+                raise _blocked(
+                    "source_delivery_runtime.database_generation_invalid"
+                )
+            if tuple(rows[0]) != legacy_binding:
+                raise _blocked(
+                    "source_delivery_runtime.database_generation_mismatch"
+                )
+            if has_work is not None:
+                raise _blocked(
+                    "source_delivery_runtime.database_generation_unbound"
+                )
+            _validate_database_file(path, identity)
+            return
         rows = connection.execute(
             f"SELECT singleton, schema, database_role, "
             f"delivery_capabilities_sha256, runtime_capabilities_sha256, "
-            f"commercial_rendering_registry_sha256, binding_sha256 "
+            f"commercial_rendering_registry_sha256, "
+            f"terminal_receiver_capabilities_sha256, binding_sha256 "
             f"FROM {_DELIVERY.CAPABILITY_BINDING_TABLE}"
         ).fetchall()
         if columns != _DELIVERY.CAPABILITY_BINDING_COLUMNS or len(rows) != 1:

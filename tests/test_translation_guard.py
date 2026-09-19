@@ -92,6 +92,41 @@ class JsonTests(unittest.TestCase):
         self.assertEqual(1, len(errors))
         self.assertIn("linguistic segment is unchanged", errors[0])
 
+    def test_strict_json_rejects_duplicate_decoded_keys_and_nonfinite_numbers(self) -> None:
+        for source in ('{"a":1,"a":2}', '{"a":1,"\\u0061":2}', '{"a":NaN}'):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                GUARD.strict_json_loads(source)
+
+    def test_strict_json_preserves_extreme_number_semantics(self) -> None:
+        source = GUARD.strict_json_loads('{"n":1e1000000,"tiny":1e-1000000}')
+        target = GUARD.strict_json_loads('{"n":1e9999999,"tiny":1e-9999999}')
+        message = "\n".join(GUARD.compare_json(source, target))
+        self.assertIn("$.n: non-string value changed", message)
+        self.assertIn("$.tiny: non-string value changed", message)
+        huge = "9" * 5000
+        self.assertEqual("json", GUARD.json_document_state(huge))
+        self.assertNotEqual(
+            GUARD.strict_json_loads(huge), GUARD.strict_json_loads("8" * 5000))
+        for target_text in ('{"n":1.0}', '{"n":1e0}'):
+            message = "\n".join(GUARD.compare_json(
+                GUARD.strict_json_loads('{"n":1}'),
+                GUARD.strict_json_loads(target_text),
+            ))
+            self.assertIn("type changed", message)
+        extreme_exponent = "1e" + ("9" * 20000)
+        self.assertEqual("json", GUARD.json_document_state(extreme_exponent))
+
+    def test_json_paths_do_not_collide_with_keys_or_array_syntax(self) -> None:
+        value = {"a.b": "eins", "a": {"b": "zwei"},
+                 "items[0]": "drei", "items": ["vier"],
+                 "a/b~c": "fünf"}
+        paths = [path for path, _segment in GUARD.json_located_segments(value)]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertIn("#/k:a.b", paths)
+        self.assertIn("#/k:a/k:b", paths)
+        self.assertIn("#/k:items/i:0", paths)
+        self.assertIn("#/k:a~1b~0c", paths)
+
 
 class IcuTests(unittest.TestCase):
     def test_preserves_plural_contract(self) -> None:
@@ -286,7 +321,7 @@ class VolumeIntegrityTests(unittest.TestCase):
             "json",
         )
         self.assertEqual(1, len(errors))
-        self.assertIn("$.hinweis", errors[0])
+        self.assertIn("#/k:hinweis", errors[0])
         self.assertIn("untranslated segment is blocked", errors[0])
 
     def test_equal_volume_literal_text_is_not_misrepresented_as_semantic_proof(self) -> None:
@@ -312,10 +347,73 @@ class VolumeIntegrityTests(unittest.TestCase):
 
     def test_format_detection_is_measured_not_caller_declared(self) -> None:
         self.assertEqual("json", GUARD.detect_content_format('{"copy":"Hello"}'))
+        self.assertEqual("json", GUARD.detect_content_format('"Top-level text"'))
+        self.assertEqual("json", GUARD.detect_content_format("1e1000000"))
+        for source in ('{"a":1,"a":2}', '{"a":NaN}', '{"a":"\\ud800"}',
+                       '{"a":1,}', '["a",]'):
+            with self.subTest(source=source):
+                self.assertEqual("json_invalid", GUARD.detect_content_format(source))
+        self.assertEqual("text", GUARD.detect_content_format("[Refrain]\nSing it again."))
+        self.assertEqual("text", GUARD.detect_content_format("{name} starts this line."))
+        for heading in ("[1. Introduction]\nText", "[true story]\nText",
+                        "[null hypothesis]\nText", '["Quoted heading"]\nText',
+                        "[Refrain,]", "[Chorus,\n]", "[Dear reader,]",
+                        "[1. Introduction,]", "[true story,]",
+                        '["Stay," she whispered.]', '["Stay" — she whispered.]',
+                        '["Refrain:" sing together]'):
+            with self.subTest(heading=heading):
+                self.assertEqual("text", GUARD.detect_content_format(heading))
+        for malformed in ('["a" "b"]', "[1 2]", '["a", invalid]',
+                          "[1, 2", '[{"a":1]', "[1", "[-2.3e4",
+                          "[true", "[false", "[null"):
+            with self.subTest(malformed=malformed):
+                self.assertEqual("json_invalid", GUARD.detect_content_format(malformed))
         self.assertEqual("html", GUARD.detect_content_format("<main><p>Hello</p></main>"))
+        self.assertEqual("html", GUARD.detect_content_format("<span>Hello</span><span>World</span>"))
+        self.assertEqual("html", GUARD.detect_content_format('<a href="/x">Open</a>'))
+        for fragment in ("<abbr>A</abbr><abbr>B</abbr>",
+                         "<aside>Text</aside>", "<figure>Text</figure>"):
+            self.assertEqual("html", GUARD.detect_content_format(fragment))
+        self.assertEqual("xml", GUARD.detect_content_format("<product-card>Text</product-card>"))
+        self.assertEqual("html", GUARD.detect_content_format("<span title=\"unfinished"))
+        self.assertEqual("html", GUARD.detect_content_format("<unknown>unfinished"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text <product-card>One</product-card>"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text </unknown> trailing text"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text <!-- fixed comment --> trailing text"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text <?processing fixed?> trailing text"))
+        self.assertEqual("html", GUARD.detect_content_format(
+            "Intro text <product-card"))
         self.assertEqual("xml", GUARD.detect_content_format("<resources><string>Hello</string></resources>"))
         self.assertEqual("po", GUARD.detect_content_format('msgid "Hello"\nmsgstr "Hallo"\n'))
         self.assertEqual("subtitle", GUARD.detect_content_format("00:00:01,000 --> 00:00:03,000\nHello"))
+
+    def test_multi_root_html_is_not_routed_through_plain_text(self) -> None:
+        source = "<abbr>First value 42</abbr><abbr>Second value 84</abbr>"
+        target = "<abbr>Second value 84</abbr><abbr>First value 42</abbr>"
+        self.assertEqual("html", GUARD.detect_content_format(source))
+        self.assertEqual(["First value 42", "Second value 84"],
+                         GUARD.linguistic_segments(source, "html"))
+        self.assertEqual(["Second value 84", "First value 42"],
+                         GUARD.linguistic_segments(target, "html"))
+
+    def test_html_code_descendants_are_opaque(self) -> None:
+        source = ('<main><p>Original text</p><code title="fixed-code"><span title="fixed">'
+                  'rm -rf /</span></code><pre><b>SELECT * FROM users</b></pre></main>')
+        translated = ('<main><p>Ny text</p><code title="fixed-code"><span title="fixed">'
+                      'rm -rf /</span></code><pre><b>SELECT * FROM users</b></pre></main>')
+        self.assertEqual([], GUARD.compare_html(source, translated))
+        changed_code = translated.replace("rm -rf /", "rm -rf /tmp")
+        changed_nested_attribute = translated.replace('title="fixed"', 'title="ändrad"')
+        changed_code_attribute = translated.replace('title="fixed-code"', 'title="ändrad"')
+        changed_pre = translated.replace("SELECT * FROM users", "DROP TABLE users")
+        self.assertTrue(GUARD.compare_html(source, changed_code))
+        self.assertTrue(GUARD.compare_html(source, changed_nested_attribute))
+        self.assertTrue(GUARD.compare_html(source, changed_code_attribute))
+        self.assertTrue(GUARD.compare_html(source, changed_pre))
 
     def test_cli_returns_nonzero_for_seventy_percent_omission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -362,7 +460,7 @@ class VolumeIntegrityTests(unittest.TestCase):
                 capture_output=True, text=True, check=False,
             )
         self.assertEqual(1, result.returncode)
-        self.assertIn("$.hinweis", result.stderr)
+        self.assertIn("#/k:hinweis", result.stderr)
         self.assertIn("linguistic segment is unchanged", result.stderr)
 
     def test_cli_blocks_short_copyright_identity_in_json_html_and_text(self) -> None:

@@ -164,17 +164,22 @@ class SidecarOutboxAdapterTests(unittest.TestCase):
             sidecar_delivery_max_attempts=4,
             runtime_capabilities_sha256="c" * 64,
             commercial_rendering_registry_sha256="d" * 64,
+            terminal_receiver_capabilities_sha256="f" * 64,
         )
         changed = ADAPTER.CMSSourceDeliverySidecarOutboxAdapter(
             self.client,
             sidecar_delivery_max_attempts=4,
             runtime_capabilities_sha256="e" * 64,
             commercial_rendering_registry_sha256="d" * 64,
+            terminal_receiver_capabilities_sha256="f" * 64,
         )
 
         self.assertEqual(pinned.expected_runtime_capabilities_sha256, "c" * 64)
         self.assertEqual(
             pinned.expected_commercial_rendering_registry_sha256, "d" * 64,
+        )
+        self.assertEqual(
+            pinned.expected_terminal_receiver_capabilities_sha256, "f" * 64,
         )
         self.assertNotEqual(
             pinned.expected_capabilities_sha256,
@@ -184,14 +189,31 @@ class SidecarOutboxAdapterTests(unittest.TestCase):
             pinned.expected_capabilities_sha256,
             self.adapter.expected_capabilities_sha256,
         )
+        self.assertNotEqual(
+            pinned.legacy_expected_capabilities_sha256,
+            pinned.expected_capabilities_sha256,
+        )
+        expected_legacy = hashlib.sha256(ADAPTER._canonical({
+            "schema": ADAPTER.LEGACY_ADAPTER_SCHEMA,
+            "sidecar_capabilities_sha256": "a" * 64,
+            "remote_capabilities_sha256": "b" * 64,
+            "sidecar_delivery_max_attempts": 4,
+            "runtime_capabilities_sha256": "c" * 64,
+            "commercial_rendering_registry_sha256": "d" * 64,
+        })).hexdigest()
+        self.assertEqual(
+            pinned.legacy_expected_capabilities_sha256, expected_legacy,
+        )
 
     def test_generation_pins_must_be_complete_and_canonical(self):
         invalid = (
             {"runtime_capabilities_sha256": "c" * 64},
             {"commercial_rendering_registry_sha256": "d" * 64},
+            {"terminal_receiver_capabilities_sha256": "f" * 64},
             {
                 "runtime_capabilities_sha256": "C" * 64,
                 "commercial_rendering_registry_sha256": "d" * 64,
+                "terminal_receiver_capabilities_sha256": "f" * 64,
             },
         )
         for values in invalid:

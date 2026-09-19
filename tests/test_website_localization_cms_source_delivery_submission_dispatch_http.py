@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
@@ -7,6 +8,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests import test_website_localization_cms_client as cms_support
 from tests import (
@@ -59,6 +61,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.support.setUp()
         self.authenticator = Authenticator()
         self.runtime = None
+        self.capabilities_digest = None
 
     def tearDown(self):
         if self.runtime is not None:
@@ -97,6 +100,9 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             http_authenticator=self.authenticator,
             **kwargs,
         )
+        self.capabilities_digest = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )["sha256"]
         return self.runtime
 
     @staticmethod
@@ -108,7 +114,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
 
     def call(
         self, path, *, method=None, body=None, headers=None, scheme="https",
-        query="",
+        query="", content_length=None, bind_capabilities=True,
     ):
         raw = b"" if body is None else (
             body if isinstance(body, bytes) else self.canonical(body)
@@ -119,12 +125,20 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             "QUERY_STRING": query,
             "wsgi.url_scheme": scheme,
             "wsgi.input": io.BytesIO(raw),
-            "CONTENT_LENGTH": str(len(raw)),
+            "CONTENT_LENGTH": (
+                str(len(raw)) if content_length is None else content_length
+            ),
             "HTTP_AUTHORIZATION": "Bearer test",
         }
         if body is not None:
             environ["CONTENT_TYPE"] = "application/json; charset=utf-8"
-        for name, value in (headers or {}).items():
+        request_headers = dict(headers or {})
+        if bind_capabilities and path in HTTP.CAPABILITIES_PRECONDITION_PATHS:
+            request_headers.setdefault(
+                HTTP.CAPABILITIES_PRECONDITION_HEADER,
+                self.capabilities_digest,
+            )
+        for name, value in request_headers.items():
             environ["HTTP_" + name.upper().replace("-", "_")] = value
         response = {}
 
@@ -137,14 +151,25 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         response["json"] = json.loads(response["raw"])
         return response
 
-    @staticmethod
-    def enqueue_request(payload, **overrides):
+    def enqueue_request(self, payload, **overrides):
+        capabilities = HTTP._capabilities_payload(
+            self.support.digest
+        )
+        commercial = (
+            payload.get("schema") == HTTP._DISPATCH._CLIENT._CMS.CHANGE_SCHEMA
+            and payload.get("localization", {}).get("content_type")
+            == "commercial"
+        )
         request = {
             "schema": HTTP.ENQUEUE_REQUEST_SCHEMA,
             "payload": payload,
             "source_max_attempts": 3,
             "delivery_max_attempts": 4,
             "client_max_attempts": 2,
+            "commercial_contract_binding": (
+                capabilities["commercial_contract_binding"]
+                if commercial else None
+            ),
         }
         request.update(overrides)
         return request
@@ -171,7 +196,10 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         capabilities = response["json"]["capabilities"]
         self.assertEqual(
             set(capabilities["operations"]),
-            {"capabilities", "enqueue", "health", "openapi", "readiness", "status"},
+            {
+                "capabilities", "commercial_profile", "enqueue", "health",
+                "lifecycle", "openapi", "readiness", "status",
+            },
         )
         self.assertEqual(
             capabilities["public_submission_capabilities_sha256"],
@@ -183,12 +211,58 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertTrue(
             capabilities["semantics"]["write_requires_ready_managed_worker"]
         )
+        self.assertTrue(
+            capabilities["semantics"]
+            ["non_discovery_operations_require_exact_capability_precondition"]
+        )
+        self.assertTrue(
+            capabilities["semantics"]
+            ["accepted_commercial_contract_matches_remote_registry"]
+        )
+        self.assertIsNone(
+            capabilities["operations"]["capabilities"]
+            ["capabilities_precondition_header"]
+        )
+        for name in {
+            "commercial_profile", "enqueue", "health", "lifecycle",
+            "openapi", "readiness", "status",
+        }:
+            self.assertEqual(
+                capabilities["operations"][name]
+                ["capabilities_precondition_header"],
+                HTTP.CAPABILITIES_PRECONDITION_HEADER,
+            )
+        self.assertEqual(
+            capabilities["operations"]["enqueue"]["error_statuses"],
+            [400, 401, 403, 405, 409, 411, 412, 413, 415, 428, 503],
+        )
+        self.assertEqual(
+            capabilities["operations"]["status"]["error_statuses"],
+            [400, 401, 403, 404, 405, 411, 412, 413, 415, 428, 503],
+        )
+        self.assertEqual(
+            capabilities["operations"]["capabilities"]["error_statuses"],
+            [400, 401, 403, 405, 411, 413, 503],
+        )
+        self.assertEqual(
+            capabilities["operations"]["enqueue"]["error_codes"]["409"],
+            ["submission_dispatch_http.idempotency_collision"],
+        )
         unsigned = dict(capabilities)
         digest = unsigned.pop("sha256")
         self.assertEqual(digest, hashlib.sha256(self.canonical(unsigned)).hexdigest())
         rendered = response["raw"].decode("utf-8")
-        self.assertNotIn("source_text", rendered)
-        self.assertNotIn("target_text", rendered)
+        self.assertNotIn(cms_support.event()["localization"]["source_text"], rendered)
+        self.assertEqual(
+            capabilities["commercial_rendering_registry"]["content_policy"],
+            {
+                "credentials": False,
+                "project_brands": False,
+                "project_prices": False,
+                "source_text": False,
+                "target_text": False,
+            },
+        )
 
     def test_openapi_is_capability_bound_origin_free_and_content_free(self):
         self.open()
@@ -222,9 +296,450 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             self.assertEqual(described["x-authentication-scope"], operation["scope"])
             self.assertEqual(described["x-principal-schema"], operation["principal_schema"])
             self.assertEqual(described["x-success-status"], operation["success_status"])
+            self.assertEqual(described["x-error-statuses"], operation["error_statuses"])
+            self.assertEqual(described["x-error-codes"], operation["error_codes"])
+            self.assertEqual(
+                described["x-response-invariants"],
+                operation["response_invariants"],
+            )
+            self.assertEqual(
+                set(described["responses"]),
+                {str(operation["success_status"]), *map(str, operation["error_statuses"])},
+            )
+            self.assertNotIn("default", described["responses"])
         rendered = response["raw"].decode("utf-8")
-        for private in ("source_text", "target_text", "Bearer test", "site-1"):
+        for private in (
+            cms_support.event()["localization"]["source_text"],
+            "Bearer test", "site-1",
+        ):
             self.assertNotIn(private, rendered)
+
+    def test_commercial_profile_is_exact_closed_and_live_bound(self):
+        self.open()
+        response = self.call(HTTP.COMMERCIAL_PROFILE_PATH)
+
+        self.assertEqual(response["status"], 200)
+        payload = response["json"]
+        self.assertEqual(
+            set(payload),
+            {
+                "schema", "api_schema", "commercial_profile",
+                "commercial_rendering_registry", "website_capability_binding",
+                "capabilities_sha256", "content_free",
+                "publication_authority",
+            },
+        )
+        self.assertTrue(payload["content_free"])
+        self.assertFalse(payload["publication_authority"])
+        self.assertEqual(len(payload["commercial_profile"]["dimensions"]), 10)
+        locales = [
+            item["locale"]
+            for item in payload["commercial_rendering_registry"]["locales"]
+        ]
+        self.assertEqual(tuple(locales), HTTP._OPENAPI.EU_TARGET_LOCALES)
+        self.assertIn("mt-MT", locales)
+        self.assertIn("fi-FI", locales)
+        self.assertEqual(
+            payload["website_capability_binding"]
+            ["commercial_rendering_registry_sha256"],
+            payload["commercial_rendering_registry"]["sha256"],
+        )
+        schemas = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"][
+            "components"
+        ]["schemas"]
+        operation = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]["paths"][
+            HTTP.COMMERCIAL_PROFILE_PATH
+        ]["get"]
+        self.assertEqual(
+            operation["operationId"], "readCommercialLocalizationProfile"
+        )
+        self.assertNotIn("requestBody", operation)
+        for name in (
+            "CommercialProfile", "CommercialRenderingRegistry",
+            "CommercialProfileResponse",
+        ):
+            self.assertFalse(schemas[name]["additionalProperties"], name)
+            self.assertEqual(
+                set(schemas[name]["required"]),
+                set(schemas[name]["properties"]),
+                name,
+            )
+
+        self.runtime.commercial_profile = lambda: object()
+        blocked = self.call(HTTP.COMMERCIAL_PROFILE_PATH)
+        self.assertEqual(
+            (blocked["status"], blocked["json"]["error_code"]),
+            (503, "submission_dispatch_http.runtime_response_invalid"),
+        )
+
+    def test_commercial_enqueue_requires_exact_discovered_contract_binding(self):
+        self.open()
+        commercial = cms_support.event()
+        commercial["localization"]["content_type"] = "commercial"
+        expected = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )["commercial_contract_binding"]
+
+        accepted = self.enqueue(commercial)
+        missing = self.enqueue(
+            {**commercial, "event_id": "commercial-missing"},
+            commercial_contract_binding=None,
+        )
+        wrong = dict(expected)
+        wrong["commercial_profile_sha256"] = "0" * 64
+        substituted = self.enqueue(
+            {**commercial, "event_id": "commercial-substituted"},
+            commercial_contract_binding=wrong,
+        )
+        ordinary = cms_support.event()
+        ordinary["event_id"] = "ordinary-injected"
+        ordinary["localization"]["content_type"] = "marketing"
+        injected = self.enqueue(
+            ordinary, commercial_contract_binding=expected,
+        )
+
+        self.assertEqual(accepted["status"], 202)
+        self.assertEqual(
+            accepted["json"]["status"]["commercial_contract_binding"],
+            expected,
+        )
+        queued = accepted["json"]["status"]
+        status = self.call(HTTP.STATUS_PATH, body={
+            "schema": HTTP.STATUS_REQUEST_SCHEMA,
+            **{name: queued[name] for name in (
+                "operation", "request_id", "event_id", "site_id",
+                "payload_sha256",
+            )},
+        })
+        self.assertEqual(
+            status["json"]["status"]["commercial_contract_binding"],
+            expected,
+        )
+        for response in (missing, substituted, injected):
+            self.assertEqual(
+                (response["status"], response["json"]["error_code"]),
+                (400, "submission_dispatch_http.binding_invalid"),
+            )
+        schemas = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"][
+            "components"
+        ]["schemas"]
+        self.assertEqual(
+            schemas["CommercialContractBinding"],
+            HTTP._OPENAPI._exact_schema(expected),
+        )
+        self.assertEqual(
+            schemas["SubmissionStatus"]["properties"][
+                "commercial_contract_binding"
+            ]["oneOf"][0],
+            {"$ref": "#/components/schemas/CommercialContractBinding"},
+        )
+        self.assertEqual(len(schemas["EnqueueRequest"]["allOf"]), 1)
+
+    def test_openapi_describes_all_three_exact_source_payloads(self):
+        self.open()
+        document = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]
+        schemas = document["components"]["schemas"]
+        contracts = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )["source_payload_schemas"]
+
+        self.assertEqual(schemas["SourcePayload"]["oneOf"], [
+            {"$ref": "#/components/schemas/ContentChange"},
+            {"$ref": "#/components/schemas/ContentCancellation"},
+            {"$ref": "#/components/schemas/ContentTombstone"},
+        ])
+        self.assertEqual(
+            set(schemas["SourcePayload"]["discriminator"]["mapping"]),
+            set(contracts.values()),
+        )
+        fixtures = {
+            "ContentChange": cms_support.event(),
+            "ContentCancellation": cms_support.cancellation(),
+            "ContentTombstone": cms_support.tombstone(),
+        }
+        for name, fixture in fixtures.items():
+            schema = schemas[name]
+            self.assertFalse(schema["additionalProperties"])
+            self.assertEqual(set(schema["required"]), set(fixture))
+            self.assertEqual(set(schema["properties"]), set(fixture))
+            self.assertEqual(
+                schema["properties"]["schema"]["const"], fixture["schema"]
+            )
+
+        localization = schemas["LocalizationRequest"]
+        self.assertFalse(localization["additionalProperties"])
+        self.assertEqual(
+            set(localization["properties"]),
+            set(cms_support.event()["localization"]),
+        )
+        self.assertNotIn("target_locales", localization["required"])
+        target = localization["properties"]["target_locales"]
+        self.assertTrue(target["uniqueItems"])
+        self.assertTrue(target["x-source-language-excluded"])
+        self.assertEqual(tuple(target["items"]["enum"]), HTTP._OPENAPI.EU_TARGET_LOCALES)
+        self.assertEqual(len(target["items"]["enum"]), 24)
+        self.assertTrue(localization["properties"]["source_locale"]["x-canonical-bcp47"])
+        self.assertEqual(
+            localization["properties"]["source_text"]["x-max-utf8-bytes"],
+            1_000_000,
+        )
+
+    def test_openapi_capabilities_schema_is_recursively_exact_and_closed(self):
+        self.open()
+        response = self.call(HTTP.OPENAPI_PATH)["json"]
+        document = response["openapi"]
+        capabilities = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )
+        schema = document["components"]["schemas"]["Capabilities"]
+
+        def assert_exact(described, value):
+            if isinstance(value, dict):
+                self.assertEqual(described["type"], "object")
+                self.assertFalse(described["additionalProperties"])
+                self.assertEqual(described["required"], sorted(value))
+                self.assertEqual(set(described["properties"]), set(value))
+                for name, content in value.items():
+                    assert_exact(described["properties"][name], content)
+                return
+            if value is None:
+                self.assertEqual(described, {"type": "null"})
+                return
+            if isinstance(value, list):
+                self.assertEqual(described["type"], "array")
+                self.assertFalse(described["items"])
+                self.assertEqual(described["minItems"], len(value))
+                self.assertEqual(described["maxItems"], len(value))
+                self.assertEqual(len(described["prefixItems"]), len(value))
+                for item_schema, item in zip(described["prefixItems"], value):
+                    assert_exact(item_schema, item)
+                return
+            expected_type = (
+                "boolean" if isinstance(value, bool)
+                else "integer" if isinstance(value, int)
+                else "number" if isinstance(value, float)
+                else "string"
+            )
+            self.assertEqual(described, {"type": expected_type, "const": value})
+
+        core = {
+            name: value for name, value in schema.items()
+            if name not in {"description", "x-capabilities-sha256"}
+        }
+        assert_exact(core, capabilities)
+        self.assertEqual(
+            document["components"]["schemas"]["CapabilitiesResponse"]
+            ["properties"]["capabilities"],
+            {"$ref": "#/components/schemas/Capabilities"},
+        )
+        self.assertEqual(
+            capabilities["openapi_document_schema"], document["x-schema"]
+        )
+        self.assertEqual(schema["x-capabilities-sha256"], capabilities["sha256"])
+
+    def test_openapi_models_exact_errors_and_degraded_monitor_responses(self):
+        self.open()
+        document = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]
+        capabilities = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )
+
+        for name, operation in capabilities["operations"].items():
+            described = document["paths"][operation["path"]][
+                operation["method"].lower()
+            ]
+            for status in operation["error_statuses"]:
+                schema = described["responses"][str(status)]["content"][
+                    "application/json"
+                ]["schema"]
+                codes = operation["error_codes"][str(status)]
+                self.assertEqual(
+                    described["responses"][str(status)]["x-error-codes"],
+                    codes,
+                )
+                if name in {"health", "readiness"} and status == 503:
+                    expected = name.title() + "Response"
+                    self.assertEqual(
+                        schema["oneOf"][0],
+                        {"$ref": "#/components/schemas/" + expected},
+                    )
+                    error_schema = schema["oneOf"][1]
+                else:
+                    error_schema = schema
+                self.assertFalse(error_schema["additionalProperties"])
+                self.assertEqual(
+                    error_schema["properties"]["error_code"]["enum"], codes,
+                )
+        all_codes = sorted({
+            code
+            for operation in capabilities["operations"].values()
+            for codes in operation["error_codes"].values()
+            for code in codes
+        })
+        self.assertEqual(
+            document["components"]["schemas"]["Error"]["properties"]
+            ["error_code"]["enum"],
+            all_codes,
+        )
+
+    def test_openapi_requires_the_capability_precondition_except_for_discovery(self):
+        self.open()
+        document = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]
+        capabilities = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )
+
+        for name, contract in capabilities["operations"].items():
+            operation = document["paths"][contract["path"]][
+                contract["method"].lower()
+            ]
+            parameters = operation.get("parameters", [])
+            matches = [
+                item for item in parameters
+                if item["name"] == HTTP.CAPABILITIES_PRECONDITION_HEADER
+            ]
+            self.assertEqual(len(matches), 0 if name == "capabilities" else 1)
+            if matches:
+                self.assertTrue(matches[0]["required"])
+                self.assertEqual(
+                    matches[0]["schema"],
+                    {"$ref": "#/components/schemas/Sha256"},
+                )
+
+    def test_missing_or_stale_capability_precondition_blocks_before_runtime(self):
+        self.open()
+        payload = cms_support.event()
+        request = self.enqueue_request(payload)
+        _copy, identity, canonical = HTTP._DISPATCH._payload(payload)
+        base_headers = {
+            "Idempotency-Key": identity["request_id"],
+            "X-Localization-Source-Payload-SHA256": hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest(),
+        }
+
+        with mock.patch.object(
+            self.runtime, "enqueue", wraps=self.runtime.enqueue,
+        ) as enqueue:
+            missing = self.call(
+                HTTP.ENQUEUE_PATH, body=request, headers=base_headers,
+                bind_capabilities=False,
+            )
+            stale = self.call(
+                HTTP.ENQUEUE_PATH, body=request,
+                headers={
+                    **base_headers,
+                    HTTP.CAPABILITIES_PRECONDITION_HEADER: "0" * 64,
+                },
+                bind_capabilities=False,
+            )
+
+        self.assertEqual(
+            (missing["status"], missing["json"]["error_code"]),
+            (428, "submission_dispatch_http.capabilities_precondition_required"),
+        )
+        self.assertEqual(
+            (stale["status"], stale["json"]["error_code"]),
+            (412, "submission_dispatch_http.capabilities_precondition_failed"),
+        )
+        enqueue.assert_not_called()
+        self.assertEqual(len(self.authenticator.calls), 2)
+        with self.assertRaises(
+            RUNTIME.CMSSourceDeliverySubmissionDispatchRuntimeBlocked
+        ):
+            self.runtime.status("change", payload["event_id"])
+
+    def test_openapi_encodes_runtime_state_invariants(self):
+        self.open()
+        schemas = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"][
+            "components"
+        ]["schemas"]
+
+        status = schemas["SubmissionStatus"]
+        self.assertEqual(status["x-invariants"], [
+            "attempts_lte_client_max_attempts",
+            "leased_iff_lease_expires_at",
+            "accepted_iff_remote_website_binding_complete_and_valid",
+            "accepted_commercial_contract_matches_remote_registry",
+        ])
+        self.assertEqual(
+            status["allOf"][0]["then"]["properties"]["lease_expires_at"]["type"],
+            "number",
+        )
+        self.assertEqual(
+            status["allOf"][0]["else"]["properties"]["lease_expires_at"],
+            {"type": "null"},
+        )
+        self.assertEqual(
+            status["allOf"][1]["then"]["properties"]["remote_status"]["type"],
+            "string",
+        )
+        website_binding = schemas["WebsiteCapabilityBinding"]
+        self.assertFalse(website_binding["additionalProperties"])
+        self.assertEqual(
+            set(website_binding["properties"]),
+            {
+                "binding_sha256", "commercial_rendering_registry_sha256",
+                "database_role", "delivery_capabilities_sha256",
+                "runtime_capabilities_sha256", "schema", "status",
+                "terminal_receiver_capabilities_sha256",
+            },
+        )
+        self.assertEqual(
+            status["allOf"][1]["then"]["properties"][
+                "remote_website_capability_binding"
+            ],
+            {"$ref": "#/components/schemas/WebsiteCapabilityBinding"},
+        )
+        self.assertEqual(
+            schemas["Health"]["allOf"][0]["then"]["properties"]["failed"],
+            {"const": 0},
+        )
+        ready = schemas["Readiness"]["oneOf"]
+        self.assertEqual(ready[0]["properties"]["worker_state"], {"const": "running"})
+        self.assertEqual(ready[0]["properties"]["error_code"], {"type": "null"})
+        self.assertEqual(
+            ready[1]["properties"]["error_code"],
+            {"$ref": "#/components/schemas/ErrorCode"},
+        )
+
+    def test_openapi_closes_the_complete_lifecycle_contract(self):
+        self.open()
+        document = self.call(HTTP.OPENAPI_PATH)["json"]["openapi"]
+        schemas = document["components"]["schemas"]
+        operation = document["paths"][HTTP.LIFECYCLE_PATH]["post"]
+
+        self.assertEqual(operation["operationId"], "readSubmissionLifecycle")
+        self.assertEqual(
+            operation["requestBody"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/LifecycleRequest"},
+        )
+        self.assertIn("409", operation["responses"])
+        self.assertEqual(
+            operation["responses"]["409"]["x-error-codes"],
+            ["submission_dispatch_http.lifecycle_not_accepted"],
+        )
+        for name in (
+            "LifecycleRequest", "LifecycleResponse", "SourceLifecycle",
+            "DownstreamSubmissionStatus", "SourceServiceStatus",
+            "SourceCapabilityBinding",
+        ):
+            self.assertFalse(schemas[name]["additionalProperties"], name)
+            self.assertEqual(
+                set(schemas[name]["required"]),
+                set(schemas[name]["properties"]),
+                name,
+            )
+        nested = schemas["LifecycleResponse"]["properties"]["lifecycle"]
+        self.assertFalse(nested["additionalProperties"])
+        self.assertEqual(
+            nested["properties"]["source_lifecycle"],
+            {"$ref": "#/components/schemas/SourceLifecycle"},
+        )
+        self.assertFalse(
+            schemas["SourceLifecycle"]["properties"]["result"]
+            ["additionalProperties"]
+        )
 
     def test_enqueue_commits_before_202_and_status_requires_full_identity(self):
         self.open()
@@ -234,6 +749,7 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertFalse(accepted["json"]["accepted_implies_publication"])
         status = accepted["json"]["status"]
         self.assertEqual(status["status"], "pending")
+        self.assertIsNone(status["remote_website_capability_binding"])
         self.assertEqual(
             (
                 status["source_max_attempts"],
@@ -261,6 +777,126 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
         self.assertNotIn(
             cms_support.event()["localization"]["source_text"],
             found["raw"].decode("utf-8"),
+        )
+
+    def test_accepted_status_exposes_only_the_verified_website_binding(self):
+        self.open()
+        queued = self.enqueue()["json"]["status"]
+        with self.runtime._lock:
+            self.runtime._dispatcher.run_once(
+                self.runtime._client, "manual-test-worker", now=self.now,
+            )
+        query = {
+            "schema": HTTP.STATUS_REQUEST_SCHEMA,
+            **{
+                key: queued[key]
+                for key in (
+                    "operation", "request_id", "event_id", "site_id",
+                    "payload_sha256",
+                )
+            },
+        }
+        accepted = self.call(HTTP.STATUS_PATH, body=query)
+        status = accepted["json"]["status"]
+        expected = self.support.runtime.submission_capabilities().as_payload()[
+            "website_capability_binding"
+        ]
+        self.assertEqual(accepted["status"], 200)
+        self.assertEqual(status["status"], "accepted")
+        self.assertEqual(status["remote_website_capability_binding"], expected)
+
+        different_registry = dict(expected)
+        different_registry["commercial_rendering_registry_sha256"] = "0" * 64
+        different_registry["binding_sha256"] = hashlib.sha256("\x00".join((
+            different_registry["schema"], different_registry["database_role"],
+            different_registry["delivery_capabilities_sha256"],
+            different_registry["runtime_capabilities_sha256"],
+            different_registry["commercial_rendering_registry_sha256"],
+            different_registry["terminal_receiver_capabilities_sha256"],
+        )).encode("utf-8")).hexdigest()
+        mismatched_status = dataclasses.replace(
+            self.runtime.status(queued["operation"], queued["request_id"]),
+            remote_website_capability_binding=different_registry,
+            remote_binding_sha256=hashlib.sha256(
+                self.canonical(different_registry)
+            ).hexdigest(),
+        )
+        with self.assertRaises(
+            HTTP.CMSSourceDeliverySubmissionDispatchHTTPBlocked,
+        ) as mismatched:
+            HTTP._status_payload(mismatched_status)
+        self.assertEqual(
+            (mismatched.exception.code, mismatched.exception.status),
+            ("submission_dispatch_http.runtime_response_invalid", 503),
+        )
+
+        invalid_binding = dict(expected)
+        invalid_binding["terminal_receiver_capabilities_sha256"] = "0" * 64
+        invalid_status = dataclasses.replace(
+            self.runtime.status(queued["operation"], queued["request_id"]),
+            remote_website_capability_binding=invalid_binding,
+        )
+        with mock.patch.object(
+            self.runtime, "status", return_value=invalid_status,
+        ):
+            blocked = self.call(HTTP.STATUS_PATH, body=query)
+        self.assertEqual(blocked["status"], 404)
+        self.assertEqual(
+            blocked["json"]["error_code"],
+            "submission_dispatch_http.submission_not_found",
+        )
+
+    def test_lifecycle_crosses_the_outer_tenant_edge_fail_closed(self):
+        self.open()
+        queued = self.enqueue()["json"]["status"]
+        identity = {
+            key: queued[key] for key in (
+                "operation", "request_id", "event_id", "site_id",
+                "payload_sha256",
+            )
+        }
+        request = {"schema": HTTP.LIFECYCLE_REQUEST_SCHEMA, **identity}
+
+        pending = self.call(HTTP.LIFECYCLE_PATH, body=request)
+        self.assertEqual(pending["status"], 409)
+        self.assertEqual(
+            pending["json"]["error_code"],
+            "submission_dispatch_http.lifecycle_not_accepted",
+        )
+
+        with self.runtime._lock:
+            self.runtime._dispatcher.run_once(
+                self.runtime._client, "manual-lifecycle-worker", now=self.now,
+            )
+        response = self.call(HTTP.LIFECYCLE_PATH, body=request)
+        self.assertEqual(response["status"], 200)
+        self.assertFalse(response["json"]["accepted_implies_publication"])
+        lifecycle = response["json"]["lifecycle"]
+        self.assertEqual(lifecycle["dispatch_status"]["status"], "accepted")
+        self.assertEqual(
+            lifecycle["source_lifecycle"]["result"]["submission"]["event_id"],
+            identity["event_id"],
+        )
+        self.assertEqual(
+            lifecycle["source_lifecycle"]["result"]
+            ["website_capability_binding"],
+            lifecycle["dispatch_status"]
+            ["remote_website_capability_binding"],
+        )
+        self.assertNotIn("source_text", response["raw"].decode("utf-8"))
+        self.assertNotIn("target_text", response["raw"].decode("utf-8"))
+
+        self.authenticator.site_id = "another-site"
+        hidden = self.call(HTTP.LIFECYCLE_PATH, body=request)
+        self.assertEqual(hidden["status"], 404)
+
+        self.authenticator.site_id = identity["site_id"]
+        self.runtime.lifecycle = lambda operation, request_id: object()
+        malformed = self.call(HTTP.LIFECYCLE_PATH, body=request)
+        self.assertEqual(malformed["status"], 503)
+        self.assertEqual(
+            malformed["json"]["error_code"],
+            "submission_dispatch_http.runtime_response_invalid",
         )
 
     def test_change_cancellation_and_tombstone_are_independent_durable_rows(self):
@@ -449,6 +1085,39 @@ class SubmissionDispatchHTTPTests(unittest.TestCase):
             self.assertEqual(response["status"], expected)
             self.assertEqual(response["json"]["status"], "BLOCK")
             self.assertEqual(response["headers"]["Cache-Control"], "no-store")
+
+    def test_bodyless_framing_failures_match_advertised_statuses_and_codes(self):
+        self.open()
+        cases = (
+            ("invalid", 411, "submission_dispatch_http.content_length_required"),
+            (str(HTTP.MAX_BODY_BYTES + 1), 413, "submission_dispatch_http.body_too_large"),
+        )
+        contract = HTTP._capabilities_payload(
+            self.runtime.expected_capabilities_sha256
+        )["operations"]["capabilities"]
+        for content_length, status, code in cases:
+            with self.subTest(status=status):
+                response = self.call(
+                    HTTP.CAPABILITIES_PATH, content_length=content_length,
+                )
+                self.assertEqual(response["status"], status)
+                self.assertEqual(response["json"]["error_code"], code)
+                self.assertIn(status, contract["error_statuses"])
+                self.assertIn(code, contract["error_codes"][str(status)])
+
+    def test_unadvertised_internal_error_is_not_serialized(self):
+        self.open()
+        with mock.patch.object(
+            HTTP, "_health_payload",
+            side_effect=HTTP._blocked("unadvertised_failure", 400),
+        ):
+            response = self.call(HTTP.HEALTH_PATH)
+
+        self.assertEqual(response["status"], 503)
+        self.assertEqual(
+            response["json"]["error_code"],
+            "submission_dispatch_http.runtime_blocked",
+        )
 
     def test_invalid_http_authenticator_creates_no_database(self):
         with self.assertRaises(

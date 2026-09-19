@@ -372,7 +372,21 @@ class SourceDeliveryHTTPTests(unittest.TestCase):
         )
 
         self.assertEqual((first[0], replay[0]), ("202 Accepted", "202 Accepted"))
-        self.assertEqual(first[2], replay[2])
+        # These are live queue snapshots: the worker may advance between calls.
+        # Idempotency preserves identity and policy, not mutable delivery status.
+        for field in ("operation", "request_id", "event_id", "site_id",
+                      "payload_sha256", "remote_capabilities_sha256",
+                      "source_max_attempts", "delivery_max_attempts"):
+            self.assertEqual(first[2]["queue"][field], replay[2]["queue"][field])
+        self.assertEqual(
+            {key: value for key, value in first[2].items() if key != "queue"},
+            {key: value for key, value in replay[2].items() if key != "queue"},
+        )
+        with self.runtime._lock:
+            count = self.runtime._connection.execute(
+                "SELECT COUNT(*) FROM cms_source_delivery_outbox"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
         self.assertEqual(conflict[0], "409 Conflict")
         self.assertEqual(
             conflict[2]["error_code"],

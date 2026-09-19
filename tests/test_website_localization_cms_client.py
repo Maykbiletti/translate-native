@@ -314,6 +314,36 @@ class CMSLocalizationHTTPClientTests(unittest.TestCase):
         self.assertTrue(caught.exception.retryable)
         self.assertNotIn("private", str(caught.exception))
 
+    def test_lifecycle_policy_outage_is_retryable_but_drift_is_terminal(self):
+        def blocked(code):
+            def fail(*_args, **_kwargs):
+                raise CMS.CMSBridgeBlocked(code)
+            return fail
+
+        original = self.bridge.change_lifecycle
+        try:
+            self.bridge.change_lifecycle = blocked(
+                "cms.release.policy_unavailable",
+            )
+            with self.assertRaises(CLIENT.CMSClientFailed) as unavailable:
+                self.client.lifecycle("event-1", "site-1")
+            self.assertEqual(
+                (unavailable.exception.code, unavailable.exception.retryable),
+                ("cms.release.policy_unavailable", True),
+            )
+
+            self.bridge.change_lifecycle = blocked(
+                "cms.release.integrity_failed",
+            )
+            with self.assertRaises(CLIENT.CMSClientFailed) as stale:
+                self.client.lifecycle("event-1", "site-1")
+            self.assertEqual(
+                (stale.exception.code, stale.exception.retryable),
+                ("cms.release.integrity_failed", False),
+            )
+        finally:
+            self.bridge.change_lifecycle = original
+
     def test_prequeue_recovery_progress_remains_observable(self):
         enqueue_plan = self.queue.enqueue_plan
 
@@ -495,6 +525,30 @@ class CMSLocalizationHTTPClientTests(unittest.TestCase):
 
         with self.assertRaises(CLIENT.CMSClientFailed) as caught:
             client.capabilities(request_id="self-rehashed-registry-1")
+
+        self.assertEqual(caught.exception.code, "response_binding")
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_self_rehashed_release_evidence_contract_substitution_blocks(self):
+        def substitute_contract(result):
+            def transform(value):
+                capabilities = value["capabilities"]
+                publication = capabilities["publication_http"]
+                contract = publication["release_evidence_contract"]
+                contract["bindings"]["lineage_fields"].pop()
+                rehash(contract)
+                rehash(publication)
+                rehash(capabilities)
+            return replace_json(result, transform)
+
+        transport = TransformingTransport(self.transport, substitute_contract)
+        client = CLIENT.CMSLocalizationHTTPClient(
+            "https://localization.example.test", lambda: {}, self.authority,
+            transport=transport, clock=lambda: 100,
+        )
+
+        with self.assertRaises(CLIENT.CMSClientFailed) as caught:
+            client.capabilities(request_id="self-rehashed-release-contract-1")
 
         self.assertEqual(caught.exception.code, "response_binding")
         self.assertEqual(len(transport.calls), 1)

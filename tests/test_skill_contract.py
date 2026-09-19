@@ -85,9 +85,12 @@ class SkillContractTests(unittest.TestCase):
             with self.subTest(document=content[:40]):
                 self.assertIn("release_response", content)
                 self.assertIn("release_translation", content)
+                self.assertIn("rewrite_text", content)
         self.assertIn("task_kind: translation", skill)
         self.assertIn("host", skill.casefold())
         self.assertIn("translate-native", rules)
+        self.assertIn("task_kind: rewrite", skill)
+        self.assertIn("rewrite_context_token", rules)
 
     def test_claude_persistent_http_mcp_is_part_of_the_contract(self) -> None:
         skill = SKILL.read_text(encoding="utf-8")

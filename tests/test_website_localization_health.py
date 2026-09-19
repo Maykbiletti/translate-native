@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,8 @@ RELEASE = CMS._RELEASE
 QUEUE = CMS._QUEUE
 WORKER = RELEASE._WORKER
 COORDINATOR = HEALTH._COORDINATOR
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 
 
 class CMSAuthority:
@@ -163,6 +166,74 @@ class SupervisorProbe:
         }
 
 
+class BenchmarkWatcherProbe:
+    def __init__(self, payload, *, schema_valid=True):
+        self.connection = sqlite3.connect(":memory:")
+        self.payload = payload
+        self.schema_valid = schema_valid
+        self.calls = []
+
+    def _validate_schema(self):
+        if not self.schema_valid:
+            raise RuntimeError("private watcher schema diagnostic")
+
+    def health(self, *, now):
+        self.calls.append(now)
+        return json.loads(json.dumps(self.payload))
+
+
+def benchmark_watcher_health(*, now=250.0, state="pending", report_status=None):
+    report = None
+    reasons = []
+    status = "degraded"
+    ready = state == "succeeded"
+    due = state in {"pending", "retry_wait"}
+    last_error_code = None
+    if state == "pending":
+        reasons.append("benchmark_watcher.pending")
+    elif state == "retry_wait":
+        reasons.append("benchmark_watcher.retry_wait")
+        last_error_code = "benchmark_client.network"
+    elif state == "failed":
+        reasons.append("benchmark_watcher.failed")
+        last_error_code = "benchmark_client.policy_mismatch"
+        status = "blocked"
+        due = False
+    elif state == "succeeded":
+        due = False
+        status = "healthy" if report_status == "PASS" else "blocked"
+        block_reasons = (
+            [] if report_status == "PASS"
+            else ["configured_locale_evaluation_failed"]
+        )
+        if report_status == "BLOCK":
+            reasons.append("benchmark_watcher.report_blocked")
+        report = {
+            "sha256": "a" * 64,
+            "status": report_status,
+            "superiority_claim_allowed": report_status == "PASS",
+            "block_reasons": block_reasons,
+            "locale_count": 24,
+            "completed_at": now - 1,
+        }
+    return {
+        "schema": HEALTH.BENCHMARK_WATCHER_SCHEMA,
+        "checked_at": now,
+        "status": status,
+        "state": state,
+        "ready": ready,
+        "due": due,
+        "active_lease": False,
+        "lease_expired": False,
+        "attempts": 1 if state != "pending" else 0,
+        "max_attempts": 3,
+        "next_action_at": now,
+        "last_error_code": last_error_code,
+        "report": report,
+        "watcher_reasons": reasons,
+    }
+
+
 def event():
     return {
         "schema": CMS.CHANGE_SCHEMA,
@@ -223,6 +294,9 @@ def completed_result(job, candidate):
             "sha256": payload["target"]["quality_profile_sha256"],
         },
         "commercial_review": None,
+        "commercial_review_routing": None,
+        "commercial_review_routing_contract_sha256": None,
+        "commercial_review_resolution_contract_sha256": None,
         "human_review_required": False,
         "independent_review_required": False,
         "release_required": True,
@@ -324,6 +398,8 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
                 "quality-receipt",
                 self.receipt_verifier,
                 self.approval_authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
                 ttl_seconds=ttl,
             )
@@ -355,6 +431,20 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             now=now,
         )
 
+    def report_with_watcher(self, watcher, *, now=250):
+        monitor = HEALTH.LocalizationHealthMonitor(
+            self.bridge,
+            self.evidence_state,
+            benchmark_report_watcher=watcher,
+        )
+        return monitor.check(
+            event_verifier=self.event_authority,
+            approval_authority=self.approval_authority,
+            publication_authority=self.publication_authority,
+            provider_probe=self.probe,
+            now=now,
+        )
+
     @staticmethod
     def component(report, name):
         return next(item for item in report.components if item.component == name)
@@ -377,6 +467,236 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             dict(self.component(report, "evidence").counts),
             {status: 0 for status in HEALTH.EVIDENCE_STATUSES},
         )
+
+    def test_pending_benchmark_report_watcher_is_visible_and_read_only(self):
+        watcher = BenchmarkWatcherProbe(benchmark_watcher_health())
+        try:
+            before = watcher.connection.total_changes
+            report = self.report_with_watcher(watcher)
+            after = watcher.connection.total_changes
+
+            component = self.component(report, "benchmark_report_watcher")
+            self.assertEqual(report.status, "degraded")
+            self.assertEqual(component.status, "degraded")
+            self.assertEqual(component.reasons, ("benchmark_watcher.pending",))
+            self.assertEqual(dict(component.counts)["pending"], 1)
+            self.assertEqual(dict(component.counts)["due"], 1)
+            self.assertEqual(watcher.calls, [250.0])
+            self.assertEqual(before, after)
+            self.assertEqual(
+                dict(self.component(report, "storage").counts)["connections"],
+                5,
+            )
+        finally:
+            watcher.connection.close()
+
+    def test_verified_benchmark_pass_is_healthy_but_block_remains_blocking(self):
+        scenarios = (
+            ("PASS", "healthy", ()),
+            (
+                "BLOCK",
+                "blocked",
+                (
+                    "benchmark_watcher.report_blocked",
+                    "configured_locale_evaluation_failed",
+                ),
+            ),
+        )
+        for report_status, expected_status, expected_reasons in scenarios:
+            with self.subTest(report_status=report_status):
+                watcher = BenchmarkWatcherProbe(benchmark_watcher_health(
+                    state="succeeded", report_status=report_status,
+                ))
+                try:
+                    report = self.report_with_watcher(watcher)
+                    component = self.component(
+                        report, "benchmark_report_watcher",
+                    )
+                    counts = dict(component.counts)
+                    self.assertEqual(report.status, expected_status)
+                    self.assertEqual(component.status, expected_status)
+                    self.assertEqual(component.reasons, expected_reasons)
+                    self.assertEqual(counts["succeeded"], 1)
+                    self.assertEqual(counts["report_ready"], 1)
+                    self.assertEqual(counts["locale_count"], 24)
+                finally:
+                    watcher.connection.close()
+
+    def test_retry_failure_and_lease_states_map_exactly(self):
+        retrying = benchmark_watcher_health(state="retry_wait")
+        failed = benchmark_watcher_health(state="failed")
+        leased = benchmark_watcher_health()
+        leased.update({
+            "state": "leased",
+            "due": False,
+            "active_lease": True,
+            "attempts": 1,
+            "next_action_at": 260.0,
+            "watcher_reasons": [],
+        })
+        expired = json.loads(json.dumps(leased))
+        expired.update({
+            "due": True,
+            "active_lease": False,
+            "lease_expired": True,
+            "next_action_at": 249.0,
+            "watcher_reasons": ["benchmark_watcher.lease_expired"],
+        })
+        scenarios = (
+            (retrying, "degraded", "retry_wait", 0),
+            (failed, "blocked", "failed", 0),
+            (leased, "degraded", "leased", 1),
+            (expired, "degraded", "leased", 0),
+        )
+        for payload, expected_status, state, active in scenarios:
+            with self.subTest(state=state, active=active):
+                watcher = BenchmarkWatcherProbe(payload)
+                try:
+                    report = self.report_with_watcher(watcher)
+                    component = self.component(
+                        report, "benchmark_report_watcher",
+                    )
+                    counts = dict(component.counts)
+                    self.assertEqual(component.status, expected_status)
+                    self.assertEqual(counts[state], 1)
+                    self.assertEqual(counts["active_lease"], active)
+                    self.assertEqual(report.status, expected_status)
+                finally:
+                    watcher.connection.close()
+
+    def test_watcher_consistency_forgery_always_fails_closed(self):
+        scenarios = []
+        wrong_status = benchmark_watcher_health()
+        wrong_status["status"] = "healthy"
+        scenarios.append(wrong_status)
+        wrong_due = benchmark_watcher_health()
+        wrong_due["due"] = False
+        scenarios.append(wrong_due)
+        wrong_claim = benchmark_watcher_health(
+            state="succeeded", report_status="PASS",
+        )
+        wrong_claim["report"]["superiority_claim_allowed"] = False
+        scenarios.append(wrong_claim)
+        wrong_digest = benchmark_watcher_health(
+            state="succeeded", report_status="PASS",
+        )
+        wrong_digest["report"]["sha256"] = "not-a-digest"
+        scenarios.append(wrong_digest)
+        wrong_reasons = benchmark_watcher_health(state="failed")
+        wrong_reasons["watcher_reasons"] = []
+        scenarios.append(wrong_reasons)
+
+        for index, payload in enumerate(scenarios):
+            with self.subTest(index=index):
+                watcher = BenchmarkWatcherProbe(payload)
+                try:
+                    report = self.report_with_watcher(watcher)
+                    component = self.component(
+                        report, "benchmark_report_watcher",
+                    )
+                    self.assertEqual(report.status, "blocked")
+                    self.assertEqual(
+                        component.reasons,
+                        ("benchmark_watcher.state_invalid",),
+                    )
+                finally:
+                    watcher.connection.close()
+
+    def test_invalid_or_prose_bearing_watcher_state_fails_closed_without_echo(self):
+        malformed = benchmark_watcher_health()
+        malformed["private_campaign_text"] = "secret benchmark prose"
+        watcher = BenchmarkWatcherProbe(malformed)
+        try:
+            report = self.report_with_watcher(watcher)
+            component = self.component(report, "benchmark_report_watcher")
+            self.assertEqual(report.status, "blocked")
+            self.assertEqual(component.status, "blocked")
+            self.assertEqual(
+                component.reasons,
+                ("benchmark_watcher.state_invalid",),
+            )
+            self.assertNotIn(
+                "secret benchmark prose",
+                json.dumps(report.as_payload()),
+            )
+        finally:
+            watcher.connection.close()
+
+    def test_watcher_schema_failure_blocks_storage_and_never_hides_state(self):
+        watcher = BenchmarkWatcherProbe(
+            benchmark_watcher_health(), schema_valid=False,
+        )
+        try:
+            report = self.report_with_watcher(watcher)
+            self.assertEqual(report.status, "blocked")
+            self.assertIn(
+                "benchmark_watcher.schema_invalid",
+                self.component(report, "storage").reasons,
+            )
+            self.assertEqual(
+                self.component(report, "benchmark_report_watcher").status,
+                "degraded",
+            )
+        finally:
+            watcher.connection.close()
+
+    def test_incomplete_benchmark_report_watcher_dependency_is_rejected(self):
+        with self.assertRaisesRegex(
+            HEALTH.LocalizationHealthBlocked,
+            "benchmark report watcher is invalid",
+        ):
+            HEALTH.LocalizationHealthMonitor(
+                self.bridge,
+                self.evidence_state,
+                benchmark_report_watcher=object(),
+            )
+
+    def test_commercial_contract_stale_queue_job_blocks_read_only_health(self):
+        plan = PLANNER.plan_website_localization(
+            source_id="pricing", source_revision="1",
+            source_text="Save up to €480 a year. All prices exclude VAT.",
+            source_locale="en-IE", content_type="commercial",
+            glossary_version="g1", policy_version="p1",
+            provider_id="customer-llm", model_id="king",
+            model_version="2026-09-14", software_version="6.140.0",
+            target_locales=["sv-SE"],
+        )
+        self.queue.enqueue_plan(plan, now=100)
+        self.assertEqual(self.report().status, "healthy")
+        planner = WORKER._PLANNER
+        commercial = planner._COMMERCIAL
+        contract = commercial.public_review_evidence_contract(
+            planner.COMMERCIAL_PROFILE,
+        )
+        altered = json.loads(json.dumps(contract))
+        altered["trust_boundary"]["publication_authority"] = True
+        unsigned = dict(altered)
+        unsigned.pop("sha256")
+        altered["sha256"] = planner._digest(unsigned)
+        public_profile = commercial.public_profile(
+            planner.COMMERCIAL_PROFILE,
+        )
+        public_profile = json.loads(json.dumps(public_profile))
+        public_profile["review_evidence_contract"] = altered
+        changes_before = self.queue_connection.total_changes
+        with patch.object(
+            commercial,
+            "public_review_evidence_contract",
+            return_value=altered,
+        ), patch.object(
+            commercial,
+            "public_profile",
+            return_value=public_profile,
+        ):
+            report = self.report()
+        self.assertEqual(report.status, "blocked")
+        self.assertEqual(
+            self.component(report, "queue").reasons,
+            ("queue.job_binding_invalid",),
+        )
+        self.assertEqual(self.queue_connection.total_changes, changes_before)
+        self.assertEqual(self.probe.calls, [])
+        self.assertEqual(self.report().status, "healthy")
 
     def test_supervisor_liveness_is_part_of_read_only_health(self):
         probe = SupervisorProbe(status="leased")
@@ -694,6 +1014,8 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             "quality-receipt",
             self.receipt_verifier,
             self.approval_authority,
+            evidence_request_id=request.request_id,
+            evidence_revision=request.evidence_revision,
             now=201,
             ttl_seconds=1000,
         )
@@ -808,6 +1130,135 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
             ("release.approval_expired",),
         )
 
+    def test_locale_policy_outage_blocks_health_without_writes_or_detail(self):
+        plan = self.ingest()
+        self.complete(plan)
+        changes_before = (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        release = self.component(report, "release")
+        self.assertEqual(release.status, "blocked")
+        self.assertEqual(release.reasons, ("release.policy_unavailable",))
+        version = report.website_versions[0]
+        self.assertEqual(version.status, "awaiting_approval")
+        self.assertEqual(version.approved_locales, 0)
+        self.assertEqual(
+            {code for _, code in version.blocked_locales},
+            {"publication.evidence.policy_unavailable"},
+        )
+        self.assertNotIn(
+            "private resolver diagnostic",
+            json.dumps(report.as_payload(), ensure_ascii=False),
+        )
+        self.assertEqual(changes_before, (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        ))
+
+    def test_verified_policy_drift_precedes_simultaneous_resolver_outage(self):
+        plan = self.ingest()
+        self.complete(plan)
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def stale_or_unavailable(locale):
+            if locale == "de-AT":
+                current = dict(original(locale))
+                current["version"] += ".changed"
+                current["sha256"] = "0" * 64
+                return current
+            raise RuntimeError("private resolver diagnostic")
+
+        with patch.object(
+            planner, "quality_profile_for", side_effect=stale_or_unavailable,
+        ):
+            report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        release = self.component(report, "release")
+        self.assertEqual(release.reasons, ("release.policy_stale",))
+        self.assertNotIn("release.policy_unavailable", release.reasons)
+        self.assertEqual(
+            {code for _, code in report.website_versions[0].blocked_locales},
+            {
+                "publication.evidence.policy_stale",
+                "publication.evidence.policy_unavailable",
+            },
+        )
+        self.assertNotIn(
+            "private resolver diagnostic",
+            json.dumps(report.as_payload(), ensure_ascii=False),
+        )
+
+    def test_release_integrity_precedes_simultaneous_policy_outage(self):
+        plan = self.ingest()
+        self.complete(plan)
+        row = self.release_connection.execute("""
+            SELECT job_id, approval_json FROM localization_approvals
+            WHERE target_locale = 'de-AT'
+        """).fetchone()
+        payload = json.loads(row["approval_json"])
+        payload["quality_receipt_sha256"] = "0" * 64
+        approval_json = RELEASE._canonical_json(payload)
+        signature = self.approval_authority.sign(
+            approval_json.encode("utf-8")
+        )
+        self.release_connection.execute("""
+            UPDATE localization_approvals
+            SET approval_json = ?, approval_sha256 = ?, signature = ?
+            WHERE job_id = ?
+        """, (
+            approval_json,
+            RELEASE._hash_text(approval_json),
+            signature.signature,
+            row["job_id"],
+        ))
+        self.release_connection.commit()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def available_or_unavailable(locale):
+            if locale == "de-AT":
+                return original(locale)
+            raise RuntimeError("private resolver diagnostic")
+
+        with patch.object(
+            planner,
+            "quality_profile_for",
+            side_effect=available_or_unavailable,
+        ):
+            report = self.report()
+
+        self.assertEqual(report.status, "blocked")
+        release = self.component(report, "release")
+        self.assertEqual(release.reasons, (
+            "release.approval_invalid", "release.integrity_failed",
+        ))
+        self.assertNotIn("release.policy_unavailable", release.reasons)
+        self.assertEqual(
+            {code for _, code in report.website_versions[0].blocked_locales},
+            {
+                "approval.binding_mismatch",
+                "publication.evidence.policy_unavailable",
+            },
+        )
+        self.assertNotIn(
+            "private resolver diagnostic",
+            json.dumps(report.as_payload(), ensure_ascii=False),
+        )
+
     def test_queue_tamper_blocks_and_never_discloses_payload(self):
         self.ingest()
         self.queue_connection.execute(
@@ -876,6 +1327,30 @@ class WebsiteLocalizationHealthTests(unittest.TestCase):
         published = self.report(now=261)
         self.assertEqual(published.website_versions[0].status, "published")
         self.assertEqual(dict(self.component(published, "cms").counts)["succeeded"], 1)
+
+    def test_policy_resolver_outage_has_a_stable_cms_health_reason(self):
+        plan = self.ingest()
+        self.complete(plan)
+        self.bridge.prepare_delivery(
+            event()["event_id"],
+            self.event_authority,
+            self.approval_authority,
+            self.publication_authority,
+            now=250,
+        )
+
+        with patch.object(
+            RELEASE._WORKER._PLANNER,
+            "quality_profile_for",
+            side_effect=RuntimeError("private resolver diagnostic"),
+        ):
+            report = self.report(now=251)
+
+        cms = self.component(report, "cms")
+        self.assertIn("cms.delivery.policy_unavailable", cms.reasons)
+        self.assertNotIn("cms.delivery.invalid", cms.reasons)
+        encoded = json.dumps(report.as_payload(), ensure_ascii=False)
+        self.assertNotIn("private resolver diagnostic", encoded)
 
     def test_tombstone_state_is_verified_visible_and_needs_no_model_probe(self):
         plan = self.ingest()

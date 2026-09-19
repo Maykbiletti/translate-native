@@ -77,7 +77,7 @@ class LocalizationProvider:
                 "locale": request.input["target"]["locale"],
                 "candidate": "Baue dein Unternehmen mit BLUN auf.",
             }
-        return {
+        response = {
             "schema": WORKER.REVIEW_SCHEMA,
             "phase": request.phase,
             "locale": request.input["target"]["locale"],
@@ -85,7 +85,18 @@ class LocalizationProvider:
             "confidence": "high",
             "blocking_defects": [],
             "major_defects": [],
+            "uncertainties": [],
         }
+        if request.phase == "target_native":
+            response["holistic_assessment"] = {
+                "reads_as_native_original": True,
+                "reason": "Synthetic service fixture judgment.",
+                "repair_scope": "none",
+                "dimensions": {
+                    name: "PASS" for name in WORKER.NATIVE_DIMENSIONS
+                },
+            }
+        return response
 
 
 def quality_receipt(source_text, target_text, target_locale, request_id):

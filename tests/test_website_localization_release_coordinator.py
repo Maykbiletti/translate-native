@@ -8,7 +8,9 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +94,8 @@ class ReceiptVerifier:
                 binding["target_locale"],
                 request.request_id,
             )
+            and binding["evidence_request_id"] == request.request_id
+            and binding["evidence_revision"] == request.evidence_revision
             for request in self.requests
         )
 
@@ -245,9 +249,48 @@ def completed_result(job, target_text, *, review_confidence=None):
                     and review_confidence["source_fidelity"] == "low"
                     else []
                 ),
+                "offer_count": 1,
+                "review_required_offers": (
+                    [{"dimension": "amount_currency", "offer_indexes": [0]}]
+                    if payload["content_type"] == "commercial"
+                    and review_confidence["source_fidelity"] == "low"
+                    else []
+                ),
+                "review_evidence_contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_evidence_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
                 "evidence_sha256": "c" * 64,
             }
             if payload["content_type"] == "commercial" else None
+        ),
+        "commercial_review_routing": (
+            {
+                "schema": WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+                "profile": payload["commercial_profile"],
+                "contract_sha256": (
+                    WORKER._COMMERCIAL.public_review_routing_contract(
+                        payload["commercial_profile"],
+                    )["sha256"]
+                ),
+                "offer_count": 1,
+                "source_length": len(payload["source"]["text"]),
+                "target_length": len(target_text),
+                "offers": [{
+                    "offer_index": 0,
+                    "source_spans": [[0, len(payload["source"]["text"])]],
+                    "target_spans": [[0, len(target_text)]],
+                }],
+            }
+            if payload["content_type"] == "commercial"
+            and review_confidence["source_fidelity"] == "low" else None
+        ),
+        "commercial_review_routing_contract_sha256": (
+            payload.get("commercial_review_routing_contract_sha256")
+        ),
+        "commercial_review_resolution_contract_sha256": (
+            payload.get("commercial_review_resolution_contract_sha256")
         ),
         "human_review_required": payload["content_type"] == "legal",
         "independent_review_required": (
@@ -372,7 +415,7 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
     def test_evidence_request_is_exactly_bound_and_contains_one_locale(self):
         self.complete_all()
         provider = EvidenceProvider()
-        outcome, _, _ = self.run_release(provider)
+        outcome, quality, _ = self.run_release(provider)
         request = provider.requests[0]
         payload = request.as_payload()
 
@@ -388,8 +431,22 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             "sha256": self.plan.jobs[0].target.quality_profile_sha256,
         })
         self.assertIsNone(payload["commercial_profile"])
+        self.assertIsNone(
+            payload["commercial_review_routing_contract_sha256"],
+        )
+        self.assertIsNone(payload["commercial_review_routing_contract"])
+        self.assertIsNone(
+            payload["commercial_review_resolution_contract_sha256"],
+        )
         self.assertTrue(payload["request_id"].startswith("blun-l10n-evidence-"))
         self.assertNotIn("target_locales", json.dumps(payload))
+        receipt_binding = quality.calls[0]["binding"]
+        self.assertEqual(
+            receipt_binding["evidence_request_id"], request.request_id,
+        )
+        self.assertEqual(
+            receipt_binding["evidence_revision"], request.evidence_revision,
+        )
 
         commercial_event = change_event(targets=("sv-SE",), content_type="commercial")
         commercial_plan = PLANNER.plan_from_mapping(commercial_event["localization"])
@@ -436,6 +493,254 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
                 "review_required_dimensions"
             ],
             ["amount_currency"],
+        )
+        routing = commercial_request.as_payload()["commercial_review_routing"]
+        routing_contract = commercial_request.as_payload()[
+            "commercial_review_routing_contract"
+        ]
+        routing_contract_sha256 = commercial_request.as_payload()[
+            "commercial_review_routing_contract_sha256"
+        ]
+        self.assertEqual(
+            routing["schema"], WORKER._COMMERCIAL.REVIEW_ROUTING_SCHEMA,
+        )
+        self.assertEqual(routing["offer_count"], 1)
+        self.assertEqual(routing["offers"][0]["offer_index"], 0)
+        self.assertNotIn("offer-1", json.dumps(routing))
+        self.assertEqual(
+            routing_contract_sha256,
+            commercial_job.as_payload()[
+                "commercial_review_routing_contract_sha256"
+            ],
+        )
+        self.assertEqual(
+            routing_contract_sha256,
+            routing_contract["sha256"],
+        )
+        self.assertEqual(
+            routing_contract,
+            COORDINATOR._CMS._COMMERCIAL.public_review_routing_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            ),
+        )
+        self.assertFalse(
+            routing_contract["trust_boundary"]["publication_authority"],
+        )
+        changed_routing = commercial_request.as_payload()
+        changed_routing["commercial_review_routing"]["offers"][0][
+            "source_spans"
+        ] = [[1, routing["source_length"]]]
+        self.assertNotEqual(
+            COORDINATOR._request_id_for_payload(changed_routing),
+            commercial_request.request_id,
+        )
+        changed_contract = commercial_request.as_payload()
+        changed_contract["commercial_review_routing"][
+            "contract_sha256"
+        ] = "0" * 64
+        self.assertNotEqual(
+            COORDINATOR._request_id_for_payload(changed_contract),
+            commercial_request.request_id,
+        )
+        changed_full_contract = commercial_request.as_payload()
+        changed_full_contract["commercial_review_routing_contract"][
+            "sha256"
+        ] = "0" * 64
+        self.assertNotEqual(
+            COORDINATOR._request_id_for_payload(changed_full_contract),
+            commercial_request.request_id,
+        )
+        changed_contract_digest = commercial_request.as_payload()
+        changed_contract_digest[
+            "commercial_review_routing_contract_sha256"
+        ] = "0" * 64
+        self.assertNotEqual(
+            COORDINATOR._request_id_for_payload(changed_contract_digest),
+            commercial_request.request_id,
+        )
+        substituted_digest_request = replace(
+            commercial_request,
+            commercial_review_routing_contract_sha256="0" * 64,
+        )
+        substituted_digest_request = replace(
+            substituted_digest_request,
+            request_id=COORDINATOR._request_id_for_payload(
+                substituted_digest_request.as_payload(),
+            ),
+        )
+        with self.assertRaises(
+            COORDINATOR.LocalizationReleaseCoordinatorBlocked,
+        ) as caught:
+            COORDINATOR._validated_request_payload(
+                substituted_digest_request,
+            )
+        self.assertEqual(caught.exception.code, "evidence.request.invalid")
+        substituted_contract = json.loads(json.dumps(routing_contract))
+        substituted_contract["offers"]["regions"]["span_format"] = (
+            "zero-based-utf-8-bytes-exclusive-end"
+        )
+        unsigned_substitute = dict(substituted_contract)
+        unsigned_substitute.pop("sha256")
+        substituted_contract["sha256"] = hashlib.sha256(
+            json.dumps(
+                unsigned_substitute,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        substituted_request = replace(
+            commercial_request,
+            commercial_review_routing_contract=substituted_contract,
+        )
+        substituted_request = replace(
+            substituted_request,
+            request_id=COORDINATOR._request_id_for_payload(
+                substituted_request.as_payload(),
+            ),
+        )
+        with self.assertRaises(
+            COORDINATOR.LocalizationReleaseCoordinatorBlocked,
+        ) as caught:
+            COORDINATOR._validated_request_payload(substituted_request)
+        self.assertEqual(caught.exception.code, "evidence.request.invalid")
+        with patch.object(
+            COORDINATOR._CMS._COMMERCIAL,
+            "public_review_routing_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            changed_routing_contract_request = COORDINATOR._request(
+                commercial_event,
+                commercial_plan,
+                commercial_job,
+                commercial_result,
+                commercial_result_hash,
+                "commercial-evidence-1",
+            )
+        self.assertNotEqual(
+            changed_routing_contract_request.request_id,
+            commercial_request.request_id,
+        )
+        expected_contract_sha256 = (
+            COORDINATOR._CMS._COMMERCIAL.public_review_resolution_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            )["sha256"]
+        )
+        self.assertEqual(
+            commercial_request.as_payload()[
+                "commercial_review_resolution_contract_sha256"
+            ],
+            expected_contract_sha256,
+        )
+        self.assertEqual(
+            commercial_request.as_payload()[
+                "commercial_review_resolution_contract"
+            ],
+            COORDINATOR._CMS._COMMERCIAL.public_review_resolution_contract(
+                PLANNER.COMMERCIAL_PROFILE,
+            ),
+        )
+        substituted_resolution = commercial_request.as_payload()
+        substituted_resolution["commercial_review_resolution_contract"][
+            "status"
+        ] = "substituted"
+        substituted_resolution["commercial_review_resolution_contract"][
+            "sha256"
+        ] = hashlib.sha256(json.dumps(
+            {
+                key: value for key, value in substituted_resolution[
+                    "commercial_review_resolution_contract"
+                ].items() if key != "sha256"
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        substituted_resolution[
+            "commercial_review_resolution_contract_sha256"
+        ] = substituted_resolution[
+            "commercial_review_resolution_contract"
+        ]["sha256"]
+        substituted_resolution["request_id"] = (
+            COORDINATOR._request_id_for_payload(substituted_resolution)
+        )
+        substituted_resolution_request = COORDINATOR.QualityEvidenceRequest(
+            **substituted_resolution,
+        )
+        with self.assertRaises(
+            COORDINATOR.LocalizationReleaseCoordinatorBlocked,
+        ) as caught:
+            COORDINATOR._validated_request_payload(
+                substituted_resolution_request,
+            )
+        self.assertEqual(caught.exception.code, "evidence.request.invalid")
+        with patch.object(
+            COORDINATOR._CMS._COMMERCIAL,
+            "public_review_resolution_contract",
+            return_value={"sha256": "0" * 64},
+        ):
+            changed_contract_request = COORDINATOR._request(
+                commercial_event,
+                commercial_plan,
+                commercial_job,
+                commercial_result,
+                commercial_result_hash,
+                "commercial-evidence-1",
+            )
+        self.assertNotEqual(
+            changed_contract_request.request_id,
+            commercial_request.request_id,
+        )
+
+        verified_commercial_result = completed_result(
+            commercial_job,
+            "Spara 480 € per år. Alla priser är exklusive moms.",
+        )
+        verified_commercial_result_hash = hashlib.sha256(
+            json.dumps(
+                verified_commercial_result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        verified_commercial_request = COORDINATOR._request(
+            commercial_event,
+            commercial_plan,
+            commercial_job,
+            verified_commercial_result,
+            verified_commercial_result_hash,
+            "commercial-evidence-verified-1",
+        )
+        self.assertEqual(
+            verified_commercial_request.commercial_review["status"],
+            "verified",
+        )
+        self.assertIsNone(
+            verified_commercial_request.commercial_review_routing,
+        )
+        self.assertIsNone(
+            verified_commercial_request.commercial_review_routing_contract,
+        )
+        self.assertEqual(
+            verified_commercial_request
+            .commercial_review_routing_contract_sha256,
+            commercial_job.as_payload()[
+                "commercial_review_routing_contract_sha256"
+            ],
+        )
+        self.assertIsNone(
+            verified_commercial_request.as_payload()[
+                "commercial_review_resolution_contract_sha256"
+            ],
+        )
+        self.assertIsNone(
+            verified_commercial_request.as_payload()[
+                "commercial_review_resolution_contract"
+            ],
         )
 
     def test_outer_operation_guard_blocks_before_evidence_provider_call(self):
@@ -525,6 +830,37 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
         self.assertIsNone(duplicate)
         status = self.evidence_state.statuses(self.event["event_id"])[0]
         self.assertEqual((status.status, status.attempts), ("leased", 1))
+
+    def test_request_identity_is_verified_before_state_persistence(self):
+        self.complete_all()
+        valid = self.evidence_request()
+        cases = (
+            replace(valid, evidence_revision="different-evidence-1"),
+            replace(valid, target_locale="fi-FI"),
+            replace(
+                valid,
+                request_id="blun-l10n-evidence-" + "0" * 64,
+            ),
+        )
+
+        for request in cases:
+            with self.subTest(request=request), self.assertRaises(
+                COORDINATOR.LocalizationReleaseCoordinatorBlocked,
+            ) as caught:
+                self.evidence_state.claim(
+                    request,
+                    worker_id="quality-worker",
+                    now=200,
+                    lease_seconds=10,
+                    max_attempts=3,
+                )
+            self.assertEqual(
+                caught.exception.code,
+                "evidence.request_id.binding_mismatch",
+            )
+        self.assertEqual(self.evidence_connection.execute(
+            "SELECT COUNT(*) FROM localization_quality_evidence_state"
+        ).fetchone()[0], 0)
 
     def test_retryable_evidence_failure_backs_off_and_stops_at_attempt_limit(self):
         self.complete_all()
@@ -663,6 +999,8 @@ class WebsiteLocalizationReleaseCoordinatorTests(unittest.TestCase):
             response["quality_receipt"],
             quality,
             self.approval_authority,
+            evidence_request_id=request.request_id,
+            evidence_revision=request.evidence_revision,
             now=200,
             ttl_seconds=1000,
         )

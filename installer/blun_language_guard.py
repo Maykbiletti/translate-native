@@ -41,6 +41,9 @@ DELIVERY_POLICY = Path.home() / ".config" / "blun-language-guard" / "delivery-po
 SIGNING_KEY = Path.home() / ".config" / "blun-language-guard" / "signing.key"
 SERVICE_COMMAND = Path.home() / ".local" / "bin" / "blun-language-guard-service"
 SERVICE_TOKEN = Path.home() / ".config" / "blun-language-guard" / "service.token"
+RESPONSE_REVIEW_CONFIG = (
+    Path.home() / ".config" / "blun-language-guard" / "response-review.json"
+)
 AUDIT_LOG = Path.home() / ".config" / "blun-language-guard" / "audit.jsonl"
 MCP_HTTP_COMMAND = Path.home() / ".local" / "bin" / "blun-language-guard-mcp"
 MCP_HEADERS_COMMAND = Path.home() / ".local" / "bin" / "blun-language-guard-mcp-headers"
@@ -850,7 +853,7 @@ def install_mcp_http_runtime(root: Path) -> None:
 
 
 def _service_arguments(root: Path) -> list[str]:
-    return [
+    arguments = [
         sys.executable,
         str(root / "integrations" / "guard_service.py"),
         "--endpoint", SERVICE_ENDPOINT,
@@ -858,6 +861,12 @@ def _service_arguments(root: Path) -> list[str]:
         "--token-file", str(SERVICE_TOKEN),
         "--audit-file", str(AUDIT_LOG),
     ]
+    # Configuration is operator-owned and never created or repaired here.  If
+    # present (including a dangling/unsafe link), the Guard must validate it
+    # and fail closed instead of silently starting without mandatory review.
+    if RESPONSE_REVIEW_CONFIG.exists() or RESPONSE_REVIEW_CONFIG.is_symlink():
+        arguments.extend(("--response-review-config", str(RESPONSE_REVIEW_CONFIG)))
+    return arguments
 
 
 def _mcp_http_arguments(root: Path) -> list[str]:

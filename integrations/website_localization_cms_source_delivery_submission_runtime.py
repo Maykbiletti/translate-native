@@ -47,7 +47,7 @@ _RUNTIME = _load_module(
 HMACCredential = _AUTH.HMACCredential
 
 CAPABILITIES_SCHEMA = (
-    "blun.cms-source-delivery-submission-capabilities.v5"
+    "blun.cms-source-delivery-submission-capabilities.v7"
 )
 CAPABILITIES_HTTP_PATH = (
     "/v1/localization/source-delivery/submission-capabilities"
@@ -141,7 +141,7 @@ LIFECYCLE_HTTP_RESPONSE_SCHEMA = (
     "blun.cms-source-delivery-submission-lifecycle-response.v1"
 )
 STATUS_SCHEMA = "blun.cms-source-delivery-submission-status.v2"
-LIFECYCLE_SCHEMA = "blun.cms-source-delivery-submission-lifecycle.v3"
+LIFECYCLE_SCHEMA = "blun.cms-source-delivery-submission-lifecycle.v4"
 HEALTH_SCHEMA = "blun.cms-source-delivery-submission-health.v2"
 PIPELINE_HEALTH_SCHEMA = (
     "blun.cms-source-delivery-submission-pipeline-health.v3"
@@ -495,6 +495,7 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                 self._adapter.expected_capabilities_sha256,
                 self._adapter.expected_runtime_capabilities_sha256,
                 self._adapter.expected_commercial_rendering_registry_sha256,
+                self._adapter.expected_terminal_receiver_capabilities_sha256,
             )
             expected = {
                 "schema": row[1],
@@ -503,7 +504,8 @@ class HMACCMSSourceDeliverySubmissionRuntime:
                 "delivery_capabilities_sha256": row[3],
                 "runtime_capabilities_sha256": row[4],
                 "commercial_rendering_registry_sha256": row[5],
-                "binding_sha256": row[6],
+                "terminal_receiver_capabilities_sha256": row[6],
+                "binding_sha256": row[7],
             }
             binding = self._delivery.capability_binding()
             if not isinstance(binding, Mapping) or binding != expected:
@@ -1318,6 +1320,7 @@ def _client_and_adapter(
     remote_capabilities_sha256: str,
     runtime_capabilities_sha256: str,
     commercial_rendering_registry_sha256: str,
+    terminal_receiver_capabilities_sha256: str,
     sidecar_delivery_max_attempts: int,
     clock: Callable[[], float | int],
     nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24),
@@ -1343,6 +1346,9 @@ def _client_and_adapter(
         runtime_capabilities_sha256=runtime_capabilities_sha256,
         commercial_rendering_registry_sha256=(
             commercial_rendering_registry_sha256
+        ),
+        terminal_receiver_capabilities_sha256=(
+            terminal_receiver_capabilities_sha256
         ),
     )
     if local_preflight is not None:
@@ -1394,6 +1400,7 @@ def open_durable_hmac_cms_source_delivery_submission(
     remote_capabilities_sha256: str,
     runtime_capabilities_sha256: str,
     commercial_rendering_registry_sha256: str,
+    terminal_receiver_capabilities_sha256: str,
     sidecar_delivery_max_attempts: int = 5,
     clock: Callable[[], float | int] = time.time,
     nonce_factory: Callable[[], str],
@@ -1415,6 +1422,9 @@ def open_durable_hmac_cms_source_delivery_submission(
         runtime_capabilities_sha256=runtime_capabilities_sha256,
         commercial_rendering_registry_sha256=(
             commercial_rendering_registry_sha256
+        ),
+        terminal_receiver_capabilities_sha256=(
+            terminal_receiver_capabilities_sha256
         ),
         sidecar_delivery_max_attempts=sidecar_delivery_max_attempts,
         clock=clock,

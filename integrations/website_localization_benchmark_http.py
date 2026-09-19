@@ -8,27 +8,50 @@ report, or repairs durable state.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
 STATUS_PATH = "/v1/benchmarks/status"
 REPORT_PATH = "/v1/benchmarks/report"
+OPENAPI_PATH = "/v1/benchmarks/openapi"
 AUTH_REQUEST_SCHEMA = "blun.website-localization-benchmark-http-auth.v1"
 PRINCIPAL_SCHEMA = "blun.website-localization-benchmark-reader.v1"
 STATUS_RESPONSE_SCHEMA = "blun.website-localization-benchmark-http-status.v1"
 REPORT_RESPONSE_SCHEMA = "blun.website-localization-benchmark-http-report.v1"
 ERROR_RESPONSE_SCHEMA = "blun.website-localization-benchmark-http-error.v1"
-BENCHMARK_REPORT_SCHEMA = "blun.website-localization-benchmark-report.v12"
+BENCHMARK_REPORT_SCHEMA = "blun.website-localization-benchmark-report.v19"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}")
 ERROR_CODE = re.compile(r"[a-z][a-z0-9_.-]{0,127}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 CAMPAIGN_ID = re.compile(r"benchmark-campaign-[0-9a-f]{64}")
 CAMPAIGN_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
+
+
+def _load_openapi():
+    path = Path(__file__).resolve().with_name(
+        "website_localization_benchmark_openapi.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "blun_website_localization_benchmark_http_openapi", path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("benchmark OpenAPI contract is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_OPENAPI = _load_openapi()
+OPENAPI_RESPONSE_SCHEMA = _OPENAPI.RESPONSE_SCHEMA
 
 
 class BenchmarkHTTPFailed(RuntimeError):
@@ -118,6 +141,54 @@ def _count(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError
     return value
+
+
+def _openapi_contract() -> dict[str, Any]:
+    shared = {
+        "method": "GET",
+        "auth_request_schema": AUTH_REQUEST_SCHEMA,
+        "principal_schema": PRINCIPAL_SCHEMA,
+        "error_statuses": [400, 401, 403, 404, 409, 503],
+    }
+    contract = {
+        "schema": "blun.website-localization-benchmark-http-contract.v1",
+        "version": "1.0.0",
+        "auth_request_schema": AUTH_REQUEST_SCHEMA,
+        "principal_schema": PRINCIPAL_SCHEMA,
+        "status_response_schema": STATUS_RESPONSE_SCHEMA,
+        "report_response_schema": REPORT_RESPONSE_SCHEMA,
+        "error_response_schema": ERROR_RESPONSE_SCHEMA,
+        "benchmark_report_schema": BENCHMARK_REPORT_SCHEMA,
+        "statuses": list(CAMPAIGN_STATUSES),
+        "max_response_bytes": MAX_RESPONSE_BYTES,
+        "operations": {
+            "openapi": {
+                "name": "openapi", "path": OPENAPI_PATH,
+                "operation_id": "readBenchmarkOpenAPI",
+                "summary": "Read the exact origin-free API contract.",
+                "success_status": 200,
+                "response_component": "OpenAPIResponse",
+                **shared,
+            },
+            "report": {
+                "name": "report", "path": REPORT_PATH,
+                "operation_id": "readBenchmarkReport",
+                "summary": "Read the stored and reverified benchmark report.",
+                "success_status": 200,
+                "response_component": "ReportResponse",
+                **shared,
+            },
+            "status": {
+                "name": "status", "path": STATUS_PATH,
+                "operation_id": "readBenchmarkStatus",
+                "summary": "Read content-free benchmark campaign status.",
+                "success_status": 200,
+                "response_component": "StatusResponse",
+                **shared,
+            },
+        },
+    }
+    return json.loads(_canonical_json(contract))
 
 
 def _status_payload(value: Any) -> dict[str, Any]:
@@ -332,6 +403,7 @@ class BenchmarkReportHTTPApplication:
         headers = [
             ("Cache-Control", "no-store"),
             ("Content-Length", str(len(body))),
+            ("Referrer-Policy", "no-referrer"),
             ("X-Content-Type-Options", "nosniff"),
         ]
         if body:
@@ -351,7 +423,7 @@ class BenchmarkReportHTTPApplication:
                 raise BenchmarkHTTPFailed(
                     "benchmark.http.query_invalid", status=400,
                 )
-            if path not in {STATUS_PATH, REPORT_PATH} or method != "GET":
+            if path not in {STATUS_PATH, REPORT_PATH, OPENAPI_PATH} or method != "GET":
                 raise BenchmarkHTTPFailed(
                     "benchmark.http.route_not_found", status=404,
                 )
@@ -364,6 +436,15 @@ class BenchmarkReportHTTPApplication:
                 raise BenchmarkHTTPFailed(
                     "benchmark.http.campaign_forbidden", status=403,
                 )
+            if path == OPENAPI_PATH:
+                contract = _openapi_contract()
+                document = _OPENAPI.build_document(contract)
+                return self._send(start_response, 200, {
+                    "schema": OPENAPI_RESPONSE_SCHEMA,
+                    "contract_sha256": _OPENAPI.document_sha256(contract),
+                    "openapi_sha256": _OPENAPI.document_sha256(document),
+                    "openapi": document,
+                })
             if path == STATUS_PATH:
                 return self._send(start_response, 200, {
                     "schema": STATUS_RESPONSE_SCHEMA,

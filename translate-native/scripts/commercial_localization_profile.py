@@ -9,21 +9,37 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 
-PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v5"
-REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
-    "translate-native.commercial-review-summary-capabilities.v2"
+PUBLIC_PROFILE_SCHEMA = "translate-native.commercial-capabilities.v15"
+REVIEW_EVIDENCE_CAPABILITIES_SCHEMA = (
+    "translate-native.commercial-review-evidence-capabilities.v2"
 )
-REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v2"
-EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v1"
+REVIEW_SUMMARY_CAPABILITIES_SCHEMA = (
+    "translate-native.commercial-review-summary-capabilities.v7"
+)
+REVIEW_SUMMARY_SCHEMA = "translate-native.commercial-review-summary.v6"
+REVIEW_ROUTING_CAPABILITIES_SCHEMA = (
+    "translate-native.commercial-review-routing-capabilities.v1"
+)
+REVIEW_ROUTING_SCHEMA = "translate-native.commercial-review-routing.v2"
+EVIDENCE_BINDING_SCHEMA = "translate-native.commercial-review-evidence-binding.v5"
+REVIEW_RESOLUTION_CAPABILITIES_SCHEMA = (
+    "translate-native.commercial-review-resolution-capabilities.v4"
+)
+REVIEW_RESOLUTION_SCHEMA = "translate-native.commercial-review-resolution.v4"
 COMMERCIAL_LOCALE_PROFILE_SCHEMA = (
     "translate-native.commercial-locale-quality-profile.v2"
 )
 COMMERCIAL_RENDERING_REFERENCE_SCHEMA = (
     "translate-native.commercial-rendering-reference.v1"
 )
+TARGET_LOCALE = re.compile(
+    r"^[a-z]{2,3}(?:-[A-Z][a-z]{3})?-[A-Z]{2}$"
+)
+PROFILE_VERSION = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 
 DIMENSIONS = {
     "amount_currency": "Amounts, currency identity, units and price-to-product association; no conversion or rounding.",
@@ -49,11 +65,33 @@ def _text_sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def evidence_sha256(value: Any, source: str, target: str, profile: str) -> str:
-    """Bind complete evidence to exact UTF-8 texts and the commercial profile."""
+def evidence_sha256(
+    value: Any,
+    source: str,
+    target: str,
+    profile: str,
+    *,
+    target_locale: str,
+    commercial_quality_profile_version: str,
+    commercial_quality_profile_sha256: str,
+) -> str:
+    """Bind evidence to exact texts, locale, and commercial quality generation."""
+    review_evidence_contract_sha256 = public_review_evidence_contract(
+        profile,
+    )["sha256"]
     binding = {
         "schema": EVIDENCE_BINDING_SCHEMA,
         "profile": profile,
+        "review_evidence_contract_sha256": (
+            review_evidence_contract_sha256
+        ),
+        "target_locale": target_locale,
+        "commercial_quality_profile_version": (
+            commercial_quality_profile_version
+        ),
+        "commercial_quality_profile_sha256": (
+            commercial_quality_profile_sha256
+        ),
         "source_sha256": _text_sha256(source),
         "target_sha256": _text_sha256(target),
         "evidence": value,
@@ -69,12 +107,17 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
         "profile": profile,
         "required_fields": [
             "schema", "profile", "status", "review_required_dimensions",
-            "evidence_sha256",
+            "offer_count", "review_required_offers",
+            "review_evidence_contract_sha256", "evidence_sha256",
         ],
         "statuses": {
-            "verified": {"review_required_dimensions": "empty"},
+            "verified": {
+                "review_required_dimensions": "empty",
+                "review_required_offers": "empty",
+            },
             "review_required": {
                 "review_required_dimensions": "one-or-more",
+                "review_required_offers": "zero-or-more",
                 "requires_independent_review": True,
             },
         },
@@ -83,21 +126,51 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
             "order": list(DIMENSIONS),
             "unique": True,
         },
+        "review_required_offers": {
+            "item_required_fields": ["dimension", "offer_indexes"],
+            "dimension_order": list(DIMENSIONS),
+            "dimension_must_be_review_required": True,
+            "offer_indexes": {
+                "meaning": "zero-based-opaque-offer-registry-position",
+                "minimum": 0,
+                "maximum_exclusive": 1000,
+                "order": "ascending",
+                "unique": True,
+            },
+            "configured_offer_identifiers_published": False,
+        },
+        "offer_count": {
+            "meaning": "opaque-offer-registry-size",
+            "minimum": 0,
+            "maximum": 1000,
+        },
         "evidence_sha256": {
             "algorithm": "sha-256",
             "canonicalization": "utf-8-json-sort-keys-no-insignificant-whitespace",
             "binding_schema": EVIDENCE_BINDING_SCHEMA,
             "binding_fields": [
-                "schema", "profile", "source_sha256", "target_sha256",
-                "evidence",
+                "schema", "profile", "review_evidence_contract_sha256",
+                "target_locale",
+                "commercial_quality_profile_version",
+                "commercial_quality_profile_sha256", "source_sha256",
+                "target_sha256", "evidence",
             ],
             "text_hashing": "exact-utf-8",
             "covers": [
                 "commercial-profile",
+                "exact-review-evidence-contract",
+                "exact-target-locale",
+                "commercial-quality-profile-generation",
                 "exact-source-sha256",
                 "exact-target-sha256",
+                "offer-registry-and-proposition-assignment",
                 "complete-commercial-review-evidence",
             ],
+        },
+        "review_evidence_contract_sha256": {
+            "algorithm": "sha-256",
+            "equals": public_review_evidence_contract(profile)["sha256"],
+            "purpose": "reject-stale-or-reinterpreted-private-evidence",
         },
         "content_policy": {
             "source_text": False,
@@ -115,13 +188,335 @@ def public_review_summary_contract(profile: str) -> dict[str, Any]:
     }
 
 
+def public_review_evidence_contract(profile: str) -> dict[str, Any]:
+    """Return the exact public contract for private commercial evidence."""
+    body = {
+        "schema": REVIEW_EVIDENCE_CAPABILITIES_SCHEMA,
+        "result_schema": profile,
+        "profile": profile,
+        "required_fields": ["schema", "coverage", "offers", "checks"],
+        "coverage": {
+            "allowed": ["complete", "uncertain"],
+            "complete": "every-proposition-and-offer-association-reviewed",
+            "uncertain": "independent-review-required",
+        },
+        "offer_registry": {
+            "field": "offers",
+            "max_items": 1000,
+            "item_required_fields": [
+                "id", "source_spans", "target_spans",
+            ],
+            "identifier": {
+                "pattern": PROFILE_VERSION.pattern,
+                "unique": True,
+            },
+            "regions": {
+                "fields": ["source_spans", "target_spans"],
+                "span_format": (
+                    "zero-based-unicode-code-points-exclusive-end"
+                ),
+                "non_empty_text": True,
+                "ordered": True,
+                "overlap": "forbidden-within-and-across-offers",
+                "discontiguous": True,
+                "at_least_one_side_non_empty": True,
+            },
+        },
+        "checks": {
+            "required_dimensions": list(DIMENSIONS),
+            "exact_dimension_set": True,
+            "max_items_per_dimension": 1000,
+            "statuses": [
+                "equivalent", "not_present", "changed", "uncertain",
+            ],
+            "status_items": {
+                "equivalent": "one-or-more-matched",
+                "not_present": "empty",
+                "changed": "one-or-more-specific",
+                "uncertain": "one-or-more-specific",
+            },
+            "offer_statuses": {
+                "field": "offer_statuses",
+                "item_required_fields": ["offer", "status"],
+                "coverage": "exactly-one-per-registered-offer",
+                "order": "offer-registry-order",
+                "statuses": [
+                    "equivalent", "not_present", "changed", "uncertain",
+                ],
+                "global_status": (
+                    "changed-then-uncertain-then-equivalent-then-not_present"
+                ),
+                "items_must_match_offer_status": True,
+            },
+            "item": {
+                "required_fields": [
+                    "offer", "relation", "source_span", "target_span",
+                    "explanation",
+                ],
+                "offer": "registered-offer-id",
+                "relations": ["matched", "source_only", "target_only"],
+                "matched_requires": "source-and-target-spans",
+                "source_only_requires": "source-span-and-null-target-span",
+                "target_only_requires": "null-source-span-and-target-span",
+                "span_containment": "inside-named-offer-region",
+                "duplicates": "forbidden-per-dimension",
+                "explanation": "non-empty-maximum-2000-code-points",
+            },
+            "offer_assignment": {
+                "equivalent": (
+                    "exactly-one-matched-item-per-registered-offer"
+                ),
+                "other_equivalent_checks_require_equivalent_assignment": True,
+            },
+        },
+        "trust_boundary": {
+            "validates": "structure-offsets-and-verdict-consistency",
+            "semantic_truth": False,
+            "numeric_regex_semantic_proof": False,
+            "unresolved_route": (
+                "independent-model-or-qualified-native-domain-review"
+            ),
+            "publication_authority": False,
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "source_spans": False,
+            "target_spans": False,
+            "reviewer_prose": False,
+            "project_prices": False,
+            "project_brands": False,
+        },
+    }
+    return {
+        **body,
+        "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
+    }
+
+
+def public_review_routing_contract(profile: str) -> dict[str, Any]:
+    """Return the exact public contract for private actionable offer routes."""
+    body = {
+        "schema": REVIEW_ROUTING_CAPABILITIES_SCHEMA,
+        "result_schema": REVIEW_ROUTING_SCHEMA,
+        "profile": profile,
+        "applies_when": {
+            "review_summary_status": "review_required",
+            "offer_count": "exact-review-summary-offer-count",
+        },
+        "required_fields": [
+            "schema", "profile", "contract_sha256", "offer_count",
+            "source_length", "target_length", "offers",
+        ],
+        "text_lengths": {
+            "fields": ["source_length", "target_length"],
+            "unit": "unicode-code-points",
+            "must_equal_complete_texts": True,
+        },
+        "offers": {
+            "coverage": "exactly-one-per-registered-offer",
+            "order": "offer-registry-order",
+            "item_required_fields": [
+                "offer_index", "source_spans", "target_spans",
+            ],
+            "offer_index": {
+                "meaning": "zero-based-opaque-offer-registry-position",
+                "minimum": 0,
+                "maximum_exclusive": 1000,
+                "order": "ascending",
+                "unique": True,
+            },
+            "regions": {
+                "fields": ["source_spans", "target_spans"],
+                "span_format": (
+                    "zero-based-unicode-code-points-exclusive-end"
+                ),
+                "non_empty_text": True,
+                "ordered": True,
+                "overlap": "forbidden-within-and-across-offers",
+                "discontiguous": True,
+                "at_least_one_side_non_empty": True,
+            },
+        },
+        "trust_boundary": {
+            "validates": "shape-offsets-order-count-and-text-lengths",
+            "semantic_truth": False,
+            "route_values": "private-evidence-and-receipt-boundary-only",
+            "public_release_evidence": False,
+            "publication_authority": False,
+        },
+        "content_policy": {
+            "configured_offer_identifiers": False,
+            "source_text": False,
+            "target_text": False,
+            "reviewer_prose": False,
+            "project_prices": False,
+            "project_brands": False,
+        },
+    }
+    return {
+        **body,
+        "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
+    }
+
+
+def public_review_resolution_contract(profile: str) -> dict[str, Any]:
+    """Return the exact content-free contract for resolving uncertain checks."""
+    body = {
+        "schema": REVIEW_RESOLUTION_CAPABILITIES_SCHEMA,
+        "result_schema": REVIEW_RESOLUTION_SCHEMA,
+        "profile": profile,
+        "applies_when": {
+            "review_summary_status": "review_required",
+            "reviewed_dimensions": "exact-ordered-review-summary-dimensions",
+            "reviewed_offer_count": "exact-review-summary-offer-count",
+            "reviewed_offers": "exact-ordered-review-summary-offer-scope",
+        },
+        "required_fields": [
+            "schema", "profile", "contract_sha256", "status",
+            "reviewed_dimensions", "reviewed_offer_count", "reviewed_offers",
+            "method", "receipt_sha256",
+            "primary_provider", "provider",
+        ],
+        "status": "resolved",
+        "methods": {
+            "qualified_human": {
+                "primary_provider": "required",
+                "provider": "null",
+                "receipt": "verified-qualified-human-review",
+            },
+            "independent_model": {
+                "primary_provider": "required",
+                "provider": "required",
+                "provider_id_must_differ_from_primary_provider": True,
+                "receipt": "verified-independent-model-review",
+            },
+        },
+        "provider_identity": {
+            "fields": ["id", "model_id", "model_version"],
+            "primary_provider": "required",
+            "credentials_published": False,
+        },
+        "reviewed_dimensions": {
+            "allowed": list(DIMENSIONS),
+            "order": list(DIMENSIONS),
+            "unique": True,
+            "must_equal_review_summary": True,
+        },
+        "reviewed_offers": {
+            "must_equal_review_summary": True,
+            "configured_offer_identifiers_published": False,
+        },
+        "reviewed_offer_count": {
+            "must_equal_review_summary": True,
+        },
+        "receipt_sha256": {
+            "algorithm": "sha-256",
+            "covers": "exact-verified-review-receipt",
+            "raw_receipt_published": False,
+        },
+        "content_policy": {
+            "source_text": False,
+            "target_text": False,
+            "raw_receipt": False,
+            "reviewer_prose": False,
+            "qualified_human_identity": False,
+            "project_prices": False,
+            "project_brands": False,
+        },
+    }
+    return {
+        **body,
+        "sha256": hashlib.sha256(_canonical_json(body)).hexdigest(),
+    }
+
+
+def _resolution_provider(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "id", "model_id", "model_version",
+    }:
+        raise CommercialReviewBlocked("review.commercial.resolution_invalid")
+    if any(
+        not isinstance(value.get(field), str)
+        or PROFILE_VERSION.fullmatch(value[field]) is None
+        for field in value
+    ):
+        raise CommercialReviewBlocked("review.commercial.resolution_invalid")
+    return json.loads(_canonical_json(value))
+
+
+def validate_review_resolution(
+    value: Any,
+    summary: Any,
+    profile: str,
+) -> dict[str, Any]:
+    """Validate exact review-resolution routing without trusting reviewer prose."""
+    summary = validate_summary(summary, profile, review_required=True)
+    contract = public_review_resolution_contract(profile)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "profile", "contract_sha256", "status",
+            "reviewed_dimensions", "reviewed_offer_count", "reviewed_offers",
+            "method", "receipt_sha256",
+            "primary_provider", "provider",
+        }
+        or value.get("schema") != REVIEW_RESOLUTION_SCHEMA
+        or value.get("profile") != profile
+        or value.get("contract_sha256") != contract["sha256"]
+        or value.get("status") != "resolved"
+        or value.get("reviewed_dimensions")
+        != summary["review_required_dimensions"]
+        or value.get("reviewed_offer_count") != summary["offer_count"]
+        or value.get("reviewed_offers")
+        != summary["review_required_offers"]
+        or value.get("method") not in {
+            "qualified_human", "independent_model",
+        }
+        or not isinstance(value.get("receipt_sha256"), str)
+        or len(value["receipt_sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in value["receipt_sha256"]
+        )
+    ):
+        raise CommercialReviewBlocked("review.commercial.resolution_invalid")
+    primary_provider = _resolution_provider(value.get("primary_provider"))
+    provider = _resolution_provider(value.get("provider"))
+    if primary_provider is None or (
+        value["method"] == "qualified_human" and provider is not None
+    ) or (
+        value["method"] == "independent_model"
+        and (
+            provider is None
+            or provider["id"] == primary_provider["id"]
+        )
+    ):
+        raise CommercialReviewBlocked("review.commercial.resolution_invalid")
+    return json.loads(_canonical_json({
+        **value,
+        "primary_provider": primary_provider,
+        "provider": provider,
+    }))
+
+
 def public_profile(profile: str) -> dict[str, Any]:
     """Return the public, brand-neutral contract implemented by this module."""
     body = {
         "schema": PUBLIC_PROFILE_SCHEMA,
         "profile": profile,
+        "review_evidence_schema": profile,
+        "review_evidence_contract": public_review_evidence_contract(profile),
         "review_summary_schema": REVIEW_SUMMARY_SCHEMA,
         "review_summary_contract": public_review_summary_contract(profile),
+        "review_routing_schema": REVIEW_ROUTING_SCHEMA,
+        "review_routing_contract": public_review_routing_contract(profile),
+        "review_resolution_schema": REVIEW_RESOLUTION_SCHEMA,
+        "review_resolution_contract": public_review_resolution_contract(
+            profile,
+        ),
         "applies_to": {
             "content_type": "commercial",
             "locales": "all-supported-target-locales",
@@ -158,6 +553,14 @@ def public_profile(profile: str) -> dict[str, Any]:
             "method": "semantic-provider-evidence",
             "deterministic_numeric_regex_is_sufficient": False,
             "evidence_granularity": "every-proposition-per-offer",
+            "offer_registry": {
+                "identifiers": "unique",
+                "source_and_target_regions": "ordered-non-overlapping",
+                "discontiguous_regions_allowed": True,
+                "every_proposition_contained_in_declared_offer": True,
+                "every_offer_has_exactly_one_assignment_item": True,
+                "every_dimension_has_exactly_one_status_per_offer": True,
+            },
             "directions": ["matched", "source_only", "target_only"],
             "ambiguous_values": "unresolved",
             "unresolved_route": "independent-model-or-qualified-native-domain-review",
@@ -211,8 +614,10 @@ all offers, headings, footnotes, links and conditions. Record every applicable p
 offer label, semantic explanation and relation: 'matched', 'source_only' for an omission, or 'target_only' for an
 addition. Give exact zero-based Python Unicode code-point spans with an exclusive end; the absent side of a one-sided
 item MUST be null. Repeated amounts must stay attached to their own offer; number multisets do not prove fidelity.
+'offer_statuses' MUST contain exactly one verdict for every registered offer, in registry order, for every dimension.
+Derive the dimension status from those offer verdicts with precedence changed, uncertain, equivalent, not_present.
 'not_present' is valid only if a dimension is absent from BOTH texts. 'equivalent' requires nonempty matched items
-covering every applicable proposition. A dimension-level 'changed' or 'uncertain' verdict requires at least one
+for that offer covering every applicable proposition. A per-offer 'changed' or 'uncertain' verdict requires at least one
 specific item; use coverage='uncertain' for unresolved overall completeness without inventing a span.
 Use 'changed' for a known defect and 'uncertain' for unresolved interpretation, coverage or insufficient language/domain
 evidence. Use coverage='uncertain' unless every proposition and offer association was checked. Never resolve numeric
@@ -231,9 +636,18 @@ def review_contract(schema: str) -> dict[str, Any]:
     return {
         "schema": schema,
         "coverage": "complete or uncertain",
+        "offers": [{
+            "id": "stable unique offer identifier",
+            "source_spans": [[0, 1]],
+            "target_spans": [[0, 1]],
+        }],
         "checks": {
             name: {
                 "status": "equivalent, not_present, changed or uncertain",
+                "offer_statuses": [{
+                    "offer": "stable offer label",
+                    "status": "equivalent, not_present, changed or uncertain",
+                }],
                 "items": [{
                     "offer": "stable offer label",
                     "relation": "matched, source_only, or target_only",
@@ -253,13 +667,16 @@ def validate_review(
     target: str,
     schema: str,
     *,
+    target_locale: str,
+    commercial_quality_profile_version: str,
+    commercial_quality_profile_sha256: str,
     allow_uncertain: bool = False,
 ) -> dict[str, Any]:
     """Validate evidence and return a content-free, hash-bound routing summary."""
     def invalid() -> None:
         raise CommercialReviewBlocked("review.commercial.invalid")
 
-    def span(value: Any, text: str) -> None:
+    def span(value: Any, text: str) -> tuple[int, int]:
         if (
             not isinstance(value, list) or len(value) != 2
             or any(type(offset) is not int for offset in value)
@@ -267,55 +684,169 @@ def validate_review(
             or not text[value[0]:value[1]].strip()
         ):
             invalid()
+        return value[0], value[1]
 
-    if not isinstance(value, dict) or set(value) != {"schema", "coverage", "checks"}:
+    def regions(value: Any, text: str) -> tuple[tuple[int, int], ...]:
+        if not isinstance(value, list) or len(value) > 1000:
+            invalid()
+        parsed = tuple(span(item, text) for item in value)
+        if list(parsed) != sorted(parsed) or any(
+            previous[1] > current[0]
+            for previous, current in zip(parsed, parsed[1:])
+        ):
+            invalid()
+        return parsed
+
+    if (
+        not isinstance(target_locale, str)
+        or TARGET_LOCALE.fullmatch(target_locale) is None
+        or not isinstance(commercial_quality_profile_version, str)
+        or PROFILE_VERSION.fullmatch(commercial_quality_profile_version) is None
+        or not isinstance(commercial_quality_profile_sha256, str)
+        or len(commercial_quality_profile_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in commercial_quality_profile_sha256
+        )
+    ):
+        invalid()
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "coverage", "offers", "checks",
+    }:
         invalid()
     if value["schema"] != schema or value["coverage"] not in ("complete", "uncertain"):
         invalid()
+    offers = value["offers"]
+    if not isinstance(offers, list) or len(offers) > 1000:
+        invalid()
+    offer_regions: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {}
+    occupied = {"source_spans": [], "target_spans": []}
+    for offer in offers:
+        if not isinstance(offer, dict) or set(offer) != {
+            "id", "source_spans", "target_spans",
+        }:
+            invalid()
+        offer_id = offer["id"]
+        if (
+            not isinstance(offer_id, str)
+            or PROFILE_VERSION.fullmatch(offer_id) is None
+            or offer_id in offer_regions
+        ):
+            invalid()
+        parsed = {
+            "source_spans": regions(offer["source_spans"], source),
+            "target_spans": regions(offer["target_spans"], target),
+        }
+        if not parsed["source_spans"] and not parsed["target_spans"]:
+            invalid()
+        offer_regions[offer_id] = parsed
+        for side in occupied:
+            occupied[side].extend(
+                (start, end, offer_id) for start, end in parsed[side]
+            )
+    for side in occupied:
+        ordered = sorted(occupied[side])
+        if any(
+            previous[1] > current[0]
+            for previous, current in zip(ordered, ordered[1:])
+        ):
+            invalid()
     checks = value["checks"]
     if not isinstance(checks, dict) or set(checks) != set(DIMENSIONS):
         invalid()
     uncertain_dimensions: set[str] = set()
+    uncertain_offers: dict[str, set[int]] = {
+        name: set() for name in DIMENSIONS
+    }
     coverage_uncertain = value["coverage"] == "uncertain"
     changed = False
     evidenced = False
+    offer_ids = list(offer_regions)
+    status_priority = {
+        "not_present": 0,
+        "equivalent": 1,
+        "uncertain": 2,
+        "changed": 3,
+    }
     for name, check in checks.items():
-        if not isinstance(check, dict) or set(check) != {"status", "items"}:
+        if not isinstance(check, dict) or set(check) != {
+            "status", "offer_statuses", "items",
+        }:
             invalid()
-        status, items = check["status"], check["items"]
+        status = check["status"]
+        offer_statuses = check["offer_statuses"]
+        items = check["items"]
         if status not in ("equivalent", "not_present", "changed", "uncertain"):
+            invalid()
+        if (
+            not isinstance(offer_statuses, list)
+            or len(offer_statuses) != len(offer_ids)
+        ):
+            invalid()
+        parsed_offer_statuses: dict[str, str] = {}
+        for index, offer_status in enumerate(offer_statuses):
+            if (
+                not isinstance(offer_status, dict)
+                or set(offer_status) != {"offer", "status"}
+                or offer_status.get("offer") != offer_ids[index]
+                or offer_status.get("status") not in status_priority
+                or offer_status["offer"] in parsed_offer_statuses
+            ):
+                invalid()
+            parsed_offer_statuses[offer_status["offer"]] = (
+                offer_status["status"]
+            )
+        derived_status = (
+            max(parsed_offer_statuses.values(), key=status_priority.__getitem__)
+            if parsed_offer_statuses else "not_present"
+        )
+        if status != derived_status:
             invalid()
         if not isinstance(items, list) or len(items) > 1000:
             invalid()
-        if (
-            (status == "not_present" and items)
-            or (status in ("equivalent", "changed", "uncertain") and not items)
-        ):
-            invalid()
         seen = set()
+        items_by_offer = {offer_id: [] for offer_id in offer_ids}
         for item in items:
             if not isinstance(item, dict) or set(item) != {
                 "offer", "relation", "source_span", "target_span", "explanation",
             }:
                 invalid()
-            for field in ("offer", "explanation"):
-                if not isinstance(item[field], str) or not item[field].strip() or len(item[field]) > 2000:
-                    invalid()
+            if (
+                not isinstance(item["offer"], str)
+                or PROFILE_VERSION.fullmatch(item["offer"]) is None
+                or item["offer"] not in offer_regions
+                or not isinstance(item["explanation"], str)
+                or not item["explanation"].strip()
+                or len(item["explanation"]) > 2000
+            ):
+                invalid()
             relation = item["relation"]
+            source_span = target_span = None
             if relation == "matched":
-                span(item["source_span"], source)
-                span(item["target_span"], target)
+                source_span = span(item["source_span"], source)
+                target_span = span(item["target_span"], target)
             elif relation == "source_only":
-                span(item["source_span"], source)
+                source_span = span(item["source_span"], source)
                 if item["target_span"] is not None:
                     invalid()
             elif relation == "target_only":
                 if item["source_span"] is not None:
                     invalid()
-                span(item["target_span"], target)
+                target_span = span(item["target_span"], target)
             else:
                 invalid()
-            if status == "equivalent" and relation != "matched":
+            declared = offer_regions[item["offer"]]
+            if source_span is not None and not any(
+                region[0] <= source_span[0]
+                and source_span[1] <= region[1]
+                for region in declared["source_spans"]
+            ):
+                invalid()
+            if target_span is not None and not any(
+                region[0] <= target_span[0]
+                and target_span[1] <= region[1]
+                for region in declared["target_spans"]
+            ):
                 invalid()
             identity = (
                 item["offer"], relation,
@@ -325,10 +856,33 @@ def validate_review(
             if identity in seen:
                 invalid()
             seen.add(identity)
-        if status == "uncertain":
+            items_by_offer[item["offer"]].append(item)
+        for offer_id, offer_status in parsed_offer_statuses.items():
+            offer_items = items_by_offer[offer_id]
+            if (
+                (offer_status == "not_present" and offer_items)
+                or (
+                    offer_status in ("equivalent", "changed", "uncertain")
+                    and not offer_items
+                )
+                or (
+                    offer_status == "equivalent"
+                    and any(item["relation"] != "matched" for item in offer_items)
+                )
+            ):
+                invalid()
+        if any(value == "uncertain" for value in parsed_offer_statuses.values()):
             uncertain_dimensions.add(name)
-        changed |= status == "changed"
-        evidenced |= status == "equivalent"
+            uncertain_offers[name].update(
+                index for index, offer_id in enumerate(offer_ids)
+                if parsed_offer_statuses[offer_id] == "uncertain"
+            )
+        changed |= any(
+            value == "changed" for value in parsed_offer_statuses.values()
+        )
+        evidenced |= any(
+            value == "equivalent" for value in parsed_offer_statuses.values()
+        )
     if changed:
         raise CommercialReviewBlocked("review.commercial.changed")
     # Every evidenced condition must resolve to an explicitly reviewed offer.
@@ -337,12 +891,22 @@ def validate_review(
         check["status"] == "equivalent" for name, check in checks.items() if name != "offer_assignment"
     ):
         uncertain_dimensions.add("offer_assignment")
+        if not uncertain_offers["offer_assignment"]:
+            uncertain_offers["offer_assignment"].update(
+                range(len(offer_ids))
+            )
     else:
-        offers = {item["offer"] for item in assignment["items"]}
-        if any(item["offer"] not in offers for check in checks.values() for item in check["items"]):
+        assigned = [item["offer"] for item in assignment["items"]]
+        if (
+            any(item["relation"] != "matched" for item in assignment["items"])
+            or len(assigned) != len(set(assigned))
+            or set(assigned) != set(offer_regions)
+        ):
             invalid()
     if coverage_uncertain or not evidenced:
         uncertain_dimensions.update(DIMENSIONS)
+        for name in DIMENSIONS:
+            uncertain_offers[name].update(range(len(offer_ids)))
     summary = {
         "schema": REVIEW_SUMMARY_SCHEMA,
         "profile": schema,
@@ -350,7 +914,30 @@ def validate_review(
         "review_required_dimensions": [
             name for name in DIMENSIONS if name in uncertain_dimensions
         ],
-        "evidence_sha256": evidence_sha256(value, source, target, schema),
+        "offer_count": len(offer_ids),
+        "review_required_offers": [
+            {
+                "dimension": name,
+                "offer_indexes": sorted(uncertain_offers[name]),
+            }
+            for name in DIMENSIONS if uncertain_offers[name]
+        ],
+        "review_evidence_contract_sha256": (
+            public_review_evidence_contract(schema)["sha256"]
+        ),
+        "evidence_sha256": evidence_sha256(
+            value,
+            source,
+            target,
+            schema,
+            target_locale=target_locale,
+            commercial_quality_profile_version=(
+                commercial_quality_profile_version
+            ),
+            commercial_quality_profile_sha256=(
+                commercial_quality_profile_sha256
+            ),
+        ),
     }
     if uncertain_dimensions and not allow_uncertain:
         raise CommercialReviewBlocked("review.commercial.independent_review_required")
@@ -368,24 +955,177 @@ def validate_summary(
         not isinstance(value, dict)
         or set(value) != {
             "schema", "profile", "status", "review_required_dimensions",
-            "evidence_sha256",
+            "offer_count", "review_required_offers",
+            "review_evidence_contract_sha256", "evidence_sha256",
         }
         or value["schema"] != REVIEW_SUMMARY_SCHEMA
         or value["profile"] != profile
+        or value["review_evidence_contract_sha256"]
+        != public_review_evidence_contract(profile)["sha256"]
         or value["status"] not in {"verified", "review_required"}
         or not isinstance(value["evidence_sha256"], str)
         or len(value["evidence_sha256"]) != 64
         or any(character not in "0123456789abcdef" for character in value["evidence_sha256"])
         or not isinstance(value["review_required_dimensions"], list)
+        or type(value["offer_count"]) is not int
+        or not 0 <= value["offer_count"] <= 1000
+        or not isinstance(value["review_required_offers"], list)
     ):
         raise CommercialReviewBlocked("review.commercial.summary_invalid")
     dimensions = value["review_required_dimensions"]
+    offer_scope = value["review_required_offers"]
     if (
-        len(dimensions) != len(set(dimensions))
+        len(offer_scope) > len(DIMENSIONS)
+        or len(dimensions) != len(set(dimensions))
         or any(name not in DIMENSIONS for name in dimensions)
         or dimensions != [name for name in DIMENSIONS if name in dimensions]
         or (value["status"] == "verified") != (not dimensions)
+        or (value["status"] == "verified" and offer_scope)
         or (value["status"] == "review_required" and not review_required)
     ):
         raise CommercialReviewBlocked("review.commercial.summary_invalid")
+    previous_dimension_index = -1
+    seen_scope_dimensions: set[str] = set()
+    for item in offer_scope:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"dimension", "offer_indexes"}
+            or item.get("dimension") not in dimensions
+            or item["dimension"] in seen_scope_dimensions
+            or not isinstance(item.get("offer_indexes"), list)
+            or not item["offer_indexes"]
+            or any(type(index) is not int or not 0 <= index < value["offer_count"]
+                   for index in item["offer_indexes"])
+            or item["offer_indexes"] != sorted(set(item["offer_indexes"]))
+        ):
+            raise CommercialReviewBlocked("review.commercial.summary_invalid")
+        dimension_index = list(DIMENSIONS).index(item["dimension"])
+        if dimension_index <= previous_dimension_index:
+            raise CommercialReviewBlocked("review.commercial.summary_invalid")
+        previous_dimension_index = dimension_index
+        seen_scope_dimensions.add(item["dimension"])
     return json.loads(_canonical_json(value))
+
+
+def validate_review_routing_context(
+    value: Any,
+    source: str,
+    target: str,
+    summary: Any,
+    profile: str,
+) -> dict[str, Any]:
+    """Validate private offer regions used only by an independent reviewer."""
+    try:
+        summary = validate_summary(summary, profile, review_required=True)
+    except CommercialReviewBlocked:
+        raise CommercialReviewBlocked("review.commercial.routing_invalid") from None
+    if (
+        summary["status"] != "review_required"
+        or not isinstance(source, str)
+        or not isinstance(target, str)
+        or not isinstance(value, dict)
+        or set(value) != {
+            "schema", "profile", "contract_sha256", "offer_count",
+            "source_length", "target_length", "offers",
+        }
+        or value.get("schema") != REVIEW_ROUTING_SCHEMA
+        or value.get("profile") != profile
+        or value.get("contract_sha256")
+        != public_review_routing_contract(profile)["sha256"]
+        or value.get("offer_count") != summary["offer_count"]
+        or type(value.get("source_length")) is not int
+        or value["source_length"] != len(source)
+        or type(value.get("target_length")) is not int
+        or value["target_length"] != len(target)
+        or not isinstance(value.get("offers"), list)
+        or len(value["offers"]) != value["offer_count"]
+    ):
+        raise CommercialReviewBlocked("review.commercial.routing_invalid")
+
+    occupied = {"source_spans": [], "target_spans": []}
+    for expected_index, offer in enumerate(value["offers"]):
+        if (
+            not isinstance(offer, dict)
+            or set(offer) != {
+                "offer_index", "source_spans", "target_spans",
+            }
+            or offer.get("offer_index") != expected_index
+        ):
+            raise CommercialReviewBlocked("review.commercial.routing_invalid")
+        for field, text in (
+            ("source_spans", source), ("target_spans", target),
+        ):
+            spans = offer.get(field)
+            if not isinstance(spans, list) or len(spans) > 1000:
+                raise CommercialReviewBlocked(
+                    "review.commercial.routing_invalid",
+                )
+            parsed = []
+            for span in spans:
+                if (
+                    not isinstance(span, list)
+                    or len(span) != 2
+                    or any(type(offset) is not int for offset in span)
+                    or not 0 <= span[0] < span[1] <= len(text)
+                    or not text[span[0]:span[1]].strip()
+                ):
+                    raise CommercialReviewBlocked(
+                        "review.commercial.routing_invalid",
+                    )
+                parsed.append(tuple(span))
+            if parsed != sorted(parsed) or any(
+                previous[1] > current[0]
+                for previous, current in zip(parsed, parsed[1:])
+            ):
+                raise CommercialReviewBlocked(
+                    "review.commercial.routing_invalid",
+                )
+            occupied[field].extend(
+                (start, end, expected_index) for start, end in parsed
+            )
+        if not offer["source_spans"] and not offer["target_spans"]:
+            raise CommercialReviewBlocked("review.commercial.routing_invalid")
+    for spans in occupied.values():
+        ordered = sorted(spans)
+        if any(
+            previous[1] > current[0]
+            for previous, current in zip(ordered, ordered[1:])
+        ):
+            raise CommercialReviewBlocked("review.commercial.routing_invalid")
+    return json.loads(_canonical_json(value))
+
+
+def review_routing_context(
+    evidence: Any,
+    source: str,
+    target: str,
+    summary: Any,
+    profile: str,
+) -> dict[str, Any]:
+    """Remove offer IDs and prose while retaining actionable private regions."""
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("schema") != profile
+        or not isinstance(evidence.get("offers"), list)
+    ):
+        raise CommercialReviewBlocked("review.commercial.routing_invalid")
+    context = {
+        "schema": REVIEW_ROUTING_SCHEMA,
+        "profile": profile,
+        "contract_sha256": public_review_routing_contract(profile)["sha256"],
+        "offer_count": len(evidence["offers"]),
+        "source_length": len(source),
+        "target_length": len(target),
+        "offers": [
+            {
+                "offer_index": index,
+                "source_spans": offer.get("source_spans"),
+                "target_spans": offer.get("target_spans"),
+            }
+            if isinstance(offer, dict) else offer
+            for index, offer in enumerate(evidence["offers"])
+        ],
+    }
+    return validate_review_routing_context(
+        context, source, target, summary, profile,
+    )

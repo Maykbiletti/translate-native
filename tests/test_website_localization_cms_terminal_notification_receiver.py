@@ -147,6 +147,7 @@ class TerminalNotificationReceiverTests(unittest.TestCase):
     def adapter(self, transport=None):
         return HTTP.HTTPTerminalNotifierAdapter(
             "https://cms.example.test/v1/localization/terminal-notifications",
+            RECEIVER.capabilities_payload(self.application.path)["sha256"],
             lambda _request: {"Authorization": "Bearer exact"},
             transport=transport or WSGITransport(self.application),
         )
@@ -179,8 +180,47 @@ class TerminalNotificationReceiverTests(unittest.TestCase):
             "event_id": payload["event_id"],
             "site_id": payload["site_id"],
             "body_sha256": expected_sha,
+            "capabilities_sha256": RECEIVER.capabilities_payload(
+                self.application.path
+            )["sha256"],
         })
         self.assertEqual(headers["authorization"], "Bearer exact")
+        self.assertEqual(
+            headers["x-localization-capabilities-sha256"],
+            request["capabilities_sha256"],
+        )
+
+    def test_capability_precondition_blocks_before_durable_intake(self):
+        payload = notification()
+        body = HTTP._canonical(payload)
+        body_sha256 = hashlib.sha256(body).hexdigest()
+        base_headers = {
+            "Authorization": "Bearer exact",
+            "Content-Type": "application/json; charset=utf-8",
+            "Idempotency-Key": payload["notification_id"],
+            "X-Localization-Terminal-Notification-Id": payload[
+                "notification_id"
+            ],
+            "X-Localization-Terminal-Notification-Sha256": body_sha256,
+        }
+        for supplied, status, code in (
+            (None, 428, "notification_receiver.capabilities_precondition_required"),
+            ("0" * 64, 412, "notification_receiver.capabilities_precondition_failed"),
+        ):
+            with self.subTest(status=status):
+                headers = dict(base_headers)
+                if supplied is not None:
+                    headers[RECEIVER.CAPABILITIES_PRECONDITION_HEADER] = supplied
+                result = WSGITransport(self.application).post(
+                    "https://cms.example.test" + self.application.path,
+                    headers, body, timeout=30,
+                )
+                self.assertEqual(result.status, status)
+                self.assertEqual(json.loads(result.body)["error_code"], code)
+                self.assertEqual(self.connection.execute(
+                    "SELECT COUNT(*) FROM cms_terminal_notification_inbox"
+                ).fetchone()[0], 0)
+        self.assertEqual(len(self.authentication_calls), 2)
 
     def test_lost_ack_replay_converges_on_one_durable_row(self):
         payload = notification()
@@ -231,6 +271,7 @@ class TerminalNotificationReceiverTests(unittest.TestCase):
         transport = WSGITransport(app)
         callback = HTTP.HTTPTerminalNotifierAdapter(
             "https://cms.example.test/v1/localization/terminal-notifications",
+            RECEIVER.capabilities_payload(app.path)["sha256"],
             lambda _request: {"Authorization": "Bearer wrong-site"},
             transport=transport,
         )
@@ -392,6 +433,7 @@ class TerminalNotificationReceiverTests(unittest.TestCase):
         transport = WSGITransport(app)
         callback = HTTP.HTTPTerminalNotifierAdapter(
             "https://cms.example.test/v1/localization/terminal-notifications",
+            RECEIVER.capabilities_payload(app.path)["sha256"],
             lambda _request: {"Authorization": "Bearer exact"},
             transport=transport,
         )

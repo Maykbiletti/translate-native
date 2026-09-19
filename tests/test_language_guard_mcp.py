@@ -21,6 +21,13 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
+RESPONSE_BINDING = {
+    "response_session_sha256": "b" * 64,
+    "response_session_epoch_sha256": "c" * 64,
+    "response_agent_sha256": "d" * 64,
+    "response_guard_boot_sha256": "e" * 64,
+}
+
 
 class LanguageGuardMCPTests(unittest.TestCase):
     @staticmethod
@@ -110,6 +117,8 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.assertIn("release_response", instructions)
         self.assertIn("translate-native skill/plugin", instructions)
         self.assertIn("release_translation", instructions)
+        self.assertIn("rewrite_text", instructions)
+        self.assertIn("one-time rewrite context", instructions)
 
     def test_mcp_advertises_translate_native_prompt(self) -> None:
         listed = MODULE.handle_message({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"})
@@ -121,13 +130,20 @@ class LanguageGuardMCPTests(unittest.TestCase):
         })
         assert fetched is not None
         self.assertIn("release_translation", fetched["result"]["messages"][0]["content"]["text"])
+        self.assertIn("rewrite_text", fetched["result"]["messages"][0]["content"]["text"])
+
+    def test_rewrite_tool_requires_trusted_host_context_and_identity(self) -> None:
+        tool = next(item for item in MODULE.TOOLS if item["name"] == "rewrite_text")
+        required = set(tool["inputSchema"]["required"])
+        self.assertTrue({"rewrite_context_token", "session_id", "session_epoch", "agent_id"} <= required)
+        self.assertFalse(tool["inputSchema"]["additionalProperties"])
 
     def test_release_response_blocks_damaged_german_answer(self) -> None:
-        report = MODULE.release_response({
+        report = MODULE.release_response_verified({
             "target_text": "Haendler pruefen taeglich die Qualitaet im Buero.",
             "language": "de-DE",
             "attestations": {"nativeness": True, "orthography": True},
-        })
+        }, "a" * 64, RESPONSE_BINDING)
         self.assertFalse(report["release_allowed"])
         self.assertIn("ascii-folding-pressure", {finding["code"] for finding in report["findings"]})
 
@@ -138,26 +154,26 @@ class LanguageGuardMCPTests(unittest.TestCase):
         )
         for target, language in cases:
             with self.subTest(language=language):
-                report = MODULE.release_response({
+                report = MODULE.release_response_verified({
                     "target_text": target,
                     "language": language,
                     "attestations": {"nativeness": True, "orthography": True},
-                })
+                }, "a" * 64, RESPONSE_BINDING)
                 self.assertFalse(report["release_allowed"])
                 self.assertIn(
                     "suspected-ascii-substitution",
                     {finding["code"] for finding in report["findings"]},
                 )
 
-    def test_release_response_requires_exact_language_and_attestations(self) -> None:
-        report = MODULE.release_response({
+    def test_release_response_requires_exact_language_and_host_review(self) -> None:
+        report = MODULE.release_response_verified({
             "target_text": "Natürlich ist das möglich.",
             "language": "auto",
             "attestations": {"orthography": True},
-        })
+        }, "a" * 64, RESPONSE_BINDING)
         self.assertFalse(report["release_allowed"])
         self.assertEqual(
-            {"exact-language-required", "missing-response-attestations"},
+            {"exact-language-required"},
             {finding["code"] for finding in report["findings"]},
         )
 
@@ -166,11 +182,11 @@ class LanguageGuardMCPTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
         target = "Natürlich ist das möglich."
-        report = MODULE.release_response({
+        report = MODULE.release_response_verified({
             "target_text": target,
             "language": "de-DE",
             "attestations": {"nativeness": True, "orthography": True},
-        })
+        }, "a" * 64, RESPONSE_BINDING)
         self.assertTrue(report["release_allowed"], report)
         key = MODULE.QUALITY.load_or_create_key(MODULE.KEY_PATH)
         response_check = MODULE.QUALITY.verify_receipt(
@@ -338,11 +354,11 @@ class LanguageGuardMCPTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         MODULE.KEY_PATH = Path(temporary.name) / "signing.key"
-        report = MODULE.release_response({
+        report = MODULE.release_response_verified({
             "target_text": target,
             "language": "de-DE",
             "attestations": {"nativeness": True, "orthography": True},
-        })
+        }, "a" * 64, RESPONSE_BINDING)
         self.assertTrue(report["release_allowed"], report)
 
     def test_native_german_ue_sequences_do_not_look_ascii_folded(self) -> None:
@@ -605,7 +621,17 @@ class LanguageGuardMCPTests(unittest.TestCase):
         names = {tool["name"] for tool in response["result"]["tools"]}
         self.assertEqual(
             names,
-            {"validate_text", "release_response", "release_translation", "verify_release_token"},
+            {"validate_text", "release_response", "release_translation", "verify_release_token", "rewrite_text"},
+        )
+        release = next(
+            tool for tool in response["result"]["tools"]
+            if tool["name"] == "release_response"
+        )
+        self.assertNotIn(
+            "review_context_token", release["inputSchema"]["required"],
+        )
+        self.assertIn(
+            "review_context_token", release["inputSchema"]["properties"],
         )
 
 

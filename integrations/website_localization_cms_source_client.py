@@ -348,6 +348,7 @@ class CMSLocalizationSourceHTTPClient:
         *,
         expected_runtime_capabilities_sha256: str,
         expected_commercial_rendering_registry_sha256: str,
+        expected_terminal_receiver_capabilities_sha256: str | None = None,
         transport: HTTPTransport | None = None,
         timeout: float | int = 30,
         allow_loopback_http: bool = False,
@@ -374,6 +375,18 @@ class CMSLocalizationSourceHTTPClient:
         ):
             raise ValueError("expected runtime capability binding is invalid")
         if (
+            expected_terminal_receiver_capabilities_sha256 is not None
+            and (
+                not isinstance(
+                    expected_terminal_receiver_capabilities_sha256, str,
+                )
+                or SHA256.fullmatch(
+                    expected_terminal_receiver_capabilities_sha256
+                ) is None
+            )
+        ):
+            raise ValueError("expected terminal receiver capability is invalid")
+        if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
             or not math.isfinite(float(timeout))
@@ -386,6 +399,9 @@ class CMSLocalizationSourceHTTPClient:
         )
         self.expected_commercial_rendering_registry_sha256 = (
             expected_commercial_rendering_registry_sha256
+        )
+        self.expected_terminal_receiver_capabilities_sha256 = (
+            expected_terminal_receiver_capabilities_sha256
         )
         self.authentication_headers = authentication_headers
         self.transport = URLTransport() if transport is None else transport
@@ -570,6 +586,11 @@ class CMSLocalizationSourceHTTPClient:
             _fail("status_binding")
         if normalized != response["status"]:
             _fail("status_binding")
+        if (
+            normalized["terminal_receiver_capabilities_sha256"]
+            != self.expected_terminal_receiver_capabilities_sha256
+        ):
+            _fail("status_binding")
         return response
 
     def health(self) -> Mapping[str, Any]:
@@ -593,6 +614,8 @@ class CMSLocalizationSourceHTTPClient:
         if (
             normalized != response["health"]
             or (result.status == 503) != (normalized["status"] == "blocked")
+            or normalized["terminal_receiver_capabilities_sha256"]
+            != self.expected_terminal_receiver_capabilities_sha256
         ):
             _fail("health_binding")
         return response

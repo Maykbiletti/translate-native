@@ -29,8 +29,9 @@ Neither credentials nor remote response prose appears in adapter errors.
 ## Request
 
 The adapter accepts only the coordinator's exact immutable
-`blun.localization-quality-evidence-request.v6` object. It validates the
-complete field set, request ID, SHA-256 values, locale profile, model identity,
+`blun.localization-quality-evidence-request.v14` object. It validates the
+complete field set, derives the request ID, and checks SHA-256 values, locale
+profile, model identity,
 confidence decisions, and, for commercial content, the exact locale-specific
 commercial quality-profile binding plus its content-free targeted-review
 summary, UTF-8 size, Unicode NFC, and the source and target text hashes before
@@ -44,7 +45,7 @@ It sends one canonical UTF-8 JSON document:
   "request_id": "blun-l10n-evidence-<64 lowercase hexadecimal characters>",
   "request_sha256": "<SHA-256 of the canonical inner request>",
   "request": {
-    "schema": "blun.localization-quality-evidence-request.v6",
+    "schema": "blun.localization-quality-evidence-request.v14",
     "request_id": "<same request ID>",
     "source_locale": "en-IE",
     "target_locale": "fi-FI",
@@ -54,6 +55,11 @@ It sends one canonical UTF-8 JSON document:
     "source_sha256": "<source-text hash>",
     "target_sha256": "<target-text hash>",
     "content_type": "headline",
+    "commercial_review_routing": null,
+    "commercial_review_routing_contract_sha256": null,
+    "commercial_review_routing_contract": null,
+    "commercial_review_resolution_contract_sha256": null,
+    "commercial_review_resolution_contract": null,
     "quality_profile": {
       "locale": "fi-FI",
       "version": "<locale profile version>",
@@ -64,15 +70,56 @@ It sends one canonical UTF-8 JSON document:
 ```
 
 The abbreviated example omits other required inner fields for readability.
-Production requests always contain exactly the full v6 field set. Commercial
+Production requests always contain exactly the full v14 field set. Commercial
 requests include `commercial_profile`, the matching `commercial_review`
 summary, and `quality_profile.commercial` with the same profile identifier plus
-its exact locale-specific version and SHA-256 digest. Non-commercial requests
-require both commercial fields to be `null` and forbid that nested profile.
+its exact locale-specific version and SHA-256 digest. The summary binds the
+exact advertised commercial review-evidence-contract SHA-256, so a prior
+structurally valid report cannot be reinterpreted under a changed contract. An unresolved commercial
+summary additionally carries the canonical advertised resolution-contract
+SHA-256 and the complete content-free resolution contract. Both fields are
+part of the deterministic request ID, so a reviewer can resolve the targeted
+uncertainty without separate capability discovery. The coordinator and HTTP
+adapter independently reconstruct the current contract and reject a missing,
+stale, substituted, or merely self-rehashed object before provider access.
+Verified commercial results and non-commercial requests require both fields
+to be `null`.
+Every commercial request also carries
+`commercial_review_routing_contract_sha256`, even when the commercial review
+is already verified and no private offer route is needed. This lets the
+evidence provider issue the receipt against the same exact public contract
+digest that the receipt verifier, signed approval, and CMS evidence later
+require. Non-commercial requests require this field to be `null`.
+An unresolved commercial request also carries a private
+`commercial_review_routing` object. It maps every zero-based opaque offer index
+to its ordered, non-overlapping source and target Unicode code-point spans and
+binds both complete text lengths. The object contains no configured offer ID,
+text, price, brand, or reviewer prose. It also carries the exact SHA-256 of the
+separately advertised machine-readable routing contract. The sibling
+`commercial_review_routing_contract` field contains that complete content-free
+contract, so a remote reviewer does not depend on separate capability
+discovery. The adapter reconstructs the canonical object and validates the
+route against the exact source, target, summary, and profile before
+authentication or transport. Route, digest, and full contract are part of the
+deterministic request ID. Verified commercial results and non-commercial
+requests require both route and routing contract to be `null`.
+Non-commercial requests require every commercial field to be `null` and forbid
+the nested commercial quality profile.
 Source and
 target text are intentionally present because this external step verifies the
 existing source-blind native review and the separate source-aware fidelity
 review. The service must preserve their confidentiality.
+
+The suffix of `request_id` is the SHA-256 of canonical UTF-8 JSON containing
+exactly `schema`, `evidence_revision`, `event_id`, `plan_id`, `job_id`,
+`result_sha256`, both text hashes, both locales, `content_type`, glossary and
+policy versions, provider/model identity, software version, both confidence
+decisions, the complete locale quality profile, commercial profile and review,
+the routing-contract digest, the conditional commercial review-routing object,
+its complete routing contract, the resolution-contract hash, and both escalation
+flags. The full texts and `request_id` itself are excluded from that identity;
+their exact bytes are already bound by `source_sha256` and `target_sha256`.
+The durable store and HTTP adapter independently recompute this same identity.
 
 The adapter adds:
 
@@ -113,11 +160,15 @@ numbers, a UTF-8 byte-order mark, wrong bindings, ambiguous content types,
 incorrect lengths, and oversized bodies. The release coordinator then applies
 its existing independent receipt checks. Each opaque receipt must verify
 against the complete canonical
-`blun.localization-quality-receipt-binding.v3` object supplied by the release
+`blun.localization-quality-receipt-binding.v9` object supplied by the release
 coordinator, including the review purpose, job and result hashes, both texts
 and locales, content type, glossary and policy versions, provider/model and
 software identities, locale quality and commercial profiles, the exact
-commercial review scope, confidence, and escalation requirements. Reuse across
+commercial review scope, canonical resolution-contract SHA-256, confidence,
+the exact public offer-routing-contract SHA-256, the private offer-routing
+context, escalation requirements, and the exact
+evidence request ID and revision from
+this response. Reuse across
 a changed field or between quality,
 qualified-human, and independent-model review purposes must fail closed.
 Legal content still requires a

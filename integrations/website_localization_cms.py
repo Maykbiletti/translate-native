@@ -31,9 +31,9 @@ PUBLICATION_SCHEMA = "blun.cms-localization-publication.v3"
 ACK_SCHEMA = "blun.cms-localization-publication-ack.v1"
 TOMBSTONE_DELIVERY_SCHEMA = "blun.cms-localization-tombstone.v1"
 TOMBSTONE_ACK_SCHEMA = "blun.cms-localization-tombstone-ack.v1"
-CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v5"
+CAPABILITIES_SCHEMA = "blun.website-localization-capabilities.v9"
 PUBLICATION_HTTP_CONTRACT_SCHEMA = (
-    "blun.cms-localization-publication-http-capabilities.v2"
+    "blun.cms-localization-publication-http-capabilities.v5"
 )
 PUBLICATION_HTTP_REQUEST_SCHEMA = "blun.cms-localization-publication-http.v1"
 PUBLICATION_HTTP_RESPONSE_SCHEMA = "blun.cms-localization-publication-http-ack.v1"
@@ -60,6 +60,7 @@ PUBLICATION_HEALTH_HTTP_BINDING_HEADERS = (
 MAX_MESSAGE_BYTES = 4_000_000
 MAX_ATTEMPTS = 20
 MAX_LEASE_SECONDS = 86_400.0
+MAX_DELIVERY_POLICY_SCREEN = 24
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 SIGNATURE_VALUE = re.compile(r"^[A-Za-z0-9_.:/+=-]{1,4096}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -382,9 +383,15 @@ def _valid_release_evidence(
     locale: Any,
     target_sha256: Any,
     approval_id: Any,
+    require_current_locale_quality: bool = True,
 ) -> bool:
     try:
-        evidence = _RELEASE.validate_publication_evidence(value)
+        evidence = _RELEASE.validate_publication_evidence(
+            value,
+            require_current_locale_quality=(
+                require_current_locale_quality
+            ),
+        )
     except _RELEASE.LocalizationReleaseBlocked:
         return False
     return (
@@ -392,6 +399,38 @@ def _valid_release_evidence(
         and evidence["target_sha256"] == target_sha256
         and evidence["approval_id"] == approval_id
     )
+
+
+def _release_evidence_policy_state(
+    value: Any,
+    *,
+    locale: Any,
+    target_sha256: Any,
+    approval_id: Any,
+) -> str:
+    """Return current, stale, unavailable, or invalid without exposing content."""
+
+    try:
+        evidence = _RELEASE.validate_publication_evidence(
+            value, require_current_locale_quality=False,
+        )
+    except _RELEASE.LocalizationReleaseBlocked:
+        return "invalid"
+    if (
+        evidence["target_locale"] != locale
+        or evidence["target_sha256"] != target_sha256
+        or evidence["approval_id"] != approval_id
+    ):
+        return "invalid"
+    try:
+        _RELEASE.validate_current_publication_policy(evidence)
+    except _RELEASE.LocalizationReleaseBlocked as error:
+        if error.code == "publication.evidence.policy_stale":
+            return "stale"
+        if error.code == "publication.evidence.policy_unavailable":
+            return "unavailable"
+        return "invalid"
+    return "current"
 
 
 def _positive_integer(value: Any, code: str) -> int:
@@ -508,8 +547,23 @@ class WebsiteLocalizationCMSBridge:
 
             commercial = _COMMERCIAL.public_profile(_PLANNER.COMMERCIAL_PROFILE)
             rendering_registry = _PLANNER.commercial_rendering_registry()
+            review_evidence_contract = (
+                _COMMERCIAL.public_review_evidence_contract(
+                    _PLANNER.COMMERCIAL_PROFILE,
+                )
+            )
             review_summary_contract = _COMMERCIAL.public_review_summary_contract(
                 _PLANNER.COMMERCIAL_PROFILE,
+            )
+            review_routing_contract = (
+                _COMMERCIAL.public_review_routing_contract(
+                    _PLANNER.COMMERCIAL_PROFILE,
+                )
+            )
+            review_resolution_contract = (
+                _COMMERCIAL.public_review_resolution_contract(
+                    _PLANNER.COMMERCIAL_PROFILE,
+                )
             )
             if (
                 not isinstance(commercial, dict)
@@ -517,14 +571,29 @@ class WebsiteLocalizationCMSBridge:
                     "schema", "profile", "applies_to", "dimensions",
                     "preservation", "rendering", "verification",
                     "locale_quality_profile", "protected_terms",
+                    "review_evidence_schema", "review_evidence_contract",
                     "review_summary_schema",
-                    "review_summary_contract", "sha256",
+                    "review_summary_contract", "review_routing_schema",
+                    "review_routing_contract", "review_resolution_schema",
+                    "review_resolution_contract", "sha256",
                 }
                 or commercial["schema"] != _COMMERCIAL.PUBLIC_PROFILE_SCHEMA
                 or commercial["profile"] != _PLANNER.COMMERCIAL_PROFILE
+                or commercial["review_evidence_schema"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or commercial["review_evidence_contract"]
+                != review_evidence_contract
                 or commercial["review_summary_schema"]
                 != _COMMERCIAL.REVIEW_SUMMARY_SCHEMA
                 or commercial["review_summary_contract"] != review_summary_contract
+                or commercial["review_routing_schema"]
+                != _COMMERCIAL.REVIEW_ROUTING_SCHEMA
+                or commercial["review_routing_contract"]
+                != review_routing_contract
+                or commercial["review_resolution_schema"]
+                != _COMMERCIAL.REVIEW_RESOLUTION_SCHEMA
+                or commercial["review_resolution_contract"]
+                != review_resolution_contract
                 or commercial["applies_to"] != {
                     "content_type": "commercial",
                     "locales": "all-supported-target-locales",
@@ -564,6 +633,142 @@ class WebsiteLocalizationCMSBridge:
                 or tuple(_COMMERCIAL.DIMENSIONS) != _EXPECTED_COMMERCIAL_DIMENSIONS
             ):
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+            unsigned_review_evidence_contract = dict(
+                review_evidence_contract
+            )
+            review_evidence_digest = unsigned_review_evidence_contract.pop(
+                "sha256", None,
+            )
+            if (
+                set(review_evidence_contract) != {
+                    "schema", "result_schema", "profile", "required_fields",
+                    "coverage", "offer_registry", "checks", "trust_boundary",
+                    "content_policy", "sha256",
+                }
+                or review_evidence_contract["schema"]
+                != _COMMERCIAL.REVIEW_EVIDENCE_CAPABILITIES_SCHEMA
+                or review_evidence_contract["result_schema"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or review_evidence_contract["profile"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or review_evidence_contract["required_fields"] != [
+                    "schema", "coverage", "offers", "checks",
+                ]
+                or review_evidence_contract["coverage"] != {
+                    "allowed": ["complete", "uncertain"],
+                    "complete": (
+                        "every-proposition-and-offer-association-reviewed"
+                    ),
+                    "uncertain": "independent-review-required",
+                }
+                or review_evidence_contract["offer_registry"] != {
+                    "field": "offers",
+                    "max_items": 1000,
+                    "item_required_fields": [
+                        "id", "source_spans", "target_spans",
+                    ],
+                    "identifier": {
+                        "pattern": r"^[A-Za-z0-9_.:-]{1,256}$",
+                        "unique": True,
+                    },
+                    "regions": {
+                        "fields": ["source_spans", "target_spans"],
+                        "span_format": (
+                            "zero-based-unicode-code-points-exclusive-end"
+                        ),
+                        "non_empty_text": True,
+                        "ordered": True,
+                        "overlap": "forbidden-within-and-across-offers",
+                        "discontiguous": True,
+                        "at_least_one_side_non_empty": True,
+                    },
+                }
+                or review_evidence_contract["checks"] != {
+                    "required_dimensions": list(
+                        _EXPECTED_COMMERCIAL_DIMENSIONS
+                    ),
+                    "exact_dimension_set": True,
+                    "max_items_per_dimension": 1000,
+                    "statuses": [
+                        "equivalent", "not_present", "changed", "uncertain",
+                    ],
+                    "status_items": {
+                        "equivalent": "one-or-more-matched",
+                        "not_present": "empty",
+                        "changed": "one-or-more-specific",
+                        "uncertain": "one-or-more-specific",
+                    },
+                    "offer_statuses": {
+                        "field": "offer_statuses",
+                        "item_required_fields": ["offer", "status"],
+                        "coverage": "exactly-one-per-registered-offer",
+                        "order": "offer-registry-order",
+                        "statuses": [
+                            "equivalent", "not_present", "changed",
+                            "uncertain",
+                        ],
+                        "global_status": (
+                            "changed-then-uncertain-then-equivalent-then-"
+                            "not_present"
+                        ),
+                        "items_must_match_offer_status": True,
+                    },
+                    "item": {
+                        "required_fields": [
+                            "offer", "relation", "source_span", "target_span",
+                            "explanation",
+                        ],
+                        "offer": "registered-offer-id",
+                        "relations": [
+                            "matched", "source_only", "target_only",
+                        ],
+                        "matched_requires": "source-and-target-spans",
+                        "source_only_requires": (
+                            "source-span-and-null-target-span"
+                        ),
+                        "target_only_requires": (
+                            "null-source-span-and-target-span"
+                        ),
+                        "span_containment": "inside-named-offer-region",
+                        "duplicates": "forbidden-per-dimension",
+                        "explanation": (
+                            "non-empty-maximum-2000-code-points"
+                        ),
+                    },
+                    "offer_assignment": {
+                        "equivalent": (
+                            "exactly-one-matched-item-per-registered-offer"
+                        ),
+                        "other_equivalent_checks_require_equivalent_assignment": (
+                            True
+                        ),
+                    },
+                }
+                or review_evidence_contract["trust_boundary"] != {
+                    "validates": "structure-offsets-and-verdict-consistency",
+                    "semantic_truth": False,
+                    "numeric_regex_semantic_proof": False,
+                    "unresolved_route": (
+                        "independent-model-or-qualified-native-domain-review"
+                    ),
+                    "publication_authority": False,
+                }
+                or review_evidence_contract["content_policy"] != {
+                    "source_text": False,
+                    "target_text": False,
+                    "source_spans": False,
+                    "target_spans": False,
+                    "reviewer_prose": False,
+                    "project_prices": False,
+                    "project_brands": False,
+                }
+                or not isinstance(review_evidence_digest, str)
+                or SHA256.fullmatch(review_evidence_digest) is None
+                or review_evidence_digest != _hash(
+                    _canonical_json(unsigned_review_evidence_contract)
+                )
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
             unsigned_review_summary_contract = dict(review_summary_contract)
             review_summary_digest = unsigned_review_summary_contract.pop(
                 "sha256", None,
@@ -571,8 +776,10 @@ class WebsiteLocalizationCMSBridge:
             if (
                 set(review_summary_contract) != {
                     "schema", "result_schema", "profile", "required_fields",
-                    "statuses", "review_required_dimensions", "evidence_sha256",
-                    "content_policy", "sha256",
+                    "statuses", "review_required_dimensions",
+                    "offer_count", "review_required_offers", "evidence_sha256",
+                    "review_evidence_contract_sha256", "content_policy",
+                    "sha256",
                 }
                 or review_summary_contract["schema"]
                 != _COMMERCIAL.REVIEW_SUMMARY_CAPABILITIES_SCHEMA
@@ -582,12 +789,17 @@ class WebsiteLocalizationCMSBridge:
                 != _PLANNER.COMMERCIAL_PROFILE
                 or review_summary_contract["required_fields"] != [
                     "schema", "profile", "status", "review_required_dimensions",
-                    "evidence_sha256",
+                    "offer_count", "review_required_offers",
+                    "review_evidence_contract_sha256", "evidence_sha256",
                 ]
                 or review_summary_contract["statuses"] != {
-                    "verified": {"review_required_dimensions": "empty"},
+                    "verified": {
+                        "review_required_dimensions": "empty",
+                        "review_required_offers": "empty",
+                    },
                     "review_required": {
                         "review_required_dimensions": "one-or-more",
+                        "review_required_offers": "zero-or-more",
                         "requires_independent_review": True,
                     },
                 }
@@ -596,6 +808,30 @@ class WebsiteLocalizationCMSBridge:
                     "order": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
                     "unique": True,
                 }
+                or review_summary_contract["review_required_offers"] != {
+                    "item_required_fields": [
+                        "dimension", "offer_indexes",
+                    ],
+                    "dimension_order": list(
+                        _EXPECTED_COMMERCIAL_DIMENSIONS
+                    ),
+                    "dimension_must_be_review_required": True,
+                    "offer_indexes": {
+                        "meaning": (
+                            "zero-based-opaque-offer-registry-position"
+                        ),
+                        "minimum": 0,
+                        "maximum_exclusive": 1000,
+                        "order": "ascending",
+                        "unique": True,
+                    },
+                    "configured_offer_identifiers_published": False,
+                }
+                or review_summary_contract["offer_count"] != {
+                    "meaning": "opaque-offer-registry-size",
+                    "minimum": 0,
+                    "maximum": 1000,
+                }
                 or review_summary_contract["evidence_sha256"] != {
                     "algorithm": "sha-256",
                     "canonicalization": (
@@ -603,16 +839,32 @@ class WebsiteLocalizationCMSBridge:
                     ),
                     "binding_schema": _COMMERCIAL.EVIDENCE_BINDING_SCHEMA,
                     "binding_fields": [
-                        "schema", "profile", "source_sha256", "target_sha256",
-                        "evidence",
+                        "schema", "profile",
+                        "review_evidence_contract_sha256", "target_locale",
+                        "commercial_quality_profile_version",
+                        "commercial_quality_profile_sha256", "source_sha256",
+                        "target_sha256", "evidence",
                     ],
                     "text_hashing": "exact-utf-8",
                     "covers": [
                         "commercial-profile",
+                        "exact-review-evidence-contract",
+                        "exact-target-locale",
+                        "commercial-quality-profile-generation",
                         "exact-source-sha256",
                         "exact-target-sha256",
+                        "offer-registry-and-proposition-assignment",
                         "complete-commercial-review-evidence",
                     ],
+                }
+                or review_summary_contract[
+                    "review_evidence_contract_sha256"
+                ] != {
+                    "algorithm": "sha-256",
+                    "equals": review_evidence_contract["sha256"],
+                    "purpose": (
+                        "reject-stale-or-reinterpreted-private-evidence"
+                    ),
                 }
                 or review_summary_contract["content_policy"] != {
                     "source_text": False,
@@ -627,6 +879,183 @@ class WebsiteLocalizationCMSBridge:
                 or SHA256.fullmatch(review_summary_digest) is None
                 or review_summary_digest
                 != _hash(_canonical_json(unsigned_review_summary_contract))
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+            unsigned_review_routing_contract = dict(
+                review_routing_contract
+            )
+            review_routing_digest = unsigned_review_routing_contract.pop(
+                "sha256", None,
+            )
+            if (
+                set(review_routing_contract) != {
+                    "schema", "result_schema", "profile", "applies_when",
+                    "required_fields", "text_lengths", "offers",
+                    "trust_boundary", "content_policy", "sha256",
+                }
+                or review_routing_contract["schema"]
+                != _COMMERCIAL.REVIEW_ROUTING_CAPABILITIES_SCHEMA
+                or review_routing_contract["result_schema"]
+                != _COMMERCIAL.REVIEW_ROUTING_SCHEMA
+                or review_routing_contract["profile"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or review_routing_contract["applies_when"] != {
+                    "review_summary_status": "review_required",
+                    "offer_count": "exact-review-summary-offer-count",
+                }
+                or review_routing_contract["required_fields"] != [
+                    "schema", "profile", "contract_sha256", "offer_count",
+                    "source_length", "target_length", "offers",
+                ]
+                or review_routing_contract["text_lengths"] != {
+                    "fields": ["source_length", "target_length"],
+                    "unit": "unicode-code-points",
+                    "must_equal_complete_texts": True,
+                }
+                or review_routing_contract["offers"] != {
+                    "coverage": "exactly-one-per-registered-offer",
+                    "order": "offer-registry-order",
+                    "item_required_fields": [
+                        "offer_index", "source_spans", "target_spans",
+                    ],
+                    "offer_index": {
+                        "meaning": (
+                            "zero-based-opaque-offer-registry-position"
+                        ),
+                        "minimum": 0,
+                        "maximum_exclusive": 1000,
+                        "order": "ascending",
+                        "unique": True,
+                    },
+                    "regions": {
+                        "fields": ["source_spans", "target_spans"],
+                        "span_format": (
+                            "zero-based-unicode-code-points-exclusive-end"
+                        ),
+                        "non_empty_text": True,
+                        "ordered": True,
+                        "overlap": "forbidden-within-and-across-offers",
+                        "discontiguous": True,
+                        "at_least_one_side_non_empty": True,
+                    },
+                }
+                or review_routing_contract["trust_boundary"] != {
+                    "validates": (
+                        "shape-offsets-order-count-and-text-lengths"
+                    ),
+                    "semantic_truth": False,
+                    "route_values": (
+                        "private-evidence-and-receipt-boundary-only"
+                    ),
+                    "public_release_evidence": False,
+                    "publication_authority": False,
+                }
+                or review_routing_contract["content_policy"] != {
+                    "configured_offer_identifiers": False,
+                    "source_text": False,
+                    "target_text": False,
+                    "reviewer_prose": False,
+                    "project_prices": False,
+                    "project_brands": False,
+                }
+                or not isinstance(review_routing_digest, str)
+                or SHA256.fullmatch(review_routing_digest) is None
+                or review_routing_digest != _hash(
+                    _canonical_json(unsigned_review_routing_contract)
+                )
+            ):
+                raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
+            unsigned_review_resolution_contract = dict(
+                review_resolution_contract
+            )
+            review_resolution_digest = (
+                unsigned_review_resolution_contract.pop("sha256", None)
+            )
+            if (
+                set(review_resolution_contract) != {
+                    "schema", "result_schema", "profile", "applies_when",
+                    "required_fields", "status", "methods",
+                    "provider_identity", "reviewed_dimensions",
+                    "reviewed_offer_count", "reviewed_offers",
+                    "receipt_sha256",
+                    "content_policy", "sha256",
+                }
+                or review_resolution_contract["schema"]
+                != _COMMERCIAL.REVIEW_RESOLUTION_CAPABILITIES_SCHEMA
+                or review_resolution_contract["result_schema"]
+                != _COMMERCIAL.REVIEW_RESOLUTION_SCHEMA
+                or review_resolution_contract["profile"]
+                != _PLANNER.COMMERCIAL_PROFILE
+                or review_resolution_contract["applies_when"] != {
+                    "review_summary_status": "review_required",
+                    "reviewed_dimensions": (
+                        "exact-ordered-review-summary-dimensions"
+                    ),
+                    "reviewed_offer_count": (
+                        "exact-review-summary-offer-count"
+                    ),
+                    "reviewed_offers": (
+                        "exact-ordered-review-summary-offer-scope"
+                    ),
+                }
+                or review_resolution_contract["required_fields"] != [
+                    "schema", "profile", "contract_sha256", "status",
+                    "reviewed_dimensions", "reviewed_offer_count",
+                    "reviewed_offers", "method",
+                    "receipt_sha256",
+                    "primary_provider", "provider",
+                ]
+                or review_resolution_contract["status"] != "resolved"
+                or review_resolution_contract["methods"] != {
+                    "qualified_human": {
+                        "primary_provider": "required",
+                        "provider": "null",
+                        "receipt": "verified-qualified-human-review",
+                    },
+                    "independent_model": {
+                        "primary_provider": "required",
+                        "provider": "required",
+                        "provider_id_must_differ_from_primary_provider": True,
+                        "receipt": "verified-independent-model-review",
+                    },
+                }
+                or review_resolution_contract["provider_identity"] != {
+                    "fields": ["id", "model_id", "model_version"],
+                    "primary_provider": "required",
+                    "credentials_published": False,
+                }
+                or review_resolution_contract["reviewed_dimensions"] != {
+                    "allowed": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
+                    "order": list(_EXPECTED_COMMERCIAL_DIMENSIONS),
+                    "unique": True,
+                    "must_equal_review_summary": True,
+                }
+                or review_resolution_contract["reviewed_offers"] != {
+                    "must_equal_review_summary": True,
+                    "configured_offer_identifiers_published": False,
+                }
+                or review_resolution_contract["reviewed_offer_count"] != {
+                    "must_equal_review_summary": True,
+                }
+                or review_resolution_contract["receipt_sha256"] != {
+                    "algorithm": "sha-256",
+                    "covers": "exact-verified-review-receipt",
+                    "raw_receipt_published": False,
+                }
+                or review_resolution_contract["content_policy"] != {
+                    "source_text": False,
+                    "target_text": False,
+                    "raw_receipt": False,
+                    "reviewer_prose": False,
+                    "qualified_human_identity": False,
+                    "project_prices": False,
+                    "project_brands": False,
+                }
+                or not isinstance(review_resolution_digest, str)
+                or SHA256.fullmatch(review_resolution_digest) is None
+                or review_resolution_digest != _hash(
+                    _canonical_json(unsigned_review_resolution_contract)
+                )
             ):
                 raise CMSBridgeBlocked("cms.capabilities.registry_invalid")
             unsigned_commercial = dict(commercial)
@@ -791,6 +1220,11 @@ class WebsiteLocalizationCMSBridge:
     def _publication_http_capabilities() -> dict[str, Any]:
         """Describe the built-in outbound adapter without deployment secrets."""
         try:
+            release_evidence_contract = (
+                _RELEASE.validate_publication_evidence_contract(
+                    _RELEASE.publication_evidence_contract()
+                )
+            )
             operations = [
                 {
                     "name": "publication",
@@ -883,6 +1317,7 @@ class WebsiteLocalizationCMSBridge:
                     _RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
                     "cms.capabilities.registry_invalid",
                 ),
+                "release_evidence_contract": release_evidence_contract,
                 "binding_headers": headers,
                 "health_binding_headers": [
                     {
@@ -1989,15 +2424,23 @@ class WebsiteLocalizationCMSBridge:
         try:
             readiness = self.release_store.readiness(
                 plan, approval_authority, now=now,
+                current_policy_errors=True,
             )
         except _RELEASE.LocalizationReleaseBlocked:
             raise CMSBridgeBlocked("cms.release.integrity_failed") from None
         expected_release_blocks = {"approval.missing", "approval.expired"}
+        unexpected_release_blocks = {
+            code for _, code in readiness.blocked
+            if code not in expected_release_blocks
+            and code != "publication.evidence.policy_unavailable"
+        }
+        if unexpected_release_blocks:
+            raise CMSBridgeBlocked("cms.release.integrity_failed")
         if any(
-            code not in expected_release_blocks
+            code == "publication.evidence.policy_unavailable"
             for _, code in readiness.blocked
         ):
-            raise CMSBridgeBlocked("cms.release.integrity_failed")
+            raise CMSBridgeBlocked("cms.release.policy_unavailable")
 
         row = self.connection.execute(
             "SELECT * FROM cms_publication_deliveries WHERE event_id = ?",
@@ -2427,27 +2870,15 @@ class WebsiteLocalizationCMSBridge:
         validated_expiries = tuple(
             _timestamp(expiry, "cms.delivery.tampered") for expiry in expiries
         )
-        try:
-            for item in localizations:
-                if not isinstance(item, dict):
-                    raise _RELEASE.LocalizationReleaseBlocked(
-                        "publication.evidence.invalid"
-                    )
-                if not _valid_release_evidence(
-                    item.get("release_evidence"),
-                    locale=item.get("locale"),
-                    target_sha256=item.get("target_sha256"),
-                    approval_id=item.get("approval_id"),
-                ):
-                    raise _RELEASE.LocalizationReleaseBlocked(
-                        "publication.evidence.invalid"
-                    )
-        except _RELEASE.LocalizationReleaseBlocked:
-            raise CMSBridgeBlocked("cms.delivery.tampered") from None
-        if require_current_approvals and any(
-            expiry <= now for expiry in validated_expiries
-        ):
-            raise CMSBridgeBlocked("cms.delivery.approval_expired")
+        for item in localizations:
+            if not isinstance(item, dict) or not _valid_release_evidence(
+                item.get("release_evidence"),
+                locale=item.get("locale"),
+                target_sha256=item.get("target_sha256"),
+                approval_id=item.get("approval_id"),
+                require_current_locale_quality=False,
+            ):
+                raise CMSBridgeBlocked("cms.delivery.tampered")
         signature = _signature(CMSMessageSignature(
             row["signature_algorithm"], row["key_id"], row["signature"],
         ))
@@ -2457,6 +2888,22 @@ class WebsiteLocalizationCMSBridge:
             signature,
             "cms.delivery.signature_invalid",
         )
+        if require_current_approvals:
+            for item in localizations:
+                policy_state = _release_evidence_policy_state(
+                    item["release_evidence"],
+                    locale=item["locale"],
+                    target_sha256=item["target_sha256"],
+                    approval_id=item["approval_id"],
+                )
+                if policy_state == "unavailable":
+                    raise CMSBridgeBlocked("cms.delivery.policy_unavailable")
+                if policy_state == "stale":
+                    raise CMSBridgeBlocked("cms.delivery.policy_stale")
+                if policy_state != "current":
+                    raise CMSBridgeBlocked("cms.delivery.tampered")
+            if any(expiry <= now for expiry in validated_expiries):
+                raise CMSBridgeBlocked("cms.delivery.approval_expired")
         return CMSPublicationRequest(row["delivery_id"], payload, row["payload_sha256"], signature)
 
     def _tombstone_request_from_row(
@@ -2774,44 +3221,94 @@ class WebsiteLocalizationCMSBridge:
                     last_error_code = 'lease_expired', updated_at = ?
                 WHERE status = 'leased' AND lease_expires_at <= ? AND attempts < max_attempts
             """, (now, now, now))
-            row = self.connection.execute("""
-                SELECT * FROM cms_publication_deliveries
-                WHERE status IN ('pending', 'retry_wait') AND next_attempt_at <= ?
-                  AND attempts < max_attempts
-                  AND event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
-                  AND event_id NOT IN (SELECT event_id FROM cms_event_cancellations)
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM cms_event_topics AS current
-                      JOIN cms_event_topics AS newer
-                        ON newer.site_id = current.site_id
-                       AND newer.source_id = current.source_id
-                       AND newer.generation > current.generation
-                      JOIN cms_change_events AS newer_event
-                        ON newer_event.event_id = newer.event_id
-                      WHERE current.event_id = cms_publication_deliveries.event_id
-                        AND newer_event.status = 'enqueued'
-                  )
-                ORDER BY created_at, delivery_id LIMIT 1
-            """, (now,)).fetchone()
-            if row is None:
-                return None
-            request = self._request_from_row(row, authority, now)
-            lease_token = secrets.token_urlsafe(32)
-            expires = now + lease_seconds
-            updated = self.connection.execute("""
-                UPDATE cms_publication_deliveries
-                SET status = 'leased', attempts = attempts + 1, lease_owner = ?,
-                    lease_token = ?, lease_expires_at = ?, last_error_code = NULL,
-                    last_error_detail_hash = NULL, updated_at = ?
-                WHERE delivery_id = ? AND status IN ('pending', 'retry_wait')
-            """, (worker_id, lease_token, expires, now, row["delivery_id"]))
-            if updated.rowcount != 1:
-                raise CMSBridgeBlocked("cms.delivery.claim_lost")
-            return ClaimedDelivery(
-                request, int(row["attempts"]) + 1, int(row["max_attempts"]),
-                worker_id, lease_token, expires,
-            )
+            screened = 0
+            while True:
+                row = self.connection.execute("""
+                    SELECT * FROM cms_publication_deliveries
+                    WHERE status IN ('pending', 'retry_wait') AND next_attempt_at <= ?
+                      AND attempts < max_attempts
+                      AND event_id NOT IN (SELECT event_id FROM cms_event_supersessions)
+                      AND event_id NOT IN (SELECT event_id FROM cms_event_cancellations)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM cms_event_topics AS current
+                          JOIN cms_event_topics AS newer
+                            ON newer.site_id = current.site_id
+                           AND newer.source_id = current.source_id
+                           AND newer.generation > current.generation
+                          JOIN cms_change_events AS newer_event
+                            ON newer_event.event_id = newer.event_id
+                          WHERE current.event_id = cms_publication_deliveries.event_id
+                            AND newer_event.status = 'enqueued'
+                      )
+                    ORDER BY created_at, delivery_id LIMIT 1
+                """, (now,)).fetchone()
+                if row is None:
+                    return None
+                try:
+                    request = self._request_from_row(row, authority, now)
+                except CMSBridgeBlocked as error:
+                    if error.code == "cms.delivery.policy_unavailable":
+                        attempts = int(row["attempts"]) + 1
+                        terminal = attempts >= int(row["max_attempts"])
+                        status = "failed" if terminal else "retry_wait"
+                        next_attempt = now if terminal else now + min(
+                            3600.0, 5.0 * (2 ** (attempts - 1)),
+                        )
+                        updated = self.connection.execute("""
+                            UPDATE cms_publication_deliveries
+                            SET status = ?, attempts = ?, next_attempt_at = ?,
+                                lease_owner = NULL, lease_token = NULL,
+                                lease_expires_at = NULL,
+                                last_error_code = 'policy_unavailable',
+                                last_error_detail_hash = NULL, updated_at = ?
+                            WHERE delivery_id = ?
+                              AND status IN ('pending', 'retry_wait')
+                        """, (
+                            status, attempts, next_attempt, now,
+                            row["delivery_id"],
+                        ))
+                        if updated.rowcount != 1:
+                            raise CMSBridgeBlocked("cms.delivery.claim_lost")
+                        screened += 1
+                        if screened >= MAX_DELIVERY_POLICY_SCREEN:
+                            return None
+                        continue
+                    quarantine_codes = {
+                        "cms.delivery.policy_stale": "release_evidence_stale",
+                        "cms.delivery.approval_expired": "approval_expired",
+                    }
+                    code = quarantine_codes.get(error.code)
+                    if code is None:
+                        raise
+                    self.connection.execute("""
+                        UPDATE cms_publication_deliveries
+                        SET status = 'failed', lease_owner = NULL,
+                            lease_token = NULL, lease_expires_at = NULL,
+                            last_error_code = ?, last_error_detail_hash = NULL,
+                            updated_at = ?
+                        WHERE delivery_id = ?
+                          AND status IN ('pending', 'retry_wait')
+                    """, (code, now, row["delivery_id"]))
+                    screened += 1
+                    if screened >= MAX_DELIVERY_POLICY_SCREEN:
+                        return None
+                    continue
+                lease_token = secrets.token_urlsafe(32)
+                expires = now + lease_seconds
+                updated = self.connection.execute("""
+                    UPDATE cms_publication_deliveries
+                    SET status = 'leased', attempts = attempts + 1, lease_owner = ?,
+                        lease_token = ?, lease_expires_at = ?, last_error_code = NULL,
+                        last_error_detail_hash = NULL, updated_at = ?
+                    WHERE delivery_id = ? AND status IN ('pending', 'retry_wait')
+                """, (worker_id, lease_token, expires, now, row["delivery_id"]))
+                if updated.rowcount != 1:
+                    raise CMSBridgeBlocked("cms.delivery.claim_lost")
+                return ClaimedDelivery(
+                    request, int(row["attempts"]) + 1, int(row["max_attempts"]),
+                    worker_id, lease_token, expires,
+                )
 
     def _live_delivery(self, claim: Any, now: float) -> sqlite3.Row:
         if not isinstance(claim, ClaimedDelivery):
@@ -2900,6 +3397,39 @@ class WebsiteLocalizationCMSBridge:
                 raise CMSBridgeBlocked(
                     "cms.delivery.operation_guard_failed",
                 ) from None
+        try:
+            validation_now = _timestamp(clock(), "cms.time.invalid")
+            row = self._live_delivery(claim, validation_now)
+            current_request = self._request_from_row(
+                row, publication_authority, validation_now,
+            )
+            if current_request != claim.request:
+                raise CMSBridgeBlocked("cms.delivery.tampered")
+        except CMSBridgeBlocked as original_error:
+            validation_failures = {
+                "cms.delivery.policy_unavailable": (
+                    "policy_unavailable", True,
+                ),
+                "cms.delivery.policy_stale": (
+                    "release_evidence_stale", False,
+                ),
+                "cms.delivery.approval_expired": (
+                    "approval_expired", False,
+                ),
+                "cms.delivery.tampered": ("delivery_integrity", False),
+                "cms.delivery.signature_invalid": (
+                    "delivery_integrity", False,
+                ),
+            }
+            failure = validation_failures.get(original_error.code)
+            if failure is None:
+                raise
+            code, retryable = failure
+            error = CMSPublishFailed(code, retryable=retryable)
+            status = self._finish(claim, now=validation_now, error=error)
+            return DeliveryOutcome(
+                status.status, status.delivery_id, status.attempts, code,
+            )
         publish = getattr(publisher, "publish", None)
         try:
             if not callable(publish):

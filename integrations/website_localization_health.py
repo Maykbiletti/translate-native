@@ -30,6 +30,10 @@ SUPERVISOR_STATUSES = {
     "idle", "succeeded", "retry_wait", "failed", "blocked", "approved",
     "delivery_ready", "delivered",
 }
+BENCHMARK_WATCHER_SCHEMA = "blun.website-localization-benchmark-watcher.v1"
+BENCHMARK_WATCHER_STATES = {
+    "pending", "leased", "retry_wait", "succeeded", "failed",
+}
 QUEUE_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
 DELIVERY_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
 EVIDENCE_STATUSES = ("pending", "leased", "retry_wait", "succeeded", "failed")
@@ -207,6 +211,7 @@ class LocalizationHealthMonitor:
         benchmark_review_store: Any | None = None,
         benchmark_reviewer_route_id: str | None = None,
         benchmark_reference_queue: Any | None = None,
+        benchmark_report_watcher: Any | None = None,
     ):
         if not self._supports_bridge(bridge):
             raise LocalizationHealthBlocked("bridge must be WebsiteLocalizationCMSBridge")
@@ -269,6 +274,17 @@ class LocalizationHealthMonitor:
             ))
         ):
             raise LocalizationHealthBlocked("native-reference queue is invalid")
+        if benchmark_report_watcher is not None and (
+            not isinstance(
+                getattr(benchmark_report_watcher, "connection", None),
+                sqlite3.Connection,
+            )
+            or not callable(getattr(benchmark_report_watcher, "health", None))
+            or not callable(
+                getattr(benchmark_report_watcher, "_validate_schema", None),
+            )
+        ):
+            raise LocalizationHealthBlocked("benchmark report watcher is invalid")
         if (
             isinstance(supervisor_stale_after_seconds, bool)
             or not isinstance(supervisor_stale_after_seconds, (int, float))
@@ -297,6 +313,7 @@ class LocalizationHealthMonitor:
         self.benchmark_review_store = benchmark_review_store
         self.benchmark_reviewer_route_id = benchmark_reviewer_route_id
         self.benchmark_reference_queue = benchmark_reference_queue
+        self.benchmark_report_watcher = benchmark_report_watcher
 
     @staticmethod
     def _supports_bridge(bridge: Any) -> bool:
@@ -365,6 +382,11 @@ class LocalizationHealthMonitor:
                 self.benchmark_review_store._verify_schema()
             except Exception:
                 reasons.add("review.store.schema_unsupported")
+        if self.benchmark_report_watcher is not None:
+            try:
+                self.benchmark_report_watcher._validate_schema()
+            except Exception:
+                reasons.add("benchmark_watcher.schema_invalid")
         connections = [
             ("queue", self.queue.connection),
             ("release", self.release_store.connection),
@@ -376,6 +398,11 @@ class LocalizationHealthMonitor:
             connections.append(("benchmark", self.benchmark_store.connection))
         if self.benchmark_review_store is not None:
             connections.append(("benchmark_review", self.benchmark_review_store.connection))
+        if self.benchmark_report_watcher is not None:
+            connections.append((
+                "benchmark_watcher",
+                self.benchmark_report_watcher.connection,
+            ))
         for name, connection in connections:
             try:
                 if not self._quick_check(connection):
@@ -399,6 +426,11 @@ class LocalizationHealthMonitor:
                     raise ValueError
                 if payload.get("target", {}).get("locale") != row["target_locale"]:
                     raise ValueError
+                try:
+                    _RELEASE._validated_job_payload(payload)
+                except _RELEASE.LocalizationReleaseBlocked:
+                    reasons.add("queue.job_binding_invalid")
+                    continue
                 if row["status"] == "succeeded":
                     self.queue.result(row["job_id"])
                 if row["status"] == "leased" and float(row["lease_expires_at"]) <= now:
@@ -639,13 +671,18 @@ class LocalizationHealthMonitor:
                         raise ValueError
                     if _hash(item["target_text"]) != item["target_sha256"]:
                         raise ValueError
-                    if not _CMS._valid_release_evidence(
+                    policy_state = _CMS._release_evidence_policy_state(
                         item["release_evidence"],
                         locale=item["locale"],
                         target_sha256=item["target_sha256"],
                         approval_id=item["approval_id"],
-                    ):
+                    )
+                    if policy_state == "invalid":
                         raise ValueError
+                    if policy_state == "stale":
+                        reasons.add("cms.delivery.policy_stale")
+                    elif policy_state == "unavailable":
+                        reasons.add("cms.delivery.policy_unavailable")
                     locales.append(item["locale"])
                 if locales != sorted(set(locales)):
                     raise ValueError
@@ -916,6 +953,7 @@ class LocalizationHealthMonitor:
                     queue_counts = self.queue.plan_counts(plan.plan_id)
                 readiness = self.release_store.readiness(
                     plan, approval_authority, now=now,
+                    current_policy_errors=True,
                 )
             except Exception:
                 reasons.add("cms.event.invalid")
@@ -960,7 +998,25 @@ class LocalizationHealthMonitor:
                 queue_counts=tuple(sorted(queue_counts.items())),
                 blocked_locales=readiness.blocked,
             ))
-            if any(code == "approval.expired" for _, code in readiness.blocked):
+            blocked_codes = {code for _, code in readiness.blocked}
+            expected_release_blocks = {"approval.missing", "approval.expired"}
+            policy_unavailable = "publication.evidence.policy_unavailable"
+            policy_stale = "publication.evidence.policy_stale"
+            unexpected_release_blocks = (
+                blocked_codes
+                - expected_release_blocks
+                - {policy_unavailable, policy_stale}
+            )
+            if unexpected_release_blocks:
+                reasons.add("release.integrity_failed")
+            elif policy_stale in blocked_codes:
+                # Verified drift has terminal precedence over a simultaneous
+                # resolver outage: no caller may treat the version as safely
+                # retryable while one locale is already known to be stale.
+                reasons.add("release.policy_stale")
+            elif policy_unavailable in blocked_codes:
+                reasons.add("release.policy_unavailable")
+            if "approval.expired" in blocked_codes:
                 reasons.add("release.approval_expired")
         return tuple(versions), reasons, providers
 
@@ -1374,6 +1430,174 @@ class LocalizationHealthMonitor:
                 counts,
             )
 
+    def _check_benchmark_report_watcher(
+        self, now: float,
+    ) -> ComponentHealth | None:
+        if self.benchmark_report_watcher is None:
+            return None
+        counts = {
+            "pending": 0,
+            "leased": 0,
+            "retry_wait": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "attempts": 0,
+            "max_attempts": 0,
+            "due": 0,
+            "active_lease": 0,
+            "lease_expired": 0,
+            "report_ready": 0,
+            "locale_count": 0,
+        }
+        try:
+            value = self.benchmark_report_watcher.health(now=now)
+            payload_method = getattr(value, "as_payload", None)
+            payload = payload_method() if callable(payload_method) else value
+            expected = {
+                "schema", "checked_at", "status", "state", "ready", "due",
+                "active_lease", "lease_expired", "attempts", "max_attempts",
+                "next_action_at", "last_error_code", "report",
+                "watcher_reasons",
+            }
+            if (
+                not isinstance(payload, Mapping)
+                or set(payload) != expected
+                or payload["schema"] != BENCHMARK_WATCHER_SCHEMA
+                or _timestamp(payload["checked_at"]) != now
+                or payload["status"] not in {"healthy", "degraded", "blocked"}
+                or payload["state"] not in BENCHMARK_WATCHER_STATES
+                or any(type(payload[name]) is not bool for name in (
+                    "ready", "due", "active_lease", "lease_expired",
+                ))
+            ):
+                raise ValueError
+            attempts = payload["attempts"]
+            maximum = payload["max_attempts"]
+            next_action_at = _timestamp(payload["next_action_at"])
+            if (
+                isinstance(attempts, bool) or not isinstance(attempts, int)
+                or isinstance(maximum, bool) or not isinstance(maximum, int)
+                or not 0 <= attempts <= maximum or maximum <= 0
+            ):
+                raise ValueError
+            state = payload["state"]
+            error_code = payload["last_error_code"]
+            if error_code is not None and (
+                not isinstance(error_code, str)
+                or _QUEUE.ERROR_CODE.fullmatch(error_code) is None
+            ):
+                raise ValueError
+            if (state in {"retry_wait", "failed"}) != (error_code is not None):
+                raise ValueError
+            if payload["active_lease"] != (
+                state == "leased" and not payload["lease_expired"]
+            ):
+                raise ValueError
+            if payload["lease_expired"] and state != "leased":
+                raise ValueError
+            if payload["ready"] != (state == "succeeded"):
+                raise ValueError
+            expected_due = payload["lease_expired"] or (
+                state in {"pending", "retry_wait"} and next_action_at <= now
+            )
+            if payload["due"] != expected_due:
+                raise ValueError
+
+            reasons = payload["watcher_reasons"]
+            if (
+                not isinstance(reasons, list)
+                or reasons != sorted(set(reasons))
+                or any(
+                    not isinstance(reason, str)
+                    or _QUEUE.ERROR_CODE.fullmatch(reason) is None
+                    or not reason.startswith("benchmark_watcher.")
+                    for reason in reasons
+                )
+            ):
+                raise ValueError
+            expected_watcher_reasons: set[str] = set()
+            if state == "pending":
+                expected_watcher_reasons.add("benchmark_watcher.pending")
+            elif state == "retry_wait":
+                expected_watcher_reasons.add("benchmark_watcher.retry_wait")
+            elif state == "failed":
+                expected_watcher_reasons.add("benchmark_watcher.failed")
+            if payload["lease_expired"]:
+                expected_watcher_reasons.add("benchmark_watcher.lease_expired")
+
+            report = payload["report"]
+            report_reasons: set[str] = set()
+            locale_count = 0
+            report_status = None
+            if report is not None:
+                if not isinstance(report, Mapping) or set(report) != {
+                    "sha256", "status", "superiority_claim_allowed",
+                    "block_reasons", "locale_count", "completed_at",
+                }:
+                    raise ValueError
+                report_status = report["status"]
+                block_reasons = report["block_reasons"]
+                locale_count = report["locale_count"]
+                if (
+                    not isinstance(report["sha256"], str)
+                    or len(report["sha256"]) != 64
+                    or any(character not in "0123456789abcdef" for character in report["sha256"])
+                    or report_status not in {"PASS", "BLOCK"}
+                    or type(report["superiority_claim_allowed"]) is not bool
+                    or report["superiority_claim_allowed"] != (report_status == "PASS")
+                    or not isinstance(block_reasons, list)
+                    or block_reasons != sorted(set(block_reasons))
+                    or any(
+                        not isinstance(reason, str)
+                        or _QUEUE.ERROR_CODE.fullmatch(reason) is None
+                        for reason in block_reasons
+                    )
+                    or (report_status == "PASS" and block_reasons)
+                    or (report_status == "BLOCK" and not block_reasons)
+                    or isinstance(locale_count, bool)
+                    or not isinstance(locale_count, int)
+                    or locale_count < 0
+                    or _timestamp(report["completed_at"]) > now
+                ):
+                    raise ValueError
+                report_reasons.update(block_reasons)
+                if report_status == "BLOCK":
+                    expected_watcher_reasons.add("benchmark_watcher.report_blocked")
+            if (state == "succeeded") != (report is not None):
+                raise ValueError
+            if set(reasons) != expected_watcher_reasons:
+                raise ValueError
+            expected_status = (
+                "blocked" if state == "failed" or report_status == "BLOCK"
+                else "healthy" if state == "succeeded"
+                else "degraded"
+            )
+            if payload["status"] != expected_status:
+                raise ValueError
+            counts.update({
+                state: 1,
+                "attempts": attempts,
+                "max_attempts": maximum,
+                "due": int(payload["due"]),
+                "active_lease": int(payload["active_lease"]),
+                "lease_expired": int(payload["lease_expired"]),
+                "report_ready": int(payload["ready"]),
+                "locale_count": locale_count,
+            })
+            return _component(
+                "benchmark_report_watcher",
+                expected_status,
+                set(reasons) | report_reasons,
+                counts,
+            )
+        except Exception:
+            return _component(
+                "benchmark_report_watcher",
+                "blocked",
+                {"benchmark_watcher.state_invalid"},
+                counts,
+            )
+
     def check(
         self,
         *,
@@ -1430,10 +1654,15 @@ class LocalizationHealthMonitor:
         benchmark = self._check_benchmark(now)
         benchmark_reviews = self._check_benchmark_reviews(now)
         benchmark_references = self._check_native_reference_queue(now)
+        benchmark_report_watcher = self._check_benchmark_report_watcher(now)
         blocking_workflow = {
             "queue.state_invalid",
+            "queue.job_binding_invalid",
             "evidence.state_invalid",
             "release.approval_invalid",
+            "release.integrity_failed",
+            "release.policy_stale",
+            "release.policy_unavailable",
             "cms.delivery.invalid",
             "cms.tombstone.invalid",
             "cms.event.invalid",
@@ -1452,7 +1681,9 @@ class LocalizationHealthMonitor:
                 storage_reasons,
                 {"connections": 3 + int(self.evidence_state is not None) + int(
                     self.benchmark_store is not None
-                ) + int(self.benchmark_review_store is not None)},
+                ) + int(self.benchmark_review_store is not None) + int(
+                    self.benchmark_report_watcher is not None
+                )},
             ),
             _component(
                 "queue",
@@ -1510,6 +1741,8 @@ class LocalizationHealthMonitor:
             components = components + (benchmark_reviews,)
         if benchmark_references is not None:
             components = components + (benchmark_references,)
+        if benchmark_report_watcher is not None:
+            components = components + (benchmark_report_watcher,)
         if (
             storage_reasons
             or provider_reasons
@@ -1525,6 +1758,10 @@ class LocalizationHealthMonitor:
                 benchmark_references is not None
                 and benchmark_references.status == "blocked"
             )
+            or (
+                benchmark_report_watcher is not None
+                and benchmark_report_watcher.status == "blocked"
+            )
         ):
             status = "blocked"
         elif workflow_reasons or (
@@ -1534,6 +1771,9 @@ class LocalizationHealthMonitor:
         ) or (
             benchmark_references is not None
             and benchmark_references.status == "degraded"
+        ) or (
+            benchmark_report_watcher is not None
+            and benchmark_report_watcher.status == "degraded"
         ):
             status = "degraded"
         else:

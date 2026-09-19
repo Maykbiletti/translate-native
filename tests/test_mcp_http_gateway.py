@@ -32,6 +32,13 @@ def load(name: str, path: Path):
 
 
 GATEWAY = load("blun_test_mcp_http_gateway", GATEWAY_PATH)
+
+
+class FixtureResponseReviewer:
+    def review(self, target, locale, content_type, **_identity):
+        return {"evidence_sha256": SERVICE.QUALITY.canonical_hash(
+            "fixture-review\0" + target + "\0" + locale + "\0" + content_type
+        )}
 HEADERS = load("blun_test_mcp_auth_headers", HEADERS_PATH)
 SERVICE = load("blun_test_mcp_http_guard_service", SERVICE_PATH)
 INSTALLER = load("blun_test_mcp_http_installer", INSTALLER_PATH)
@@ -174,7 +181,26 @@ class MCPHTTPGatewayTests(unittest.TestCase):
             token_file.write_text(service_token + "\n", encoding="ascii")
             if os.name != "nt":
                 os.chmod(token_file, 0o600)
-            service = SERVICE.GuardService(root / "signing.key", root / "audit.jsonl", service_token)
+            service = SERVICE.GuardService(
+                root / "signing.key", root / "audit.jsonl", service_token,
+                FixtureResponseReviewer(),
+            )
+            session_epoch = "a" * 64
+            service.handle({"service_token": service_token,
+                            "operation": "register_session_epoch",
+                            "session_id": "mcp-test", "session_epoch": session_epoch})
+            prepared = service.handle({
+                "service_token": service_token,
+                "operation": "prepare_response_review",
+                "task_kind": "response",
+                "target_text": "Natürlich ist das möglich.",
+                "language": "de-DE",
+                "content_type": "prose",
+                "session_id": "mcp-test",
+                "session_epoch": session_epoch,
+                "agent_id": "mcp-test-agent",
+                "channel": "test",
+            })
             server = SERVICE._ThreadingTCPServer(("127.0.0.1", 0), SERVICE._RequestHandler)
             server.guard_service = service
             server.socket_path = None
@@ -194,7 +220,7 @@ class MCPHTTPGatewayTests(unittest.TestCase):
                             "arguments": {
                                 "target_text": "Natürlich ist das möglich.",
                                 "language": "de-DE",
-                                "attestations": {"nativeness": True, "orthography": True},
+                                "review_context_token": prepared["review_context_token"],
                             },
                         },
                     }, token=self.token)
@@ -226,7 +252,10 @@ class MCPHTTPGatewayTests(unittest.TestCase):
             if os.name != "nt":
                 os.chmod(service_token_file, 0o600)
                 os.chmod(mcp_token_file, 0o600)
-            service = SERVICE.GuardService(root / "signing.key", root / "audit.jsonl", service_token)
+            service = SERVICE.GuardService(
+                root / "signing.key", root / "audit.jsonl", service_token,
+                FixtureResponseReviewer(),
+            )
             signer = SERVICE._ThreadingTCPServer(("127.0.0.1", 0), SERVICE._RequestHandler)
             signer.guard_service = service
             signer.socket_path = None
@@ -245,6 +274,7 @@ class MCPHTTPGatewayTests(unittest.TestCase):
                     "signature": True,
                     "tamper_blocked": True,
                     "audit_paths": True,
+                    "response_review_configured": True,
                 })
                 self.assertEqual(result["canary"], {"status": "PASS", "language": "sv-SE"})
                 self.assertFalse((root / "audit.jsonl").exists())

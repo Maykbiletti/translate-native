@@ -35,6 +35,8 @@ PLANNER = CMS._PLANNER
 RELEASE = CMS._RELEASE
 QUEUE = CMS._QUEUE
 WORKER = RELEASE._WORKER
+EVIDENCE_REQUEST_ID = "blun-l10n-evidence-" + "a" * 64
+EVIDENCE_REVISION = "native-evidence-1"
 
 
 class CMSAuthority:
@@ -176,6 +178,13 @@ def completed_result(job, candidate):
             "profile": payload["commercial_profile"],
             "status": "verified",
             "review_required_dimensions": [],
+            "offer_count": 1,
+            "review_required_offers": [],
+            "review_evidence_contract_sha256": (
+                WORKER._COMMERCIAL.public_review_evidence_contract(
+                    payload["commercial_profile"],
+                )["sha256"]
+            ),
             "evidence_sha256": "a" * 64,
         }
     return {
@@ -225,6 +234,13 @@ def completed_result(job, candidate):
             ),
         },
         "commercial_review": commercial_review,
+        "commercial_review_routing": None,
+        "commercial_review_routing_contract_sha256": (
+            payload.get("commercial_review_routing_contract_sha256")
+        ),
+        "commercial_review_resolution_contract_sha256": (
+            payload.get("commercial_review_resolution_contract_sha256")
+        ),
         "human_review_required": False,
         "independent_review_required": False,
         "release_required": True,
@@ -305,6 +321,8 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
                 "quality-receipt",
                 self.receipt_verifier,
                 self.approval_authority,
+                evidence_request_id=EVIDENCE_REQUEST_ID,
+                evidence_revision=EVIDENCE_REVISION,
                 now=200,
                 ttl_seconds=1000,
             )
@@ -428,7 +446,10 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         self.queue.complete(first, completed_result(job, "Natürlicher Zieltext."), now=111)
         self.release_store.approve(
             plan, job.job_id, "quality-receipt", self.receipt_verifier,
-            self.approval_authority, now=200, ttl_seconds=1000,
+            self.approval_authority,
+            evidence_request_id=EVIDENCE_REQUEST_ID,
+            evidence_revision=EVIDENCE_REVISION,
+            now=200, ttl_seconds=1000,
         )
         with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
             self.prepare()
@@ -461,12 +482,24 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             self.assertEqual(
                 evidence["schema"], RELEASE.PUBLICATION_EVIDENCE_SCHEMA,
             )
+            self.assertEqual(
+                evidence["release_evidence_contract_sha256"],
+                RELEASE.publication_evidence_contract()["sha256"],
+            )
             self.assertEqual(evidence["result_sha256"], row["result_sha256"])
             self.assertEqual(evidence["approval_sha256"], row["approval_sha256"])
             self.assertEqual(
                 evidence["quality_receipt_sha256"],
                 hashlib.sha256(b"quality-receipt").hexdigest(),
             )
+            self.assertEqual(evidence["evidence_request_id"], EVIDENCE_REQUEST_ID)
+            self.assertEqual(evidence["evidence_revision"], EVIDENCE_REVISION)
+            canonical_quality = PLANNER.quality_profile_for(item["locale"])
+            self.assertEqual(evidence["quality_profile"], {
+                "locale": canonical_quality["locale"],
+                "version": canonical_quality["version"],
+                "sha256": canonical_quality["sha256"],
+            })
             self.assertIsNone(evidence["commercial_profile"])
             self.assertIsNone(evidence["commercial_quality_profile"])
             self.assertIsNone(evidence["commercial_review"])
@@ -492,15 +525,25 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         for item in request.payload["localizations"]:
             evidence = item["release_evidence"]
             self.assertEqual(set(evidence), {
-                "schema", "job_id", "target_locale", "content_type",
+                "schema", "release_evidence_contract_sha256", "job_id",
+                "target_locale", "content_type",
                 "target_sha256", "result_sha256", "quality_receipt_sha256",
-                "approval_id", "approval_sha256", "commercial_profile",
+                "approval_id", "approval_sha256", "evidence_request_id",
+                "evidence_revision", "quality_profile", "commercial_profile",
                 "commercial_quality_profile", "commercial_review",
+                "commercial_review_routing_contract_sha256",
+                "commercial_review_resolution_contract_sha256",
                 "commercial_review_resolution",
             })
             self.assertEqual(
                 evidence["commercial_profile"], PLANNER.COMMERCIAL_PROFILE,
             )
+            canonical_quality = PLANNER.quality_profile_for(item["locale"])
+            self.assertEqual(evidence["quality_profile"], {
+                "locale": canonical_quality["locale"],
+                "version": canonical_quality["version"],
+                "sha256": canonical_quality["sha256"],
+            })
             canonical = PLANNER.commercial_quality_profile_for(item["locale"])
             self.assertEqual(evidence["commercial_quality_profile"], {
                 "profile": canonical["commercial_profile"],
@@ -509,8 +552,29 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
             })
             self.assertEqual(set(evidence["commercial_review"]), {
                 "schema", "profile", "status", "review_required_dimensions",
-                "evidence_sha256",
+                "offer_count",
+                "review_required_offers",
+                "review_evidence_contract_sha256", "evidence_sha256",
             })
+            self.assertEqual(
+                evidence["commercial_review_routing_contract_sha256"],
+                WORKER._COMMERCIAL.public_review_routing_contract(
+                    PLANNER.COMMERCIAL_PROFILE,
+                )["sha256"],
+            )
+            self.assertEqual(
+                evidence["commercial_review_resolution_contract_sha256"],
+                WORKER._COMMERCIAL.public_review_resolution_contract(
+                    PLANNER.COMMERCIAL_PROFILE,
+                )["sha256"],
+            )
+            self.assertEqual(
+                evidence["commercial_review"]
+                ["review_evidence_contract_sha256"],
+                WORKER._COMMERCIAL.public_review_evidence_contract(
+                    PLANNER.COMMERCIAL_PROFILE,
+                )["sha256"],
+            )
             self.assertIsNone(evidence["commercial_review_resolution"])
             self.assertEqual(evidence["commercial_review"]["status"], "verified")
             self.assertEqual(
@@ -569,6 +633,46 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
 
         self.assertEqual(publisher.requests, [])
         self.assertEqual(self.bridge.delivery_status(request.delivery_id).status, "leased")
+
+    def test_policy_is_revalidated_after_guard_before_publisher_call(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare()
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def changed_profile(locale):
+            profile = original(locale)
+            if locale == "de-AT":
+                profile = dict(profile)
+                profile["version"] = profile["version"] + ".changed"
+                profile["sha256"] = "f" * 64
+            return profile
+
+        def change_policy(_):
+            planner.quality_profile_for = changed_profile
+
+        try:
+            outcome = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="publisher-worker",
+                clock=Clock(260),
+                lease_seconds=20,
+                operation_guard=change_policy,
+            )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(
+            (outcome.status, outcome.error_code),
+            ("failed", "release_evidence_stale"),
+        )
+        self.assertEqual(publisher.requests, [])
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual((status.status, status.attempts), ("failed", 1))
+        self.assertIsNone(status.last_error_detail_hash)
 
     def test_invalid_ack_retries_with_bound_and_opaque_error(self):
         self.ingest()
@@ -770,20 +874,325 @@ class WebsiteLocalizationCMSBridgeTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "cms.delivery.tampered")
         self.assertEqual(publisher.requests, [])
 
-    def test_expired_approval_blocks_before_publisher_call(self):
+    def test_expired_approval_is_quarantined_before_publisher_call(self):
         self.ingest()
         self.release_all()
-        self.prepare()
+        request = self.prepare()
         publisher = Publisher()
-        with self.assertRaises(CMS.CMSBridgeBlocked) as caught:
-            self.bridge.run_delivery(
+        outcome = self.bridge.run_delivery(
+            publisher,
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(1200),
+        )
+        self.assertEqual(outcome.status, "idle")
+        self.assertEqual(publisher.requests, [])
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual(
+            (status.status, status.attempts, status.last_error_code),
+            ("failed", 0, "approval_expired"),
+        )
+        self.assertIsNone(status.last_error_detail_hash)
+
+    def test_expired_delivery_does_not_block_valid_following_delivery(self):
+        first_event = change_event()
+        self.ingest(first_event)
+        self.release_all(first_event)
+        first = self.prepare(first_event)
+        payload = json.loads(CMS._canonical_json(first.payload))
+        for localization in payload["localizations"]:
+            localization["approval_expires_at"] = 259.0
+        payload_json = CMS._canonical_json(payload)
+        signature = self.publication_authority.sign(payload_json.encode("utf-8"))
+        self.cms_connection.execute("""
+            UPDATE cms_publication_deliveries
+            SET payload_json = ?, payload_sha256 = ?, signature = ?, created_at = 249
+            WHERE delivery_id = ?
+        """, (
+            payload_json,
+            hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+            signature.signature,
+            first.delivery_id,
+        ))
+        self.cms_connection.commit()
+
+        second_event = change_event(
+            event_id="cms-event-185",
+            site_id="second-site",
+            source_id="second-homepage.hero",
+            source_revision="cms-185",
+            source_text="Build a second business with BLUN.",
+        )
+        self.ingest(second_event, now=101)
+        self.release_all(second_event)
+        second = self.prepare(second_event)
+        publisher = Publisher()
+
+        outcome = self.bridge.run_delivery(
+            publisher,
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(260),
+        )
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(
+            [request.delivery_id for request in publisher.requests],
+            [second.delivery_id],
+        )
+        first_status = self.bridge.delivery_status(first.delivery_id)
+        self.assertEqual(
+            (
+                first_status.status,
+                first_status.attempts,
+                first_status.last_error_code,
+            ),
+            ("failed", 0, "approval_expired"),
+        )
+
+    def test_stale_policy_is_quarantined_without_consuming_attempt(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare()
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def changed_profile(locale):
+            profile = original(locale)
+            if locale == "sv-SE":
+                profile = dict(profile)
+                profile["version"] = profile["version"] + ".changed"
+                profile["sha256"] = "e" * 64
+            return profile
+
+        planner.quality_profile_for = changed_profile
+        try:
+            outcome = self.bridge.run_delivery(
                 publisher,
                 self.publication_authority,
                 worker_id="cms-worker",
-                clock=Clock(1200),
+                clock=Clock(260),
             )
-        self.assertEqual(caught.exception.code, "cms.delivery.approval_expired")
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(outcome.status, "idle")
         self.assertEqual(publisher.requests, [])
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual(
+            (status.status, status.attempts, status.last_error_code),
+            ("failed", 0, "release_evidence_stale"),
+        )
+        self.assertIsNone(status.last_error_detail_hash)
+
+    def test_policy_resolver_outage_retries_with_a_bound(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare(max_attempts=2)
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+        planner.quality_profile_for = lambda _locale: (_ for _ in ()).throw(
+            RuntimeError("private resolver diagnostic")
+        )
+        try:
+            first = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(260),
+            )
+            first_status = self.bridge.delivery_status(request.delivery_id)
+            second = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(265),
+            )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(first.status, "idle")
+        self.assertEqual(
+            (
+                first_status.status,
+                first_status.attempts,
+                first_status.next_attempt_at,
+                first_status.last_error_code,
+            ),
+            ("retry_wait", 1, 265.0, "policy_unavailable"),
+        )
+        self.assertEqual(second.status, "idle")
+        final = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual(
+            (final.status, final.attempts, final.last_error_code),
+            ("failed", 2, "policy_unavailable"),
+        )
+        self.assertIsNone(final.last_error_detail_hash)
+        self.assertEqual(publisher.requests, [])
+
+    def test_policy_resolver_outage_does_not_block_a_following_delivery(self):
+        first_event = change_event()
+        self.ingest(first_event)
+        self.release_all(first_event)
+        first = self.prepare(first_event)
+        self.cms_connection.execute(
+            "UPDATE cms_publication_deliveries SET created_at = 249 "
+            "WHERE delivery_id = ?",
+            (first.delivery_id,),
+        )
+        self.cms_connection.commit()
+
+        second_event = change_event(
+            event_id="cms-event-185",
+            site_id="second-site",
+            source_id="second-homepage.hero",
+            source_revision="cms-185",
+            source_text="Build a second business with BLUN.",
+        )
+        self.ingest(second_event, now=101)
+        self.release_all(second_event)
+        second = self.prepare(second_event)
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+        calls = 0
+
+        def transient(locale):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("private resolver diagnostic")
+            return original(locale)
+
+        planner.quality_profile_for = transient
+        try:
+            outcome = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(260),
+            )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(
+            [item.delivery_id for item in publisher.requests],
+            [second.delivery_id],
+        )
+        first_status = self.bridge.delivery_status(first.delivery_id)
+        self.assertEqual(
+            (
+                first_status.status,
+                first_status.attempts,
+                first_status.last_error_code,
+            ),
+            ("retry_wait", 1, "policy_unavailable"),
+        )
+
+    def test_policy_resolver_outage_after_guard_retries_before_network(self):
+        self.ingest()
+        self.release_all()
+        request = self.prepare(max_attempts=2)
+        publisher = Publisher()
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+
+        def lose_resolver(_):
+            planner.quality_profile_for = lambda _locale: (
+                _ for _ in ()
+            ).throw(RuntimeError("private resolver diagnostic"))
+
+        try:
+            first = self.bridge.run_delivery(
+                publisher,
+                self.publication_authority,
+                worker_id="cms-worker",
+                clock=Clock(260),
+                operation_guard=lose_resolver,
+            )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(
+            (first.status, first.attempt, first.error_code),
+            ("retry_wait", 1, "policy_unavailable"),
+        )
+        self.assertEqual(publisher.requests, [])
+        status = self.bridge.delivery_status(request.delivery_id)
+        self.assertEqual(
+            (status.status, status.attempts, status.last_error_code),
+            ("retry_wait", 1, "policy_unavailable"),
+        )
+
+        recovered = self.bridge.run_delivery(
+            publisher,
+            self.publication_authority,
+            worker_id="cms-worker",
+            clock=Clock(265),
+        )
+        self.assertEqual((recovered.status, recovered.attempt), ("succeeded", 2))
+        self.assertEqual(len(publisher.requests), 1)
+
+    def test_lifecycle_distinguishes_policy_outage_from_policy_drift(self):
+        event = change_event()
+        self.ingest(event)
+        self.release_all(event)
+        planner = RELEASE._WORKER._PLANNER
+        original = planner.quality_profile_for
+        changes_before = (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        )
+
+        planner.quality_profile_for = lambda _locale: (
+            _ for _ in ()
+        ).throw(RuntimeError("private resolver diagnostic"))
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked) as unavailable:
+                self.bridge.change_lifecycle(
+                    event["event_id"], self.event_authority,
+                    self.approval_authority, self.publication_authority,
+                    site_id=event["site_id"], requester_key_id="cms-key-1",
+                    now=250,
+                )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(
+            unavailable.exception.code, "cms.release.policy_unavailable",
+        )
+        self.assertNotIn("private", str(unavailable.exception))
+
+        def stale_or_unavailable(locale):
+            if locale == "de-AT":
+                current = dict(original(locale))
+                current["version"] += ".changed"
+                current["sha256"] = "0" * 64
+                return current
+            raise RuntimeError("private resolver diagnostic")
+
+        planner.quality_profile_for = stale_or_unavailable
+        try:
+            with self.assertRaises(CMS.CMSBridgeBlocked) as stale:
+                self.bridge.change_lifecycle(
+                    event["event_id"], self.event_authority,
+                    self.approval_authority, self.publication_authority,
+                    site_id=event["site_id"], requester_key_id="cms-key-1",
+                    now=250,
+                )
+        finally:
+            planner.quality_profile_for = original
+
+        self.assertEqual(stale.exception.code, "cms.release.integrity_failed")
+        self.assertEqual(changes_before, (
+            self.queue_connection.total_changes,
+            self.release_connection.total_changes,
+            self.cms_connection.total_changes,
+        ))
 
     def test_new_revision_supersedes_old_event_and_pending_delivery(self):
         old = change_event()

@@ -24,9 +24,20 @@ Before editing, identify:
 | Apple strings | Values | Keys unless product rules say otherwise, format specifiers, escapes |
 | ICU MessageFormat | Text within every branch | Argument names, selector keys, braces, plural/select structure |
 | HTML / JSX | Rendered text and approved linguistic attributes | Tag structure, attribute names, technical values, URLs, expressions, component names |
-| Markdown | Prose, headings, link labels | Link destinations, code fences, inline code, directives |
+| Markdown | Unambiguous prose and headings | Complete links, code fences, inline code, directives |
 
 Do not assume every string value is translatable. IDs, paths, enum values, SQL, CSS, commands, hashes, telemetry names, and machine prompts may need to remain exact.
+
+The automated long-rewrite profile is deliberately narrower than the general
+Markdown guidance above. It rewrites only unambiguous prose in headings,
+paragraphs and list items. Front matter, blockquotes, code, complete links and
+bracket labels, reference definitions, URLs, entities, escapes, placeholders,
+markers and line endings remain byte-exact; lines with emphasis delimiters stay
+entirely opaque. Raw HTML or HTML/Markdown ambiguity outside a line-start,
+still-open CommonMark block-HTML region, tables, directives,
+templates/MDX statements or expressions, ambiguous front matter, escaped/multiline/malformed or nested
+links, unclosed constructs and non-NFC source block instead of falling back to
+ordinary text segmentation.
 
 ## Translate with whole-file context
 

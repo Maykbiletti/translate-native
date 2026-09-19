@@ -16,17 +16,22 @@ from typing import Any
 
 
 DIACRITICS_PATH = Path(__file__).with_name("check_diacritics.py")
-VERSION = "6.20.0"
+VERSION = "6.21.0"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", PROTOCOL_VERSION}
 EXACT_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$")
 MCP_INSTRUCTIONS = (
     "Treat every user-visible natural-language answer as an untrusted candidate. "
-    "Before delivery, call release_response with the complete answer and exact language tag. "
-    "For every translation, localization, transcreation, or target-language rewrite, first apply "
+    "For original answers without an input draft, call release_response with the complete answer and exact language tag; "
+    "the trusted host must inject a one-time context and run a separate source-blind native review. "
+    "For every translation, localization, or transcreation, first apply "
     "the installed translate-native skill/plugin and then call release_translation with the complete "
     "source-target pair and truthful seven-pass attestations. Never use release_response to bypass "
     "the translation gate. Release only after the exact current text receives a valid token. "
+    "For same-language revision of an original or AI draft, apply translate-native and use rewrite_text "
+    "with the complete original, host-injected one-time rewrite context, explicit host profile and stable request ID. Its isolated native review "
+    "precedes meaning-preservation review; missing host support blocks. Rewrite receipts cross only a "
+    "rewrite-aware trusted delivery adapter or the protected Claude Stop/SubagentStop path. "
     "When BLUN_LANGUAGE_GUARD_MANDATORY=1, final stdout must be exactly one JSON object containing "
     "only target_text and release_token; never call a delivery channel directly or include host-owned policy fields."
 )
@@ -151,6 +156,7 @@ def _isolated_release(task_kind: str, arguments: dict[str, Any]) -> dict[str, An
             SERVICE_ENDPOINT,
             request,
             auth_token=_service_token(),
+            timeout=75.0 if task_kind == "response" else 10.0,
         )
     except (OSError, SERVICE_CLIENT.GuardServiceError) as error:
         return {
@@ -159,6 +165,21 @@ def _isolated_release(task_kind: str, arguments: dict[str, Any]) -> dict[str, An
             "reason": "isolated-guard-unavailable",
             "error": str(error),
         }
+
+
+def _response_requires_isolated_review() -> dict[str, Any]:
+    return {
+        "status": "BLOCK",
+        "release_allowed": False,
+        "reason": "isolated-response-review-required",
+        "findings": [{
+            "code": "response-review-unavailable",
+            "message": "A trusted host-isolated target-language review is required.",
+            "blocking": True,
+            "line": None,
+            "language": None,
+        }],
+    }
 
 
 def _languages_for(text: str, language: str) -> tuple[str, ...]:
@@ -260,7 +281,10 @@ def validate_text(
             "native-diacritics-heuristics",
         ],
         "findings": [asdict(finding) for finding in findings],
+        "style_review": QUALITY.prose_style_report(text, language, content_type, prose),
         "limitations": (
+            "PASS covers deterministic language checks, not style or human authorship. "
+            "Style signals are advisory; NO_SIGNALS is not a quality approval. "
             "Deterministic checks cannot prove semantic fidelity or native fluency. "
             "The release gate therefore also requires explicit seven-pass attestations."
         ),
@@ -336,6 +360,13 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
             )
         if not whole_identity_errors:
             selected_format = TRANSLATION.detect_content_format(source)
+            if selected_format == "json_invalid":
+                report["findings"].append(
+                    asdict(Finding(
+                        "invalid-json-structure",
+                        "Source resembles JSON but violates the strict JSON structure policy.",
+                    ))
+                )
             for error in TRANSLATION.structured_identity_errors(
                 source, target, selected_format
             ):
@@ -373,16 +404,60 @@ def release_translation(arguments: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def rewrite_text(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Execute the operator-configured rewrite pipeline, never a local fallback."""
+    if not SERVICE_ENDPOINT:
+        return {"status": "BLOCK", "release_allowed": False,
+                "reason": "rewrite.host_unavailable"}
+    allowed = {"source_text", "language", "content_type", "request_id", "profile_id",
+               "rewrite_context_token", "session_id", "session_epoch", "agent_id"}
+    if not isinstance(arguments, dict) or set(arguments) - allowed:
+        return {"status": "BLOCK", "release_allowed": False,
+                "reason": "rewrite.invalid_request"}
+    try:
+        return SERVICE_CLIENT.call_guard_service(
+            SERVICE_ENDPOINT, {**arguments, "operation": "rewrite_text"},
+            # Two creations and three reviews, each capped at 300 seconds by
+            # the host adapter contract, plus transport overhead.
+            auth_token=_service_token(), timeout=1510.0,
+        )
+    except (OSError, SERVICE_CLIENT.GuardServiceError):
+        return {"status": "BLOCK", "release_allowed": False,
+                "reason": "rewrite.guard_unavailable"}
+
+
 def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
     """Validate an agent's own final answer and bind a receipt to the exact text."""
     isolated = _isolated_release("response", arguments)
     if isolated is not None:
         return isolated
+    return _response_requires_isolated_review()
+
+
+def release_response_verified(
+    arguments: dict[str, Any], response_review_sha256: str,
+    response_context_binding: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Service-internal response signer after verified host review.
+
+    This function is intentionally absent from the MCP tool list.  The digest
+    originates in the isolated service, not in model-controlled tool input.
+    """
+    if (not isinstance(response_review_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", response_review_sha256) is None):
+        return _response_requires_isolated_review()
+    binding_fields = {
+        "response_session_sha256", "response_session_epoch_sha256",
+        "response_agent_sha256", "response_guard_boot_sha256",
+    }
+    if (not isinstance(response_context_binding, dict)
+            or set(response_context_binding) != binding_fields
+            or any(not isinstance(value, str)
+                   or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                   for value in response_context_binding.values())):
+        return _response_requires_isolated_review()
     target = arguments.get("target_text", "")
     language = arguments.get("language", "")
-    attestations = arguments.get("attestations") or {}
-    if not isinstance(attestations, dict):
-        attestations = {}
     target_is_text = isinstance(target, str)
     language_is_exact = (
         isinstance(language, str)
@@ -408,17 +483,10 @@ def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
                 "A host-supplied exact language or locale tag is required for response release.",
             ))
         )
-    missing = [name for name in ("nativeness", "orthography") if attestations.get(name) is not True]
-    if missing:
-        report["findings"].append(
-            asdict(Finding(
-                "missing-response-attestations",
-                "The following response checks were not explicitly passed: " + ", ".join(missing),
-            ))
-        )
     report["status"] = "BLOCK" if report["findings"] else "PASS"
     report["release_allowed"] = not report["findings"]
-    report["required_attestations"] = ["nativeness", "orthography"]
+    report["required_attestations"] = []
+    report["response_review_sha256"] = response_review_sha256
     report["limitations"] = (
         "Deterministic checks cannot prove that every word is native or correctly accented. "
         "Response release also requires nativeness and orthography review plus a trusted host interceptor."
@@ -430,11 +498,34 @@ def release_response(arguments: dict[str, Any]) -> dict[str, Any]:
             content_type=arguments.get("content_type", "prose"),
             short_text_reviewed=arguments.get("short_text_reviewed") is True,
             purpose="response",
+            response_review_sha256=response_review_sha256,
+            **response_context_binding,
         )
     return report
 
 
 TOOLS = [
+    {
+        "name": "rewrite_text",
+        "description": "Naturally revise an original or AI draft in its own language using a host-configured locale/register profile. Isolated native review runs before meaning-preservation review. Returns only Guard-approved exact text and a rewrite-purpose receipt; missing host support blocks. Not an AI-authorship detector. Keep request_id stable when retrying unchanged input; never route translations here.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_text": {"type": "string"},
+                "language": {"type": "string"},
+                "profile_id": {"type": "string", "description": "Explicit host-registered profile; dialect only when requested."},
+                "request_id": {"type": "string"},
+                "content_type": {"type": "string", "default": "prose"},
+                "rewrite_context_token": {"type": "string", "description": "Opaque one-time context injected by the trusted host; never invent or reuse it."},
+                "session_id": {"type": "string", "description": "Trusted-host session binding."},
+                "session_epoch": {"type": "string", "description": "Trusted-host session epoch binding."},
+                "agent_id": {"type": "string", "description": "Trusted-host writer identity binding."},
+            },
+            "required": ["source_text", "language", "profile_id", "request_id",
+                         "rewrite_context_token", "session_id", "session_epoch", "agent_id"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": "verify_release_token",
         "description": "Cryptographically verify that a BLUN release receipt is authentic, unexpired, and bound to the exact purpose, source when applicable, target, locale, and guard version. Never accept a receipt based on its appearance.",
@@ -445,8 +536,9 @@ TOOLS = [
                 "source_text": {"type": "string"},
                 "target_text": {"type": "string"},
                 "language": {"type": "string"},
-                "purpose": {"type": "string", "enum": ["translation", "response"], "default": "translation"},
-                "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
+                "purpose": {"type": "string", "enum": ["translation", "response", "rewrite"], "default": "translation"},
+                "profile_id": {"type": "string", "description": "Required for rewrite-purpose verification."},
+                "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui", "headline", "cta", "marketing", "documentation", "seo", "legal"], "default": "prose"},
                 "short_text_reviewed": {"type": "boolean", "default": False},
             },
             "required": ["release_token", "source_text", "target_text", "language"],
@@ -455,7 +547,7 @@ TOOLS = [
     },
     {
         "name": "release_response",
-        "description": "Mandatory final gate for an agent's own user-visible natural-language answer. Returns a purpose-bound token only after deterministic Unicode, script, native-diacritics, and explicit nativeness/orthography checks pass. Never use this tool for a translation.",
+        "description": "Mandatory final gate for an agent's own user-visible natural-language answer. The isolated service delegates a source-blind native-language review to a trusted host subagent before signing. Never use this tool for a translation.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -464,17 +556,9 @@ TOOLS = [
                 "glossary": {"type": "object"},
                 "content_type": {"type": "string", "enum": ["prose", "title", "meta_description", "ui"], "default": "prose"},
                 "short_text_reviewed": {"type": "boolean", "description": "Compatibility metadata only; never suppresses measurable findings."},
-                "attestations": {
-                    "type": "object",
-                    "properties": {
-                        "nativeness": {"type": "boolean"},
-                        "orthography": {"type": "boolean"},
-                    },
-                    "required": ["nativeness", "orthography"],
-                    "additionalProperties": False,
-                },
+                "review_context_token": {"type": "string", "description": "Opaque host-issued one-time review context. The PreToolUse hook supplies it; never invent or reuse it."},
             },
-            "required": ["target_text", "language", "attestations"],
+            "required": ["target_text", "language"],
             "additionalProperties": False,
         },
     },
@@ -619,6 +703,8 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
             payload = release_translation(arguments)
         elif name == "release_response":
             payload = release_response(arguments)
+        elif name == "rewrite_text":
+            payload = rewrite_text(arguments)
         elif name == "verify_release_token":
             if SERVICE_ENDPOINT:
                 try:
@@ -631,6 +717,7 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
                             "target_text": arguments.get("target_text", ""),
                             "language": arguments.get("language", ""),
                             "release_token": arguments.get("release_token", ""),
+                            "profile_id": arguments.get("profile_id", ""),
                             "content_type": arguments.get("content_type", "prose"),
                             "short_text_reviewed": arguments.get("short_text_reviewed") is True,
                             "agent_id": os.environ.get("BLUN_LANGUAGE_GUARD_AGENT_ID", ""),

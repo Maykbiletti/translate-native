@@ -13,11 +13,13 @@ import re
 import stat
 import time
 import unicodedata
+from collections import defaultdict
+from statistics import mean, pstdev
 from pathlib import Path
 from typing import Any
 
 
-VERSION = "6.20.0"
+VERSION = "6.21.0"
 MAX_SIGNING_KEY_BYTES = 64 * 1024
 DANGEROUS_BIDI = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e"}
 ISOLATE_OPENERS = {"\u2066", "\u2067", "\u2068"}
@@ -46,6 +48,91 @@ def canonical_text(text: str) -> str:
 
 def canonical_hash(text: str) -> str:
     return hashlib.sha256(canonical_text(text).encode("utf-8")).hexdigest()
+
+
+def prose_style_report(text: str, language: str, content_type: str,
+                       masked_text: str) -> dict[str, Any]:
+    """Advisory surface measurements, never authorship or semantic proof.
+
+    Offsets refer to the exact original text. Callers supply the existing
+    length-preserving technical mask; unsupported formats are not assessed.
+    """
+    report = {
+        "profile_version": "prose-style-v1",
+        "target_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "language": language, "content_type": content_type,
+        "status": "NOT_ASSESSED", "authorship": "NOT_ASSESSED",
+        "semantic_repetition": "REQUIRES_NATIVE_REVIEW",
+        "native_quality": "REQUIRES_NATIVE_REVIEW",
+        "findings": [], "metrics": {},
+    }
+    base = language.lower().replace("_", "-").split("-")[0]
+    # The lexical measurements need word-delimited prose. Other languages still
+    # receive mandatory semantic native review, never an invented clean score.
+    word_delimited = {"bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr",
+                      "de", "el", "hu", "ga", "it", "lv", "lt", "mt", "pl",
+                      "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk", "tr",
+                      "ca", "eu", "nb", "nn", "is", "id", "ms", "vi"}
+    if (base not in word_delimited
+            or content_type not in {"prose", "marketing", "documentation"}
+            or len(masked_text) != len(text)
+            or re.search(r"<[/!A-Za-z]|^\s*[\[{]", text)):
+        return report
+    # Avoid scoring quoted blocks, lists, headings and tables as narrative.
+    prose = re.sub(r"(?m)^\s*(?:>|#|[-*+]\s|\d+[.)]\s|\|)[^\n]*",
+                   lambda match: " " * len(match[0]), masked_text)
+    # Protect common German abbreviations and decimals from sentence splitting.
+    prose = re.sub(r"\b(?:z\.\s*B\.|d\.\s*h\.|u\.\s*a\.|bzw\.|Dr\.|Prof\.|ca\.)|(?<=\d)\.(?=\d)",
+                   lambda match: match[0].replace(".", "·"), prose)
+    sentences = []
+    offset = 0
+    for boundary in re.finditer(r"[.!?]+[\"”’»]*", prose):
+        segment = prose[offset:boundary.end()]
+        start = offset + len(segment) - len(segment.lstrip())
+        offset = boundary.end()
+        words = re.findall(r"[^\W_]+", segment, re.UNICODE)
+        if len(words) >= 4:
+            sentences.append((start, boundary.end(), tuple(w.casefold() for w in words)))
+    lengths = [len(s[2]) for s in sentences]
+    report["metrics"] = {"sentence_count": len(sentences),
+                         "word_count": sum(lengths)}
+    if len(sentences) < 8 or sum(lengths) < 100:
+        return report
+    report["status"] = "NO_SIGNALS"
+    findings = report["findings"]
+
+    def add(code: str, indices: list[int], reason: str) -> None:
+        findings.append({"code": code, "severity": "advisory",
+                         "reason": reason, "count": len(indices),
+                         "spans": [{"start": sentences[i][0], "end": sentences[i][1]}
+                                   for i in indices[:10]],
+                         "requires_context_review": True})
+
+    repeated = defaultdict(list)
+    for i, (_, _, words) in enumerate(sentences):
+        if len(words) >= 8:
+            repeated[words].append(i)
+    for indices in repeated.values():
+        if len(indices) >= 3 and len(findings) < 10:
+            add("style-repeated-sentence", indices,
+                "The same lexical sentence occurs at least three times; check whether repetition serves the genre.")
+    transitions = ("darüber hinaus", "des weiteren", "nicht zuletzt",
+                   "es ist wichtig zu betonen", "in diesem zusammenhang",
+                   "zusammenfassend lässt sich sagen", "an dieser stelle") if base == "de" else ()
+    report["metrics"]["stock_transition_profile"] = "de-v1" if base == "de" else "NOT_ASSESSED"
+    indices = [i for i, (_, _, words) in enumerate(sentences)
+               if any(" ".join(words).startswith(p + " ") for p in transitions)]
+    if len(indices) >= 4 and len(indices) / len(sentences) >= .25:
+        add("style-formulaic-transitions", indices,
+            "At least a quarter of sentences begin with stock transitions; check their actual logical contribution.")
+    cv = pstdev(lengths) / mean(lengths)
+    report["metrics"]["sentence_length_cv"] = round(cv, 4)
+    if len(lengths) >= 12 and mean(lengths) >= 10 and cv <= .12:
+        add("style-uniform-sentence-length", list(range(len(sentences))),
+            "Sentence lengths vary little; this is a rhythm hint, not proof of poor writing or AI authorship.")
+    if findings:
+        report["status"] = "REVIEW_RECOMMENDED"
+    return report
 
 
 def _b64encode(data: bytes) -> str:
@@ -276,7 +363,11 @@ def load_or_create_key(path: Path) -> bytes:
 def issue_receipt(
     source: str, target: str, language: str, key: bytes, ttl: int = 86400,
     content_type: str = "prose", short_text_reviewed: bool = False,
-    purpose: str = "translation",
+    purpose: str = "translation", response_review_sha256: str = "",
+    response_session_sha256: str = "",
+    response_session_epoch_sha256: str = "",
+    response_agent_sha256: str = "",
+    response_guard_boot_sha256: str = "",
 ) -> str:
     now = int(time.time())
     payload = {
@@ -287,6 +378,15 @@ def issue_receipt(
         "purpose": purpose,
         "content_type": content_type,
         "short_text_reviewed": short_text_reviewed,
+        "response_review_sha256": response_review_sha256 if purpose == "response" else "",
+        "response_session_sha256": response_session_sha256 if purpose == "response" else "",
+        "response_session_epoch_sha256": (
+            response_session_epoch_sha256 if purpose == "response" else ""
+        ),
+        "response_agent_sha256": response_agent_sha256 if purpose == "response" else "",
+        "response_guard_boot_sha256": (
+            response_guard_boot_sha256 if purpose == "response" else ""
+        ),
         "iat": now,
         "exp": now + max(60, min(ttl, 604800)),
         "nonce": _b64encode(os.urandom(12)),
@@ -314,6 +414,22 @@ def verify_receipt(
             "purpose": payload.get("purpose") == purpose,
             "content_type": payload.get("content_type") == content_type,
             "short_text_reviewed": payload.get("short_text_reviewed") is short_text_reviewed,
+            "response_review": all(
+                isinstance(payload.get(name), str)
+                and re.fullmatch(r"[0-9a-f]{64}", payload[name]) is not None
+                for name in (
+                    "response_review_sha256", "response_session_sha256",
+                    "response_session_epoch_sha256", "response_agent_sha256",
+                    "response_guard_boot_sha256",
+                )
+            ) if purpose == "response" else all(
+                payload.get(name, "") == ""
+                for name in (
+                    "response_review_sha256", "response_session_sha256",
+                    "response_session_epoch_sha256", "response_agent_sha256",
+                    "response_guard_boot_sha256",
+                )
+            ),
             "version": payload.get("v") == VERSION,
             "not_expired": int(payload.get("exp", 0)) >= int(time.time()),
         }
@@ -352,12 +468,18 @@ def script_report(text: str, language: str) -> dict[str, Any]:
     expected = explicit or LANGUAGE_SCRIPTS.get(base)
     if not expected:
         return {"status": "not-evaluated", "reason": "no deterministic script expectation"}
+    # Han variants share Unicode blocks. Block membership cannot decide whether
+    # Chinese is Simplified or Traditional; the locale-aware reviewer must.
+    measured = "Hani" if expected in {"Hans", "Hant"} else expected
+    if measured not in SCRIPT_RANGES:
+        return {"status": "not-evaluated", "expected_script": expected,
+                "reason": "no deterministic coverage for this script"}
     letters = [c for c in text if unicodedata.category(c).startswith("L")]
     if not letters:
         return {"status": "fail", "expected_script": expected, "ratio": 0.0}
-    matching = sum(_in_script(c, expected) for c in letters)
+    matching = sum(_in_script(c, measured) for c in letters)
     ratio = matching / len(letters)
-    threshold = 0.45 if expected in {"Hani", "Jpan"} else 0.70
+    threshold = 0.45 if measured in {"Hani", "Jpan"} else 0.70
     return {"status": "pass" if ratio >= threshold else "fail", "expected_script": expected, "ratio": round(ratio, 3)}
 
 

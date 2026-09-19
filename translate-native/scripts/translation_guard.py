@@ -42,7 +42,7 @@ TRANSLATABLE_HTML_ATTRIBUTES = {
     "placeholder",
     "title",
 }
-HTML_CODE_ELEMENTS = {"script", "style"}
+HTML_CODE_ELEMENTS = {"code", "kbd", "pre", "samp", "script", "style", "var"}
 JSONLD_LINGUISTIC_KEYS = {
     "alternativeHeadline", "articleBody", "caption", "description", "headline",
     "keywords", "name", "text",
@@ -61,6 +61,32 @@ TRANSLATABLE_META_PROPERTIES = {
     "twitter:description",
     "twitter:title",
 }
+HTML_DETECTION_POLICY = "standard-html-vocabulary-before-xml-v1"
+HTML_STANDARD_ELEMENTS = frozenset({
+    "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base",
+    "bdi", "bdo", "blockquote", "body", "br", "button", "canvas", "caption",
+    "cite", "code", "col", "colgroup", "data", "datalist", "dd", "del",
+    "details", "dfn", "dialog", "div", "dl", "dt", "em", "embed", "fieldset",
+    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+    "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img",
+    "input", "ins", "kbd", "label", "legend", "li", "link", "main", "map",
+    "mark", "menu", "meta", "meter", "nav", "object", "ol", "optgroup",
+    "option", "output", "p", "picture", "pre", "progress", "q", "rp", "rt",
+    "ruby", "s", "samp", "script", "search", "section", "select", "slot",
+    "small", "source", "span", "strong", "style", "sub", "summary", "sup",
+    "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead",
+    "time", "title", "tr", "track", "u", "ul", "var", "video", "wbr",
+})
+HTML_DETECTION_PATTERN = re.compile(
+    r"<(?:!doctype[ \t\n\f\r]+html|"
+    + "|".join(sorted(HTML_STANDARD_ELEMENTS, key=lambda item: (-len(item), item)))
+    + r")\b",
+    re.IGNORECASE,
+)
+HTML_TAGLIKE_FALLBACK_PATTERN = re.compile(
+    r"(?:</?[A-Za-z][A-Za-z0-9._:-]*(?=[ \t\n\f\r/>]|$)"
+    r"|<!--|<!\[CDATA\[|<![A-Za-z]|<\?)",
+)
 MIN_TOTAL_SOURCE_UNITS = 80
 MIN_SEGMENT_SOURCE_UNITS = 24
 MIN_IDENTITY_SOURCE_CHARACTERS = 200
@@ -249,21 +275,183 @@ def json_segments(value: Any) -> list[str]:
     return [value] if isinstance(value, str) else []
 
 
-def json_located_segments(value: Any, path: str = "$") -> list[tuple[str, str]]:
-    """Return JSON string values with stable semantic paths."""
+def _json_pointer(path: str, kind: str, value: Any) -> str:
+    if kind == "key":
+        segment = "k:" + str(value).replace("~", "~0").replace("/", "~1")
+    else:
+        segment = "i:" + str(value)
+    return path + "/" + segment
+
+
+def json_located_segments(value: Any, path: str = "#") -> list[tuple[str, str]]:
+    """Return JSON strings with collision-free typed RFC-6901-style paths."""
     if isinstance(value, dict):
         return [
             segment
             for key in sorted(value)
-            for segment in json_located_segments(value[key], f"{path}.{key}")
+            for segment in json_located_segments(
+                value[key], _json_pointer(path, "key", key))
         ]
     if isinstance(value, list):
         return [
             segment
             for index, child in enumerate(value)
-            for segment in json_located_segments(child, f"{path}[{index}]")
+            for segment in json_located_segments(
+                child, _json_pointer(path, "index", index))
         ]
     return [(path, value)] if isinstance(value, str) else []
+
+
+class _JsonNumberToken:
+    """Exact JSON number lexeme that never inherits host numeric limits."""
+    __slots__ = ("lexeme",)
+
+    def __init__(self, lexeme: str) -> None:
+        self.lexeme = lexeme
+
+    def __eq__(self, other: object) -> bool:
+        return type(self) is type(other) and self.lexeme == other.lexeme
+
+    def __hash__(self) -> int:
+        return hash((type(self), self.lexeme))
+
+    def __repr__(self) -> str:
+        return self.lexeme
+
+
+class _JsonIntegerToken(_JsonNumberToken):
+    pass
+
+
+class _JsonDecimalToken(_JsonNumberToken):
+    pass
+
+
+def strict_json_loads(text: str) -> Any:
+    """Parse standards-compliant JSON without collapsing duplicate keys."""
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def constant(_value: str) -> Any:
+        raise ValueError("nonfinite JSON number")
+
+    try:
+        # Lexeme tokens avoid host integer/float limits and preserve the exact
+        # protected number spelling, including integer-versus-decimal type.
+        value = json.loads(
+            text,
+            object_pairs_hook=pairs,
+            parse_int=_JsonIntegerToken,
+            parse_float=_JsonDecimalToken,
+            parse_constant=constant,
+        )
+    except RecursionError:
+        raise ValueError("JSON nesting is too deep") from None
+
+    def valid_unicode(item: Any) -> None:
+        if isinstance(item, str):
+            item.encode("utf-8")
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                key.encode("utf-8")
+                valid_unicode(child)
+        elif isinstance(item, list):
+            for child in item:
+                valid_unicode(child)
+
+    try:
+        valid_unicode(value)
+    except RecursionError:
+        raise ValueError("JSON nesting is too deep") from None
+    return value
+
+
+_JSON_NUMBER_TOKEN = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+
+
+def _json_container_intent(stripped: str) -> bool:
+    """Recognize JSON-token structure without guessing from brackets alone."""
+    if stripped[:1] not in {"{", "["}:
+        return False
+    object_container = stripped[0] == "{"
+    position = 1
+    values = 0
+    structural = False
+    while position < len(stripped):
+        if stripped[position] in " \t\r\n":
+            position += 1
+            continue
+        marker = stripped[position]
+        if marker == '"':
+            try:
+                _value, position = json.decoder.scanstring(stripped, position + 1, True)
+            except (json.JSONDecodeError, UnicodeError):
+                return True
+            values += 1
+            structural = structural or object_container
+            continue
+        if marker in "{}[],:":
+            if marker in "{[:,":
+                structural = True
+            position += 1
+            continue
+        number = _JSON_NUMBER_TOKEN.match(stripped, position)
+        if number is not None:
+            values += 1
+            position = number.end()
+            continue
+        keyword = next(
+            (token for token in ("true", "false", "null")
+             if stripped.startswith(token, position)),
+            None,
+        )
+        if keyword is not None:
+            values += 1
+            position += len(keyword)
+            continue
+        return structural or values >= 2
+    # Reaching EOF after any complete JSON primitive while the outer container
+    # is still open is a clear truncation, not a prose label.
+    return structural or values >= 1
+
+
+def json_document_state(text: str) -> str:
+    """Classify valid JSON, security-relevant invalid JSON, or ordinary text.
+
+    A permissive second parse identifies inputs rejected only by the strict
+    policy (duplicate keys, non-finite constants, or invalid Unicode). Small
+    syntax heuristics catch malformed containers without treating refrains such
+    as ``[Verse]`` or placeholders such as ``{name}`` as JSON.
+    """
+    stripped = text.lstrip("\ufeff\n\r\t ")
+    if not stripped:
+        return "text"
+    try:
+        strict_json_loads(stripped)
+        return "json"
+    except (json.JSONDecodeError, ValueError, UnicodeError):
+        pass
+    try:
+        json.loads(stripped)
+    except (json.JSONDecodeError, ValueError, UnicodeError, RecursionError):
+        try:
+            _prefix, end = json.JSONDecoder().raw_decode(stripped)
+        except (json.JSONDecodeError, ValueError, UnicodeError, RecursionError):
+            pass
+        else:
+            try:
+                strict_json_loads(stripped[:end])
+            except (json.JSONDecodeError, ValueError, UnicodeError):
+                return "json_invalid"
+            if stripped[end:].strip():
+                return "text"
+        return "json_invalid" if _json_container_intent(stripped) else "text"
+    return "json_invalid"
 
 
 def jsonld_segments(value: Any, key: str | None = None) -> list[str]:
@@ -322,12 +510,14 @@ class LinguisticHTMLParser(HTMLParser):
         })
         meta_name = attribute_map.get("name", "").casefold()
         meta_property = attribute_map.get("property", "").casefold()
+        opaque_parent = any(item["tag"] in HTML_CODE_ELEMENTS for item in self.stack)
         for name, value in attrs:
             normalized = name.casefold()
             linguistic_meta = normalized == "content" and (
                 meta_name in TRANSLATABLE_META_NAMES or meta_property in TRANSLATABLE_META_PROPERTIES
             )
-            if value and (normalized in TRANSLATABLE_HTML_ATTRIBUTES or linguistic_meta):
+            if (not opaque_parent and value
+                    and (normalized in TRANSLATABLE_HTML_ATTRIBUTES or linguistic_meta)):
                 self._append_segment(value, f"{element_path}/@{normalized}")
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -342,10 +532,13 @@ class LinguisticHTMLParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         current = self.stack[-1] if self.stack else None
+        opaque = next((item for item in reversed(self.stack)
+                       if item["tag"] in HTML_CODE_ELEMENTS), None)
         current_tag = current["tag"] if current else ""
         current_type = current["type"] if current else ""
-        if current_tag in HTML_CODE_ELEMENTS:
-            if current_tag == "script" and current_type == "application/ld+json":
+        if opaque is not None:
+            if (opaque is current and current_tag == "script"
+                    and current_type == "application/ld+json"):
                 try:
                     for index, segment in enumerate(jsonld_segments(json.loads(data))):
                         self._append_segment(segment, f"{current['path']}/jsonld[{index}]")
@@ -519,11 +712,21 @@ class TranslationHTMLParser(HTMLParser):
         return tuple(signature)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.events.append(("start", tag, self.attribute_signature(tag, attrs)))
+        signature = (tuple((name, "fixed", value) for name, value in attrs)
+                     if tag.casefold() in HTML_CODE_ELEMENTS
+                     or any(item[0].casefold() in HTML_CODE_ELEMENTS
+                            for item in self.open_elements)
+                     else self.attribute_signature(tag, attrs))
+        self.events.append(("start", tag, signature))
         self.open_elements.append((tag, dict(attrs)))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.events.append(("empty", tag, self.attribute_signature(tag, attrs)))
+        signature = (tuple((name, "fixed", value) for name, value in attrs)
+                     if tag.casefold() in HTML_CODE_ELEMENTS
+                     or any(item[0].casefold() in HTML_CODE_ELEMENTS
+                            for item in self.open_elements)
+                     else self.attribute_signature(tag, attrs))
+        self.events.append(("empty", tag, signature))
 
     def handle_endtag(self, tag: str) -> None:
         self.events.append(("end", tag))
@@ -534,15 +737,18 @@ class TranslationHTMLParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         current = self.open_elements[-1] if self.open_elements else None
+        opaque = next((item for item in reversed(self.open_elements)
+                       if item[0].casefold() in HTML_CODE_ELEMENTS), None)
         current_element = current[0] if current else None
-        if current_element == "script" and (current[1].get("type") or "").casefold() == "application/ld+json":
+        if (opaque is current and current_element == "script"
+                and (current[1].get("type") or "").casefold() == "application/ld+json"):
             try:
                 self.events.append(("json-ld", jsonld_signature(json.loads(data))))
             except json.JSONDecodeError:
                 self.events.append(("invalid json-ld", data))
             return
-        if current_element in HTML_CODE_ELEMENTS:
-            self.events.append(("code", current_element, data))
+        if opaque is not None:
+            self.events.append(("code", opaque[0], data))
             return
         signature = token_signature(data)
         if signature:
@@ -699,17 +905,10 @@ def detect_content_format(text: str) -> str:
     stripped = text.lstrip("\ufeff\n\r\t ")
     if not stripped:
         return "text"
-    if stripped[:1] in {"{", "["}:
-        try:
-            json.loads(stripped)
-            return "json"
-        except json.JSONDecodeError:
-            pass
-    if re.search(
-        r"<(?:!doctype\s+html|html|head|body|main|section|article|nav|header|footer|div|p|h[1-6])\b",
-        stripped,
-        re.IGNORECASE,
-    ):
+    json_state = json_document_state(stripped)
+    if json_state != "text":
+        return json_state
+    if HTML_DETECTION_PATTERN.search(stripped):
         return "html"
     if stripped.startswith("<"):
         try:
@@ -717,6 +916,10 @@ def detect_content_format(text: str) -> str:
             return "xml"
         except ET.ParseError:
             pass
+    # Never let malformed or embedded tag-shaped input fall through to the
+    # plain-text segmenter where markup could become model-owned.
+    if HTML_TAGLIKE_FALLBACK_PATTERN.search(stripped):
+        return "html"
     if re.search(r"^msg(?:id|str|ctxt)\b", text, re.MULTILINE):
         return "po"
     if APPLE_STRING.search(text):
@@ -730,9 +933,11 @@ def linguistic_segments(text: str, selected_format: str) -> list[str]:
     """Extract human-language segments for volume checks in one known format."""
     if selected_format == "json":
         try:
-            return json_segments(json.loads(text.lstrip("\ufeff")))
-        except json.JSONDecodeError:
+            return json_segments(strict_json_loads(text.lstrip("\ufeff")))
+        except (json.JSONDecodeError, ValueError, UnicodeError):
             return [text]
+    if selected_format == "json_invalid":
+        return [text]
     if selected_format == "html":
         return html_segments(text)
     if selected_format == "xml":
@@ -762,13 +967,13 @@ def structured_identity_errors(
     selected_format: str,
 ) -> list[str]:
     """Compare aligned user-visible segments after whole-input identity passes."""
-    if selected_format == "text":
+    if selected_format in {"text", "json_invalid"}:
         return []
     if selected_format == "json":
         try:
-            source_data = json.loads(source.lstrip("\ufeff"))
-            target_data = json.loads(target.lstrip("\ufeff"))
-        except json.JSONDecodeError:
+            source_data = strict_json_loads(source.lstrip("\ufeff"))
+            target_data = strict_json_loads(target.lstrip("\ufeff"))
+        except (json.JSONDecodeError, ValueError, UnicodeError):
             return []
         source_located = json_located_segments(source_data)
         target_by_path = dict(json_located_segments(target_data))
@@ -824,9 +1029,11 @@ def normalization_errors(text: str, path: Path) -> list[str]:
 
 def parse_json(text: str, path: Path) -> tuple[Any | None, list[str]]:
     try:
-        return json.loads(text), []
+        return strict_json_loads(text), []
     except json.JSONDecodeError as exc:
         return None, [f"{path}: invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"]
+    except (ValueError, UnicodeError) as exc:
+        return None, [f"{path}: invalid JSON ({exc})"]
 
 
 def print_errors(errors: Iterable[str]) -> None:

@@ -107,6 +107,17 @@ class SourceClientTests(unittest.TestCase):
         self.authenticator = source_support.Authenticator()
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)
+
+        class TerminalReceiver:
+            expected_capabilities_sha256 = "e" * 64
+
+            def __call__(self, _payload):
+                raise AssertionError("terminal notification was not expected")
+
+            def status(self, _event_id, _site_id):
+                raise AssertionError("terminal status was not expected")
+
+        self.terminal_receiver = TerminalReceiver()
         self.runtime = RUNTIME.open_durable_cms_source(
             root / "changes.sqlite3",
             root / "removals.sqlite3",
@@ -115,6 +126,8 @@ class SourceClientTests(unittest.TestCase):
             change_worker_id="source-change-worker",
             removal_worker_id="source-removal-worker",
             lifecycle_worker_id="source-lifecycle-worker",
+            terminal_notifier=self.terminal_receiver,
+            notification_worker_id="source-notification-worker",
             http_authenticator=self.authenticator,
             clock=lambda: self.now,
             change_lease_seconds=60,
@@ -150,6 +163,9 @@ class SourceClientTests(unittest.TestCase):
             expected_runtime_capabilities_sha256=self.runtime_digest,
             expected_commercial_rendering_registry_sha256=(
                 self.rendering_digest
+            ),
+            expected_terminal_receiver_capabilities_sha256=(
+                self.terminal_receiver.expected_capabilities_sha256
             ),
             transport=self.transport if transport is None else transport,
         )
@@ -190,12 +206,64 @@ class SourceClientTests(unittest.TestCase):
 
         self.assertEqual(status["status"]["dispatch_status"], "pending")
         self.assertEqual(health["health"]["status"], "ok")
+        self.assertEqual(
+            status["status"]["terminal_receiver_capabilities_sha256"],
+            self.terminal_receiver.expected_capabilities_sha256,
+        )
+        self.assertEqual(
+            health["health"]["terminal_receiver_capabilities_sha256"],
+            self.terminal_receiver.expected_capabilities_sha256,
+        )
+        self.assertEqual(
+            health["health"]["terminal_processing"][
+                "expected_capabilities_sha256"
+            ],
+            self.terminal_receiver.expected_capabilities_sha256,
+        )
         self.assertEqual(readiness["readiness"]["status"], "not_ready")
         self.assertTrue(all(
             value["capabilities_sha256"] == self.digest
             for value in (status, health, readiness)
         ))
         self.assertNotIn(source_text, json.dumps((status, health, readiness)))
+
+    def test_terminal_receiver_binding_substitution_blocks_public_reads(self):
+        change = cms_support.event()
+        self.client.submit_change(change)
+
+        def replace_status(index, result):
+            if index == 2:
+                return replace_json(
+                    result,
+                    lambda value: value["status"].update(
+                        terminal_receiver_capabilities_sha256="f" * 64,
+                    ),
+                )
+            return result
+
+        status_client = self.make_client(transport=TransformingTransport(
+            self.transport, replace_status,
+        ))
+        with self.assertRaises(CLIENT.CMSSourceClientBlocked) as status_error:
+            status_client.status(change["event_id"], change["site_id"])
+        self.assertEqual(status_error.exception.code, "source_client.status_binding")
+
+        def replace_health(index, result):
+            if index == 2:
+                return replace_json(
+                    result,
+                    lambda value: value["health"].update(
+                        terminal_receiver_capabilities_sha256="f" * 64,
+                    ),
+                )
+            return result
+
+        health_client = self.make_client(transport=TransformingTransport(
+            self.transport, replace_health,
+        ))
+        with self.assertRaises(CLIENT.CMSSourceClientBlocked) as health_error:
+            health_client.health()
+        self.assertEqual(health_error.exception.code, "source_client.health_binding")
 
     def test_fresh_capability_drift_blocks_before_mutation(self):
         client = self.make_client(digest="0" * 64)

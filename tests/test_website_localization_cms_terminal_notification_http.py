@@ -116,6 +116,7 @@ def response_for(body, mutate=None):
 def adapter(transport, authentication=None, **overrides):
     return HTTP.HTTPTerminalNotifierAdapter(
         "https://cms.example.test/v1/localization/terminal-notifications",
+        "d" * 64,
         authentication or (lambda _request: {"Authorization": "Bearer secret"}),
         transport=transport,
         **overrides,
@@ -157,7 +158,11 @@ class HTTPTerminalNotifierAdapterTests(unittest.TestCase):
             "event_id": payload["event_id"],
             "site_id": payload["site_id"],
             "body_sha256": expected_hash,
+            "capabilities_sha256": "d" * 64,
         }])
+        self.assertEqual(
+            headers[HTTP.CAPABILITIES_PRECONDITION_HEADER], "d" * 64,
+        )
         self.assertEqual(result["notification_sha256"], expected_hash)
         self.assertNotIn("secret", repr(callback))
 
@@ -223,6 +228,12 @@ class HTTPTerminalNotifierAdapterTests(unittest.TestCase):
                 self.assertNotIn("private", str(caught.exception))
 
     def test_endpoint_and_authentication_block_before_transport(self):
+        for digest in (None, "A" * 64, "0" * 63):
+            with self.subTest(digest=digest), self.assertRaises(ValueError):
+                HTTP.HTTPTerminalNotifierAdapter(
+                    "https://cms.example.test/notify", digest,
+                    lambda _request: {"Authorization": "x"},
+                )
         invalid_endpoints = (
             "http://cms.example.test/notify",
             "https://user:secret@cms.example.test/notify",
@@ -233,7 +244,8 @@ class HTTPTerminalNotifierAdapterTests(unittest.TestCase):
             with self.subTest(endpoint=endpoint):
                 with self.assertRaises(ValueError):
                     HTTP.HTTPTerminalNotifierAdapter(
-                        endpoint, lambda _request: {"Authorization": "x"},
+                        endpoint, "d" * 64,
+                        lambda _request: {"Authorization": "x"},
                     )
 
         for supplied in (
@@ -346,10 +358,12 @@ class HTTPTerminalNotifierAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             HTTP.HTTPTerminalNotifierAdapter(
                 "http://127.0.0.1:8080/notify",
+                "d" * 64,
                 lambda _request: {"Authorization": "x"},
             )
         created = HTTP.HTTPTerminalNotifierAdapter(
             "http://[::1]:8080/notify",
+            "d" * 64,
             lambda _request: {"Authorization": "x"},
             allow_loopback_http=True,
         )

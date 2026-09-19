@@ -17,7 +17,8 @@ import re
 from typing import Any, Mapping
 
 
-ADAPTER_SCHEMA = "blun.cms-source-delivery-sidecar-outbox-adapter.v2"
+ADAPTER_SCHEMA = "blun.cms-source-delivery-sidecar-outbox-adapter.v3"
+LEGACY_ADAPTER_SCHEMA = "blun.cms-source-delivery-sidecar-outbox-adapter.v2"
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -97,6 +98,7 @@ class CMSSourceDeliverySidecarOutboxAdapter:
         sidecar_delivery_max_attempts: int = 5,
         runtime_capabilities_sha256: str | None = None,
         commercial_rendering_registry_sha256: str | None = None,
+        terminal_receiver_capabilities_sha256: str | None = None,
     ):
         sidecar_digest = getattr(client, "expected_capabilities_sha256", None)
         remote_digest = getattr(client, "expected_remote_capabilities_sha256", None)
@@ -108,13 +110,18 @@ class CMSSourceDeliverySidecarOutboxAdapter:
             or SHA256.fullmatch(sidecar_digest) is None
             or not isinstance(remote_digest, str)
             or SHA256.fullmatch(remote_digest) is None
-            or (runtime_capabilities_sha256 is None)
-            != (commercial_rendering_registry_sha256 is None)
+            or len({
+                runtime_capabilities_sha256 is None,
+                commercial_rendering_registry_sha256 is None,
+                terminal_receiver_capabilities_sha256 is None,
+            }) != 1
             or runtime_capabilities_sha256 is not None and (
                 not isinstance(runtime_capabilities_sha256, str)
                 or SHA256.fullmatch(runtime_capabilities_sha256) is None
                 or not isinstance(commercial_rendering_registry_sha256, str)
                 or SHA256.fullmatch(commercial_rendering_registry_sha256) is None
+                or not isinstance(terminal_receiver_capabilities_sha256, str)
+                or SHA256.fullmatch(terminal_receiver_capabilities_sha256) is None
             )
             or isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
@@ -134,6 +141,19 @@ class CMSSourceDeliverySidecarOutboxAdapter:
             "commercial_rendering_registry_sha256": (
                 commercial_rendering_registry_sha256
             ),
+            "terminal_receiver_capabilities_sha256": (
+                terminal_receiver_capabilities_sha256
+            ),
+        }
+        legacy_binding = {
+            "schema": LEGACY_ADAPTER_SCHEMA,
+            "sidecar_capabilities_sha256": sidecar_digest,
+            "remote_capabilities_sha256": remote_digest,
+            "sidecar_delivery_max_attempts": delivery_attempts,
+            "runtime_capabilities_sha256": runtime_capabilities_sha256,
+            "commercial_rendering_registry_sha256": (
+                commercial_rendering_registry_sha256
+            ),
         }
         self.client = client
         self.sidecar_capabilities_sha256 = sidecar_digest
@@ -145,6 +165,12 @@ class CMSSourceDeliverySidecarOutboxAdapter:
         self.expected_commercial_rendering_registry_sha256 = (
             commercial_rendering_registry_sha256
         )
+        self.expected_terminal_receiver_capabilities_sha256 = (
+            terminal_receiver_capabilities_sha256
+        )
+        self.legacy_expected_capabilities_sha256 = hashlib.sha256(
+            _canonical(legacy_binding)
+        ).hexdigest()
         self.expected_capabilities_sha256 = hashlib.sha256(
             _canonical(binding)
         ).hexdigest()

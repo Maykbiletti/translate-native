@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-API_SCHEMA = "blun.cms-public-submission-dispatch-http.v2"
+API_SCHEMA = "blun.cms-public-submission-dispatch-http.v14"
 ERROR_SCHEMA = "blun.cms-public-submission-dispatch-http-error.v1"
 AUTH_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-auth-request.v1"
 TENANT_PRINCIPAL_SCHEMA = (
@@ -31,18 +31,30 @@ OPERATOR_PRINCIPAL_SCHEMA = (
     "blun.cms-public-submission-dispatch-operator-principal.v1"
 )
 ENQUEUE_REQUEST_SCHEMA = (
-    "blun.cms-public-submission-dispatch-enqueue-request.v1"
+    "blun.cms-public-submission-dispatch-enqueue-request.v2"
+)
+COMMERCIAL_CONTRACT_BINDING_SCHEMA = (
+    "blun.cms-public-submission-dispatch-commercial-contract-binding.v1"
 )
 STATUS_REQUEST_SCHEMA = "blun.cms-public-submission-dispatch-status-request.v1"
-QUEUE_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-queue-response.v1"
-STATUS_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-status-response.v1"
+LIFECYCLE_REQUEST_SCHEMA = (
+    "blun.cms-public-submission-dispatch-lifecycle-request.v1"
+)
+QUEUE_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-queue-response.v3"
+STATUS_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-status-response.v3"
+LIFECYCLE_RESPONSE_SCHEMA = (
+    "blun.cms-public-submission-dispatch-lifecycle-response.v2"
+)
+COMMERCIAL_PROFILE_RESPONSE_SCHEMA = (
+    "blun.cms-public-submission-dispatch-commercial-profile-response.v1"
+)
 HEALTH_RESPONSE_SCHEMA = "blun.cms-public-submission-dispatch-health-response.v1"
 READINESS_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-readiness-response.v1"
 )
-CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v2"
+CAPABILITIES_SCHEMA = "blun.cms-public-submission-dispatch-capabilities.v14"
 CAPABILITIES_RESPONSE_SCHEMA = (
-    "blun.cms-public-submission-dispatch-capabilities-response.v2"
+    "blun.cms-public-submission-dispatch-capabilities-response.v14"
 )
 OPENAPI_RESPONSE_SCHEMA = (
     "blun.cms-public-submission-dispatch-openapi-response.v1"
@@ -50,6 +62,10 @@ OPENAPI_RESPONSE_SCHEMA = (
 
 ENQUEUE_PATH = "/v1/localization/cms-submission-dispatch/requests"
 STATUS_PATH = "/v1/localization/cms-submission-dispatch/status"
+LIFECYCLE_PATH = "/v1/localization/cms-submission-dispatch/lifecycle"
+COMMERCIAL_PROFILE_PATH = (
+    "/v1/localization/cms-submission-dispatch/commercial-profile"
+)
 HEALTH_PATH = "/v1/localization/cms-submission-dispatch/health"
 READINESS_PATH = "/v1/localization/cms-submission-dispatch/readiness"
 CAPABILITIES_PATH = "/v1/localization/cms-submission-dispatch/capabilities"
@@ -57,6 +73,8 @@ OPENAPI_PATH = "/v1/localization/cms-submission-dispatch/openapi"
 SCOPES = {
     ENQUEUE_PATH: "cms-submission-dispatch:write",
     STATUS_PATH: "cms-submission-dispatch-status:read",
+    LIFECYCLE_PATH: "cms-submission-dispatch-lifecycle:read",
+    COMMERCIAL_PROFILE_PATH: "cms-submission-dispatch-commercial-profile:read",
     HEALTH_PATH: "cms-submission-dispatch-health:read",
     READINESS_PATH: "cms-submission-dispatch-readiness:read",
     CAPABILITIES_PATH: "cms-submission-dispatch-capabilities:read",
@@ -65,13 +83,193 @@ SCOPES = {
 METHODS = {
     ENQUEUE_PATH: "POST",
     STATUS_PATH: "POST",
+    LIFECYCLE_PATH: "POST",
+    COMMERCIAL_PROFILE_PATH: "GET",
     HEALTH_PATH: "GET",
     READINESS_PATH: "GET",
     CAPABILITIES_PATH: "GET",
     OPENAPI_PATH: "GET",
 }
-TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH}
-BODYLESS_PATHS = {HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH, OPENAPI_PATH}
+TENANT_PATHS = {ENQUEUE_PATH, STATUS_PATH, LIFECYCLE_PATH}
+BODYLESS_PATHS = {
+    COMMERCIAL_PROFILE_PATH, HEALTH_PATH, READINESS_PATH, CAPABILITIES_PATH,
+    OPENAPI_PATH,
+}
+CAPABILITIES_PRECONDITION_HEADER = "X-Localization-Capabilities-SHA256"
+CAPABILITIES_PRECONDITION_PATHS = set(SCOPES) - {CAPABILITIES_PATH}
+_AUTHENTICATION_ERRORS = {
+    401: ("submission_dispatch_http.authentication_failed",),
+    403: ("submission_dispatch_http.scope_rejected",),
+    405: ("submission_dispatch_http.method_not_allowed",),
+}
+_COMMON_503_ERRORS = (
+    "submission_dispatch_http.authentication_unavailable",
+    "submission_dispatch_http.capabilities_invalid",
+    "submission_dispatch_http.response_invalid",
+    "submission_dispatch_http.runtime_blocked",
+)
+_BODYLESS_400_ERRORS = (
+    "submission_dispatch_http.body_invalid",
+    "submission_dispatch_http.body_not_allowed",
+    "submission_dispatch_http.headers_invalid",
+    "submission_dispatch_http.https_required",
+    "submission_dispatch_http.query_rejected",
+    "submission_dispatch_http.transfer_encoding_rejected",
+)
+_BODY_400_ERRORS = (
+    "submission_dispatch_http.body_invalid",
+    "submission_dispatch_http.headers_invalid",
+    "submission_dispatch_http.https_required",
+    "submission_dispatch_http.json_invalid",
+    "submission_dispatch_http.query_rejected",
+    "submission_dispatch_http.request_invalid",
+    "submission_dispatch_http.transfer_encoding_rejected",
+)
+_CAPABILITIES_PRECONDITION_ERRORS = {
+    412: ("submission_dispatch_http.capabilities_precondition_failed",),
+    428: ("submission_dispatch_http.capabilities_precondition_required",),
+}
+ERROR_CODES = {
+    CAPABILITIES_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: _COMMON_503_ERRORS,
+    },
+    COMMERCIAL_PROFILE_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
+    ENQUEUE_PATH: {
+        400: tuple(sorted((
+            *_BODY_400_ERRORS, "submission_dispatch_http.binding_invalid",
+        ))),
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        409: ("submission_dispatch_http.idempotency_collision",),
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        415: ("submission_dispatch_http.content_type_invalid",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_not_ready",
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
+    HEALTH_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
+    OPENAPI_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: _COMMON_503_ERRORS,
+    },
+    READINESS_PATH: {
+        400: _BODYLESS_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
+    STATUS_PATH: {
+        400: _BODY_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        404: ("submission_dispatch_http.submission_not_found",),
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        415: ("submission_dispatch_http.content_type_invalid",),
+        503: _COMMON_503_ERRORS,
+    },
+    LIFECYCLE_PATH: {
+        400: _BODY_400_ERRORS,
+        **_AUTHENTICATION_ERRORS,
+        **_CAPABILITIES_PRECONDITION_ERRORS,
+        404: ("submission_dispatch_http.submission_not_found",),
+        409: ("submission_dispatch_http.lifecycle_not_accepted",),
+        411: ("submission_dispatch_http.content_length_required",),
+        413: ("submission_dispatch_http.body_too_large",),
+        415: ("submission_dispatch_http.content_type_invalid",),
+        503: tuple(sorted((
+            *_COMMON_503_ERRORS,
+            "submission_dispatch_http.runtime_response_invalid",
+        ))),
+    },
+}
+ERROR_STATUSES = {
+    path: tuple(sorted(statuses)) for path, statuses in ERROR_CODES.items()
+}
+RESPONSE_INVARIANTS = {
+    CAPABILITIES_PATH: (
+        "exact_capability_generation",
+    ),
+    COMMERCIAL_PROFILE_PATH: (
+        "exact_brand_neutral_commercial_profile",
+        "all_24_locale_rendering_bindings_present",
+        "registry_matches_live_website_capability_binding",
+        "project_prices_brands_and_content_absent",
+        "profile_grants_no_publication_authority",
+    ),
+    ENQUEUE_PATH: (
+        "commercial_contract_binding_matches_content_type",
+        "status_identity_matches_request",
+        "attempts_lte_client_max_attempts",
+        "leased_iff_lease_expires_at",
+        "accepted_iff_remote_website_binding_complete_and_valid",
+        "accepted_commercial_contract_matches_remote_registry",
+    ),
+    HEALTH_PATH: (
+        "queue_count_sum_matches_operation_count_sum",
+        "due_lte_pending_plus_retry_wait",
+        "expired_leases_lte_leased",
+        "failed_equals_failed_count",
+        "ok_iff_no_expired_leases_or_failures",
+    ),
+    OPENAPI_PATH: (
+        "exact_openapi_generation",
+        "capabilities_sha256_matches",
+    ),
+    READINESS_PATH: (
+        "ready_iff_worker_running_and_outbox_ok_and_no_error",
+        "not_ready_requires_error",
+    ),
+    STATUS_PATH: (
+        "status_identity_matches_request",
+        "attempts_lte_client_max_attempts",
+        "leased_iff_lease_expires_at",
+        "accepted_iff_remote_website_binding_complete_and_valid",
+    ),
+    LIFECYCLE_PATH: (
+        "status_identity_matches_request",
+        "dispatch_must_be_accepted_before_downstream_read",
+        "source_lifecycle_identity_matches_request",
+        "website_binding_matches_durable_acceptance",
+        "accepted_does_not_imply_publication",
+    ),
+}
 MAX_BODY_BYTES = 4_000_000
 MAX_HEADERS = 64
 MAX_HEADER_VALUE = 4096
@@ -116,7 +314,7 @@ class CMSSourceDeliverySubmissionDispatchHTTPBlocked(RuntimeError):
 
     def __init__(self, code: str, status: int):
         if ERROR_CODE.fullmatch(code) is None or status not in {
-            400, 401, 403, 404, 405, 409, 411, 413, 415, 503,
+            400, 401, 403, 404, 405, 409, 411, 412, 413, 415, 428, 503,
         }:
             raise ValueError("invalid submission dispatch HTTP failure")
         super().__init__(code)
@@ -309,17 +507,25 @@ def _status_payload(
         payload = dataclasses.asdict(value)
         fields = {
             "operation", "request_id", "event_id", "site_id", "payload_sha256",
+            "commercial_contract_binding",
             "source_max_attempts", "delivery_max_attempts", "status", "attempts",
             "client_max_attempts", "next_attempt_at", "lease_expires_at",
             "lease_expired", "last_error_code", "remote_status",
             "remote_attempts", "remote_capabilities_sha256",
-            "remote_binding_sha256", "response_sha256",
+            "remote_binding_sha256", "remote_website_capability_binding",
+            "response_sha256",
         }
         if set(payload) != fields or payload["operation"] not in OPERATIONS:
             raise ValueError
         for name in ("request_id", "event_id", "site_id"):
             _token(payload[name])
         _sha256(payload["payload_sha256"])
+        commercial_binding = payload["commercial_contract_binding"]
+        if commercial_binding is not None:
+            if commercial_binding != _DISPATCH._commercial_contract_binding():
+                raise ValueError
+        if payload["operation"] != "change" and commercial_binding is not None:
+            raise ValueError
         for name in (
             "source_max_attempts", "delivery_max_attempts",
             "client_max_attempts",
@@ -345,6 +551,11 @@ def _status_payload(
             "response_sha256",
         ):
             _optional(payload[name], _sha256)
+        remote_binding = payload["remote_website_capability_binding"]
+        if remote_binding is not None:
+            remote_binding = _website_capability_binding(remote_binding)
+            if remote_binding != payload["remote_website_capability_binding"]:
+                raise ValueError
         if payload["status"] not in STATUSES:
             raise ValueError
         if (payload["status"] == "leased") != (lease is not None):
@@ -353,9 +564,20 @@ def _status_payload(
         remote_fields = (
             remote_status, remote_attempts,
             payload["remote_capabilities_sha256"],
-            payload["remote_binding_sha256"], payload["response_sha256"],
+            payload["remote_binding_sha256"], remote_binding,
+            payload["response_sha256"],
         )
         if accepted != all(item is not None for item in remote_fields):
+            raise ValueError
+        if accepted and (
+            remote_binding["delivery_capabilities_sha256"]
+            != payload["remote_capabilities_sha256"]
+            or hashlib.sha256(_canonical(remote_binding)).hexdigest()
+            != payload["remote_binding_sha256"]
+            or commercial_binding is not None
+            and remote_binding["commercial_rendering_registry_sha256"]
+            != commercial_binding["commercial_rendering_registry_sha256"]
+        ):
             raise ValueError
         expected = {
             "operation": operation, "request_id": request_id,
@@ -369,6 +591,88 @@ def _status_payload(
             raise ValueError
         payload["last_error_code"] = error
         return payload
+    except Exception:
+        raise _blocked("runtime_response_invalid", 503) from None
+
+
+def _website_capability_binding(value: Any) -> dict[str, Any]:
+    return _DISPATCH._CLIENT._HTTP._binding(value)
+
+
+def _lifecycle_payload(
+    value: Any, identity: Mapping[str, str],
+) -> dict[str, Any]:
+    try:
+        payload = dataclasses.asdict(value)
+        if set(payload) != {"dispatch_status", "source_lifecycle"}:
+            raise ValueError
+        dispatch_status = _status_payload(
+            value.dispatch_status,
+            operation=identity["operation"],
+            request_id=identity["request_id"],
+            event_id=identity["event_id"],
+            site_id=identity["site_id"],
+            payload_sha256=identity["payload_sha256"],
+        )
+        if dispatch_status["status"] != "accepted":
+            raise ValueError
+        source = payload["source_lifecycle"]
+        source_http = _DISPATCH._CLIENT._HTTP
+        if (
+            not isinstance(source, Mapping)
+            or set(source) != {
+                "schema", "api_schema", "result",
+                "accepted_implies_publication",
+            }
+            or source.get("schema")
+            != source_http._SUBMISSION.LIFECYCLE_HTTP_RESPONSE_SCHEMA
+            or source.get("api_schema") != source_http.API_SCHEMA
+            or source.get("accepted_implies_publication") is not False
+            or not isinstance(source.get("result"), Mapping)
+        ):
+            raise ValueError
+        normalized = source_http._submission_lifecycle_payload(
+            source_http._PayloadView(source["result"]), identity,
+        )
+        if (
+            normalized != source["result"]
+            or normalized["website_capability_binding"]
+            != dispatch_status["remote_website_capability_binding"]
+        ):
+            raise ValueError
+        return {
+            "dispatch_status": dispatch_status,
+            "source_lifecycle": dict(source),
+        }
+    except Exception:
+        raise _blocked("runtime_response_invalid", 503) from None
+
+
+def _commercial_profile_payload(value: Any) -> dict[str, Any]:
+    try:
+        payload = dataclasses.asdict(value)
+        if set(payload) != {
+            "commercial_profile", "commercial_rendering_registry",
+            "website_capability_binding",
+        }:
+            raise ValueError
+        expected = _DISPATCH._commercial_contract()
+        binding = _website_capability_binding(
+            payload["website_capability_binding"]
+        )
+        if (
+            payload["commercial_profile"] != expected["commercial_profile"]
+            or payload["commercial_rendering_registry"]
+            != expected["commercial_rendering_registry"]
+            or binding != payload["website_capability_binding"]
+            or binding["commercial_rendering_registry_sha256"]
+            != expected["commercial_rendering_registry"]["sha256"]
+        ):
+            raise ValueError
+        return {
+            **expected,
+            "website_capability_binding": binding,
+        }
     except Exception:
         raise _blocked("runtime_response_invalid", 503) from None
 
@@ -451,13 +755,19 @@ def _readiness_payload(value: Any, expected_digest: str) -> dict[str, Any]:
 def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
     definitions = (
         ("capabilities", CAPABILITIES_PATH, None, CAPABILITIES_RESPONSE_SCHEMA, 200),
+        ("commercial_profile", COMMERCIAL_PROFILE_PATH, None, COMMERCIAL_PROFILE_RESPONSE_SCHEMA, 200),
         ("enqueue", ENQUEUE_PATH, ENQUEUE_REQUEST_SCHEMA, QUEUE_RESPONSE_SCHEMA, 202),
         ("health", HEALTH_PATH, None, HEALTH_RESPONSE_SCHEMA, 200),
+        ("lifecycle", LIFECYCLE_PATH, LIFECYCLE_REQUEST_SCHEMA, LIFECYCLE_RESPONSE_SCHEMA, 200),
         ("openapi", OPENAPI_PATH, None, OPENAPI_RESPONSE_SCHEMA, 200),
         ("readiness", READINESS_PATH, None, READINESS_RESPONSE_SCHEMA, 200),
         ("status", STATUS_PATH, STATUS_REQUEST_SCHEMA, STATUS_RESPONSE_SCHEMA, 200),
     )
     try:
+        commercial = _DISPATCH._commercial_contract()
+        commercial_binding = _DISPATCH._commercial_contract_binding()
+        if commercial_binding["schema"] != COMMERCIAL_CONTRACT_BINDING_SCHEMA:
+            raise ValueError
         operations = {}
         for name, path, request_schema, response_schema, status in definitions:
             operations[name] = {
@@ -468,7 +778,17 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 ),
                 "request_schema": request_schema,
                 "response_schema": response_schema,
+                "capabilities_precondition_header": (
+                    CAPABILITIES_PRECONDITION_HEADER
+                    if path in CAPABILITIES_PRECONDITION_PATHS else None
+                ),
                 "success_status": status,
+                "error_statuses": list(ERROR_STATUSES[path]),
+                "error_codes": {
+                    str(error_status): list(ERROR_CODES[path][error_status])
+                    for error_status in ERROR_STATUSES[path]
+                },
+                "response_invariants": list(RESPONSE_INVARIANTS[path]),
             }
         contract = {
             "schema": CAPABILITIES_SCHEMA,
@@ -485,13 +805,33 @@ def _capabilities_payload(runtime_digest: str) -> dict[str, Any]:
                 "delivery_max_attempts": "website_to_sidecar",
                 "source_max_attempts": "source_processing",
             },
+            "source_payload_schemas": {
+                "change": _DISPATCH._CLIENT._CMS.CHANGE_SCHEMA,
+                "cancellation": _DISPATCH._CLIENT._CMS.CANCELLATION_SCHEMA,
+                "tombstone": _DISPATCH._CLIENT._CMS.TOMBSTONE_SCHEMA,
+            },
+            "commercial_profile": commercial["commercial_profile"],
+            "commercial_rendering_registry": (
+                commercial["commercial_rendering_registry"]
+            ),
+            "commercial_contract_binding": commercial_binding,
+            "openapi_document_schema": _OPENAPI.DOCUMENT_SCHEMA,
             "semantics": {
                 "authentication_precedes_json_parsing": True,
                 "authentication_binds_exact_body_sha256": True,
+                "non_discovery_operations_require_exact_capability_precondition": True,
                 "tenant_operations_are_site_bound": True,
                 "write_requires_ready_managed_worker": True,
                 "accepted_means_website_intake_only": True,
                 "accepted_implies_publication": False,
+                "accepted_status_returns_exact_website_capability_binding": True,
+                "lifecycle_reads_only_after_durable_website_acceptance": True,
+                "lifecycle_preserves_source_and_website_generations": True,
+                "commercial_profile_is_brand_and_price_neutral": True,
+                "commercial_profile_route_verifies_live_website_generation": True,
+                "commercial_enqueue_requires_exact_contract_binding": True,
+                "commercial_contract_binding_is_durable": True,
+                "accepted_commercial_contract_matches_remote_registry": True,
                 "operational_responses_are_content_free": True,
             },
             "public_submission_capabilities_sha256": _sha256(runtime_digest),
@@ -509,7 +849,8 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
 
     def __init__(self, runtime: Any, authenticator: Callable[[dict[str, Any]], Any]):
         if not all(callable(getattr(runtime, name, None)) for name in (
-            "enqueue", "status", "health", "worker_readiness",
+            "enqueue", "status", "lifecycle", "commercial_profile", "health",
+            "worker_readiness",
         )):
             raise TypeError("runtime must provide submission dispatch operations")
         if not callable(authenticator):
@@ -540,7 +881,8 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
             200: "OK", 202: "Accepted", 400: "Bad Request",
             401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
             405: "Method Not Allowed", 409: "Conflict",
-            411: "Length Required", 413: "Content Too Large",
+            411: "Length Required", 412: "Precondition Failed",
+            413: "Content Too Large", 428: "Precondition Required",
             415: "Unsupported Media Type", 503: "Service Unavailable",
         }
         start_response(f"{status} {phrases[status]}", [
@@ -553,12 +895,18 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
         return [raw]
 
     @classmethod
-    def _error(cls, start_response, error):
+    def _error(cls, start_response, error, path=None):
+        if path in ERROR_CODES and (
+            error.status not in ERROR_CODES[path]
+            or error.code not in ERROR_CODES[path][error.status]
+        ):
+            error = _blocked("runtime_blocked", 503)
         return cls._send(start_response, error.status, {
             "schema": ERROR_SCHEMA, "status": "BLOCK", "error_code": error.code,
         })
 
     def __call__(self, environ: Mapping[str, Any], start_response):
+        path = None
         try:
             if not isinstance(environ, Mapping):
                 raise _blocked("environment_invalid", 400)
@@ -596,6 +944,13 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                     "schema": CAPABILITIES_RESPONSE_SCHEMA,
                     "capabilities": capabilities,
                 })
+            supplied_capabilities = environ.get(
+                "HTTP_X_LOCALIZATION_CAPABILITIES_SHA256"
+            )
+            if supplied_capabilities is None:
+                raise _blocked("capabilities_precondition_required", 428)
+            if supplied_capabilities != capabilities["sha256"]:
+                raise _blocked("capabilities_precondition_failed", 412)
             if path == OPENAPI_PATH:
                 document = _OPENAPI.build_document(capabilities)
                 return self._send(start_response, 200, {
@@ -603,6 +958,23 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                     "openapi": document,
                     "openapi_sha256": _OPENAPI.document_sha256(document),
                     "capabilities_sha256": capabilities["sha256"],
+                })
+            if path == COMMERCIAL_PROFILE_PATH:
+                try:
+                    profile = _commercial_profile_payload(
+                        self.runtime.commercial_profile()
+                    )
+                except CMSSourceDeliverySubmissionDispatchHTTPBlocked:
+                    raise
+                except Exception as error:
+                    raise _blocked("runtime_blocked", 503) from error
+                return self._send(start_response, 200, {
+                    "schema": COMMERCIAL_PROFILE_RESPONSE_SCHEMA,
+                    "api_schema": API_SCHEMA,
+                    **profile,
+                    "capabilities_sha256": capabilities["sha256"],
+                    "content_free": True,
+                    "publication_authority": False,
                 })
             if path == HEALTH_PATH:
                 health = _health_payload(self.runtime.health())
@@ -635,11 +1007,23 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                 if set(request) != {
                     "schema", "payload", "source_max_attempts",
                     "delivery_max_attempts", "client_max_attempts",
+                    "commercial_contract_binding",
                 } or request.get("schema") != ENQUEUE_REQUEST_SCHEMA:
                     raise _blocked("request_invalid", 400)
                 try:
                     _copied, identity, payload_json = _DISPATCH._payload(
                         request["payload"]
+                    )
+                    commercial = (
+                        request["payload"].get("schema")
+                        == _DISPATCH._CLIENT._CMS.CHANGE_SCHEMA
+                        and request["payload"].get("localization", {}).get(
+                            "content_type"
+                        ) == "commercial"
+                    )
+                    expected_commercial_binding = (
+                        capabilities["commercial_contract_binding"]
+                        if commercial else None
                     )
                     source_max = _count(request["source_max_attempts"], minimum=1)
                     delivery_max = _count(
@@ -648,6 +1032,11 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                     client_max = _count(request["client_max_attempts"], minimum=1)
                 except Exception:
                     raise _blocked("request_invalid", 400) from None
+                if (
+                    request["commercial_contract_binding"]
+                    != expected_commercial_binding
+                ):
+                    raise _blocked("binding_invalid", 400)
                 payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
                 if (
                     identity["site_id"] != principal["site_id"]
@@ -683,10 +1072,14 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                     "capabilities_sha256": capabilities["sha256"],
                     "accepted_implies_publication": False,
                 })
+            expected_request_schema = (
+                LIFECYCLE_REQUEST_SCHEMA
+                if path == LIFECYCLE_PATH else STATUS_REQUEST_SCHEMA
+            )
             if set(request) != {
                 "schema", "operation", "request_id", "event_id",
                 "site_id", "payload_sha256",
-            } or request.get("schema") != STATUS_REQUEST_SCHEMA:
+            } or request.get("schema") != expected_request_schema:
                 raise _blocked("request_invalid", 400)
             try:
                 operation = request["operation"]
@@ -701,14 +1094,38 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
             if site_id != principal["site_id"]:
                 raise _blocked("submission_not_found", 404)
             try:
-                status = self.runtime.status(operation, request_id)
+                result = (
+                    self.runtime.lifecycle(operation, request_id)
+                    if path == LIFECYCLE_PATH
+                    else self.runtime.status(operation, request_id)
+                )
             except Exception as error:
                 if getattr(error, "code", "").endswith("submission_missing"):
                     raise _blocked("submission_not_found", 404) from None
+                if getattr(error, "code", "").endswith(
+                    "lifecycle_not_accepted"
+                ):
+                    raise _blocked("lifecycle_not_accepted", 409) from None
                 raise _blocked("runtime_blocked", 503) from error
+            identity = {
+                "operation": operation,
+                "request_id": request_id,
+                "event_id": event_id,
+                "site_id": site_id,
+                "payload_sha256": payload_hash,
+            }
+            if path == LIFECYCLE_PATH:
+                lifecycle = _lifecycle_payload(result, identity)
+                return self._send(start_response, 200, {
+                    "schema": LIFECYCLE_RESPONSE_SCHEMA,
+                    "api_schema": API_SCHEMA,
+                    "lifecycle": lifecycle,
+                    "capabilities_sha256": capabilities["sha256"],
+                    "accepted_implies_publication": False,
+                })
             try:
                 normalized = _status_payload(
-                    status, operation=operation, request_id=request_id,
+                    result, operation=operation, request_id=request_id,
                     event_id=event_id, site_id=site_id,
                     payload_sha256=payload_hash,
                 )
@@ -722,9 +1139,11 @@ class CMSSourceDeliverySubmissionDispatchHTTPApplication:
                 "accepted_implies_publication": False,
             })
         except CMSSourceDeliverySubmissionDispatchHTTPBlocked as error:
-            return self._error(start_response, error)
+            return self._error(start_response, error, path)
         except Exception:
-            return self._error(start_response, _blocked("runtime_blocked", 503))
+            return self._error(
+                start_response, _blocked("runtime_blocked", 503), path,
+            )
 
 
 def build_submission_dispatch_http(runtime: Any, authenticator):

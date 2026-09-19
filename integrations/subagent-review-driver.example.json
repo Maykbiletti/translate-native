@@ -1,0 +1,11 @@
+{
+  "schema": "translate-native.subagent-review-driver-config.v1",
+  "driver_id": "operator-host-subagents",
+  "driver_version": "immutable-driver-revision",
+  "settings": {
+    "provider_neutral_endpoint": "https://operator-host.example/subagents",
+    "credential_file": "/absolute/protected/path/operator-host.token",
+    "request_timeout_seconds": 55,
+    "reconcile_timeout_seconds": 10
+  }
+}

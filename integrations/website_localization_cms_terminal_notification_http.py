@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping, Protocol
 NOTIFICATION_SCHEMA = "blun.cms-source-terminal-notification.v1"
 ACK_SCHEMA = "blun.cms-source-terminal-notification-ack.v1"
 AUTH_SCHEMA = "blun.cms-source-terminal-notification-http-auth.v1"
+CAPABILITIES_PRECONDITION_HEADER = "X-Localization-Capabilities-SHA256"
 MAX_BODY_BYTES = 16_384
 MAX_RESPONSE_BYTES = 8_192
 MAX_ENDPOINT_LENGTH = 2_048
@@ -35,6 +36,7 @@ RESERVED_HEADERS = {
     "idempotency-key", "transfer-encoding",
     "x-localization-terminal-notification-id",
     "x-localization-terminal-notification-sha256",
+    "x-localization-capabilities-sha256",
 }
 NOTIFICATION_FIELDS = {
     "schema", "notification_id", "event_id", "site_id", "plan_id",
@@ -326,6 +328,7 @@ class HTTPTerminalNotifierAdapter:
     def __init__(
         self,
         endpoint: str,
+        expected_capabilities_sha256: str,
         authentication_headers: Callable[
             [Mapping[str, Any]], Mapping[str, str]
         ],
@@ -339,6 +342,11 @@ class HTTPTerminalNotifierAdapter:
         self.endpoint, self.origin, self.path = _endpoint(
             endpoint, allow_loopback_http,
         )
+        if (
+            not isinstance(expected_capabilities_sha256, str)
+            or SHA256.fullmatch(expected_capabilities_sha256) is None
+        ):
+            raise ValueError("expected capability digest is invalid")
         if not callable(authentication_headers):
             raise TypeError("authentication_headers must be callable")
         if (
@@ -349,6 +357,7 @@ class HTTPTerminalNotifierAdapter:
         ):
             raise ValueError("timeout is outside the supported range")
         self.authentication_headers = authentication_headers
+        self.expected_capabilities_sha256 = expected_capabilities_sha256
         self.transport = URLTransport() if transport is None else transport
         if not callable(getattr(self.transport, "post", None)):
             raise TypeError("transport must provide post")
@@ -368,6 +377,7 @@ class HTTPTerminalNotifierAdapter:
             "event_id": payload["event_id"],
             "site_id": payload["site_id"],
             "body_sha256": body_sha256,
+            "capabilities_sha256": self.expected_capabilities_sha256,
         }
         headers = _authentication_headers(
             self.authentication_headers, authentication,
@@ -378,6 +388,9 @@ class HTTPTerminalNotifierAdapter:
             "Idempotency-Key": payload["notification_id"],
             "X-Localization-Terminal-Notification-Id": payload["notification_id"],
             "X-Localization-Terminal-Notification-Sha256": body_sha256,
+            CAPABILITIES_PRECONDITION_HEADER: (
+                self.expected_capabilities_sha256
+            ),
         })
         try:
             result = self.transport.post(
