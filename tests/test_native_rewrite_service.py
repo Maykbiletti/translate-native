@@ -2,6 +2,8 @@
 import hashlib
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -24,6 +26,10 @@ FIX = load("rewrite_service_fixtures", "tests/test_native_rewrite_worker.py")
 SERVICE = load("rewrite_test_service", "integrations/guard_service.py")
 ADAPTER = load("rewrite_test_client", "integrations/adapters/native_rewrite.py")
 DELIVERY = load("rewrite_test_delivery", "integrations/enforced_delivery.py")
+PRE_OUTPUT_HOOKS = (
+    ROOT / "integrations" / "pre_output_guard.py",
+    ROOT / "translate-native" / "scripts" / "pre_output_guard.py",
+)
 
 
 class RewriteServiceTests(unittest.TestCase):
@@ -397,6 +403,65 @@ class RewriteServiceTests(unittest.TestCase):
                     raw_envelope, policy, "test", sent.append,
                 )
         self.assertEqual(sent, [result["target_text"]])
+
+    def test_both_pre_output_hooks_use_actual_one_time_rewrite_delivery(self):
+        for hook in PRE_OUTPUT_HOOKS:
+            with self.subTest(hook=hook):
+                service, client, _host, _creator = self.setup_pipeline()
+                result = self.rewrite(client)
+                server = SERVICE._ThreadingTCPServer(("127.0.0.1", 0), SERVICE._RequestHandler)
+                server.guard_service = service
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                endpoint = "tcp:127.0.0.1:" + str(server.server_address[1])
+                environment = dict(os.environ)
+                environment["BLUN_LANGUAGE_GUARD_SERVICE_ENDPOINT"] = endpoint
+                request = {
+                    "task_kind": "rewrite",
+                    "source_text": self.request()["source_text"],
+                    "target_text": result["target_text"],
+                    "language": "fi-FI",
+                    "release_token": result["release_token"],
+                    "profile_id": "standard",
+                    "request_id": "one",
+                    "content_type": "prose",
+                    "session_id": self.SESSION_ID,
+                    "session_epoch": self.SESSION_EPOCH,
+                    "agent_id": self.AGENT_ID,
+                    "channel": "portable-hook",
+                }
+                tampered_request = dict(request, profile_id="wrong-profile")
+                try:
+                    tampered = subprocess.run(
+                        [sys.executable, str(hook)],
+                        input=json.dumps(tampered_request, ensure_ascii=False),
+                        text=True, capture_output=True, check=False, env=environment,
+                    )
+                    accepted = subprocess.run(
+                        [sys.executable, str(hook)],
+                        input=json.dumps(request, ensure_ascii=False),
+                        text=True, capture_output=True, check=False, env=environment,
+                    )
+                    replay = subprocess.run(
+                        [sys.executable, str(hook)],
+                        input=json.dumps(request, ensure_ascii=False),
+                        text=True, capture_output=True, check=False, env=environment,
+                    )
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+                self.assertEqual(tampered.returncode, 1, tampered.stdout + tampered.stderr)
+                self.assertFalse(json.loads(tampered.stdout)["allow"])
+                self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+                self.assertTrue(json.loads(accepted.stdout)["allow"])
+                self.assertEqual(replay.returncode, 1, replay.stdout + replay.stderr)
+                self.assertFalse(json.loads(replay.stdout)["allow"])
+                combined = tampered.stdout + accepted.stdout + replay.stdout
+                for secret in (
+                    request["source_text"], request["target_text"], request["release_token"],
+                ):
+                    self.assertNotIn(secret, combined)
 
     def test_mutation_locale_source_purpose_and_profile_invalidate(self):
         service, client, _, _ = self.setup_pipeline()

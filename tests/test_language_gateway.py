@@ -169,7 +169,7 @@ class LanguageGatewayTests(unittest.TestCase):
                     text=True, capture_output=True, check=False,
                 )
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("isolated authorization", result.stdout)
+                self.assertIn("isolated guard service", result.stdout)
 
     @unittest.skipIf(os.name == "nt", "POSIX permission bits are not authoritative on Windows")
     def test_pre_output_hooks_reject_a_broadly_readable_verifier_key(self) -> None:
