@@ -244,6 +244,43 @@ class RewriteServiceTests(unittest.TestCase):
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
 
+    def test_long_subtitle_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä tekstitys säilyttää ääkköset ja numeron 42."),
+            ("mt-MT", "Sottotitlu ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42."),
+            ("ar", "ترجمة واضحة تحافظ على الرقم 42 وعلامات الترقيم."),
+        )
+        for index, (locale, seed) in enumerate(cases):
+            source = "\n".join(
+                f"{cue}\n00:00:{cue % 60:02d},000 --> "
+                f"00:00:{(cue + 2) % 60:02d},000\n"
+                f"{seed} <i>{{name}}</i> https://example.test/fixed\n"
+                for cue in range(1, 80))
+            creator = FIX.Creator("fixture-keeps-subtitle-cues")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-subtitle-" + str(index)
+            result = self.rewrite(
+                client, source_text=source, language=locale,
+                request_id=request_id, content_type="documentation")
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            self.assertTrue(all(call.input["container_format"] == "subtitle"
+                                for call in creator.calls))
+            owned = json.dumps(
+                [call.input["owned_values"] for call in creator.calls],
+                ensure_ascii=False)
+            for protected in ("<i>", "{name}", "https://"):
+                self.assertNotIn(protected, owned)
+            self.assertEqual([task["phase"] for task, _control in host.calls],
+                             ["target_native", "source_fidelity"])
+            self.assertNotIn("source", host.calls[0][0]["input"])
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id, content_type="documentation")["valid"])
+
     def test_malformed_or_semantically_unsafe_long_xml_never_releases(self):
         cases = (
             '<resources><!--x---><string name="x">Text. {pad}</string></resources>',

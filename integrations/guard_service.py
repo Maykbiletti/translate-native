@@ -461,8 +461,11 @@ class GuardService:
             elif "document" in evidence or any("scope" in item for item in evidence["reviews"]):
                 raise GuardProtocolError("unexpected long rewrite evidence")
             integrity = module.integrity_errors(source, target)
-            report = GATEWAY.GUARD.validate_text(target, worker.locale, content_type=content_type,
-                                               short_text_reviewed=True)
+            validation_text = (target if integrity else
+                               module.deterministic_validation_text(source, target))
+            report = GATEWAY.GUARD.validate_text(
+                validation_text, worker.locale, content_type=content_type,
+                short_text_reviewed=True)
             if integrity or report["findings"]:
                 return {"status": "BLOCK", "release_allowed": False,
                         "reason": "rewrite.deterministic_check_failed"}

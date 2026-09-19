@@ -78,6 +78,16 @@ class Creator:
                     "completion_status": "complete",
                     "values": [{"value_id": item["value_id"], "candidate": value}
                                for item, value in zip(request.input["owned_values"], values)]}
+        if request.input["response_schema"]["schema"] == RW.LONG_SUBTITLE_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_SUBTITLE_SCHEMA, "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         return {"schema": RW.WORKER.CANDIDATE_SCHEMA, "phase": "transcreation",
                 "locale": request.input["target"]["locale"], "candidate": candidate}
 
@@ -915,6 +925,108 @@ class RewriteTests(unittest.TestCase):
                 RW.NativeRewriteBlocked, "long_po_protected_syntax_changed"):
             worker.run(source, "ui", "po-protected-value")
         self.assertTrue(creator.calls)
+
+    def test_long_subtitle_preserves_container_and_reviews_complete_file(self):
+        cues = []
+        for index in range(1, 90):
+            cues.append(
+                f"{index}\r\n00:00:{index % 60:02d},000 --> "
+                f"00:00:{(index + 2) % 60:02d},000\r\n"
+                f"Selkeä tekstitys säilyttää luvun 42 cue {index}.\r\n")
+        source = "\r\n".join(cues)
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-subtitle-cues"), host=host,
+            max_output_tokens=8192)
+        result = worker.run(source, "prose", "long-subtitle-lossless")
+        self.assertEqual(result["target_text"], source)
+        document = result["evidence"]["document"]
+        self.assertEqual(document["schema"], RW.LONG_SUBTITLE_EVIDENCE_SCHEMA)
+        self.assertEqual(document["manifest"]["selector_profile"],
+                         RW.SUBRW.SELECTOR_PROFILE)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "subtitle"
+                            for call in creator.calls))
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="prose",
+            request_id="long-subtitle-lossless", correction_history=[]))
+
+    def test_long_subtitle_rewrites_all_scripts_and_restores_protected_tokens(self):
+        cases = (
+            ("fi-FI", "On tärkeää huomata, että teksti on selkeä.",
+             "Teksti on selkeä."),
+            ("mt-MT", "Huwa importanti li ngħidu li t-test huwa ċar.",
+             "It-test huwa ċar."),
+            ("ar", "من المهم أن نذكر أن النص واضح.", "النص واضح."),
+        )
+        for index, (locale, opening, revised) in enumerate(cases):
+            cues = []
+            for cue in range(1, 75):
+                cues.append(
+                    f"{cue}\n00:00:{cue % 60:02d},000 --> "
+                    f"00:00:{(cue + 2) % 60:02d},000\n"
+                    f"{opening} <i>{{name}}</i> 42.\n")
+            source = "\n".join(cues)
+
+            def revise(request, opening=opening, revised=revised):
+                return [item["text"].replace(opening, revised)
+                        for item in request.input["owned_values"]]
+
+            worker, _creator = self.worker(
+                creator=Creator(revise), locale=locale, max_output_tokens=8192)
+            result = worker.run(source, "prose", "subtitle-locale-" + str(index))
+            target = result["target_text"]
+            self.assertIn(revised, target)
+            self.assertNotIn(opening, target)
+            self.assertEqual(target.count("<i>{name}</i>"), 74)
+            self.assertEqual(RW.integrity_errors(source, target), [])
+
+    def test_long_subtitle_fail_closed_on_unsafe_response_and_evidence(self):
+        source = "\n".join(
+            f"{cue}\n00:00:{cue % 60:02d},000 --> "
+            f"00:00:{(cue + 2) % 60:02d},000\n"
+            f"Cue {cue} keeps <i>{{name}}</i> and 42 while the complete "
+            f"subtitle remains natural and coherent for every viewer.\n"
+            for cue in range(1, 80))
+
+        def drop_marker(request):
+            values = [item["text"] for item in request.input["owned_values"]]
+            values[0] = RW.SUBRW.MARKER_PATTERN.sub("", values[0], 1)
+            return values
+
+        worker, creator = self.worker(
+            creator=Creator(drop_marker), max_output_tokens=8192)
+        with self.assertRaisesRegex(
+                RW.NativeRewriteBlocked, "long_subtitle_protected_syntax_changed"):
+            worker.run(source, "prose", "subtitle-marker-drop")
+        self.assertTrue(creator.calls)
+
+        worker, _creator = self.worker(
+            creator=Creator("fixture-keeps-subtitle-cues"), max_output_tokens=8192)
+        result = worker.run(source, "prose", "subtitle-evidence")
+        document = json.loads(json.dumps(result["evidence"]["document"]))
+        document["groups"][0]["creation_response_sha256"] = "0" * 64
+        self.assertFalse(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="prose",
+            request_id="subtitle-evidence", correction_history=[]))
+        changed = result["target_text"].replace(
+            "00:00:01,000 --> 00:00:03,000",
+            "00:00:01,000 --> 00:00:04,000", 1)
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed, result["evidence"]["document"], content_type="prose",
+            request_id="subtitle-evidence", correction_history=[]))
+
+    def test_subtitle_ambiguous_formats_block_before_creator(self):
+        source = ("Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Text\n"
+                  * 200)
+        worker, creator = self.worker(creator=Creator("unused"))
+        with self.assertRaisesRegex(
+                RW.NativeRewriteBlocked, "long_subtitle_ass_unsupported"):
+            worker.run(source, "prose", "subtitle-ass-blocked")
+        self.assertFalse(creator.calls)
 
     def test_long_html_preserves_container_and_uses_whole_document_reviews(self):
         source = ('<!doctype html><html><head><meta name="description" '

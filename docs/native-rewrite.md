@@ -235,7 +235,8 @@ Unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
 summarized or routed through the short path. Long XML has the separate bounded
 Android-resource path described below, Markdown has a separate conservative
-raw-span path, and GNU PO has a strict non-empty-`msgstr` path. Token/cost reservation must use the
+raw-span path, GNU PO has a strict non-empty-`msgstr` path, and SRT/WebVTT has a
+strict cue-payload path. Token/cost reservation must use the
 computed long plan, not assume five calls. Segment policy, budget, correction
 limit and all instructions are part of the effective profile hash, so a policy
 change invalidates previous receipts.
@@ -291,6 +292,30 @@ independently rebuilds the PO plan, creator requests, completion evidence and
 exact assembly. Combined source-plus-target review input is capped at 262,144
 UTF-8 bytes, and automatic document correction remains disabled until a finding
 can be bound safely to one exact PO value.
+
+Long SRT and WebVTT use a strict lossless cue-payload plan. Only non-empty cue
+text enters creator batches under opaque ordered IDs with bounded adjacent-cue
+context. File headers, cue identifiers, timestamps and settings, WebVTT
+`NOTE`/`STYLE`/`REGION` blocks, blank lines and every source line-ending byte
+remain host-owned. Inline tags, entities, URLs, email addresses, placeholders,
+printf tokens, escapes and inline code are replaced with collision-resistant
+host markers before creator access and restored byte-for-byte afterward. Each
+cue must keep its original line count.
+
+The parser accepts only bounded UTF-8 NFC SRT or WebVTT with exact timestamp
+syntax, unambiguous blank lines and no unsupported cue-edge whitespace. Missing, additional, duplicated or reordered
+values, marker changes, line-count changes, timestamp edits, unsupported syntax
+or incomplete completion evidence block fail-closed. ASS/SSA `Dialogue:` input
+is explicitly unsupported in this rewrite profile and never falls back to plain
+text. The complete assembled subtitle receives the source-blind native review in
+playback order and then the separate original-preservation review. The Guard
+rebuilds the plan, request and response hashes, exact assembly and immutable
+container skeleton before signing. Deterministic language checks inspect only
+cue prose: ASCII-heavy timing, identifiers, settings and protected technical
+syntax cannot create a false script mismatch, while their separate structural
+checks remain mandatory. The combined source/target review ceiling is 262,144
+UTF-8 bytes, and automatic correction remains disabled until a finding can be
+bound safely to one exact cue.
 
 Long HTML uses a separate bounded raw-span plan and never reparses then
 serializes a DOM. Standard HTML vocabulary has explicit precedence over XML in
