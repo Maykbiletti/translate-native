@@ -78,6 +78,17 @@ class Creator:
                     "completion_status": "complete",
                     "values": [{"value_id": item["value_id"], "candidate": value}
                                for item, value in zip(request.input["owned_values"], values)]}
+        if request.input["response_schema"]["schema"] == RW.LONG_APPLE_STRINGS_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_APPLE_STRINGS_SCHEMA,
+                    "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         if request.input["response_schema"]["schema"] == RW.LONG_SUBTITLE_SCHEMA:
             values = (candidate if isinstance(candidate, list)
                       and len(candidate) == len(request.input["owned_values"])
@@ -566,11 +577,88 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(native["input"]["candidate"],
+                         RW.JSONRW.native_review_text(source))
+        for forbidden in ('"a/b~c"', '"a"', '"array"', '"placeholder"',
+                          '"enabled"', '1e+02'):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.JSONRW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.JSONRW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
+        self.assertEqual(fidelity_evidence["review_input_kind"],
+                         RW.ASSEMBLED_REVIEW_INPUT)
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], document, content_type="documentation",
             request_id="long-json-lossless", correction_history=[]))
         self.assertGreaterEqual(len(creator.calls), 1)
+
+    def test_json_native_review_projection_is_key_and_structure_blind(self):
+        source = ('{"SOURCE_SENTINEL.title":"Selkeä otsikko 42.",'
+                  '"nested":{"SECRET.key":"Toinen arvo {name}."},'
+                  '"empty":"","count":42,"enabled":true}')
+        self.assertEqual(
+            RW.JSONRW.native_review_text(source),
+            "Selkeä otsikko 42.\n\nToinen arvo {name}.")
+        projection = RW.JSONRW.native_review_text(source)
+        for forbidden in ("SOURCE_SENTINEL", "SECRET", "nested", "count",
+                          "enabled", "true", "42,"):
+            self.assertNotIn(forbidden, projection)
+        self.assertEqual(RW.JSONRW.language_validation_text(source), projection)
+
+    def test_short_json_native_review_is_metadata_blind(self):
+        source = ('{"SOURCE_SENTINEL.key":"Luonteva teksti säilyttää luvun 42.",'
+                  '"SECRET.enabled":true}')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-json-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva teksti säilyttää luvun 42.")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.JSONRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_json_identity_projection(self):
+        source = '{"SOURCE_SENTINEL.key":"Luonteva kohdeteksti."}'
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-json-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_json_duplicate_keys_nonfinite_and_surrogates_block_before_model(self):
         cases = (
@@ -831,11 +919,78 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(native["input"]["candidate"],
+                         RW.PORW.native_review_text(source))
+        for forbidden in ("msgid", "msgstr", "SECRET", "Project-Id-Version",
+                          "Open %s"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.PORW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.PORW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
+        self.assertEqual(fidelity_evidence["review_input_kind"],
+                         RW.ASSEMBLED_REVIEW_INPUT)
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], document,
             content_type="documentation", request_id="long-po-lossless",
             correction_history=[]))
+
+    def test_short_po_native_review_is_also_source_blind(self):
+        source = ('# SECRET source comment\n'
+                  'msgid "SOURCE_SENTINEL must never reach native review"\n'
+                  'msgstr "Luonteva kohdeteksti säilyttää numeron 42."\n')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-po-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva kohdeteksti säilyttää numeron 42.")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.PORW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_po_identity_projection_before_model(self):
+        source = ('msgid "SOURCE_SENTINEL"\n'
+                  'msgstr "Luonteva kohdeteksti."\n')
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(
+            job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_long_po_before_after_preserves_comments_msgids_plural_and_placeholders(self):
         opening = "On tärkeää huomata, että teksti on selkeä. "
@@ -926,6 +1081,163 @@ class RewriteTests(unittest.TestCase):
             worker.run(source, "ui", "po-protected-value")
         self.assertTrue(creator.calls)
 
+    def test_long_apple_strings_preserves_container_and_reviews_whole_catalog(self):
+        source = ('\ufeff/* Translator note: SECRET stays host-owned */\r\n'
+                  '"welcome.key"\t=\t"'
+                  + ("Selkeä teksti säilyttää luvun 42 ja nimen {name}. " * 150)
+                  + '";\r\n// fixed URL https://example.test\r\n'
+                  '"empty.key" = "";\r\n')
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-apple-strings-values"), host=host,
+            max_output_tokens=4096)
+        result = worker.run(source, "ui", "long-apple-strings-lossless")
+        self.assertEqual(result["target_text"], source)
+        document = result["evidence"]["document"]
+        self.assertEqual(document["schema"], RW.LONG_APPLE_STRINGS_EVIDENCE_SCHEMA)
+        self.assertEqual(document["manifest"]["selector_profile"],
+                         RW.STRINGSRW.SELECTOR_PROFILE)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "apple_strings"
+                            for call in creator.calls))
+        owned = json.dumps(
+            [call.input["owned_values"] for call in creator.calls],
+            ensure_ascii=False)
+        for protected in ("SECRET", "welcome.key", "https://example.test", "empty.key"):
+            self.assertNotIn(protected, owned)
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertEqual(native["input"]["candidate"],
+                         RW.STRINGSRW.native_review_text(source))
+        for forbidden in ("SECRET", "welcome.key", "https://example.test",
+                          "empty.key", "msgstr"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.STRINGSRW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.STRINGSRW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
+        self.assertEqual(fidelity_evidence["review_input_kind"],
+                         RW.ASSEMBLED_REVIEW_INPUT)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="ui",
+            request_id="long-apple-strings-lossless", correction_history=[]))
+
+    def test_short_apple_strings_native_review_is_metadata_blind(self):
+        source = ('/* SECRET source comment */\n'
+                  '"SOURCE_SENTINEL.key" = "Luonteva teksti säilyttää luvun 42.";\n')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-strings-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva teksti säilyttää luvun 42.")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.STRINGSRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_apple_strings_identity_projection(self):
+        source = '"SOURCE_SENTINEL.key" = "Luonteva kohdeteksti.";\n'
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-strings-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
+
+    def test_long_apple_strings_before_after_and_protected_syntax(self):
+        opening = "On tärkeää huomata, että teksti on selkeä. "
+        source = ('/* fixed */\n"copy.key" = "' + opening
+                  + ("Arvo {name} säilyy numerolla 42 ja muodolla %1$@. " * 120)
+                  + '";\n')
+
+        def revise(request):
+            return [item["text"].replace(opening, "Teksti on selkeä. ", 1)
+                    for item in request.input["owned_values"]]
+
+        worker, _creator = self.worker(creator=Creator(revise))
+        result = worker.run(source, "ui", "long-apple-strings-before-after")
+        target = result["target_text"]
+        self.assertNotEqual(target, source)
+        self.assertTrue(target.startswith('/* fixed */\n"copy.key" = "'))
+        self.assertEqual(target.count("Teksti on selkeä."), 1)
+        self.assertEqual(target.count("{name}"), source.count("{name}"))
+        self.assertEqual(target.count("%1$@"), source.count("%1$@"))
+        self.assertEqual(RW.integrity_errors(source, target), [])
+
+    def test_long_apple_strings_fail_closed_on_syntax_tokens_and_evidence(self):
+        invalid_cases = (
+            ('"a" = "bad\\q";\n' + "// pad\n" * 800,
+             "long_apple_strings_unsupported_escape"),
+            ('"a" = "";\n' + "// pad\n" * 800,
+             "long_apple_strings_no_rewritable_values"),
+            ('"a" /* hidden */ = "Value";\n' + "// pad\n" * 800,
+             "long_apple_strings_equals_expected"),
+        )
+        for index, (source, code) in enumerate(invalid_cases):
+            worker, creator = self.worker(creator=Creator("unused"))
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, code):
+                worker.run(source, "ui", "invalid-strings-" + str(index))
+            self.assertFalse(creator.calls)
+
+        source = ('"copy.key" = "'
+                  + ("Selkeä arvo {name} säilyy numerolla 42. " * 150) + '";\n')
+
+        def remove_token(request):
+            return [item["text"].replace("{name}", "nimen")
+                    for item in request.input["owned_values"]]
+
+        worker, creator = self.worker(creator=Creator(remove_token))
+        with self.assertRaisesRegex(
+                RW.NativeRewriteBlocked,
+                "long_apple_strings_protected_syntax_changed"):
+            worker.run(source, "ui", "strings-protected-token")
+        self.assertTrue(creator.calls)
+
+        worker, _creator = self.worker(creator=Creator("unchanged"))
+        result = worker.run(source, "ui", "strings-evidence")
+        document = json.loads(json.dumps(result["evidence"]["document"]))
+        document["groups"][0]["creation_response_sha256"] = "0" * 64
+        self.assertFalse(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="ui",
+            request_id="strings-evidence", correction_history=[]))
+        changed = result["target_text"].replace('"copy.key"', '"changed.key"', 1)
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed, result["evidence"]["document"], content_type="ui",
+            request_id="strings-evidence", correction_history=[]))
+
     def test_long_subtitle_preserves_container_and_reviews_complete_file(self):
         cues = []
         for index in range(1, 90):
@@ -949,10 +1261,91 @@ class RewriteTests(unittest.TestCase):
                             for call in creator.calls))
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
+        self.assertEqual(native["input"]["candidate"],
+                         RW.SUBRW.native_review_text(source))
+        for forbidden in ("00:00:", "-->", "\r\n1\r\n"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.SUBRW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.SUBRW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], document, content_type="prose",
             request_id="long-subtitle-lossless", correction_history=[]))
+
+    def test_subtitle_native_review_projection_is_container_blind(self):
+        source = (
+            "WEBVTT SECRET_HEADER\n\n"
+            "NOTE SECRET_NOTE\nsource-only note\n\n"
+            "STYLE\n::cue { color: red; }\n\n"
+            "SOURCE_SENTINEL\n00:00:01.000 --> 00:00:03.000 line:90%\n"
+            "Selkeä tekstitys <i>{name}</i>.\n\n"
+            "00:00:04.000 --> 00:00:06.000\n"
+            "Avaa https://example.test/fixed\n")
+        projection = RW.SUBRW.native_review_text(source)
+        self.assertEqual(
+            projection,
+            "Selkeä tekstitys <i>{name}</i>.\n\n"
+            "Avaa https://example.test/fixed")
+        for forbidden in ("SECRET_HEADER", "SECRET_NOTE", "source-only",
+                          "SOURCE_SENTINEL", "00:00:", "-->", "line:90%",
+                          "::cue"):
+            self.assertNotIn(forbidden, projection)
+
+    def test_short_subtitle_native_review_is_container_blind(self):
+        source = ("1\n00:00:01,000 --> 00:00:03,000 SECRET_SETTING\n"
+                  "Luonteva tekstitys säilyttää luvun 42.\n")
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "documentation", "short-subtitle-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva tekstitys säilyttää luvun 42.")
+        self.assertNotIn("SECRET_SETTING", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("00:00:", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.SUBRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_subtitle_identity_projection(self):
+        source = ("1\n00:00:01,000 --> 00:00:03,000 SECRET_SETTING\n"
+                  "Luonteva kohdeteksti.\n")
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-subtitle-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("documentation", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_long_subtitle_rewrites_all_scripts_and_restores_protected_tokens(self):
         cases = (
@@ -1053,12 +1446,93 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
-        self.assertEqual(native["input"]["candidate"], source)
+        self.assertEqual(native["input"]["candidate"],
+                         RW.HTMLRW.native_review_text(source))
+        for forbidden in ("<script>", "https://example.test/x", "rm -rf",
+                          "href=", "<main>"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.HTMLRW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.HTMLRW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], result["evidence"]["document"],
             content_type="documentation", request_id="long-html-lossless",
             correction_history=[]))
+
+    def test_html_native_review_projection_is_markup_and_metadata_blind(self):
+        source = ('<!doctype html><!-- SECRET_COMMENT --><html data-id="SECRET_ID">'
+                  '<head><meta name="description" '
+                  'content="Selkeä &amp; luonteva kuvaus 42.">'
+                  '<script>SECRET_SCRIPT</script></head><body><main>'
+                  '<p title="Hyödyllinen vihje">Näkyvä teksti säilyy.</p>'
+                  '<a href="https://example.test/SECRET_LINK">Avaa palvelu</a>'
+                  '<pre>SECRET_CODE</pre></main></body></html>')
+        projection = RW.HTMLRW.native_review_text(source)
+        self.assertEqual(
+            projection,
+            "Selkeä & luonteva kuvaus 42.\n\nHyödyllinen vihje\n\n"
+            "Näkyvä teksti säilyy.\n\nAvaa palvelu")
+        for forbidden in ("SECRET_COMMENT", "SECRET_ID", "SECRET_SCRIPT",
+                          "SECRET_LINK", "SECRET_CODE", "<html", "href="):
+            self.assertNotIn(forbidden, projection)
+        self.assertEqual(RW.HTMLRW.language_validation_text(source), projection)
+
+    def test_short_html_native_review_is_metadata_blind(self):
+        source = ('<main id="SOURCE_SENTINEL"><!-- SECRET comment -->'
+                  '<p>Luonteva teksti säilyttää luvun 42.</p>'
+                  '<a href="https://example.test/SECRET">Avaa</a></main>')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-html-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva teksti säilyttää luvun 42.\n\nAvaa")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.HTMLRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_html_identity_projection(self):
+        source = ('<main id="SOURCE_SENTINEL"><p>Luonteva kohdeteksti.'
+                  '</p></main>')
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-html-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_long_html_before_after_changes_only_owned_text(self):
         source = ('<main data-id="fixed"><p>On tärkeää huomata, että tämä on selkeä. '
@@ -1385,12 +1859,78 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
-        self.assertEqual(native["input"]["candidate"], source)
+        self.assertEqual(native["input"]["candidate"],
+                         RW.XMLRW.native_review_text(source))
+        for forbidden in ("name=", "fixed-api-key", "<!-- fixed -->",
+                          "<?xml", "<resources"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.XMLRW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.XMLRW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
+        self.assertEqual(fidelity_evidence["review_input_kind"],
+                         RW.ASSEMBLED_REVIEW_INPUT)
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], result["evidence"]["document"],
             content_type="documentation", request_id="long-xml-lossless",
             correction_history=[]))
+
+    def test_short_xml_native_review_is_metadata_blind(self):
+        source = ('<resources><!-- SECRET source comment -->'
+                  '<string name="SOURCE_SENTINEL.key">'
+                  'Luonteva teksti säilyttää luvun 42 ja {name}.'
+                  '</string></resources>')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-xml-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva teksti säilyttää luvun 42 ja {name}.")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.XMLRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_xml_identity_projection(self):
+        source = ('<resources><string name="SOURCE_SENTINEL.key">'
+                  'Luonteva kohdeteksti.</string></resources>')
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-xml-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_long_xml_before_after_changes_only_selected_text(self):
         source = ('<resources><string name="copy">'

@@ -87,7 +87,10 @@ class HostSubagentProvider:
                  creator_session_id: str, model_id: str, model_version: str,
                  host_policy_version: str, native_brief: Mapping[str, Any],
                  timeout_seconds: int = 60,
-                 max_output_tokens: int = 4096):
+                 max_output_tokens: int = 4096,
+                 native_review_projector: Any = None,
+                 native_review_projection_selector: Any = None,
+                 native_review_projection_id: str | None = None):
         if not callable(getattr(creator, "invoke", None)):
             raise SubagentReviewBlocked("creator_unavailable")
         if any(not callable(getattr(host, method, None))
@@ -98,6 +101,21 @@ class HostSubagentProvider:
                 or not 128 <= max_output_tokens <= 32768):
             raise SubagentReviewBlocked("invalid_budget")
         self._creator, self._host = creator, host
+        projection_parts = (native_review_projector,
+                            native_review_projection_selector,
+                            native_review_projection_id)
+        if any(item is None for item in projection_parts) and any(
+                item is not None for item in projection_parts):
+            raise SubagentReviewBlocked("invalid_projection")
+        if (native_review_projector is not None
+                and (not callable(native_review_projector)
+                     or not callable(native_review_projection_selector)
+                     or not isinstance(native_review_projection_id, str)
+                     or IDENTIFIER.fullmatch(native_review_projection_id) is None)):
+            raise SubagentReviewBlocked("invalid_projection")
+        self._native_review_projector = native_review_projector
+        self._native_review_projection_selector = native_review_projection_selector
+        self._native_review_projection_id = native_review_projection_id
         brief = _copy(native_brief)
         if (not isinstance(brief, dict)
                 or set(brief) != {"audience", "tone_profile", "target_terms"}
@@ -122,6 +140,7 @@ class HostSubagentProvider:
         self.provider_id = PROVIDER_PREFIX + _hash(self._policy)
         self._creation = None
         self._candidate = None
+        self._native_review_projection = None
         self._creation_evidence = None
         self._native_receipt = None
         self._finished = False
@@ -160,6 +179,20 @@ class HostSubagentProvider:
                 raise SubagentReviewBlocked("phase_order")
             # Reserve before external work. A failure requires a new queue attempt.
             self._creation = payload
+            projection = data.get("native_review_projection", "identity-v1")
+            if (not isinstance(projection, str)
+                    or IDENTIFIER.fullmatch(projection) is None):
+                raise SubagentReviewBlocked("invalid_projection")
+            if self._native_review_projection_selector is None:
+                expected_projection = "identity-v1"
+            else:
+                try:
+                    expected_projection = self._native_review_projection_selector(data)
+                except Exception:
+                    raise SubagentReviewBlocked("invalid_projection") from None
+            if projection != expected_projection:
+                raise SubagentReviewBlocked("invalid_projection")
+            self._native_review_projection = projection
             response = _copy(self._creator.invoke(request))
             expected_schema = data.get("response_schema", {}).get("schema")
             ordinary = expected_schema == "blun.website-localization-candidate.v1"
@@ -169,9 +202,12 @@ class HostSubagentProvider:
             xml_chunk = expected_schema == "translate-native.native-rewrite-xml-chunk.v1"
             markdown_chunk = expected_schema == "translate-native.native-rewrite-markdown-chunk.v1"
             po_chunk = expected_schema == "translate-native.native-rewrite-po-chunk.v1"
+            apple_strings_chunk = expected_schema == (
+                "translate-native.native-rewrite-apple-strings-chunk.v1")
             subtitle_chunk = expected_schema == "translate-native.native-rewrite-subtitle-chunk.v1"
             structured_chunk = (json_chunk or html_chunk or xml_chunk
-                                or markdown_chunk or po_chunk or subtitle_chunk)
+                                or markdown_chunk or po_chunk
+                                or apple_strings_chunk or subtitle_chunk)
             fields = ({"schema", "phase", "locale", "candidate"} if ordinary else
                       {"schema", "phase", "locale", "chunk_id",
                        "completion_status", "candidate"} if chunk else
@@ -245,7 +281,16 @@ class HostSubagentProvider:
         if self._creation is None or self._candidate is None or self._finished:
             raise SubagentReviewBlocked("phase_order")
         creation = self._creation["input"]
-        if (data.get("candidate") != self._candidate
+        expected_candidate = self._candidate
+        if phase == "target_native" and self._native_review_projector is not None:
+            try:
+                expected_candidate = self._native_review_projector(
+                    self._candidate, self._native_review_projection)
+            except Exception:
+                raise SubagentReviewBlocked("invalid_projection") from None
+        if (data.get("candidate") != expected_candidate
+                or data.get("native_review_projection", "identity-v1")
+                   != self._native_review_projection
                 or any(data.get(key) != creation.get(key) for key in (
                     "job_id", "target", "content_type", "glossary_version",
                     "policy_version", "quality_profile", "commercial_quality_profile"))):

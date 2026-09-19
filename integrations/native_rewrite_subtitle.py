@@ -16,6 +16,7 @@ from typing import Any
 
 POLICY = "strict-srt-webvtt-cue-payloads-v1"
 SELECTOR_PROFILE = "srt-webvtt-cue-text-v1"
+NATIVE_REVIEW_PROJECTION = "subtitle-cue-text-target-only-v1"
 PACKING_OVERHEAD_CHARS = 320
 UNIT_RESERVED_CHARS = 768
 CONTEXT_CHARS = 192
@@ -343,6 +344,21 @@ def candidate_map(source: str, target: str) -> tuple[dict, str]:
         })
         result[value_id] = masked
     return result, _text_hash(_skeleton(target, right["leaves"]))
+
+
+def native_review_text(target: str) -> str:
+    """Return ordered cue payloads without timing or container metadata."""
+    parsed = parse(target)
+    values = [leaf["value"] for leaf in parsed["leaves"]
+              if leaf["value"].strip()]
+    if (not values
+            or any(not unicodedata.is_normalized("NFC", value)
+                   for value in values)):
+        raise SubtitleRewritePlanError("review_projection_invalid")
+    projection = "\n\n".join(values)
+    if not projection or not unicodedata.is_normalized("NFC", projection):
+        raise SubtitleRewritePlanError("review_projection_invalid")
+    return projection
 
 
 def language_validation_text(target: str) -> str:
