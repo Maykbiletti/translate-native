@@ -80,15 +80,44 @@ def review(
     confidence="high",
 ):
     findings = [] if findings is None else findings
-    return {
+    rich_findings = []
+    for item in findings:
+        rich_findings.append({
+            "severity": item.get("severity", "blocking"),
+            "class": item["class"], "excerpt": item["excerpt"],
+            "reason": item["reason"],
+            "impact": item.get("impact", "Synthetic fixture impact."),
+            "revision_direction": item.get(
+                "revision_direction", "Revise the cited fixture passage."),
+        })
+    uncertain = confidence == "low"
+    result = {
         "schema": WORKER.REVIEW_SCHEMA,
         "phase": phase,
         "locale": locale,
-        "status": status,
+        "status": "FAIL" if uncertain else status,
         "confidence": confidence,
-        "blocking_defects": findings,
+        "blocking_defects": rich_findings,
         "major_defects": [],
+        "uncertainties": ([{
+            "class": "fixture_language_evidence",
+            "reason": "Synthetic low-confidence review fixture.",
+            "evidence_needed": "Independent qualified native review.",
+        }] if uncertain else []),
     }
+    if phase == "target_native":
+        dimensions = {name: "PASS" for name in WORKER.NATIVE_DIMENSIONS}
+        if rich_findings:
+            dimensions["idiom_and_word_choice"] = "FAIL"
+        elif uncertain:
+            dimensions["idiom_and_word_choice"] = "NOT_ASSESSED"
+        result["holistic_assessment"] = {
+            "reads_as_native_original": not rich_findings and not uncertain,
+            "reason": "Synthetic whole-text fixture judgment.",
+            "repair_scope": "passage" if rich_findings else "none",
+            "dimensions": dimensions,
+        }
+    return result
 
 
 class ScriptedProvider:
@@ -221,6 +250,71 @@ class WebsiteLocalizationWorkerTests(unittest.TestCase):
                 )
                 self.assertEqual(result["target_locale"], profile.locale)
                 self.assertEqual(provider.requests[0].input["target"]["script"], profile.script)
+                native_schema = provider.requests[1].input["response_schema"]
+                self.assertEqual(
+                    set(native_schema["holistic_assessment"]["dimensions"]),
+                    set(WORKER.NATIVE_DIMENSIONS),
+                )
+
+    def test_spanish_whole_text_translationese_cannot_pass_from_one_local_fix(self):
+        target = (
+            "Nuestra plataforma permite la realización de proyectos de manera "
+            "inteligente. En conclusión, permite realizar proyectos de manera "
+            "inteligente y eficiente."
+        )
+        native = review("target_native", locale="es-ES")
+        native.update(status="FAIL", blocking_defects=[], major_defects=[{
+            "severity": "major",
+            "class": "whole_text_translationese",
+            "excerpt": target,
+            "reason": "The complete fixture repeats a vague source-shaped claim.",
+            "impact": "The paragraph reads mechanically translated rather than authored in Spanish.",
+            "revision_direction": "Rebuild the paragraph around the concrete intended operation.",
+        }])
+        native["holistic_assessment"] = {
+            "reads_as_native_original": False,
+            "reason": "Synthetic whole-text Spanish regression fixture.",
+            "repair_scope": "whole_text",
+            "dimensions": {
+                **{name: "PASS" for name in WORKER.NATIVE_DIMENSIONS},
+                "idiom_and_word_choice": "FAIL",
+                "rhythm_and_cohesion": "FAIL",
+            },
+        }
+        payload = PLANNER.plan_website_localization(
+            source_id="comparison.spanish", source_revision="fixture-1",
+            source_text="Build projects efficiently with the platform.",
+            source_locale="en-IE", content_type="marketing",
+            glossary_version="blun-glossary-3", policy_version="native-web-1",
+            provider_id="customer-llm", model_id="king",
+            model_version="2026-08-29", software_version="6.43.0-dev",
+            target_locales=["es-ES"],
+        ).jobs[0].as_payload()
+        provider = ScriptedProvider([candidate(target, "es-ES"), native])
+        with self.assertRaises(WORKER.LocalizationWorkerBlocked) as caught:
+            WORKER.run_localization_job(payload, assets(glossary=()), provider)
+        self.assertEqual(caught.exception.code, "review.target_native.failed")
+        self.assertEqual([request.phase for request in provider.requests], [
+            "transcreation", "target_native",
+        ])
+
+    def test_native_pass_requires_all_dimensions_and_assessed_evidence(self):
+        cases = []
+        missing = review("target_native")
+        missing.pop("holistic_assessment")
+        cases.append(missing)
+        partial = review("target_native")
+        partial["holistic_assessment"]["dimensions"].pop("rhythm_and_cohesion")
+        cases.append(partial)
+        contradictory = review("target_native")
+        contradictory["holistic_assessment"]["dimensions"]["syntax_and_information_flow"] = "NOT_ASSESSED"
+        cases.append(contradictory)
+        for response in cases:
+            with self.subTest(response=response):
+                provider = ScriptedProvider([candidate(), response])
+                with self.assertRaises(WORKER.LocalizationWorkerBlocked) as caught:
+                    WORKER.run_localization_job(job(), assets(), provider)
+                self.assertEqual(caught.exception.code, "provider.response.invalid")
 
     def test_wrong_locale_or_malformed_provider_response_blocks(self):
         for response in (

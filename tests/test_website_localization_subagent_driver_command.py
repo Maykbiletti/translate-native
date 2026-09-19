@@ -92,7 +92,9 @@ elif operation == 'execute':
         if model_input['schema'] == 'translate-native.response-subagent-review.v1':
             review = {'schema': 'translate-native.response-native-review.v1', 'phase': 'target_native', 'locale': locale, 'status': 'PASS', 'confidence': 'high', 'findings': [], 'uncertainties': []}
         else:
-            review = {'schema': 'blun.website-localization-review.v2', 'phase': model_input['phase'], 'locale': locale, 'status': 'PASS', 'confidence': 'high', 'blocking_defects': [], 'major_defects': []}
+            review = {'schema': 'blun.website-localization-review.v3', 'phase': model_input['phase'], 'locale': locale, 'status': 'PASS', 'confidence': 'high', 'blocking_defects': [], 'major_defects': [], 'uncertainties': []}
+            if model_input['phase'] == 'target_native':
+                review['holistic_assessment'] = {'reads_as_native_original': True, 'reason': 'Synthetic whole-text command fixture.', 'repair_scope': 'none', 'dimensions': {name: 'PASS' for name in ('idiom_and_word_choice','syntax_and_information_flow','rhythm_and_cohesion','register_tone_and_audience','voice_genre_and_intentional_repetition')}}
         actual = {
             'response': review,
             'phase': assignment['phase'],

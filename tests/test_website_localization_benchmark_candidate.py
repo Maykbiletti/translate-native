@@ -47,7 +47,7 @@ class SuccessfulProvider:
                 "locale": request.input["target"]["locale"],
                 "candidate": self.candidate,
             }
-        return {
+        response = {
             "schema": CANDIDATE._WORKER.REVIEW_SCHEMA,
             "phase": request.phase,
             "locale": request.input["target"]["locale"],
@@ -55,7 +55,18 @@ class SuccessfulProvider:
             "confidence": "high",
             "blocking_defects": [],
             "major_defects": [],
+            "uncertainties": [],
         }
+        if request.phase == "target_native":
+            response["holistic_assessment"] = {
+                "reads_as_native_original": True,
+                "reason": "Synthetic benchmark acquisition fixture judgment.",
+                "repair_scope": "none",
+                "dimensions": {
+                    name: "PASS" for name in CANDIDATE._WORKER.NATIVE_DIMENSIONS
+                },
+            }
+        return response
 
 
 class TracedAuthority(FIXTURES.HmacBenchmarkAuthority):

@@ -70,15 +70,42 @@ def candidate(locale, text):
 
 
 def review(locale, phase, status="PASS", findings=None, confidence="high"):
-    return {
+    findings = [] if findings is None else [{
+        "severity": item.get("severity", "blocking"),
+        "class": item["class"], "excerpt": item["excerpt"],
+        "reason": item["reason"],
+        "impact": item.get("impact", "Synthetic fixture impact."),
+        "revision_direction": item.get(
+            "revision_direction", "Revise the cited fixture passage."),
+    } for item in findings]
+    uncertain = confidence == "low"
+    result = {
         "schema": WORKER.REVIEW_SCHEMA,
         "phase": phase,
         "locale": locale,
-        "status": status,
+        "status": "FAIL" if uncertain else status,
         "confidence": confidence,
-        "blocking_defects": [] if findings is None else findings,
+        "blocking_defects": findings,
         "major_defects": [],
+        "uncertainties": ([{
+            "class": "fixture_language_evidence",
+            "reason": "Synthetic low-confidence review fixture.",
+            "evidence_needed": "Independent qualified native review.",
+        }] if uncertain else []),
     }
+    if phase == "target_native":
+        dimensions = {name: "PASS" for name in WORKER.NATIVE_DIMENSIONS}
+        if findings:
+            dimensions["idiom_and_word_choice"] = "FAIL"
+        elif uncertain:
+            dimensions["idiom_and_word_choice"] = "NOT_ASSESSED"
+        result["holistic_assessment"] = {
+            "reads_as_native_original": not findings and not uncertain,
+            "reason": "Synthetic whole-text fixture judgment.",
+            "repair_scope": "passage" if findings else "none",
+            "dimensions": dimensions,
+        }
+    return result
 
 
 class ScriptedProvider:
@@ -244,7 +271,7 @@ class WebsiteLocalizationRunnerTests(unittest.TestCase):
             candidate("sv-SE", "Bygg ditt företag med BLUN."),
             review("sv-SE", "target_native", "FAIL", [{
                 "class": "nativeness",
-                "excerpt": "hemligt kunduttryck",
+                "excerpt": "Bygg ditt företag",
                 "reason": "ordföljden känns översatt",
             }]),
         ])
@@ -259,7 +286,7 @@ class WebsiteLocalizationRunnerTests(unittest.TestCase):
             )
             for value in row
         )
-        self.assertNotIn("hemligt", database)
+        self.assertNotIn("Bygg ditt företag", database)
         self.assertNotIn("översatt", database)
 
     def test_partial_locale_failure_does_not_discard_successful_locale(self):

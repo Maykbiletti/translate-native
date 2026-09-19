@@ -15,6 +15,11 @@ from typing import Any, Mapping, Protocol
 
 SCHEMA = "translate-native.host-subagent-review.v1"
 NATIVE_REWRITE_REVIEW_SCHEMA = "translate-native.native-rewrite-review.v3"
+WEBSITE_REVIEW_SCHEMA = "blun.website-localization-review.v3"
+RICH_REVIEW_SCHEMAS = {
+    WEBSITE_REVIEW_SCHEMA,
+    NATIVE_REWRITE_REVIEW_SCHEMA,
+}
 NATIVE_DIMENSIONS = {
     "idiom_and_word_choice",
     "syntax_and_information_flow",
@@ -127,7 +132,7 @@ class HostSubagentProvider:
             payload = _copy(request.as_payload())
             if (set(payload) != {"schema", "request_id", "phase", "provider_id",
                                  "model_id", "model_version", "system_instruction", "input"}
-                    or payload["schema"] != "blun.website-localization-worker.v9"
+                    or payload["schema"] != "blun.website-localization-worker.v10"
                     or payload["provider_id"] != self.provider_id
                     or payload["model_id"] != self._policy["model_id"]
                     or payload["model_version"] != self._policy["model_version"]
@@ -295,15 +300,18 @@ class HostSubagentProvider:
         expected_schema = data.get("response_schema", {}).get("schema")
         expected_fields = {"schema", "phase", "locale", "status", "confidence",
                            "blocking_defects", "major_defects"}
-        if expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA:
+        if expected_schema in RICH_REVIEW_SCHEMAS:
             expected_fields.add("uncertainties")
             if phase == "target_native":
                 expected_fields.add("holistic_assessment")
-        elif expected_schema != "blun.website-localization-review.v2":
+            if (expected_schema == WEBSITE_REVIEW_SCHEMA
+                    and phase == "source_fidelity"
+                    and data.get("content_type") == "commercial"):
+                expected_fields.add("commercial_review")
+        else:
             raise SubagentReviewBlocked("review_invalid")
         if (not isinstance(response, dict)
-                or (expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA
-                    and set(response) != expected_fields)
+                or set(response) != expected_fields
                 or response.get("schema") != expected_schema
                 or response.get("phase") != phase
                 or response.get("locale") != data["target"]["locale"]
@@ -311,30 +319,44 @@ class HostSubagentProvider:
                 or response.get("confidence") not in {"high", "low"}
                 or not isinstance(response.get("blocking_defects"), list)
                 or not isinstance(response.get("major_defects"), list)
-                or (expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA
+                or (expected_schema in RICH_REVIEW_SCHEMAS
                     and not isinstance(response.get("uncertainties"), list))
-                or (expected_schema == NATIVE_REWRITE_REVIEW_SCHEMA
+                or (expected_schema in RICH_REVIEW_SCHEMAS
                     and phase == "target_native"
                     and not isinstance(response.get("holistic_assessment"), dict))):
             raise SubagentReviewBlocked("review_invalid")
         # Existing worker validates full findings and commercial evidence.
         self._evidence[_hash(payload)] = (_hash(response), host_evidence)
-        if (phase == "target_native" and response["status"] == "PASS"
-                and not response["blocking_defects"] and not response["major_defects"]
+        if (phase == "target_native" and not response["blocking_defects"]
+                and not response["major_defects"]
+                and expected_schema in RICH_REVIEW_SCHEMAS):
+            holistic = response.get("holistic_assessment", {})
+            dimensions = holistic.get("dimensions")
+            dimension_values = tuple(dimensions.values()) if (
+                isinstance(dimensions, dict) and set(dimensions) == NATIVE_DIMENSIONS
+            ) else ()
+            approved = (
+                response["status"] == "PASS"
+                and response["confidence"] == "high"
                 and not response.get("uncertainties", [])
-                and (expected_schema != NATIVE_REWRITE_REVIEW_SCHEMA or (
-                    response.get("holistic_assessment", {}).get(
-                        "reads_as_native_original") is True
-                    and response.get("holistic_assessment", {}).get(
-                        "repair_scope") == "none"
-                    and isinstance(response.get("holistic_assessment", {}).get(
-                        "dimensions"), dict)
-                    and set(response["holistic_assessment"]["dimensions"])
-                        == NATIVE_DIMENSIONS
-                    and all(value == "PASS" for value in
-                            response["holistic_assessment"]["dimensions"].values())))):
-            self._native_receipt = receipt
-            self._finished = False
+                and holistic.get("reads_as_native_original") is True
+                and holistic.get("repair_scope") == "none"
+                and dimension_values
+                and all(value == "PASS" for value in dimension_values)
+            )
+            unresolved = (
+                response["status"] == "FAIL"
+                and response["confidence"] == "low"
+                and bool(response.get("uncertainties", []))
+                and holistic.get("reads_as_native_original") is False
+                and holistic.get("repair_scope") == "none"
+                and dimension_values
+                and "NOT_ASSESSED" in dimension_values
+                and "FAIL" not in dimension_values
+            )
+            if approved or unresolved:
+                self._native_receipt = receipt
+                self._finished = False
         return response
 
     def _validate_receipt(self, receipt: Any, response: Any, control: dict) -> dict:

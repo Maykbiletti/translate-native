@@ -36,8 +36,12 @@ BEARER = re.compile(r"^[A-Za-z0-9._~+/=-]{32,2048}$")
 RESPONSE_REVIEW_SCHEMA = "translate-native.response-subagent-review.v1"
 WEBSITE_REVIEW_SCHEMA = "translate-native.host-subagent-review.v1"
 RESPONSE_NATIVE_SCHEMA = "translate-native.response-native-review.v1"
-WEBSITE_RESPONSE_SCHEMA = "blun.website-localization-review.v2"
+WEBSITE_RESPONSE_SCHEMA = "blun.website-localization-review.v3"
 NATIVE_REWRITE_RESPONSE_SCHEMA = "translate-native.native-rewrite-review.v3"
+RICH_REVIEW_SCHEMAS = {
+    WEBSITE_RESPONSE_SCHEMA,
+    NATIVE_REWRITE_RESPONSE_SCHEMA,
+}
 NATIVE_DIMENSIONS = {
     "idiom_and_word_choice",
     "syntax_and_information_flow",
@@ -808,10 +812,18 @@ class ReviewHostApplication:
             inputs.get("response_schema", {}).get("schema")
             if isinstance(inputs, Mapping) else None
         )
-        if response_schema == NATIVE_REWRITE_RESPONSE_SCHEMA:
+        commercial = (
+            response_schema == WEBSITE_RESPONSE_SCHEMA
+            and route.phase == FIDELITY_PHASE
+            and isinstance(inputs, Mapping)
+            and inputs.get("content_type") == "commercial"
+        )
+        if response_schema in RICH_REVIEW_SCHEMAS:
             expected.add("uncertainties")
             if route.phase == NATIVE_PHASE:
                 expected.add("holistic_assessment")
+            if commercial:
+                expected.add("commercial_review")
             if (not isinstance(response, dict) or set(response) != expected
                     or response.get("schema") != response_schema
                     or response.get("phase") != route.phase
@@ -885,15 +897,40 @@ class ReviewHostApplication:
                                  and dimensions_pass)
             passing = (not has_findings and not response["uncertainties"]
                        and response["confidence"] == "high" and holistic_pass)
+            review_required = (not has_findings and bool(response["uncertainties"])
+                               and response["confidence"] == "low"
+                               and (route.phase != NATIVE_PHASE
+                                    or not holistic_pass))
             if ((response["status"] == "PASS") != passing
-                    or response["confidence"] == "low" and not response["uncertainties"]):
+                    or (response["status"] == "FAIL") != (
+                        has_findings or review_required)
+                    or (response["confidence"] == "low") != bool(
+                        response["uncertainties"])
+                    or (response["confidence"] == "high"
+                        and bool(response["uncertainties"]))):
                 raise _blocked("review_invalid", 422)
+            if commercial:
+                source = inputs.get("source")
+                quality = inputs.get("commercial_quality_profile")
+                if (not isinstance(source, Mapping)
+                        or not isinstance(source.get("text"), str)
+                        or not isinstance(quality, Mapping)
+                        or not isinstance(inputs.get("commercial_profile"), str)
+                        or not isinstance(inputs.get(
+                            "commercial_review_evidence_contract"), Mapping)):
+                    raise _blocked("review_invalid", 422)
+                try:
+                    COMMERCIAL.validate_review(
+                        response["commercial_review"], source["text"],
+                        _candidate(task), inputs["commercial_profile"],
+                        target_locale=route.target_locale,
+                        commercial_quality_profile_version=quality.get("version"),
+                        commercial_quality_profile_sha256=quality.get("sha256"),
+                        allow_uncertain=True,
+                    )
+                except COMMERCIAL.CommercialReviewBlocked:
+                    raise _blocked("review_invalid", 422) from None
             return response
-        commercial = (
-            route.phase == FIDELITY_PHASE
-            and isinstance(inputs, Mapping)
-            and inputs.get("content_type") == "commercial"
-        )
         if commercial:
             expected.add("commercial_review")
         if (not isinstance(response, dict) or set(response) != expected
@@ -970,26 +1007,34 @@ class ReviewHostApplication:
         response_schema = task["input"].get("response_schema")
         expected_schema = (response_schema.get("schema")
                            if isinstance(response_schema, dict) else None)
+        holistic = response.get("holistic_assessment", {})
+        dimensions = holistic.get("dimensions")
+        values = tuple(dimensions.values()) if (
+            isinstance(dimensions, dict) and set(dimensions) == NATIVE_DIMENSIONS
+        ) else ()
+        approved = (
+            response.get("status") == "PASS"
+            and response.get("confidence") == "high"
+            and response.get("uncertainties") == []
+            and holistic.get("reads_as_native_original") is True
+            and holistic.get("repair_scope") == "none"
+            and values and all(value == "PASS" for value in values)
+        )
+        unresolved = (
+            response.get("status") == "FAIL"
+            and response.get("confidence") == "low"
+            and isinstance(response.get("uncertainties"), list)
+            and bool(response["uncertainties"])
+            and holistic.get("reads_as_native_original") is False
+            and holistic.get("repair_scope") == "none"
+            and values and "NOT_ASSESSED" in values and "FAIL" not in values
+        )
         if (not isinstance(expected_schema, str)
+                or expected_schema not in RICH_REVIEW_SCHEMAS
                 or response.get("schema") != expected_schema
-                or response.get("status") != "PASS"
                 or response.get("blocking_defects") != []
                 or response.get("major_defects") != []
-                or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
-                    and response.get("uncertainties") != [])
-                or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
-                    and response.get("holistic_assessment", {}).get(
-                        "reads_as_native_original") is not True)
-                or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
-                    and response.get("holistic_assessment", {}).get(
-                        "repair_scope") != "none")
-                or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
-                    and (not isinstance(response.get("holistic_assessment", {}).get(
-                        "dimensions"), dict)
-                    or set(response["holistic_assessment"]["dimensions"])
-                       != NATIVE_DIMENSIONS
-                    or any(value != "PASS" for value in
-                           response["holistic_assessment"]["dimensions"].values())))):
+                or not (approved or unresolved)):
             raise _blocked("native_predecessor_invalid", 409)
 
     @staticmethod

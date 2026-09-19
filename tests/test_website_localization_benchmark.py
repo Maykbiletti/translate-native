@@ -432,7 +432,7 @@ class RuntimeCandidateProvider:
                 "locale": locale,
                 "candidate": " ".join((phrase,) * repetitions),
             }
-        return {
+        response = {
             "schema": BENCHMARK_RUNTIME._CANDIDATE._WORKER.REVIEW_SCHEMA,
             "phase": request.phase,
             "locale": locale,
@@ -440,7 +440,19 @@ class RuntimeCandidateProvider:
             "confidence": "high",
             "blocking_defects": [],
             "major_defects": [],
+            "uncertainties": [],
         }
+        if request.phase == "target_native":
+            response["holistic_assessment"] = {
+                "reads_as_native_original": True,
+                "reason": "Synthetic campaign candidate fixture judgment.",
+                "repair_scope": "none",
+                "dimensions": {
+                    name: "PASS"
+                    for name in BENCHMARK_RUNTIME._CANDIDATE._WORKER.NATIVE_DIMENSIONS
+                },
+            }
+        return response
 
 
 class RetryOnceCampaignReviewer(CampaignCandidateReviewer):

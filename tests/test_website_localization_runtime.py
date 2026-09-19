@@ -70,7 +70,7 @@ class Provider:
                 "locale": request.input["target"]["locale"],
                 "candidate": "Kasvata yritystäsi turvallisesti.",
             }
-        return {
+        response = {
             "schema": WORKER.REVIEW_SCHEMA,
             "phase": request.phase,
             "locale": request.input["target"]["locale"],
@@ -78,7 +78,18 @@ class Provider:
             "confidence": "high",
             "blocking_defects": [],
             "major_defects": [],
+            "uncertainties": [],
         }
+        if request.phase == "target_native":
+            response["holistic_assessment"] = {
+                "reads_as_native_original": True,
+                "reason": "Synthetic runtime fixture judgment.",
+                "repair_scope": "none",
+                "dimensions": {
+                    name: "PASS" for name in WORKER.NATIVE_DIMENSIONS
+                },
+            }
+        return response
 
 
 def receipt(request):

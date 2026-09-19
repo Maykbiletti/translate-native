@@ -80,7 +80,7 @@ The JSON envelope has exactly four fields:
   "request_id": "<deterministic phase request ID>",
   "request_sha256": "<SHA-256 of canonical request JSON>",
   "request": {
-    "schema": "blun.website-localization-worker.v9",
+    "schema": "blun.website-localization-worker.v10",
     "request_id": "<same deterministic phase request ID>",
     "phase": "transcreation",
     "provider_id": "customer-llm",
@@ -154,24 +154,42 @@ The `response` value is passed to the existing worker validator. For
 }
 ```
 
-For either review, it must be exactly:
+For the source-blind native review, it must be exactly:
 
 ```json
 {
-  "schema": "blun.website-localization-review.v2",
+  "schema": "blun.website-localization-review.v3",
   "phase": "target_native",
   "locale": "fi-FI",
   "status": "PASS",
   "confidence": "high",
   "blocking_defects": [],
-  "major_defects": []
+  "major_defects": [],
+  "uncertainties": [],
+  "holistic_assessment": {
+    "reads_as_native_original": true,
+    "reason": "Complete target-only editorial assessment.",
+    "repair_scope": "none",
+    "dimensions": {
+      "idiom_and_word_choice": "PASS",
+      "syntax_and_information_flow": "PASS",
+      "rhythm_and_cohesion": "PASS",
+      "register_tone_and_audience": "PASS",
+      "voice_genre_and_intentional_repetition": "PASS"
+    }
+  }
 }
 ```
 
-Use `phase: source_fidelity` for the second review. A `PASS` requires both
-defect arrays to be empty. A failed review must report structured defects in
-the worker's existing schema; the pipeline hashes those findings instead of
-retaining reviewer prose in queue status. The worker independently validates
+Use `phase: source_fidelity` for the second review and omit
+`holistic_assessment`. A `PASS` requires both defect arrays and
+`uncertainties` to be empty. Every defect includes `severity`, `class`, an
+exact `excerpt`, `reason`, reader or meaning `impact`, and an actionable
+`revision_direction`. Every uncertainty includes `class`, `reason`, and
+`evidence_needed`. A native `PASS` additionally requires all five dimensions
+to pass; `NOT_ASSESSED` routes to additional independent evidence and is never
+a style approval. The pipeline hashes findings instead of retaining reviewer
+prose in queue status. The worker independently validates
 the exact phase, locale, shape, Unicode NFC, protected syntax, completeness,
 and review ordering.
 

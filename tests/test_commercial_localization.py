@@ -1353,7 +1353,14 @@ class CommercialLocalizationTests(unittest.TestCase):
             WORKER.run_localization_job(job(SOURCE, "commercial"), assets(), adapter)
         adapter = provider()
         adapter.responses[-1]["status"] = "FAIL"
-        adapter.responses[-1]["major_defects"] = [{"class": "meaning", "excerpt": "480", "reason": "Wrong claim"}]
+        adapter.responses[-1]["major_defects"] = [{
+            "severity": "major",
+            "class": "meaning",
+            "excerpt": "480",
+            "reason": "Wrong claim",
+            "impact": "The advertised saving would be incorrect.",
+            "revision_direction": "Restore the reviewed annual saving.",
+        }]
         with self.assertRaises(WORKER.LocalizationWorkerBlocked) as error:
             WORKER.run_localization_job(job(SOURCE, "commercial"), assets(), adapter)
         self.assertEqual(error.exception.code, "review.source_fidelity.failed")

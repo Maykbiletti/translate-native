@@ -22,7 +22,7 @@ MAX_HEADER_VALUE_LENGTH = 4096
 HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 REQUEST_ID = re.compile(r"^blun-l10n-call-[a-f0-9]{64}$")
-WORKER_REQUEST_SCHEMA = "blun.website-localization-worker.v9"
+WORKER_REQUEST_SCHEMA = "blun.website-localization-worker.v10"
 WORKER_REQUEST_FIELDS = {
     "schema", "request_id", "phase", "provider_id", "model_id",
     "model_version", "system_instruction", "input",

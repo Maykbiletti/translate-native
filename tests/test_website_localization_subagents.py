@@ -50,7 +50,10 @@ class LedgerHost:
         if key in self.ledger:
             return SUB._copy(self.ledger[key])
         phase, locale = task["phase"], task["input"]["target"]["locale"]
-        findings = [{"class": "native", "excerpt": "fixture", "reason": "synthetic defect"}] if self.fail else []
+        findings = [{
+            "class": "native", "excerpt": task["input"]["candidate"],
+            "reason": "synthetic defect",
+        }] if self.fail else []
         response = review(locale, phase, "FAIL" if findings else "PASS", findings,
                           confidence=self.confidence)
         fields = {"schema", "execution_key", "request_sha256", "task_sha256",
@@ -180,7 +183,9 @@ class HostSubagentTests(unittest.TestCase):
     def test_low_confidence_still_requires_independent_evidence(self):
         result = self.execute(adapter(LedgerHost(confidence="low")))
         self.assertTrue(result["independent_review_required"])
-        self.assertEqual(result["review_confidence"], {"target_native": "low", "source_fidelity": "low"})
+        self.assertEqual(result["review_confidence"], {
+            "target_native": "low", "source_fidelity": "low",
+        })
 
     def test_unavailable_host_and_invalid_budgets_block(self):
         with self.assertRaisesRegex(SUB.SubagentReviewBlocked, "host_unavailable"):
