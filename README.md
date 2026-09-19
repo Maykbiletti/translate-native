@@ -3285,17 +3285,20 @@ cannot enforce output validation.
 
 Long same-language Apple `.strings` rewriting uses a separate strict lossless
 path: only decoded non-empty values reach the creator, while keys, comments,
-empty values, delimiters, escapes and layout remain host-owned. The complete
-assembled catalog then receives isolated source-blind native review, separate
-original-preservation review and independent Guard reconstruction. Unsupported
-or ambiguous syntax fails closed before creator access.
+empty values, delimiters, escapes and layout remain host-owned. The isolated
+native reviewer likewise receives only the ordered decoded localized values,
+never keys, comments, layout or creator context. The complete assembled catalog
+and original go only to the separate preservation review; the Guard independently
+recomputes the projection and full target. Unsupported or ambiguous syntax fails
+closed before creator access.
 
-Long and short GNU PO native review is source-blind at the actual adapter
-boundary: the first reviewer receives only the ordered decoded non-empty
-`msgstr` target values. `msgid`, plural source text, comments, headers, contexts
-and creator metadata are absent. The fidelity reviewer still receives the exact
-original and assembled catalog, while the Guard independently recomputes and
-binds the target-only projection and full target before release.
+Long and short GNU PO and Apple `.strings` native review is source-blind at the
+actual adapter boundary: the first reviewer receives only ordered decoded
+non-empty target values. PO `msgid` and plural source text, Apple keys, comments,
+headers, contexts, layout and creator metadata are absent. The fidelity reviewer
+still receives the exact original and assembled catalog, while the Guard
+independently recomputes and binds the target-only projection and full target
+before release.
 
 See [`PREMORTEM.md`](docs/PREMORTEM.md) for the failure modes, mitigations, and proof required before calling this system production-ready.
 

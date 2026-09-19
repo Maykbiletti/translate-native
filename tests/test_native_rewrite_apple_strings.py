@@ -61,6 +61,17 @@ class AppleStringsPlannerTests(unittest.TestCase):
         for protected in ("API_SECRET", "technical.key", "https://fixed.test"):
             self.assertNotIn(protected, owned)
 
+    def test_native_review_projection_contains_only_decoded_values(self):
+        source = ('/* SECRET source comment */\n'
+                  '"SOURCE_SENTINEL.key" = "Näkyvä arvo 42.";\n'
+                  '// https://fixed.test\n"second.key" = "Toinen arvo {name}.";\n')
+        projection = STRINGS.native_review_text(source)
+        self.assertEqual(projection,
+                         "Näkyvä arvo 42.\n\nToinen arvo {name}.")
+        for forbidden in ("SOURCE_SENTINEL", "SECRET", "fixed.test",
+                          "second.key", "=", ";"):
+            self.assertNotIn(forbidden, projection)
+
     def test_carriage_return_line_comment_does_not_hide_following_entry(self):
         source = '// fixed\r"key" = "Näkyvä arvo.";\r'
         _manifest, state = self.plan(source)

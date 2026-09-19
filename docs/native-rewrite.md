@@ -312,11 +312,14 @@ Each Apple value part has an opaque ordered ID and bounded context only from
 that same value. The worker rejects missing, extra, reordered or incomplete
 results, rebuilds the immutable skeleton and separately checks placeholders and
 format specifiers inside every decoded value. The isolated native reviewer
-receives the complete assembled catalog without the original; the preservation
-reviewer then receives the exact original and target. The Guard independently
-recomputes the selector, manifest, requests, completion evidence and assembly,
-and applies the same 262,144-byte combined review ceiling. Automatic correction
-remains disabled until a finding can be bound safely to one exact value.
+receives a deterministic ordered projection containing only decoded non-empty
+localized values. Keys, comments, empty entries, separators, layout, source
+hashes and creator context are absent. The preservation reviewer then receives
+the exact original and complete target. Review evidence binds both the projection
+hash and the exact full-target hash; the Guard recomputes both together with the
+selector, manifest, requests, completion evidence and assembly. The same
+262,144-byte combined review ceiling applies. Automatic correction remains
+disabled until a finding can be bound safely to one exact value.
 
 Long SRT and WebVTT use a strict lossless cue-payload plan. Only non-empty cue
 text enters creator batches under opaque ordered IDs with bounded adjacent-cue

@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 POLICY = "raw-apple-strings-value-spans-v1"
 SELECTOR_PROFILE = "apple-strings-nonempty-values-v1"
+NATIVE_REVIEW_PROJECTION = "apple-strings-values-target-only-v1"
 PACKING_OVERHEAD_CHARS = 320
 UNIT_RESERVED_CHARS = 768
 CONTEXT_CHARS = 192
@@ -330,6 +331,17 @@ def target_value_map(target: str) -> tuple[dict[str, str], str]:
     return values, _text_hash(_skeleton(target, parsed["leaves"]))
 
 
-def language_validation_text(target: str) -> str:
+def native_review_text(target: str) -> str:
+    """Return only decoded localized values, never keys or catalog metadata."""
     parsed = parse(target)
-    return "\n".join(leaf["value"] for leaf in parsed["leaves"])
+    values = [leaf["value"] for leaf in parsed["leaves"]]
+    if not values or any(not isinstance(value, str) or not value for value in values):
+        raise AppleStringsRewritePlanError("review_projection_invalid")
+    projection = "\n\n".join(values)
+    if not projection or unicodedata.normalize("NFC", projection) != projection:
+        raise AppleStringsRewritePlanError("review_projection_invalid")
+    return projection
+
+
+def language_validation_text(target: str) -> str:
+    return native_review_text(target)
