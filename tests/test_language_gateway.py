@@ -153,6 +153,24 @@ class LanguageGatewayTests(unittest.TestCase):
                 self.assertFalse(missing.parent.exists())
                 self.assertIn("verification fails closed", result.stdout)
 
+    def test_portable_pre_output_hooks_route_rewrite_to_isolated_delivery(self) -> None:
+        request = {
+            "task_kind": "rewrite",
+            "source_text": "Alkuperäinen teksti.",
+            "target_text": "Luonteva teksti.",
+            "language": "fi-FI",
+            "release_token": "blrw1.untrusted",
+        }
+        for hook in (PRE_OUTPUT, INSTALLED_PRE_OUTPUT):
+            with self.subTest(hook=hook):
+                result = subprocess.run(
+                    [sys.executable, str(hook)],
+                    input=json.dumps(request, ensure_ascii=False),
+                    text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("isolated authorization", result.stdout)
+
     @unittest.skipIf(os.name == "nt", "POSIX permission bits are not authoritative on Windows")
     def test_pre_output_hooks_reject_a_broadly_readable_verifier_key(self) -> None:
         request = {

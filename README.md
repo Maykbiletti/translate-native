@@ -2679,7 +2679,38 @@ blun-language-deliver \
   -- your-agent-command --json-only
 ```
 
-The same module exposes `guarded_send` and `guarded_send_async` for API, Telegram, queue, and web-response adapters. These functions verify before invoking the supplied sender and never invoke it on failure. The host must remove every alternate sender: an agent with direct Telegram/API credentials or an unwrapped stdout path can still bypass any guard.
+Native rewriting uses the same captured-envelope boundary, but a rewrite
+release cannot be verified with a same-user key. The host supplies the exact
+original, locale profile, creator/request/session binding, and final channel;
+the isolated guard must authorize and then consume one grant for those exact
+bytes:
+
+```bash
+blun-language-deliver \
+  --task-kind rewrite \
+  --language fi-FI \
+  --source-file /trusted/job/original.txt \
+  --profile-id native-fi-general-v1 \
+  --request-id rewrite-123 \
+  --session-id session-456 \
+  --session-epoch "$TRUSTED_SESSION_EPOCH" \
+  --agent-id writer-789 \
+  --channel stdout \
+  --require-service \
+  -- your-agent-command --json-only
+```
+
+Changing the target, original, profile, request, session, creator, locale,
+content type, or channel invalidates authorization. A replay fails when the
+one-time grant is consumed, and a missing isolated service leaves stdout empty.
+
+The same module exposes `guarded_send` and `guarded_send_async` for locally
+verified translations, plus `guarded_send_with_service` and
+`guarded_send_async_with_service` for isolated rewrite delivery from API,
+Telegram, queue, and web-response adapters. These functions verify—or authorize
+and consume—before invoking the supplied sender and never invoke it on failure.
+The host must remove every alternate sender: an agent with direct Telegram/API
+credentials or an unwrapped stdout path can still bypass any guard.
 
 For a genuine security boundary, run the MCP signer and delivery verifier under a separate OS identity, container, or remote service. The agent must be unable to read the signing key, modify the gateway, change trusted source files, administer the delivery socket, or call the final channel directly. Same-user installation is strong workflow enforcement, not protection against a hostile process with filesystem access.
 

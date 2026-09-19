@@ -23,6 +23,7 @@ def load(name, path):
 FIX = load("rewrite_service_fixtures", "tests/test_native_rewrite_worker.py")
 SERVICE = load("rewrite_test_service", "integrations/guard_service.py")
 ADAPTER = load("rewrite_test_client", "integrations/adapters/native_rewrite.py")
+DELIVERY = load("rewrite_test_delivery", "integrations/enforced_delivery.py")
 
 
 class RewriteServiceTests(unittest.TestCase):
@@ -361,6 +362,41 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertNotIn(secret, audit)
         self.assertEqual(len(creator.calls), 1)
         self.assertEqual(len(host.ledger), 2)
+
+    def test_portable_delivery_uses_actual_rewrite_authorize_consume_protocol(self):
+        service, client, _host, _creator = self.setup_pipeline()
+        result = self.rewrite(client)
+        policy = DELIVERY.HostPolicy(
+            task_kind="rewrite",
+            language="fi-FI",
+            source_text=self.request()["source_text"],
+            content_type="prose",
+            profile_id="standard",
+            request_id="one",
+            session_id=self.SESSION_ID,
+            session_epoch=self.SESSION_EPOCH,
+            agent_id=self.AGENT_ID,
+            channel="portable-stdout",
+        )
+        envelope = {
+            "target_text": result["target_text"],
+            "release_token": result["release_token"],
+        }
+        raw_envelope = json.dumps(envelope, ensure_ascii=False)
+        sent = []
+        with mock.patch.object(
+            DELIVERY.SERVICE_CLIENT,
+            "call_guard_service",
+            side_effect=lambda _endpoint, request, **_kwargs: service.handle(request),
+        ):
+            DELIVERY.guarded_send_with_service(
+                raw_envelope, policy, "test", sent.append,
+            )
+            with self.assertRaisesRegex(DELIVERY.DeliveryBlocked, "consumption"):
+                DELIVERY.guarded_send_with_service(
+                    raw_envelope, policy, "test", sent.append,
+                )
+        self.assertEqual(sent, [result["target_text"]])
 
     def test_mutation_locale_source_purpose_and_profile_invalidate(self):
         service, client, _, _ = self.setup_pipeline()

@@ -40,12 +40,16 @@ def main() -> int:
         request = json.loads(sys.stdin.read().lstrip("\ufeff"))
         task_kind = request["task_kind"]
         source = request.get("source_text", "")
-        if task_kind not in {"translation", "response"}:
-            raise ValueError("task_kind must be translation or response")
+        if task_kind not in {"translation", "response", "rewrite"}:
+            raise ValueError("task_kind must be translation, response, or rewrite")
         if task_kind == "translation" and not source.strip():
             raise ValueError("translation receipts require source_text")
         if task_kind == "response" and source.strip():
             raise ValueError("response receipts cannot carry source_text")
+        if task_kind == "rewrite":
+            raise ValueError(
+                "rewrite receipts require isolated authorization and one-time grant consumption"
+            )
         key_path = Path(os.environ.get("BLUN_LANGUAGE_GUARD_KEY_FILE", Path.home() / ".config" / "blun-language-guard" / "signing.key"))
         key = load_verification_key(key_path)
         if task_kind == "response":

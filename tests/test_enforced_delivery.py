@@ -154,6 +154,160 @@ class EnforcedDeliveryTests(unittest.TestCase):
             )
         service_call.assert_not_called()
 
+    def test_rewrite_requires_complete_host_owned_delivery_context(self) -> None:
+        base = dict(
+            task_kind="rewrite",
+            language="fi-FI",
+            source_text="Alkuperäinen teksti.",
+            profile_id="native-fi-general-v1",
+            request_id="rewrite-one",
+            session_id="session-one",
+            session_epoch="a" * 64,
+            agent_id="writer-one",
+            channel="stdout",
+        )
+        MODULE.validate_policy(MODULE.HostPolicy(**base))
+        for field in (
+            "profile_id", "request_id", "session_id", "session_epoch", "agent_id", "channel",
+        ):
+            with self.subTest(field=field):
+                invalid = dict(base, **{field: ""})
+                with self.assertRaises(MODULE.DeliveryBlocked):
+                    MODULE.validate_policy(MODULE.HostPolicy(**invalid))
+
+    def test_rewrite_never_uses_same_user_receipt_verification(self) -> None:
+        policy = MODULE.HostPolicy(
+            "rewrite", "fi-FI", source_text="Alkuperäinen teksti.",
+            profile_id="native-fi-general-v1", request_id="rewrite-one",
+            session_id="session-one", session_epoch="a" * 64,
+            agent_id="writer-one", channel="stdout",
+        )
+        envelope = {"target_text": "Luonteva teksti.", "release_token": "blrw1.test"}
+        with self.assertRaisesRegex(MODULE.DeliveryBlocked, "isolated guard"):
+            MODULE.verify_envelope(envelope, policy, self.key)
+
+    def test_rewrite_cli_requires_isolated_service_without_loading_local_key(self) -> None:
+        source_path = Path(self.temporary.name) / "original.txt"
+        source_path.write_text("Alkuperäinen teksti.", encoding="utf-8")
+        missing_key = Path(self.temporary.name) / "missing.key"
+        result = self.run_delivery(
+            json.dumps({
+                "target_text": "Luonteva teksti.",
+                "release_token": "blrw1.untrusted",
+            }),
+            "--key-file", str(missing_key),
+            "--task-kind", "rewrite",
+            "--language", "fi-FI",
+            "--source-file", str(source_path),
+            "--profile-id", "native-fi-general-v1",
+            "--request-id", "rewrite-one",
+            "--session-id", "session-one",
+            "--session-epoch", "a" * 64,
+            "--agent-id", "writer-one",
+            "--channel", "stdout",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("isolated guard service is required", result.stderr)
+        self.assertFalse(missing_key.exists())
+
+    def test_rewrite_service_authorizes_and_consumes_exact_one_time_grant(self) -> None:
+        source = "On tärkeää huomata, että teksti on selkeä."
+        target = "Teksti on selkeä."
+        envelope = {"target_text": target, "release_token": "blrw1.release"}
+        policy = MODULE.HostPolicy(
+            "rewrite", "fi-FI", source_text=source, content_type="prose",
+            profile_id="native-fi-general-v1", request_id="rewrite-one",
+            session_id="session-one", session_epoch="a" * 64,
+            agent_id="writer-one", channel="stdout",
+        )
+        requests = []
+
+        def service_call(endpoint, request, **kwargs):
+            requests.append(request)
+            if request["operation"] == "authorize_delivery":
+                return {"valid": True, "delivery_grant": "blgd2.one-time"}
+            if request["operation"] == "consume_delivery":
+                return {"valid": True}
+            self.fail("unexpected guard operation")
+
+        with mock.patch.object(MODULE.SERVICE_CLIENT, "call_guard_service", side_effect=service_call):
+            released = MODULE.verify_envelope_with_service(
+                envelope, policy, "unix:/guard.sock", service_token="trusted-service-token",
+            )
+        self.assertEqual(released, target)
+        self.assertEqual([item["operation"] for item in requests], [
+            "authorize_delivery", "consume_delivery",
+        ])
+        authorization, consumption = requests
+        self.assertEqual(authorization["source_text"], source)
+        self.assertEqual(authorization["target_text"], target)
+        self.assertEqual(authorization["profile_id"], policy.profile_id)
+        self.assertEqual(authorization["release_token"], envelope["release_token"])
+        self.assertNotIn("source_text", consumption)
+        self.assertEqual(
+            consumption["source_sha256"],
+            MODULE.hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(consumption["delivery_grant"], "blgd2.one-time")
+
+    def test_rewrite_authorization_failure_never_consumes_or_releases(self) -> None:
+        policy = MODULE.HostPolicy(
+            "rewrite", "mt-MT", source_text="Dan huwa t-test oriġinali.",
+            profile_id="native-mt-general-v1", request_id="rewrite-one",
+            session_id="session-one", session_epoch="b" * 64,
+            agent_id="writer-one", channel="stdout",
+        )
+        envelope = {"target_text": "Dan hu t-test oriġinali.", "release_token": "blrw1.release"}
+        with mock.patch.object(
+            MODULE.SERVICE_CLIENT, "call_guard_service", return_value={"valid": False},
+        ) as service_call:
+            with self.assertRaisesRegex(MODULE.DeliveryBlocked, "authorization"):
+                MODULE.verify_envelope_with_service(envelope, policy, "unix:/guard.sock")
+        service_call.assert_called_once()
+
+    def test_rewrite_service_failure_never_calls_sync_or_async_sender(self) -> None:
+        policy = MODULE.HostPolicy(
+            "rewrite", "fi-FI", source_text="Alkuperäinen teksti.",
+            profile_id="native-fi-general-v1", request_id="rewrite-one",
+            session_id="session-one", session_epoch="c" * 64,
+            agent_id="writer-one", channel="api",
+        )
+        raw = json.dumps({
+            "target_text": "Luonteva teksti.",
+            "release_token": "blrw1.release",
+        })
+        sync_calls = []
+        async_calls = []
+
+        async def async_sender(text):
+            async_calls.append(text)
+
+        with mock.patch.object(
+            MODULE.SERVICE_CLIENT, "call_guard_service", return_value={"valid": False},
+        ):
+            with self.assertRaises(MODULE.DeliveryBlocked):
+                MODULE.guarded_send_with_service(
+                    raw, policy, "unix:/guard.sock", sync_calls.append,
+                )
+            with self.assertRaises(MODULE.DeliveryBlocked):
+                asyncio.run(MODULE.guarded_send_async_with_service(
+                    raw, policy, "unix:/guard.sock", async_sender,
+                ))
+        self.assertEqual(sync_calls, [])
+        self.assertEqual(async_calls, [])
+
+    def test_agent_cannot_override_rewrite_binding(self) -> None:
+        for field in ("profile_id", "request_id", "session_id", "agent_id", "channel"):
+            with self.subTest(field=field):
+                raw = json.dumps({
+                    "target_text": "Teksti on selkeä.",
+                    "release_token": "blrw1.release",
+                    field: "agent-selected",
+                })
+                with self.assertRaisesRegex(MODULE.DeliveryBlocked, "host-owned"):
+                    MODULE.parse_envelope(raw)
+
     def test_require_service_blocks_local_key_fallback(self) -> None:
         target = "Natürlich ist das möglich."
         result = self.run_delivery(
