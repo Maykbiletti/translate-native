@@ -37,7 +37,14 @@ RESPONSE_REVIEW_SCHEMA = "translate-native.response-subagent-review.v1"
 WEBSITE_REVIEW_SCHEMA = "translate-native.host-subagent-review.v1"
 RESPONSE_NATIVE_SCHEMA = "translate-native.response-native-review.v1"
 WEBSITE_RESPONSE_SCHEMA = "blun.website-localization-review.v2"
-NATIVE_REWRITE_RESPONSE_SCHEMA = "translate-native.native-rewrite-review.v2"
+NATIVE_REWRITE_RESPONSE_SCHEMA = "translate-native.native-rewrite-review.v3"
+NATIVE_DIMENSIONS = {
+    "idiom_and_word_choice",
+    "syntax_and_information_flow",
+    "rhythm_and_cohesion",
+    "register_tone_and_audience",
+    "voice_genre_and_intentional_repetition",
+}
 NATIVE_PHASE = "target_native"
 FIDELITY_PHASE = "source_fidelity"
 
@@ -848,20 +855,34 @@ class ReviewHostApplication:
             if route.phase == NATIVE_PHASE:
                 holistic = response["holistic_assessment"]
                 if (set(holistic) != {
-                        "reads_as_native_original", "reason", "repair_scope"}
+                        "reads_as_native_original", "reason", "repair_scope", "dimensions"}
                         or type(holistic.get("reads_as_native_original")) is not bool
                         or not isinstance(holistic.get("reason"), str)
                         or not holistic["reason"].strip()
                         or holistic.get("repair_scope") not in {
                             "none", "local", "passage", "whole_text"}
-                        or (not holistic["reads_as_native_original"]
+                        or not isinstance(holistic.get("dimensions"), dict)
+                        or set(holistic["dimensions"]) != NATIVE_DIMENSIONS
+                        or any(value not in {"PASS", "FAIL", "NOT_ASSESSED"}
+                               for value in holistic["dimensions"].values())):
+                    raise _blocked("review_invalid", 422)
+                dimension_values = tuple(holistic["dimensions"].values())
+                dimensions_pass = all(value == "PASS" for value in dimension_values)
+                dimensions_fail = "FAIL" in dimension_values
+                dimensions_unassessed = "NOT_ASSESSED" in dimension_values
+                if (holistic["reads_as_native_original"] != dimensions_pass
+                        or (dimensions_fail
                             and (not has_findings or holistic["repair_scope"] not in {
                                 "passage", "whole_text"}))
+                        or dimensions_unassessed != bool(response["uncertainties"])
+                        or (dimensions_unassessed and not dimensions_fail
+                            and holistic["repair_scope"] != "none")
                         or (holistic["reads_as_native_original"]
                             and holistic["repair_scope"] in {"passage", "whole_text"})):
                     raise _blocked("review_invalid", 422)
                 holistic_pass = (holistic["reads_as_native_original"]
-                                 and holistic["repair_scope"] == "none")
+                                 and holistic["repair_scope"] == "none"
+                                 and dimensions_pass)
             passing = (not has_findings and not response["uncertainties"]
                        and response["confidence"] == "high" and holistic_pass)
             if ((response["status"] == "PASS") != passing
@@ -961,7 +982,14 @@ class ReviewHostApplication:
                         "reads_as_native_original") is not True)
                 or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
                     and response.get("holistic_assessment", {}).get(
-                        "repair_scope") != "none")):
+                        "repair_scope") != "none")
+                or (expected_schema == NATIVE_REWRITE_RESPONSE_SCHEMA
+                    and (not isinstance(response.get("holistic_assessment", {}).get(
+                        "dimensions"), dict)
+                    or set(response["holistic_assessment"]["dimensions"])
+                       != NATIVE_DIMENSIONS
+                    or any(value != "PASS" for value in
+                           response["holistic_assessment"]["dimensions"].values())))):
             raise _blocked("native_predecessor_invalid", 409)
 
     @staticmethod

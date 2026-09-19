@@ -73,7 +73,7 @@ with output ceilings below 2,048 tokens keep the short path but block long input
 before model access with `rewrite.long_document_budget_insufficient`.
 
 Rewrite reviews use the strict
-`translate-native.native-rewrite-review.v2` result schema. Every defect is in a
+`translate-native.native-rewrite-review.v3` result schema. Every defect is in a
 severity-specific list and repeats its `severity`, `class`, exact `excerpt`,
 `reason`, reader/meaning `impact`, and actionable `revision_direction`.
 An excerpt must occur in the reviewed candidate, or—for an omission found by
@@ -90,9 +90,18 @@ user-facing text.
 The source-blind target-language phase also returns a required holistic
 assessment for the complete candidate: whether it reads as original native
 writing, why, and whether repair is local, passage-wide, or whole-text. A
-negative holistic assessment must be anchored in at least one concrete major or
-blocking defect and cannot be reduced to a spelling correction. A target-native
+negative holistic assessment caused by a failed dimension must be anchored in
+at least one concrete major or blocking defect and cannot be reduced to a
+spelling correction. A target-native
 `PASS` additionally requires a positive whole-text assessment with no repair.
+The assessment separately covers idiom and word choice, syntax and information
+flow, rhythm and cohesion, register/tone/audience, and voice/genre/intentional
+repetition. Every dimension is `PASS`, `FAIL`, or `NOT_ASSESSED`; the aggregate
+can pass only when all five pass. A failed dimension requires an anchored defect.
+`NOT_ASSESSED` requires an explicit uncertainty and evidence request, does not
+trigger automatic correction, and remains fail-closed. The dimensions are
+interpreted through the requested locale and profile; they do not impose a
+German or English style norm on other languages.
 
 ## API and delivery
 

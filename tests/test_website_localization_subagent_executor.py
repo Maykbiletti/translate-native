@@ -75,6 +75,7 @@ class FixtureBackend:
                     "reads_as_native_original": True,
                     "reason": "Synthetic fixture marks the complete candidate as native.",
                     "repair_scope": "none",
+                    "dimensions": {name: "PASS" for name in HOST.NATIVE_DIMENSIONS},
                 }
             return response
         return BASE.review(locale, model_input["phase"], confidence="high")

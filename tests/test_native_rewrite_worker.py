@@ -109,9 +109,15 @@ class Host:
                     "reads_as_native_original": True,
                     "reason": "Synthetic fixture marks the complete candidate as native.",
                     "repair_scope": "none",
+                    "dimensions": {name: "PASS" for name in RW.NATIVE_DIMENSIONS},
                 }
             if self.confidence == "low":
                 response["status"] = "FAIL"
+                if task["phase"] == "target_native":
+                    response["holistic_assessment"][
+                        "reads_as_native_original"] = False
+                    response["holistic_assessment"]["dimensions"][
+                        "idiom_and_word_choice"] = "NOT_ASSESSED"
             if self.review_factory is not None:
                 response = self.review_factory(task, response)
             fields = {"schema", "execution_key", "request_sha256", "task_sha256",

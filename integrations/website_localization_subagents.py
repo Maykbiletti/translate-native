@@ -14,7 +14,14 @@ from typing import Any, Mapping, Protocol
 
 
 SCHEMA = "translate-native.host-subagent-review.v1"
-NATIVE_REWRITE_REVIEW_SCHEMA = "translate-native.native-rewrite-review.v2"
+NATIVE_REWRITE_REVIEW_SCHEMA = "translate-native.native-rewrite-review.v3"
+NATIVE_DIMENSIONS = {
+    "idiom_and_word_choice",
+    "syntax_and_information_flow",
+    "rhythm_and_cohesion",
+    "register_tone_and_audience",
+    "voice_genre_and_intentional_repetition",
+}
 CREATOR_COMPLETION_SCHEMA = "translate-native.creator-completion.v1"
 PROVIDER_PREFIX = "host-subagents-v1-"
 MAX_BYTES = 4_000_000
@@ -319,7 +326,13 @@ class HostSubagentProvider:
                     response.get("holistic_assessment", {}).get(
                         "reads_as_native_original") is True
                     and response.get("holistic_assessment", {}).get(
-                        "repair_scope") == "none"))):
+                        "repair_scope") == "none"
+                    and isinstance(response.get("holistic_assessment", {}).get(
+                        "dimensions"), dict)
+                    and set(response["holistic_assessment"]["dimensions"])
+                        == NATIVE_DIMENSIONS
+                    and all(value == "PASS" for value in
+                            response["holistic_assessment"]["dimensions"].values())))):
             self._native_receipt = receipt
             self._finished = False
         return response

@@ -33,7 +33,14 @@ HTMLRW = _load("native_rewrite_html_planner", "native_rewrite_html.py")
 XMLRW = _load("native_rewrite_xml_planner", "native_rewrite_xml.py")
 MDRW = _load("native_rewrite_markdown_planner", "native_rewrite_markdown.py")
 SCHEMA = "translate-native.native-rewrite.v7"
-REVIEW_SCHEMA = "translate-native.native-rewrite-review.v2"
+REVIEW_SCHEMA = "translate-native.native-rewrite-review.v3"
+NATIVE_DIMENSIONS = (
+    "idiom_and_word_choice",
+    "syntax_and_information_flow",
+    "rhythm_and_cohesion",
+    "register_tone_and_audience",
+    "voice_genre_and_intentional_repetition",
+)
 LONG_SCHEMA = "translate-native.native-rewrite-chunk.v1"
 LONG_EVIDENCE_SCHEMA = "translate-native.long-rewrite-evidence.v1"
 LONG_JSON_SCHEMA = "translate-native.native-rewrite-json-chunk.v1"
@@ -173,12 +180,18 @@ evidence needed to resolve it. Low confidence requires at least one uncertainty.
 During target_native review, make a separate holistic assessment of the complete
 candidate after ignoring the source: decide whether it reads as original native
 writing, explain the decision, and state whether repair is local, passage-wide or
-whole-text. One corrected spelling or grammar issue never proves that the rest of
-the text is natural. If the complete candidate remains source-shaped, stiff,
-mechanically literal or editorially unnatural, set reads_as_native_original false,
-anchor at least one major defect in the candidate, and require passage or whole-text
-repair. PASS requires high confidence, empty defect and uncertainty lists, and a
-truthful positive holistic target-language assessment."""
+whole-text. Separately mark every requested whole-text dimension PASS, FAIL or
+NOT_ASSESSED: idiom/word choice, syntax/information flow, rhythm/cohesion,
+register/tone/audience, and voice/genre/intentional repetition. Apply the requested
+locale and profile rather than a German or English stylistic norm. One corrected
+spelling or grammar issue never proves that the rest of the text is natural. If
+the complete candidate remains source-shaped, stiff, mechanically literal or
+editorially unnatural, set reads_as_native_original false, mark the affected
+dimensions FAIL, anchor at least one major defect in the candidate, and require
+passage or whole-text repair. If a dimension cannot be assessed reliably, mark it
+NOT_ASSESSED and report the required evidence as an uncertainty. PASS requires
+high confidence, empty defect and uncertainty lists, a truthful positive holistic
+target-language assessment, and PASS for every dimension."""
 NATIVE_REVIEW = WORKER._TARGET_REVIEW_SYSTEM + "\n" + REPORT
 FIDELITY = FIDELITY + "\n" + REPORT
 LONG_CREATION = """This is one owned segment of a longer original. Rewrite only
@@ -550,18 +563,34 @@ def _review(response, phase, locale, candidate, source):
     if phase == "target_native":
         holistic = response["holistic_assessment"]
         if (not isinstance(holistic, dict)
-                or set(holistic) != {"reads_as_native_original", "reason", "repair_scope"}
+                or set(holistic) != {
+                    "reads_as_native_original", "reason", "repair_scope", "dimensions"}
                 or type(holistic.get("reads_as_native_original")) is not bool
                 or not isinstance(holistic.get("reason"), str)
                 or not holistic["reason"].strip() or len(holistic["reason"]) > 4000
                 or holistic.get("repair_scope") not in {
-                    "none", "local", "passage", "whole_text"}):
+                    "none", "local", "passage", "whole_text"}
+                or not isinstance(holistic.get("dimensions"), dict)
+                or set(holistic["dimensions"]) != set(NATIVE_DIMENSIONS)
+                or any(value not in {"PASS", "FAIL", "NOT_ASSESSED"}
+                       for value in holistic["dimensions"].values())):
+            raise NativeRewriteBlocked("review_invalid")
+        dimension_values = tuple(holistic["dimensions"].values())
+        dimensions_pass = all(value == "PASS" for value in dimension_values)
+        dimensions_fail = "FAIL" in dimension_values
+        dimensions_unassessed = "NOT_ASSESSED" in dimension_values
+        if holistic["reads_as_native_original"] != dimensions_pass:
             raise NativeRewriteBlocked("review_invalid")
         holistic_pass = (holistic["reads_as_native_original"]
-                         and holistic["repair_scope"] == "none")
-        if (not holistic["reads_as_native_original"]
-                and (not defects or holistic["repair_scope"] not in {
-                    "passage", "whole_text"})):
+                         and holistic["repair_scope"] == "none"
+                         and dimensions_pass)
+        if (dimensions_fail and (not defects or holistic["repair_scope"] not in {
+                "passage", "whole_text"})):
+            raise NativeRewriteBlocked("review_invalid")
+        if dimensions_unassessed != bool(response["uncertainties"]):
+            raise NativeRewriteBlocked("review_invalid")
+        if (dimensions_unassessed and not dimensions_fail
+                and holistic["repair_scope"] != "none"):
             raise NativeRewriteBlocked("review_invalid")
         if (holistic["reads_as_native_original"]
                 and holistic["repair_scope"] in {"passage", "whole_text"}):
@@ -2495,6 +2524,8 @@ class NativeRewriteWorker:
                     "reads_as_native_original": "true or false",
                     "reason": "whole-candidate target-only editorial judgment",
                     "repair_scope": "none, local, passage, or whole_text",
+                    "dimensions": {name: "PASS, FAIL, or NOT_ASSESSED"
+                                   for name in NATIVE_DIMENSIONS},
                 }
             data = {**base, "candidate": candidate,
                     "response_schema": response_schema}

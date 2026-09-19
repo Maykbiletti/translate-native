@@ -21,11 +21,18 @@ OFFICIAL_EU_LOCALES = (
 
 
 def defect(candidate, *, confidence="high", blocking=False, excerpt=None):
+    dimensions = {
+        name: ("FAIL" if name == "rhythm_and_cohesion" else "PASS")
+        for name in RW.NATIVE_DIMENSIONS
+    }
+    if confidence == "low":
+        dimensions["idiom_and_word_choice"] = "NOT_ASSESSED"
     return {"status": "FAIL", "confidence": confidence,
             "holistic_assessment": {
                 "reads_as_native_original": False,
                 "reason": "Synthetic fixture marks the complete candidate as unnatural.",
                 "repair_scope": "whole_text",
+                "dimensions": dimensions,
             },
             "major_defects": [] if blocking else [{
                 "severity": "major", "class": "idiom", "excerpt": excerpt or candidate,
@@ -162,6 +169,8 @@ class CorrectionTests(unittest.TestCase):
                 schema = host.calls[0][0]["input"]["response_schema"]
                 self.assertIn("holistic_assessment", schema)
                 self.assertEqual(schema["locale"], locale)
+                self.assertEqual(set(schema["holistic_assessment"]["dimensions"]),
+                                 set(RW.NATIVE_DIMENSIONS))
 
     def test_uncertain_blocking_unanchored_disabled_and_legal_do_not_correct(self):
         bad = "On tärkeää huomata, että teksti on selkeä."
@@ -207,6 +216,21 @@ class CorrectionTests(unittest.TestCase):
         local_negative = copy.deepcopy(defect(candidate))
         local_negative["holistic_assessment"]["repair_scope"] = "local"
         cases.append(local_negative)
+        missing_dimension = copy.deepcopy(defect(candidate))
+        missing_dimension["holistic_assessment"]["dimensions"].pop(
+            "rhythm_and_cohesion")
+        cases.append(missing_dimension)
+        invalid_dimension = copy.deepcopy(defect(candidate))
+        invalid_dimension["holistic_assessment"]["dimensions"][
+            "rhythm_and_cohesion"] = "NO_SIGNALS"
+        cases.append(invalid_dimension)
+        aggregate_conflict = copy.deepcopy(defect(candidate))
+        aggregate_conflict["holistic_assessment"]["reads_as_native_original"] = True
+        cases.append(aggregate_conflict)
+        not_assessed_without_uncertainty = copy.deepcopy(defect(candidate))
+        not_assessed_without_uncertainty["holistic_assessment"]["dimensions"][
+            "rhythm_and_cohesion"] = "NOT_ASSESSED"
+        cases.append(not_assessed_without_uncertainty)
         for index, change in enumerate(cases):
             creator, host = Creator(candidate, "Teksti on selkeä."), Host(candidate, change=change)
             with self.assertRaisesRegex(RW.NativeRewriteBlocked, "review_invalid"):
@@ -221,12 +245,42 @@ class CorrectionTests(unittest.TestCase):
             "reason": "Synthetic regional evidence is insufficient.",
             "evidence_needed": "Independent qualified native review.",
         }]
+        change["holistic_assessment"]["dimensions"][
+            "idiom_and_word_choice"] = "NOT_ASSESSED"
         creator = Creator(candidate, "Teksti on selkeä.")
         host = Host(candidate, change=change)
         with self.assertRaisesRegex(
                 RW.NativeRewriteBlocked, "uncertainty_requires_review"):
             self.worker(creator, host).run(
                 "Teksti on selkeä.", "prose", "high-uncertainty")
+        self.assertEqual(len(creator.calls), 1)
+
+    def test_not_assessed_dimension_routes_to_independent_evidence(self):
+        candidate = "Synthetic review fixture."
+        change = {
+            "status": "FAIL", "confidence": "low",
+            "blocking_defects": [], "major_defects": [],
+            "uncertainties": [{
+                "class": "locale_evidence",
+                "reason": "The fixture has no qualified evidence for this locale.",
+                "evidence_needed": "Independent qualified native review.",
+            }],
+            "holistic_assessment": {
+                "reads_as_native_original": False,
+                "reason": "One required dimension is not reliably assessable.",
+                "repair_scope": "none",
+                "dimensions": {
+                    name: ("NOT_ASSESSED" if name == "idiom_and_word_choice"
+                           else "PASS")
+                    for name in RW.NATIVE_DIMENSIONS
+                },
+            },
+        }
+        creator, host = Creator(candidate, candidate), Host(candidate, change=change)
+        with self.assertRaisesRegex(
+                RW.NativeRewriteBlocked, "uncertainty_requires_review"):
+            self.worker(creator, host, "mt-MT").run(
+                candidate, "prose", "dimension-not-assessed")
         self.assertEqual(len(creator.calls), 1)
 
     def test_second_failure_unchanged_and_invalid_syntax_never_loop_or_release(self):
@@ -402,6 +456,19 @@ class CorrectionTests(unittest.TestCase):
         invalid["major_defects"][0].pop("revision_direction")
         with self.assertRaises(ENDPOINT.HOST.ReviewHostBlocked):
             ENDPOINT.HOST.ReviewHostApplication._validate_review_response(invalid, route, task)
+        contradictory = copy.deepcopy(valid)
+        contradictory["holistic_assessment"]["dimensions"][
+            "rhythm_and_cohesion"] = "PASS"
+        contradictory["holistic_assessment"]["reads_as_native_original"] = False
+        with self.assertRaises(ENDPOINT.HOST.ReviewHostBlocked):
+            ENDPOINT.HOST.ReviewHostApplication._validate_review_response(
+                contradictory, route, task)
+        missing = copy.deepcopy(valid)
+        missing["holistic_assessment"]["dimensions"].pop(
+            "voice_genre_and_intentional_repetition")
+        with self.assertRaises(ENDPOINT.HOST.ReviewHostBlocked):
+            ENDPOINT.HOST.ReviewHostApplication._validate_review_response(
+                missing, route, task)
 
     def test_guard_signs_only_final_revision_and_delivery_rejects_old_candidate(self):
         source, bad, good = "Teksti on selkeä.", "On tärkeää huomata, että teksti on selkeä.", "Teksti on selkeä."

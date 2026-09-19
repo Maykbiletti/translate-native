@@ -1,5 +1,31 @@
 # Version 6 premortem
 
+## Dimension-bound whole-text native verdict (2026-09-19)
+
+Assume a source-blind reviewer returns a positive whole-text boolean after
+checking only one conspicuous sentence while the remaining text is still
+grammatical but stiff, source-shaped, tonally wrong, or unlike its genre.
+
+- A single free-form reason can merely repeat “reads naturally” without showing
+  that idiom, syntax, rhythm, information flow, register, audience fit, voice,
+  genre and intentional repetition were considered.
+- A universal German or English cadence can be silently treated as the norm for
+  unrelated languages.
+- An unsupported language, dialect or content type can be guessed as PASS
+  instead of being declared unassessed and routed to independent evidence.
+- A contradictory dimension result can be hidden behind the aggregate boolean
+  or replayed as the predecessor of the fidelity review.
+
+The next review schema will therefore bind an exact five-part target-language
+assessment to the complete candidate and locale profile. Every dimension is
+`PASS`, `FAIL` or `NOT_ASSESSED`; aggregate native-original approval requires
+all five to pass. `FAIL` requires anchored actionable defects, while
+`NOT_ASSESSED` requires explicit uncertainty/evidence and never starts an
+automatic correction. The trusted host, adapter, worker and fidelity
+predecessor validation all enforce the same structure. These dimensions name
+what to inspect, not a German/English style norm; the requested locale,
+register, audience, genre and intentional repetition remain authoritative.
+
 ## Long same-language originals (18 September 2026)
 
 Assume a complete long original enters the natural-rewrite path, but the
