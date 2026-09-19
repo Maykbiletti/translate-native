@@ -203,6 +203,47 @@ class RewriteServiceTests(unittest.TestCase):
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
 
+    def test_long_po_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä teksti säilyttää ääkköset ja numeron 42. "),
+            ("mt-MT", "Test ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42. "),
+            ("ar", "نص واضح يحافظ على الرقم 42 وعلامات الترقيم. "),
+        )
+        for index, (locale, seed) in enumerate(cases):
+            source = (
+                '# fixed comment: SECRET\n'
+                'msgid ""\nmsgstr ""\n'
+                '"Project-Id-Version: fixture\\n"\n\n'
+                '#, python-format\n'
+                'msgid "Copy %s"\n'
+                'msgstr "' + (seed * 220) + '%s"\n'
+            )
+            creator = FIX.Creator("fixture-keeps-po-values")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-po-" + str(index)
+            result = self.rewrite(
+                client, source_text=source, language=locale,
+                request_id=request_id, content_type="documentation")
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            self.assertTrue(all(call.input["container_format"] == "po"
+                                for call in creator.calls))
+            owned = json.dumps(
+                [call.input["owned_values"] for call in creator.calls],
+                ensure_ascii=False)
+            self.assertNotIn("SECRET", owned)
+            self.assertNotIn("Project-Id-Version", owned)
+            self.assertNotIn('msgid', owned)
+            self.assertEqual([task["phase"] for task, _control in host.calls],
+                             ["target_native", "source_fidelity"])
+            self.assertNotIn("source", host.calls[0][0]["input"])
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id, content_type="documentation")["valid"])
+
     def test_malformed_or_semantically_unsafe_long_xml_never_releases(self):
         cases = (
             '<resources><!--x---><string name="x">Text. {pad}</string></resources>',

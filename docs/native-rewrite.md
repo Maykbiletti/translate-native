@@ -234,8 +234,8 @@ computed bound returns `rewrite.long_document_too_large` before model access.
 Unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
 summarized or routed through the short path. Long XML has the separate bounded
-Android-resource path described below, and Markdown has a separate conservative
-raw-span path. Token/cost reservation must use the
+Android-resource path described below, Markdown has a separate conservative
+raw-span path, and GNU PO has a strict non-empty-`msgstr` path. Token/cost reservation must use the
 computed long plan, not assume five calls. Segment policy, budget, correction
 limit and all instructions are part of the effective profile hash, so a policy
 change invalidates previous receipts.
@@ -266,6 +266,31 @@ Automatic correction is deliberately
 disabled for long JSON until review findings carry a host-verifiable unique value
 identity; an actionable finding therefore routes to independent review rather
 than risking the wrong repeated value.
+
+Long GNU PO uses a strict raw-token plan. It accepts UTF-8 NFC catalogs whose
+active directives and continuation strings use a bounded JSON-compatible subset
+of GNU PO quoting. Only non-empty `msgstr` and `msgstr[n]` values outside the
+empty-`msgid` metadata header enter creator batches. Comments, flags, obsolete
+commented entries, contexts, singular and plural msgids, plural indexes,
+keywords, whitespace and line endings remain host-owned. Empty translations are
+not invented. Unsupported escapes, orphaned continuations, duplicate fields,
+unknown active syntax, noncanonical plural indexes and catalogs without a
+rewritable value block before creator access.
+
+Every decoded value part has an opaque ordered ID and bounded context from that
+same value. Missing, additional, duplicated or reordered results block. An
+unchanged value retains every original quoted token byte-for-byte; a changed
+value is safely re-escaped while the original number and placement of string
+tokens, all directive text and the immutable catalog skeleton are revalidated.
+Protected-token signatures are compared per decoded `msgstr` value, so an
+unchanged placeholder in a `msgid` cannot conceal a dropped placeholder in a
+continued translation string.
+The complete assembled catalog receives a source-blind native review of its
+`msgstr` prose, followed by the separate original-preservation review. The Guard
+independently rebuilds the PO plan, creator requests, completion evidence and
+exact assembly. Combined source-plus-target review input is capped at 262,144
+UTF-8 bytes, and automatic document correction remains disabled until a finding
+can be bound safely to one exact PO value.
 
 Long HTML uses a separate bounded raw-span plan and never reparses then
 serializes a DOM. Standard HTML vocabulary has explicit precedence over XML in

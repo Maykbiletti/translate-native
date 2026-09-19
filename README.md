@@ -64,8 +64,10 @@ before signing; truncation, omission, reordering or an ambiguous segment blocks.
 Segments end only at explicit whitespace or recognized sentence terminators;
 an unspaced long input without a safe boundary blocks before model access rather
 than risking a split inside a native-script grapheme cluster.
-Long structured containers remain explicitly unsupported rather than being
-silently shortened. A synthetic 29,705-character fixture exercises this route;
+Long JSON, HTML, Android-resource XML, conservative Markdown and strict GNU PO
+use structure-aware rewriting; other long structured containers remain blocked
+rather than being silently shortened. A synthetic 29,705-character plain-text
+fixture exercises the bounded document route;
 it is not the user's unavailable text and not evidence of native quality.
 Locale/dialect evidence and real model/host configuration remain operator
 requirements; synthetic tests do not establish native quality in every language.

@@ -68,6 +68,16 @@ class Creator:
                     "completion_status": "complete",
                     "values": [{"value_id": item["value_id"], "candidate": value}
                                for item, value in zip(request.input["owned_values"], values)]}
+        if request.input["response_schema"]["schema"] == RW.LONG_PO_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_PO_SCHEMA, "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         return {"schema": RW.WORKER.CANDIDATE_SCHEMA, "phase": "transcreation",
                 "locale": request.input["target"]["locale"], "candidate": candidate}
 
@@ -431,6 +441,17 @@ class RewriteTests(unittest.TestCase):
             RW.MDRW.MARKDOWN_INTENT_PATTERN = original
             RW.MDRW.PROTECTED = original_protected
 
+    def test_po_effective_policy_changes_release_binding(self):
+        first, _ = self.worker()
+        original = RW.PORW._DIRECTIVE
+        try:
+            RW.PORW._DIRECTIVE = RW.re.compile(original.pattern + "(?:)",
+                                                original.flags)
+            second, _ = self.worker()
+            self.assertNotEqual(first.profile_sha256, second.profile_sha256)
+        finally:
+            RW.PORW._DIRECTIVE = original
+
     def test_long_document_completion_capacity_structure_and_manifest_fail_closed(self):
         class LengthLimitedCreator(Creator):
             def verified_completion(self, request, response):
@@ -762,6 +783,138 @@ class RewriteTests(unittest.TestCase):
         for source, candidate in cases:
             with self.subTest(source=source):
                 self.assertTrue(RW.integrity_errors(source, candidate))
+
+    def test_long_po_preserves_host_owned_container_and_reviews_whole_catalog(self):
+        source = (
+            '# Translator comment: SECRET stays host-owned\r\n'
+            'msgid ""\r\n'
+            'msgstr ""\r\n'
+            '"Project-Id-Version: fixture\\n"\r\n'
+            '"Language: fi\\n"\r\n\r\n'
+            '#, python-format\r\n'
+            'msgctxt "button"\r\n'
+            'msgid "Open %s"\r\n'
+            'msgstr "Avaa %s"\r\n\r\n'
+            'msgid "Long copy"\r\n'
+            'msgstr ""\r\n'
+            '"' + ("Selkeä teksti säilyttää numeron 42. " * 170) + '"\r\n'
+        )
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-po-values"), host=host,
+            max_output_tokens=4096)
+        result = worker.run(source, "documentation", "long-po-lossless")
+        self.assertEqual(result["target_text"], source)
+        document = result["evidence"]["document"]
+        self.assertEqual(document["schema"], RW.LONG_PO_EVIDENCE_SCHEMA)
+        self.assertEqual(document["manifest"]["selector_profile"],
+                         RW.PORW.SELECTOR_PROFILE)
+        self.assertTrue(creator.calls)
+        self.assertTrue(all(call.input["container_format"] == "po"
+                            for call in creator.calls))
+        owned = json.dumps(
+            [call.input["owned_values"] for call in creator.calls],
+            ensure_ascii=False)
+        self.assertNotIn("SECRET", owned)
+        self.assertNotIn("Project-Id-Version", owned)
+        self.assertNotIn("Open %s", owned)
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertNotIn("source", native["input"])
+        self.assertNotIn("manifest", json.dumps(native))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], document,
+            content_type="documentation", request_id="long-po-lossless",
+            correction_history=[]))
+
+    def test_long_po_before_after_preserves_comments_msgids_plural_and_placeholders(self):
+        opening = "On tärkeää huomata, että teksti on selkeä. "
+        source = (
+            '# fixed comment\n'
+            'msgid "One file {name}"\n'
+            'msgid_plural "Many files {name}"\n'
+            'msgstr[0] "' + opening + ("Yksi tiedosto {name}. " * 90) + '"\n'
+            'msgstr[1] "' + opening + ("Useita tiedostoja {name}. " * 90) + '"\n'
+        )
+
+        def revise(request):
+            return [item["text"].replace(opening, "Teksti on selkeä. ", 1)
+                    for item in request.input["owned_values"]]
+
+        worker, _creator = self.worker(creator=Creator(revise))
+        result = worker.run(source, "ui", "long-po-before-after")
+        target = result["target_text"]
+        self.assertNotEqual(target, source)
+        self.assertTrue(target.startswith(
+            '# fixed comment\nmsgid "One file {name}"\n'
+            'msgid_plural "Many files {name}"\n'))
+        self.assertEqual(target.count("Teksti on selkeä."), 2)
+        self.assertEqual(target.count("{name}"), source.count("{name}"))
+        self.assertEqual(RW.integrity_errors(source, target), [])
+
+    def test_long_po_unsafe_or_non_rewritable_input_blocks_before_creator(self):
+        cases = (
+            ('msgid "Copy"\nmsgstr "bad\\x20escape"\n' + '# pad\n' * 800,
+             "long_po_unsupported_escape"),
+            ('msgid "Copy"\nmsgstr ""\n' + '# pad\n' * 800,
+             "long_po_no_rewritable_values"),
+            ('msgid "Copy"\nmsgstr "Valid"\nunknown "value"\n' + '# pad\n' * 800,
+             "long_po_unsupported_syntax"),
+            ('msgid "Copy"\nmsgstr[01] "Valid"\n' + '# pad\n' * 800,
+             "long_po_unsupported_syntax"),
+        )
+        for index, (source, code) in enumerate(cases):
+            worker, creator = self.worker(creator=Creator("unused"))
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, code):
+                worker.run(source, "prose", "invalid-po-" + str(index))
+            self.assertFalse(creator.calls)
+
+    def test_long_po_response_evidence_and_container_tampering_block(self):
+        class ReorderingPoCreator(Creator):
+            def invoke(self, request):
+                response = super().invoke(request)
+                if response.get("schema") == RW.LONG_PO_SCHEMA:
+                    response["values"].reverse()
+                return response
+
+        source = "\n\n".join(
+            'msgid "Key {0}"\nmsgstr "Arvo {0} säilyy 42. {1}"'.format(
+                index, "Lisätieto jatkuu. " * 12)
+            for index in range(30)) + "\n"
+        worker, creator = self.worker(creator=ReorderingPoCreator("unchanged"))
+        with self.assertRaises(RW.NativeRewriteBlocked):
+            worker.run(source, "ui", "po-response-reordered")
+        self.assertEqual(len(creator.calls), 1)
+
+        worker, _creator = self.worker(creator=Creator("unchanged"))
+        result = worker.run(source, "ui", "po-evidence")
+        document = json.loads(json.dumps(result["evidence"]["document"]))
+        document["groups"][0]["creation_response_sha256"] = "0" * 64
+        self.assertFalse(worker.validate_document_evidence(
+            source, result["target_text"], document, content_type="ui",
+            request_id="po-evidence", correction_history=[]))
+        changed = result["target_text"].replace('msgid "Key 0"', 'msgid "Changed"', 1)
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed, result["evidence"]["document"], content_type="ui",
+            request_id="po-evidence", correction_history=[]))
+
+    def test_long_po_cannot_drop_continuation_placeholders_hidden_by_msgid(self):
+        source = (
+            'msgid "Hello %s {name}"\nmsgstr ""\n'
+            '"Pitkä arvo säilyttää %s ja {name}. "\n'
+            '"' + ("Lisätieto jatkuu numerolla 42. " * 140) + '"\n'
+        )
+
+        def remove_tokens(request):
+            return [item["text"].replace("%s", "arvon").replace("{name}", "nimen")
+                    for item in request.input["owned_values"]]
+
+        worker, creator = self.worker(creator=Creator(remove_tokens))
+        with self.assertRaisesRegex(
+                RW.NativeRewriteBlocked, "long_po_protected_syntax_changed"):
+            worker.run(source, "ui", "po-protected-value")
+        self.assertTrue(creator.calls)
 
     def test_long_html_preserves_container_and_uses_whole_document_reviews(self):
         source = ('<!doctype html><html><head><meta name="description" '
