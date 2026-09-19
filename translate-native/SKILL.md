@@ -43,8 +43,10 @@ SRT/WebVTT cue-payload plan, but
 only a fully assembled result may be released. The native review receives the
 complete target-language material but no embedded source: for PO this is a
 deterministic projection of all decoded non-empty `msgstr` values; for Apple
-`.strings` it is the ordered decoded non-empty localized values. The projection
-never contains source fields, keys, comments, headers, layout or creator context.
+`.strings` it is the ordered decoded non-empty localized values; for Android XML
+it is the ordered decoded selected string, plural and string-array values. The
+projection never contains source fields, resource names, keys, comments, headers,
+attributes, layout or creator context.
 The subsequent original-preservation review receives the exact assembled container and original.
 The Guard recomputes both the projection hash and full-target binding. JSON keys,
 structure, non-string values

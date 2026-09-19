@@ -469,11 +469,15 @@ block before creator access.
 Only selected raw text pieces enter bounded creator batches under opaque ordered
 IDs. The worker requires exact value ordering and trusted provider-completion
 evidence, reassembles against the source skeleton, and applies the same
-262,144-byte combined source/target review ceiling. The complete XML then
-receives the source-blind native review followed by the separate original
-preservation review. The Guard independently rebuilds the policy-bound selector,
-manifest, requests, completions and exact assembly. Automatic XML correction is
-disabled until a finding can be safely assigned to one exact selected value.
+262,144-byte combined source/target review ceiling. The source-blind reviewer
+receives only one ordered decoded projection of selected string, plural and
+string-array values from the complete assembled XML. Resource names, comments,
+attributes, namespace bindings, processing instructions and opaque resources are
+absent. The separate preservation reviewer receives the exact original and full
+assembled XML. Review evidence binds the projection and full target; the Guard
+independently recomputes both together with the policy-bound selector, manifest,
+requests, completions and exact assembly. Automatic XML correction is disabled
+until a finding can be safely assigned to one exact selected value.
 
 Segment cuts are allowed only at explicit whitespace or recognized sentence
 terminators. If a long unspaced input has no such safe boundary, the worker

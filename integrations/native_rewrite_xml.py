@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 POLICY = "raw-xml-element-text-v1"
 SELECTOR_PROFILE = "android-resources-v1"
+NATIVE_REVIEW_PROJECTION = "android-xml-values-target-only-v1"
 XML_SPACE = " \t\n\r"
 MAX_DEPTH = 128
 MAX_SPANS = 512
@@ -306,6 +307,7 @@ def parse(source: str) -> dict:
         raise XmlRewritePlanError("invalid")
     _semantic_preflight(source)
     leaves: list[dict] = []
+    review_values: list[str] = []
     stack: list[dict] = []
     root_children: dict[str, int] = {}
     position = 1 if source.startswith("\ufeff") else 0
@@ -438,6 +440,16 @@ def parse(source: str) -> dict:
             closed = stack.pop()
             if closed["linguistic"] and closed["child_elements"]:
                 raise XmlRewritePlanError("mixed_content")
+            if closed["eligible"] and closed["linguistic"] and not closed["preserved"]:
+                raw_value = source[closed["content_start"]:position]
+                if (len(raw_value) >= 2 and raw_value.startswith('"')
+                        and raw_value.endswith('"')):
+                    raw_value = raw_value[1:-1]
+                value = _decode_references(raw_value)
+                if (not value or not value.strip()
+                        or unicodedata.normalize("NFC", value) != value):
+                    raise XmlRewritePlanError("review_projection_invalid")
+                review_values.append(value)
             if not stack:
                 root_closed = True
             position = end + 1
@@ -547,6 +559,7 @@ def parse(source: str) -> dict:
                 "local_name": local_name, "eligible": eligible,
                 "namespaces": namespaces, "preserved": preserve_flag,
                 "linguistic": False, "child_elements": 0,
+                "content_start": end,
             })
         elif not stack:
             root_closed = True
@@ -556,7 +569,8 @@ def parse(source: str) -> dict:
     if selector_profile != SELECTOR_PROFILE or not leaves:
         raise XmlRewritePlanError("no_linguistic_spans")
     skeleton = _skeleton(source, leaves)
-    return {"leaves": leaves, "skeleton_sha256": _text_hash(skeleton)}
+    return {"leaves": leaves, "review_values": review_values,
+            "skeleton_sha256": _text_hash(skeleton)}
 
 
 def build_plan(source: str, chunk_chars: int, max_groups: int,
@@ -695,3 +709,20 @@ def target_value_map(target: str) -> tuple[dict[str, str], str]:
             raise XmlRewritePlanError("path_collision")
         values[leaf["path"]] = leaf["source"]
     return values, parsed["skeleton_sha256"]
+
+
+def native_review_text(target: str) -> str:
+    """Return only ordered localized values, never XML resource metadata."""
+    parsed = parse(target)
+    values = parsed["review_values"]
+    if not values or any(not isinstance(value, str) or not value.strip()
+                         for value in values):
+        raise XmlRewritePlanError("review_projection_invalid")
+    projection = "\n\n".join(values)
+    if not projection or unicodedata.normalize("NFC", projection) != projection:
+        raise XmlRewritePlanError("review_projection_invalid")
+    return projection
+
+
+def language_validation_text(target: str) -> str:
+    return native_review_text(target)

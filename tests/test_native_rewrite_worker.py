@@ -1620,12 +1620,78 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
-        self.assertEqual(native["input"]["candidate"], source)
+        self.assertEqual(native["input"]["candidate"],
+                         RW.XMLRW.native_review_text(source))
+        for forbidden in ("name=", "fixed-api-key", "<!-- fixed -->",
+                          "<?xml", "<resources"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        native_evidence, fidelity_evidence = result["evidence"]["reviews"]
+        self.assertEqual(native_evidence["scope"], "target_projection")
+        self.assertEqual(native_evidence["review_input_kind"],
+                         RW.XMLRW.NATIVE_REVIEW_PROJECTION)
+        self.assertEqual(native_evidence["review_input_sha256"],
+                         RW._text_hash(RW.XMLRW.native_review_text(source)))
+        self.assertEqual(native_evidence["reviewed_target_sha256"],
+                         RW._text_hash(source))
+        self.assertEqual(fidelity_evidence["scope"], "assembled_document")
+        self.assertEqual(fidelity_evidence["review_input_kind"],
+                         RW.ASSEMBLED_REVIEW_INPUT)
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], result["evidence"]["document"],
             content_type="documentation", request_id="long-xml-lossless",
             correction_history=[]))
+
+    def test_short_xml_native_review_is_metadata_blind(self):
+        source = ('<resources><!-- SECRET source comment -->'
+                  '<string name="SOURCE_SENTINEL.key">'
+                  'Luonteva teksti säilyttää luvun 42 ja {name}.'
+                  '</string></resources>')
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-xml-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva teksti säilyttää luvun 42 ja {name}.")
+        self.assertNotIn("SOURCE_SENTINEL", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertNotIn("scope", result["evidence"]["reviews"][0])
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.XMLRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_adapter_rejects_caller_selected_xml_identity_projection(self):
+        source = ('<resources><string name="SOURCE_SENTINEL.key">'
+                  'Luonteva kohdeteksti.</string></resources>')
+        host, creator = Host(), Creator(source)
+        worker, _ = self.worker(creator=creator, host=host)
+        provider = worker._adapter(creator)
+        job = {
+            "job_id": "native-rewrite-xml-projection-attack",
+            "provider": {"id": provider.provider_id,
+                         "model_id": worker._options["model_id"],
+                         "model_version": worker._options["model_version"]},
+        }
+        data = {
+            **worker._request_base("ui", job["job_id"]),
+            "source": {"text": source, "locale": worker.locale,
+                       "sha256": RW._text_hash(source)},
+            "glossary": [], **worker._options["native_brief"],
+            "native_review_projection": RW.IDENTITY_REVIEW_PROJECTION,
+            "budgets": {"timeout_seconds": worker._options["timeout_seconds"],
+                        "max_output_tokens": worker._options["max_output_tokens"]},
+            "response_schema": {"schema": RW.WORKER.CANDIDATE_SCHEMA,
+                                "phase": "transcreation", "locale": worker.locale,
+                                "candidate": "complete revised original"},
+        }
+        request = RW.WORKER._request(job, "transcreation", RW.CREATION, data)
+        with self.assertRaisesRegex(
+                RW.SUBAGENTS.SubagentReviewBlocked, "invalid_projection"):
+            provider.invoke(request)
+        self.assertFalse(creator.calls)
+        self.assertFalse(host.calls)
 
     def test_long_xml_before_after_changes_only_selected_text(self):
         source = ('<resources><string name="copy">'

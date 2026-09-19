@@ -159,7 +159,13 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertEqual([task["phase"] for task, _control in host.calls],
                              ["target_native", "source_fidelity"])
             self.assertNotIn("source", host.calls[0][0]["input"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.XMLRW.native_review_text(source))
+            for forbidden in ("name=", "SECRET", "<?xml", "<resources"):
+                self.assertNotIn(forbidden, native_candidate)
             self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertEqual(host.calls[1][0]["input"]["candidate"], source)
             self.assertTrue(self.verify(
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
@@ -406,6 +412,36 @@ class RewriteServiceTests(unittest.TestCase):
         result = service.handle(request)
         self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
                                   "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_xml_native_projection_and_rejects_tampering(self):
+        source = ('<resources><!-- SECRET source comment -->'
+                  '<string name="SOURCE_SENTINEL.key">'
+                  + ("Täsmällinen kohdeteksti säilyy 42. " * 220)
+                  + '</string></resources>')
+        mutations = (
+            lambda review: review.__setitem__("review_input_sha256", "0" * 64),
+            lambda review: review.__setitem__("review_input_kind", "identity-v1"),
+            lambda review: review.__setitem__("scope", "assembled_document"),
+            lambda review: review.__setitem__("reviewed_target_sha256", "0" * 64),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-xml-spans")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-xml-projection-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed["evidence"]["reviews"][0])
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
 
     def test_guard_recomputes_long_markdown_manifest_and_rejects_tampering(self):
         source = ("# Ohje\n\n"

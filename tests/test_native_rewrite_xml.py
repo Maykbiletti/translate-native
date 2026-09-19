@@ -54,6 +54,28 @@ class XmlPlanTests(unittest.TestCase):
         self.assertEqual(XML.assemble(source, state, self.unchanged(state)), source)
         self.assertEqual(XML.target_value_map(source)[1], manifest["skeleton_sha256"])
 
+    def test_native_review_projection_contains_only_decoded_localized_values(self):
+        source = (
+            '<?xml version="1.0"?><resources xmlns:x="urn:metadata">'
+            '<!-- SECRET source comment -->'
+            '<string name="SOURCE_SENTINEL.title">Selkeä otsikko 42.</string>'
+            '<plurals name="SOURCE_SENTINEL.count">'
+            '<item quantity="one">Yksi &amp; vain yksi {name}.</item>'
+            '<item quantity="other">Monta @string/app_name.</item></plurals>'
+            '<string name="fixed" translatable="false">DO-NOT-REVIEW</string>'
+            '</resources>'
+        )
+        self.assertEqual(
+            XML.native_review_text(source),
+            "Selkeä otsikko 42.\n\nYksi & vain yksi {name}.\n\n"
+            "Monta @string/app_name.",
+        )
+        projection = XML.native_review_text(source)
+        for forbidden in ("SOURCE_SENTINEL", "SECRET", "DO-NOT-REVIEW",
+                          "quantity", "urn:metadata", "<string"):
+            self.assertNotIn(forbidden, projection)
+        self.assertEqual(XML.language_validation_text(source), projection)
+
     def test_revises_text_without_reserializing_xml(self):
         source = (
             "<resources><string name='heading'>On tärkeää huomata tämä.</string>"

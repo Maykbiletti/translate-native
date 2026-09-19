@@ -3292,13 +3292,13 @@ and original go only to the separate preservation review; the Guard independentl
 recomputes the projection and full target. Unsupported or ambiguous syntax fails
 closed before creator access.
 
-Long and short GNU PO and Apple `.strings` native review is source-blind at the
-actual adapter boundary: the first reviewer receives only ordered decoded
-non-empty target values. PO `msgid` and plural source text, Apple keys, comments,
-headers, contexts, layout and creator metadata are absent. The fidelity reviewer
-still receives the exact original and assembled catalog, while the Guard
-independently recomputes and binds the target-only projection and full target
-before release.
+Long and short GNU PO, Apple `.strings`, and Android-resource XML native review
+is source-blind at the actual adapter boundary: the first reviewer receives only
+ordered decoded target values. PO `msgid` and plural source text, Apple keys, XML
+resource names/attributes, comments, headers, contexts, layout and creator
+metadata are absent. The fidelity reviewer still receives the exact original and
+assembled container, while the Guard independently recomputes and binds the
+target-only projection and full target before release.
 
 See [`PREMORTEM.md`](docs/PREMORTEM.md) for the failure modes, mitigations, and proof required before calling this system production-ready.
 
