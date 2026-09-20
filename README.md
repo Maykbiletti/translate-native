@@ -64,13 +64,24 @@ before signing; truncation, omission, reordering or an ambiguous segment blocks.
 Segments end only at explicit whitespace or recognized sentence terminators;
 an unspaced long input without a safe boundary blocks before model access rather
 than risking a split inside a native-script grapheme cluster.
-Long JSON, HTML, Android-resource XML, conservative Markdown, strict GNU PO and
+Long JSON, strict YAML localization mappings, HTML, Android-resource XML, simple XLIFF 1.2/2.0 targets, conservative Markdown, strict GNU PO and
 strict SRT/WebVTT subtitles use structure-aware rewriting; other long structured
 containers remain blocked rather than being silently shortened. A synthetic 29,705-character plain-text
 fixture exercises the bounded document route;
 it is not the user's unavailable text and not evidence of native quality.
 Locale/dialect evidence and real model/host configuration remain operator
 requirements; synthetic tests do not establish native quality in every language.
+
+Source-bearing structured results use target-only review projections. For HTML,
+the native reviewer receives ordered decoded visible copy and approved linguistic
+attributes, never tags, comments, scripts, code, link destinations, IDs or
+technical attributes. The later preservation reviewer still receives the exact
+original and complete assembled HTML, and the Guard recomputes both projection
+and full-target bindings before release.
+For SRT/WebVTT, the native reviewer receives ordered cue payloads without the
+subtitle header, cue identifiers, timestamps, settings or metadata blocks. The
+later preservation reviewer retains the exact full subtitle pair under the same
+Guard-recomputed projection and full-target binding.
 
 The [prose-style report](docs/prose-style-review.md) separates surface signals
 (repetition, sentence rhythm and supported stock transitions) from the Unicode
@@ -3277,11 +3288,30 @@ cannot enforce output validation.
 
 - JSON and ARB;
 - HTML including linguistic metadata and JSON-LD linguistic fields while protecting schema, URLs, types, code, and placeholders;
-- XML, Android resources, and structurally equivalent XLIFF documents;
+- XML structural checks, Android resources, and strict simple-target XLIFF 1.2/2.0 documents;
 - PO/POT catalogs;
 - Apple `.strings`;
 - SRT, VTT, and ASS subtitle timing;
 - ICU placeholders and plural/select contracts inside supported containers.
+
+Long same-language Apple `.strings` rewriting uses a separate strict lossless
+path: only decoded non-empty values reach the creator, while keys, comments,
+empty values, delimiters, escapes and layout remain host-owned. The isolated
+native reviewer likewise receives only the ordered decoded localized values,
+never keys, comments, layout or creator context. The complete assembled catalog
+and original go only to the separate preservation review; the Guard independently
+recomputes the projection and full target. Unsupported or ambiguous syntax fails
+closed before creator access.
+
+Long and short GNU PO, Apple `.strings`, Android-resource XML, simple-target XLIFF 1.2/2.0, and JSON/ARB native
+review is source-blind at the actual adapter boundary: the first reviewer
+receives only ordered decoded target values. PO `msgid` and plural source text,
+Apple and JSON keys, JSON paths/non-string scalars, XML resource names/attributes,
+XLIFF source segments, unit IDs and notes,
+comments, headers, contexts, layout and creator metadata are absent. The fidelity
+reviewer still receives the exact original and assembled container, while the
+Guard independently recomputes and binds the target-only projection and full
+target before release.
 
 See [`PREMORTEM.md`](docs/PREMORTEM.md) for the failure modes, mitigations, and proof required before calling this system production-ready.
 

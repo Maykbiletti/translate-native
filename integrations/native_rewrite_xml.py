@@ -15,8 +15,14 @@ import xml.etree.ElementTree as ElementTree
 from typing import Any, Callable
 
 
-POLICY = "raw-xml-element-text-v1"
+POLICY = "raw-xml-element-text-v2"
 SELECTOR_PROFILE = "android-resources-v1"
+XLIFF_12_PROFILE = "xliff-1.2-targets-v1"
+XLIFF_20_PROFILE = "xliff-2.0-targets-v1"
+SELECTOR_PROFILES = (SELECTOR_PROFILE, XLIFF_12_PROFILE, XLIFF_20_PROFILE)
+XLIFF_12_NAMESPACE = "urn:oasis:names:tc:xliff:document:1.2"
+XLIFF_20_NAMESPACE = "urn:oasis:names:tc:xliff:document:2.0"
+NATIVE_REVIEW_PROJECTION = "trusted-xml-values-target-only-v2"
 XML_SPACE = " \t\n\r"
 MAX_DEPTH = 128
 MAX_SPANS = 512
@@ -111,10 +117,22 @@ def effective_policy() -> dict:
         "reject_unclassified_android_sigil": True,
         "require_source_nfc_before_creator": True,
         "require_android_selector_attributes": True,
+        "xliff_translate_no_is_opaque": True,
+        "xliff_unselected_text_is_host_owned": True,
+        "xliff_inline_target_content": "reject",
         "plural_quantities": ["zero", "one", "two", "few", "many", "other"],
         "reject_mixed_content": True,
         "translate_attributes": False,
         "selector_profile": SELECTOR_PROFILE,
+        "selector_profiles": {
+            SELECTOR_PROFILE: {"namespace": "", "root": "resources"},
+            XLIFF_12_PROFILE: {"namespace": XLIFF_12_NAMESPACE,
+                               "root": "xliff", "version": "1.2",
+                               "selected": "trans-unit/target"},
+            XLIFF_20_PROFILE: {"namespace": XLIFF_20_NAMESPACE,
+                               "root": "xliff", "version": "2.0",
+                               "selected": "segment/target"},
+        },
         "selector_root": "resources",
         "selector_direct_elements": ["string"],
         "selector_collection_elements": ["plurals", "string-array"],
@@ -306,6 +324,7 @@ def parse(source: str) -> dict:
         raise XmlRewritePlanError("invalid")
     _semantic_preflight(source)
     leaves: list[dict] = []
+    review_values: list[str] = []
     stack: list[dict] = []
     root_children: dict[str, int] = {}
     position = 1 if source.startswith("\ufeff") else 0
@@ -334,7 +353,9 @@ def parse(source: str) -> dict:
         raw = source[start:end]
         if start >= end or not raw.strip():
             return 0
-        android_quoted = len(raw) >= 2 and raw.startswith('"') and raw.endswith('"')
+        android_profile = selector_profile == SELECTOR_PROFILE
+        android_quoted = (android_profile and len(raw) >= 2
+                          and raw.startswith('"') and raw.endswith('"'))
         if android_quoted:
             raw = raw[1:-1]
             start += 1
@@ -348,9 +369,10 @@ def parse(source: str) -> dict:
         remainder = PROTECTED_PATTERN.sub("", raw)
         if "&" in remainder:
             raise XmlRewritePlanError("unsupported_entity")
-        if "@" in remainder or "\\" in remainder:
+        if android_profile and ("@" in remainder or "\\" in remainder):
             raise XmlRewritePlanError("unsupported_android_syntax")
-        if '"' in remainder or ("'" in remainder and not android_quoted):
+        if android_profile and ('"' in remainder
+                                or ("'" in remainder and not android_quoted)):
             raise XmlRewritePlanError("android_string_syntax")
         added = 0
         cursor = 0
@@ -366,6 +388,7 @@ def parse(source: str) -> dict:
                     "start": part_start, "end": part_end, "source": part,
                     "source_sha256": _text_hash(part),
                     "android_quoted": android_quoted,
+                    "selector_profile": selector_profile,
                 })
                 added += 1
             if match is not None:
@@ -388,7 +411,8 @@ def parse(source: str) -> dict:
                         f"{stack[-1]['path']}/text()[{text_index}]", position, end)
                     if added:
                         stack[-1]["linguistic"] = True
-                elif raw.strip() and not preserved():
+                elif (raw.strip() and not preserved()
+                      and selector_profile == SELECTOR_PROFILE):
                     raise XmlRewritePlanError("unclassified_text")
             position = end
             continue
@@ -436,8 +460,19 @@ def parse(source: str) -> dict:
             if match is None or not stack or stack[-1]["name"] != match.group(1):
                 raise XmlRewritePlanError("unbalanced")
             closed = stack.pop()
-            if closed["linguistic"] and closed["child_elements"]:
+            if closed["eligible"] and closed["child_elements"]:
                 raise XmlRewritePlanError("mixed_content")
+            if closed["eligible"] and closed["linguistic"] and not closed["preserved"]:
+                raw_value = source[closed["content_start"]:position]
+                if (closed["selector_profile"] == SELECTOR_PROFILE
+                        and len(raw_value) >= 2 and raw_value.startswith('"')
+                        and raw_value.endswith('"')):
+                    raw_value = raw_value[1:-1]
+                value = _decode_references(raw_value)
+                if (not value or not value.strip()
+                        or unicodedata.normalize("NFC", value) != value):
+                    raise XmlRewritePlanError("review_projection_invalid")
+                review_values.append(value)
             if not stack:
                 root_closed = True
             position = end + 1
@@ -473,10 +508,6 @@ def parse(source: str) -> dict:
                 raise XmlRewritePlanError("undeclared_prefix")
         else:
             local_name = prefix
-        if len(stack) == 0:
-            if name != "resources" or namespaces.get("", ""):
-                raise XmlRewritePlanError("unsupported_profile")
-            selector_profile = SELECTOR_PROFILE
         expanded_attributes = set()
         for item in attributes:
             attr_name = item["name"]
@@ -494,6 +525,21 @@ def parse(source: str) -> dict:
             expanded_attributes.add(expanded)
         semantic_attributes = {item["name"]: item["decoded_value"]
                                for item in attributes}
+        element_prefix = prefix if ":" in name else ""
+        element_namespace = namespaces.get(element_prefix, "")
+        if len(stack) == 0:
+            if name == "resources" and not element_namespace:
+                selector_profile = SELECTOR_PROFILE
+            elif local_name == "xliff" and element_namespace == XLIFF_12_NAMESPACE:
+                if semantic_attributes.get("version") != "1.2":
+                    raise XmlRewritePlanError("unsupported_profile")
+                selector_profile = XLIFF_12_PROFILE
+            elif local_name == "xliff" and element_namespace == XLIFF_20_NAMESPACE:
+                if semantic_attributes.get("version") != "2.0":
+                    raise XmlRewritePlanError("unsupported_profile")
+                selector_profile = XLIFF_20_PROFILE
+            else:
+                raise XmlRewritePlanError("unsupported_profile")
         xi_uri = "http://www.w3.org/2001/XInclude"
         if ((local_name == "include" and namespaces.get(prefix if name.count(":") else "") == xi_uri)
                 or any(item["decoded_value"] == xi_uri for item in attributes
@@ -506,17 +552,20 @@ def parse(source: str) -> dict:
         unnamespaced = ":" not in name and not namespaces.get("", "")
         eligible = False
         selector_element = False
-        if len(stack) == 1 and name == "string" and unnamespaced:
+        if (selector_profile == SELECTOR_PROFILE
+                and len(stack) == 1 and name == "string" and unnamespaced):
             if not semantic_attributes.get("name", "").strip():
                 raise XmlRewritePlanError("selector_attribute_invalid")
             eligible = True
             selector_element = True
-        elif (len(stack) == 1 and name in {"plurals", "string-array"}
+        elif (selector_profile == SELECTOR_PROFILE
+              and len(stack) == 1 and name in {"plurals", "string-array"}
               and unnamespaced):
             if not semantic_attributes.get("name", "").strip():
                 raise XmlRewritePlanError("selector_attribute_invalid")
             selector_element = True
-        elif (len(stack) == 2 and name == "item" and unnamespaced
+        elif (selector_profile == SELECTOR_PROFILE
+              and len(stack) == 2 and name == "item" and unnamespaced
               and stack[-1]["name"] in {"plurals", "string-array"}
               and not stack[-1]["namespaces"].get("", "")):
             if stack[-1]["name"] == "plurals":
@@ -527,6 +576,31 @@ def parse(source: str) -> dict:
                 raise XmlRewritePlanError("selector_attribute_invalid")
             eligible = True
             selector_element = True
+        elif (selector_profile == XLIFF_12_PROFILE
+              and local_name == "target"
+              and element_namespace == XLIFF_12_NAMESPACE
+              and len(stack) == 4
+              and [item["local_name"] for item in stack]
+                  == ["xliff", "file", "body", "trans-unit"]
+              and all(item["namespace_uri"] == XLIFF_12_NAMESPACE
+                      for item in stack)):
+            eligible = True
+            selector_element = True
+        elif (selector_profile == XLIFF_20_PROFILE
+              and local_name == "target"
+              and element_namespace == XLIFF_20_NAMESPACE
+              and len(stack) == 4
+              and [item["local_name"] for item in stack]
+                  == ["xliff", "file", "unit", "segment"]
+              and all(item["namespace_uri"] == XLIFF_20_NAMESPACE
+                      for item in stack)):
+            eligible = True
+            selector_element = True
+        if (eligible and selector_profile in {XLIFF_12_PROFILE, XLIFF_20_PROFILE}
+                and stack[-1]["selected_child"]):
+            raise XmlRewritePlanError("selector_duplicate")
+        if eligible and selector_profile in {XLIFF_12_PROFILE, XLIFF_20_PROFILE}:
+            stack[-1]["selected_child"] = True
         preserve_flag = preserved()
         if (selector_element
                 and semantic_attributes.get("translatable", "").casefold() == "false"):
@@ -535,6 +609,9 @@ def parse(source: str) -> dict:
                 item["name"].split(":")[-1] == "translate"
                 and item["decoded_value"].casefold() == "no"
                 for item in attributes)):
+            preserve_flag = True
+        if (selector_profile in {XLIFF_12_PROFILE, XLIFF_20_PROFILE}
+                and semantic_attributes.get("translate", "").casefold() == "no"):
             preserve_flag = True
         if stack:
             stack[-1]["child_elements"] += 1
@@ -545,18 +622,24 @@ def parse(source: str) -> dict:
             stack.append({
                 "name": name, "path": path, "children": {}, "text_count": 0,
                 "local_name": local_name, "eligible": eligible,
+                "namespace_uri": element_namespace,
+                "selector_profile": selector_profile,
                 "namespaces": namespaces, "preserved": preserve_flag,
                 "linguistic": False, "child_elements": 0,
+                "selected_child": False,
+                "content_start": end,
             })
         elif not stack:
             root_closed = True
         position = end
     if stack or not root_seen or not root_closed:
         raise XmlRewritePlanError("unbalanced")
-    if selector_profile != SELECTOR_PROFILE or not leaves:
+    if selector_profile not in SELECTOR_PROFILES or not leaves:
         raise XmlRewritePlanError("no_linguistic_spans")
     skeleton = _skeleton(source, leaves)
-    return {"leaves": leaves, "skeleton_sha256": _text_hash(skeleton)}
+    return {"leaves": leaves, "review_values": review_values,
+            "selector_profile": selector_profile,
+            "skeleton_sha256": _text_hash(skeleton)}
 
 
 def build_plan(source: str, chunk_chars: int, max_groups: int,
@@ -593,6 +676,7 @@ def build_plan(source: str, chunk_chars: int, max_groups: int,
                 "source_sha256": chunk["source_sha256"], "path": leaf["path"],
                 "kind": leaf["kind"], "leaf_index": leaf_index,
                 "android_quoted": leaf["android_quoted"],
+                "selector_profile": leaf["selector_profile"],
                 "part_index": index, "previous_context": "", "next_context": "",
             })
         leaf_units = units[-len(unit_ids):] if unit_ids else []
@@ -606,6 +690,7 @@ def build_plan(source: str, chunk_chars: int, max_groups: int,
             "path": leaf["path"], "kind": leaf["kind"],
             "source_sha256": leaf["source_sha256"],
             "android_quoted": leaf["android_quoted"],
+            "selector_profile": leaf["selector_profile"],
             "prefix": prefix, "suffix": suffix, "separators": separators,
             "unit_ids": unit_ids,
         })
@@ -627,6 +712,7 @@ def build_plan(source: str, chunk_chars: int, max_groups: int,
         raise XmlRewritePlanError("too_large")
     for index, group in enumerate(groups):
         group["index"] = index
+        group["selector_profile"] = parsed["selector_profile"]
         group["chunk_id"] = "rewrite-xml-chunk-" + _hash({
             "policy": POLICY, "index": index,
             "values": [(item["value_id"], item["source_sha256"])
@@ -634,7 +720,7 @@ def build_plan(source: str, chunk_chars: int, max_groups: int,
         })
     manifest = {
         "schema": "translate-native.long-xml-manifest.v1", "policy": POLICY,
-        "selector_profile": SELECTOR_PROFILE,
+        "selector_profile": parsed["selector_profile"],
         "source_sha256": document_sha256, "source_chars": len(source),
         "source_bytes": len(source.encode("utf-8")),
         "skeleton_sha256": parsed["skeleton_sha256"],
@@ -660,8 +746,9 @@ def assemble(source: str, state: dict, candidates: dict[str, str]) -> str:
             if (not isinstance(candidate, str) or not candidate
                     or candidate != candidate.strip()
                     or not unicodedata.is_normalized("NFC", candidate)
-                    or '"' in candidate
-                    or ("'" in candidate and not leaf["android_quoted"])
+                    or (leaf["selector_profile"] == SELECTOR_PROFILE
+                        and ('"' in candidate
+                             or ("'" in candidate and not leaf["android_quoted"])))
                     or any(character in candidate for character in CANDIDATE_FORBIDDEN)
                     or "]]>" in candidate
                     or any(not _valid_xml_character(character) for character in candidate)):
@@ -695,3 +782,20 @@ def target_value_map(target: str) -> tuple[dict[str, str], str]:
             raise XmlRewritePlanError("path_collision")
         values[leaf["path"]] = leaf["source"]
     return values, parsed["skeleton_sha256"]
+
+
+def native_review_text(target: str) -> str:
+    """Return only ordered localized values, never XML resource metadata."""
+    parsed = parse(target)
+    values = parsed["review_values"]
+    if not values or any(not isinstance(value, str) or not value.strip()
+                         for value in values):
+        raise XmlRewritePlanError("review_projection_invalid")
+    projection = "\n\n".join(values)
+    if not projection or unicodedata.normalize("NFC", projection) != projection:
+        raise XmlRewritePlanError("review_projection_invalid")
+    return projection
+
+
+def language_validation_text(target: str) -> str:
+    return native_review_text(target)
