@@ -234,7 +234,7 @@ computed bound returns `rewrite.long_document_too_large` before model access.
 Unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
 summarized or routed through the short path. Long XML has the separate bounded
-Android-resource path described below, YAML has a strict localization-mapping
+Android-resource and simple-target XLIFF paths described below, YAML has a strict localization-mapping
 path, Markdown has a separate conservative
 raw-span path, GNU PO has a strict non-empty-`msgstr` path, Apple `.strings` has
 a strict non-empty-value path, and SRT/WebVTT has a strict cue-payload path.
@@ -457,12 +457,24 @@ back to plain-text segmentation.
 
 Long XML is deliberately narrower than generic XML because element names do not
 prove that a value is prose rather than a key, checksum, credential or program
-fragment. The first version therefore binds one trusted selector profile:
+fragment. It therefore binds explicit trusted selector profiles rather than
+guessing from arbitrary element names. The Android profile selects
 unnamespaced Android `<resources>` containing direct `<string>` values and
 `<item>` values directly under unnamespaced `<plurals>` or
 `<string-array>`. `translatable="false"` values remain opaque. Any other
 non-whitespace text is unclassified and blocks before creator access; a generic
 XML document is never guessed to be linguistic.
+
+The XLIFF profiles require the exact OASIS XLIFF 1.2 or 2.0 namespace and matching
+`version`. XLIFF 1.2 selects only one plain-text `<target>` on the direct
+`xliff/file/body/trans-unit/target` path; XLIFF 2.0 selects only one plain-text
+`<target>` on the direct `xliff/file/unit/segment/target` path. Source segments,
+notes, unit/file IDs, state and language attributes,
+namespace bindings and all other XML remain host-owned. `translate="no"`
+propagates as opaque. Inline target elements, unknown namespaces or versions and
+documents without a selected target fail before creator access. Inline markup in
+an unselected source remains protected container data and never reaches the
+source-blind reviewer.
 
 Direct strings and both collection types require a nonempty `name`. Plural
 items require one of Android's `zero`, `one`, `two`, `few`, `many` or `other`
@@ -499,9 +511,10 @@ Only selected raw text pieces enter bounded creator batches under opaque ordered
 IDs. The worker requires exact value ordering and trusted provider-completion
 evidence, reassembles against the source skeleton, and applies the same
 262,144-byte combined source/target review ceiling. The source-blind reviewer
-receives only one ordered decoded projection of selected string, plural and
-string-array values from the complete assembled XML. Resource names, comments,
-attributes, namespace bindings, processing instructions and opaque resources are
+receives only one ordered decoded projection of selected Android string, plural
+and string-array values or selected XLIFF targets from the complete assembled
+XML. Resource names, XLIFF sources/IDs/notes, comments, attributes, namespace
+bindings, processing instructions and opaque resources are
 absent. The separate preservation reviewer receives the exact original and full
 assembled XML. Review evidence binds the projection and full target; the Guard
 independently recomputes both together with the policy-bound selector, manifest,

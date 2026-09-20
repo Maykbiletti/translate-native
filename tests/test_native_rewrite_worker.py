@@ -1980,6 +1980,82 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
                          RW.XMLRW.NATIVE_REVIEW_PROJECTION)
 
+    def test_long_xliff_review_sees_only_targets_and_guard_rebuilds_profile(self):
+        target = "Selkeä kohdeteksti säilyttää luvun 42. " * 300
+        source = (
+            '<?xml version="1.0"?><xliff '
+            'xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2" '
+            'source-language="en" target-language="fi">'
+            '<file original="SECRET-file"><body><trans-unit id="SECRET-unit">'
+            '<source>Source text must never reach native review.</source>'
+            '<target state="translated">' + target + '</target>'
+            '<note>SECRET-note</note></trans-unit></body></file></xliff>'
+        )
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator("fixture-keeps-xml-spans"), host=host,
+            max_output_tokens=8192)
+        result = worker.run(source, "documentation", "long-xliff-source-blind")
+        self.assertEqual(result["target_text"], source)
+        self.assertTrue(all(call.input["selector_profile"]
+                            == RW.XMLRW.XLIFF_12_PROFILE
+                            for call in creator.calls))
+        owned = json.dumps([call.input["owned_values"] for call in creator.calls],
+                           ensure_ascii=False)
+        for forbidden in ("Source text", "SECRET-file", "SECRET-unit", "SECRET-note"):
+            self.assertNotIn(forbidden, owned)
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"], target)
+        self.assertNotIn("source", native["input"])
+        for forbidden in ("Source text", "SECRET", "trans-unit", "translated"):
+            self.assertNotIn(forbidden, native["input"]["candidate"])
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertTrue(worker.validate_document_evidence(
+            source, result["target_text"], result["evidence"]["document"],
+            content_type="documentation", request_id="long-xliff-source-blind",
+            correction_history=[]))
+        changed = result["target_text"].replace('id="SECRET-unit"', 'id="changed"')
+        self.assertFalse(worker.validate_document_evidence(
+            source, changed, result["evidence"]["document"],
+            content_type="documentation", request_id="long-xliff-source-blind",
+            correction_history=[]))
+
+    def test_short_xliff_native_review_is_source_and_metadata_blind(self):
+        source = (
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.0" '
+            'srcLang="en" trgLang="mt-MT"><file id="SECRET-file"><unit '
+            'id="SECRET-unit"><segment><source>Hidden source 42.</source>'
+            '<target>Test naturali jżomm in-numru 42.</target>'
+            '</segment></unit></file></xliff>'
+        )
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-xliff-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Test naturali jżomm in-numru 42.")
+        self.assertNotIn("Hidden source", json.dumps(native, ensure_ascii=False))
+        self.assertNotIn("SECRET", json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(result["target_text"], source)
+
+    def test_short_unsupported_xliff_blocks_before_creator(self):
+        cases = (
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="2.0">'
+            '<file><body><trans-unit id="x"><target>Wrong version.</target>'
+            '</trans-unit></body></file></xliff>',
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.0">'
+            '<file id="f"><unit id="u"><segment><target><ph id="1"/></target>'
+            '</segment><segment><target>Other.</target></segment></unit></file></xliff>',
+        )
+        for index, source in enumerate(cases):
+            worker, creator = self.worker(creator=Creator("unused"))
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(RW.NativeRewriteBlocked, "long_xml_"):
+                    worker.run(source, "ui", "short-xliff-invalid-" + str(index))
+                self.assertFalse(creator.calls)
+
     def test_adapter_rejects_caller_selected_xml_identity_projection(self):
         source = ('<resources><string name="SOURCE_SENTINEL.key">'
                   'Luonteva kohdeteksti.</string></resources>')
@@ -2084,6 +2160,13 @@ class RewriteTests(unittest.TestCase):
             '<resources><string name="x" xml:space="preserve"> Text </string></resources>',
             '<?xml version="1.0"?><catalog><title>'
             'Generic XML is unsupported.</title></catalog>',
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="2.0">'
+            '<file><body><trans-unit id="x"><target>Wrong version</target>'
+            '</trans-unit></body></file></xliff>',
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.0">'
+            '<file id="f"><unit id="u"><segment><source>Source</source>'
+            '<target>Text <ph id="1"/>continued</target></segment>'
+            '</unit></file></xliff>',
             '<resources><!--x---><string name="x">Text</string></resources>',
             '<resources><string name="x"other="y">Text</string></resources>',
             '<resources><string name="x">Text</string></resources>\u00a0',

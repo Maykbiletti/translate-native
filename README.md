@@ -64,7 +64,7 @@ before signing; truncation, omission, reordering or an ambiguous segment blocks.
 Segments end only at explicit whitespace or recognized sentence terminators;
 an unspaced long input without a safe boundary blocks before model access rather
 than risking a split inside a native-script grapheme cluster.
-Long JSON, strict YAML localization mappings, HTML, Android-resource XML, conservative Markdown, strict GNU PO and
+Long JSON, strict YAML localization mappings, HTML, Android-resource XML, simple XLIFF 1.2/2.0 targets, conservative Markdown, strict GNU PO and
 strict SRT/WebVTT subtitles use structure-aware rewriting; other long structured
 containers remain blocked rather than being silently shortened. A synthetic 29,705-character plain-text
 fixture exercises the bounded document route;
@@ -3288,7 +3288,7 @@ cannot enforce output validation.
 
 - JSON and ARB;
 - HTML including linguistic metadata and JSON-LD linguistic fields while protecting schema, URLs, types, code, and placeholders;
-- XML, Android resources, and structurally equivalent XLIFF documents;
+- XML structural checks, Android resources, and strict simple-target XLIFF 1.2/2.0 documents;
 - PO/POT catalogs;
 - Apple `.strings`;
 - SRT, VTT, and ASS subtitle timing;
@@ -3303,10 +3303,11 @@ and original go only to the separate preservation review; the Guard independentl
 recomputes the projection and full target. Unsupported or ambiguous syntax fails
 closed before creator access.
 
-Long and short GNU PO, Apple `.strings`, Android-resource XML, and JSON/ARB native
+Long and short GNU PO, Apple `.strings`, Android-resource XML, simple-target XLIFF 1.2/2.0, and JSON/ARB native
 review is source-blind at the actual adapter boundary: the first reviewer
 receives only ordered decoded target values. PO `msgid` and plural source text,
 Apple and JSON keys, JSON paths/non-string scalars, XML resource names/attributes,
+XLIFF source segments, unit IDs and notes,
 comments, headers, contexts, layout and creator metadata are absent. The fidelity
 reviewer still receives the exact original and assembled container, while the
 Guard independently recomputes and binds the target-only projection and full

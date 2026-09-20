@@ -213,6 +213,49 @@ class RewriteServiceTests(unittest.TestCase):
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
 
+    def test_long_xliff_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä kohdeteksti säilyttää ääkköset ja numeron 42. "),
+            ("mt-MT", "Test naturali jżomm ċ, ġ, għ, ħ, ż u n-numru 42. "),
+            ("ar", "نص طبيعي يحافظ على الرقم 42 وعلامات الترقيم. "),
+        )
+        for index, (locale, seed) in enumerate(cases):
+            source = (
+                '<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" '
+                'version="2.0" srcLang="en" trgLang="' + locale + '">'
+                '<file id="SECRET-file"><unit id="SECRET-unit"><segment>'
+                '<source>Source text must remain hidden from native review.</source>'
+                '<target>' + (seed * 300) + '</target></segment>'
+                '<notes><note>SECRET-note</note></notes>'
+                '</unit></file></xliff>'
+            )
+            creator = FIX.Creator("fixture-keeps-xml-spans")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-xliff-" + str(index)
+            result = self.rewrite(client, source_text=source, language=locale,
+                                  request_id=request_id,
+                                  content_type="documentation")
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            self.assertTrue(all(call.input["selector_profile"]
+                                == FIX.RW.XMLRW.XLIFF_20_PROFILE
+                                for call in creator.calls))
+            self.assertEqual([task["phase"] for task, _control in host.calls],
+                             ["target_native", "source_fidelity"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.XMLRW.native_review_text(source))
+            for forbidden in ("Source text", "SECRET", "<xliff", "srcLang"):
+                self.assertNotIn(forbidden, native_candidate)
+            self.assertNotIn("source", host.calls[0][0]["input"])
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertEqual(host.calls[1][0]["input"]["candidate"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id, content_type="documentation")["valid"])
+
     def test_long_markdown_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
         cases = (
             ("fi-FI", "Selkeä teksti säilyttää ääkköset ja numeron 42. "),

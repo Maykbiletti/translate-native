@@ -111,6 +111,78 @@ class XmlPlanTests(unittest.TestCase):
         self.assertNotIn("Älä paljasta.", joined)
         self.assertEqual(XML.assemble(source, state, self.unchanged(state)), source)
 
+    def test_xliff_12_exposes_only_simple_target_values(self):
+        source = (
+            '<?xml version="1.0"?><xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" '
+            'version="1.2" source-language="en" target-language="fi">'
+            '<file original="SECRET-file"><body>'
+            '<trans-unit id="SECRET-unit"><source>Do not review source 42.</source>'
+            '<target state="translated">Selkeä kohdeteksti 42.</target>'
+            '<note>SECRET reviewer note</note></trans-unit>'
+            '<trans-unit id="fixed" translate="no"><source>Fixed source.</source>'
+            '<target>Älä paljasta tätä.</target></trans-unit>'
+            '</body></file></xliff>'
+        )
+        manifest, state = self.plan(source)
+        self.assertEqual(manifest["selector_profile"], XML.XLIFF_12_PROFILE)
+        joined = "\n".join(
+            unit["source"] for group in state["groups"] for unit in group["units"])
+        self.assertEqual(joined, "Selkeä kohdeteksti 42.")
+        self.assertEqual(XML.native_review_text(source), "Selkeä kohdeteksti 42.")
+        for hidden in ("Do not review", "SECRET", "Älä paljasta", "translated"):
+            self.assertNotIn(hidden, joined)
+        self.assertEqual(XML.assemble(source, state, self.unchanged(state)), source)
+
+    def test_xliff_20_supports_prefixed_targets_and_natural_quotes(self):
+        source = (
+            '<x:xliff xmlns:x="urn:oasis:names:tc:xliff:document:2.0" '
+            'version="2.0" srcLang="en" trgLang="mt-MT">'
+            '<x:file id="SECRET-file"><x:unit id="SECRET-unit"><x:segment>'
+            '<x:source>Source must stay hidden.</x:source>'
+            '<x:target>Dan hu test ta\' Mira u qalet "iva".</x:target>'
+            '</x:segment></x:unit></x:file></x:xliff>'
+        )
+        manifest, state = self.plan(source)
+        self.assertEqual(manifest["selector_profile"], XML.XLIFF_20_PROFILE)
+        self.assertEqual(XML.native_review_text(source),
+                         'Dan hu test ta\' Mira u qalet "iva".')
+        candidates = self.unchanged(state)
+        candidates[next(iter(candidates))] = 'Mira qalet "iva" b\'mod naturali.'
+        target = XML.assemble(source, state, candidates)
+        self.assertIn('>Mira qalet "iva" b\'mod naturali.</x:target>', target)
+        self.assertIn('<x:source>Source must stay hidden.</x:source>', target)
+
+    def test_xliff_unknown_profiles_inline_targets_and_missing_targets_block(self):
+        cases = (
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="2.0">'
+            '<file><body><trans-unit id="x"><target>Text</target></trans-unit>'
+            '</body></file></xliff>',
+            '<xliff xmlns="urn:example:xliff" version="1.2"><target>Text</target></xliff>',
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">'
+            '<file><body><trans-unit id="x"><source>Source</source>'
+            '<target>Text <ph id="1"/>continued</target></trans-unit>'
+            '</body></file></xliff>',
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.0">'
+            '<file id="f"><unit id="u"><segment><source>Source only</source>'
+            '</segment></unit></file></xliff>',
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.0">'
+            '<file id="f"><unit id="u"><segment><source>Source</source>'
+            '<target><ph id="1"/></target></segment><segment>'
+            '<target>Another eligible target.</target></segment>'
+            '</unit></file></xliff>',
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" version="2.0">'
+            '<file id="f"><group id="g"><unit id="u"><segment>'
+            '<target>Unsupported nesting.</target></segment></unit></group>'
+            '</file></xliff>',
+            '<xliff xmlns="urn:oasis:names:tc:xliff:document:1.2" version="1.2">'
+            '<file><body><trans-unit id="x"><target>First.</target>'
+            '<target>Duplicate.</target></trans-unit></body></file></xliff>',
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                with self.assertRaises(XML.XmlRewritePlanError):
+                    self.plan(source)
+
     def test_dangerous_ambiguous_or_unsupported_xml_blocks(self):
         cases = (
             '<!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]><r>&x;</r>',

@@ -21,6 +21,7 @@ Before editing, identify:
 | YAML | User-visible scalar values | Keys, indentation semantics, anchors, tags, types |
 | PO / POT | `msgstr`; contextual human copy | `msgid`, comments, flags, plural indices, format tokens |
 | Android XML | Text nodes intended for users | Resource names, tags, escapes, `%` placeholders, quantity items |
+| XLIFF 1.2 / 2.0 | Simple `target` text in the documented profile | `source`, unit IDs, notes, attributes, namespaces, inline markup |
 | Apple strings | Values | Keys unless product rules say otherwise, format specifiers, escapes |
 | ICU MessageFormat | Text within every branch | Argument names, selector keys, braces, plural/select structure |
 | HTML / JSX | Rendered text and approved linguistic attributes | Tag structure, attribute names, technical values, URLs, expressions, component names |
@@ -42,6 +43,14 @@ Sequences, anchors, aliases, tags, merge keys, block scalars, flow collections,
 directives, document markers, tabs, non-JSON-compatible implicit scalars and ambiguous
 plain values block before model access. Markdown front matter remains governed
 by the separate Markdown profile.
+
+The automated XLIFF rewrite profile accepts only namespace- and version-matched
+XLIFF 1.2 `file/body/trans-unit/target` or XLIFF 2.0
+`file/unit/segment/target` elements containing one plain-text target. Source
+segments, notes, IDs, attributes, namespaces and other XML
+bytes remain host-owned. `translate="no"`, inline target markup, unknown XLIFF
+namespaces or versions, DTD/CDATA and documents without an eligible target block
+before model access.
 
 The automated long-rewrite profile is deliberately narrower than the general
 Markdown guidance above. It rewrites only unambiguous prose in headings,
