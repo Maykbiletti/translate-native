@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -52,6 +53,36 @@ class _CapacityUnavailable(RuntimeError):
 class DeadlineURLTransport:
     """Run one HTTPS exchange in a killable process with a wall deadline."""
 
+    @staticmethod
+    def _terminate(process: subprocess.Popen) -> None:
+        """Stop the worker and its pipe-inheriting descendants without hanging."""
+        if process.poll() is None:
+            if os.name != "nt":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except (OSError, ValueError):
+                    process.kill()
+            else:
+                process.kill()
+        try:
+            process.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            # A broken or unkillable worker must not turn cleanup into a new
+            # unbounded console wait. Closing our pipe endpoints is safe after
+            # the request has already failed closed.
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+            try:
+                process.wait(timeout=1.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
     def post(self, url: str, headers: dict[str, str], body: bytes, *, timeout: float):
         try:
             request = json.dumps({
@@ -74,13 +105,11 @@ class DeadlineURLTransport:
             output, _error = process.communicate(request, timeout=float(timeout))
         except subprocess.TimeoutExpired:
             if process is not None:
-                process.kill()
-                process.communicate()
+                self._terminate(process)
             raise HTTP.HTTPReviewHostFailed("http.timeout", retryable=True) from None
         except (OSError, subprocess.SubprocessError):
             if process is not None and process.poll() is None:
-                process.kill()
-                process.communicate()
+                self._terminate(process)
             raise HTTP.HTTPReviewHostFailed("http.network", retryable=True) from None
         if (process.returncode != 0 or not output
                 or len(output) > MAX_TRANSPORT_MESSAGE_BYTES):
