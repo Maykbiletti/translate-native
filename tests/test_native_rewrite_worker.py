@@ -38,6 +38,16 @@ class Creator:
                     "completion_status": "complete",
                     "values": [{"value_id": item["value_id"], "candidate": value}
                                for item, value in zip(request.input["owned_values"], values)]}
+        if request.input["response_schema"]["schema"] == RW.LONG_YAML_SCHEMA:
+            values = (candidate if isinstance(candidate, list)
+                      and len(candidate) == len(request.input["owned_values"])
+                      else [item["text"] for item in request.input["owned_values"]])
+            return {"schema": RW.LONG_YAML_SCHEMA, "phase": "transcreation",
+                    "locale": request.input["target"]["locale"],
+                    "chunk_id": request.input["chunk_id"],
+                    "completion_status": "complete",
+                    "values": [{"value_id": item["value_id"], "candidate": value}
+                               for item, value in zip(request.input["owned_values"], values)]}
         if request.input["response_schema"]["schema"] == RW.LONG_HTML_SCHEMA:
             values = (candidate if isinstance(candidate, list)
                       and len(candidate) == len(request.input["owned_values"])
@@ -881,6 +891,75 @@ class RewriteTests(unittest.TestCase):
         for source, candidate in cases:
             with self.subTest(source=source):
                 self.assertTrue(RW.integrity_errors(source, candidate))
+
+    def test_long_yaml_preserves_container_and_reviews_only_values(self):
+        source = (
+            '# SECRET comment stays host-owned\r\n'
+            'hero:\r\n'
+            '  title: "On tärkeää huomata, että otsikko on selkeä."\r\n'
+            '  body: "' + ("Pitkä luonteva teksti säilyttää luvun 42 ja termin Tuote. " * 180)
+            + '" # https://fixed.test\r\n'
+            "cta: 'Aloita nyt {name}.'\r\n")
+
+        def revise(request):
+            return [item["text"].replace(
+                "On tärkeää huomata, että otsikko on selkeä.",
+                "Otsikko on selkeä.") for item in request.input["owned_values"]]
+
+        host = Host()
+        worker, creator = self.worker(
+            creator=Creator(revise), host=host, max_output_tokens=8192)
+        result = worker.run(source, "marketing", "long-yaml-lossless")
+        target = result["target_text"]
+        self.assertIn('title: "Otsikko on selkeä."', target)
+        self.assertIn("# SECRET comment stays host-owned", target)
+        self.assertIn("# https://fixed.test", target)
+        self.assertIn("cta: 'Aloita nyt {name}.'", target)
+        self.assertEqual(result["evidence"]["document"]["schema"],
+                         RW.LONG_YAML_EVIDENCE_SCHEMA)
+        self.assertTrue(all(call.input["container_format"] == "yaml"
+                            for call in creator.calls))
+        owned = json.dumps([call.input["owned_values"] for call in creator.calls],
+                           ensure_ascii=False)
+        for hidden in ("SECRET", "hero", "title", "body", "fixed.test", "cta"):
+            self.assertNotIn(hidden, owned)
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         RW.YAMLRW.native_review_text(target))
+        for hidden in ("SECRET", "hero", "title", "fixed.test", "cta"):
+            self.assertNotIn(hidden, json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(fidelity["input"]["candidate"], target)
+        self.assertTrue(worker.validate_document_evidence(
+            source, target, result["evidence"]["document"],
+            content_type="marketing", request_id="long-yaml-lossless",
+            correction_history=[]))
+
+    def test_short_yaml_native_review_is_metadata_blind(self):
+        source = ('# SECRET\ninternal.key: "Luonteva teksti 42."\n'
+                  "cta: 'Aloita nyt {name}.' # fixed.test\n")
+        host = Host()
+        worker, _creator = self.worker(creator=Creator(source), host=host)
+        result = worker.run(source, "ui", "short-yaml-source-blind")
+        native, fidelity = (task for task, _control in host.calls)
+        self.assertEqual(native["input"]["candidate"],
+                         "Luonteva teksti 42.\n\nAloita nyt {name}.")
+        for hidden in ("SECRET", "internal.key", "cta", "fixed.test"):
+            self.assertNotIn(hidden, json.dumps(native, ensure_ascii=False))
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertEqual(result["evidence"]["reviews"][0]["review_input_kind"],
+                         RW.YAMLRW.NATIVE_REVIEW_PROJECTION)
+
+    def test_yaml_unsupported_features_block_before_creator(self):
+        for index, source in enumerate((
+                "base: &base text\ncopy: *base\n",
+                "items:\n  - one\nother: text\n",
+                "body: |\n  multiline\ntitle: Text\n")):
+            worker, creator = self.worker()
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    RW.NativeRewriteBlocked, "long_yaml_"):
+                worker.run(source, "documentation", "yaml-block-" + str(index))
+            self.assertFalse(creator.calls)
 
     def test_long_po_preserves_host_owned_container_and_reviews_whole_catalog(self):
         source = (

@@ -110,6 +110,35 @@ class RewriteServiceTests(unittest.TestCase):
                 service, result, source_text=source, language=locale,
                 request_id=request_id)["valid"])
 
+    def test_long_yaml_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä arvo säilyttää ääkköset ja numeron 42. ", "Kokeile nyt {name}."),
+            ("mt-MT", "Valur ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42. ", "Ipprova issa {name}."),
+            ("ar", "نص واضح يحافظ على الرقم 42 وعلامات الترقيم. ", "جرّب الآن {name}."),
+        )
+        for index, (locale, seed, cta) in enumerate(cases):
+            source = ('# SECRET host metadata\nhero:\n'
+                      '  copy: "' + seed * 180 + '"\n'
+                      "cta: '" + cta + "' # fixed.test\n")
+            creator = FIX.Creator("fixture-keeps-yaml-values")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-yaml-" + str(index)
+            result = self.rewrite(client, source_text=source, language=locale,
+                                  request_id=request_id)
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.YAMLRW.native_review_text(source))
+            for hidden in ("SECRET", "hero", "copy", "cta", "fixed.test"):
+                self.assertNotIn(hidden, native_candidate)
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id)["valid"])
+
     def test_long_html_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
         cases = (
             ("fi-FI", "Selkeä teksti säilyttää ääkköset ja numeron 42. "),
@@ -605,6 +634,37 @@ class RewriteServiceTests(unittest.TestCase):
         result = service.handle(request)
         self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
                                   "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_yaml_manifest_and_projection(self):
+        source = ('# SECRET source comment\nhero:\n  copy: "'
+                  + ("Täsmällinen kohdeteksti säilyy 42. " * 240)
+                  + '"\ncta: "Aloita nyt {name}."\n')
+        mutations = (
+            lambda value: value["evidence"]["document"]["groups"][0].__setitem__(
+                "creation_response_sha256", "0" * 64),
+            lambda value: value["evidence"]["reviews"][0].__setitem__(
+                "review_input_sha256", "0" * 64),
+            lambda value: value["evidence"]["reviews"][0].__setitem__(
+                "review_input_kind", "identity-v1"),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-yaml-values")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-yaml-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed)
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
 
     def test_guard_recomputes_markdown_native_projection_and_rejects_tampering(self):
         source = ("# Ohje\n\n"

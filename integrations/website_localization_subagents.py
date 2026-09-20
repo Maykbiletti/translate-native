@@ -198,6 +198,7 @@ class HostSubagentProvider:
             ordinary = expected_schema == "blun.website-localization-candidate.v1"
             chunk = expected_schema == "translate-native.native-rewrite-chunk.v1"
             json_chunk = expected_schema == "translate-native.native-rewrite-json-chunk.v1"
+            yaml_chunk = expected_schema == "translate-native.native-rewrite-yaml-chunk.v1"
             html_chunk = expected_schema == "translate-native.native-rewrite-html-chunk.v1"
             xml_chunk = expected_schema == "translate-native.native-rewrite-xml-chunk.v1"
             markdown_chunk = expected_schema == "translate-native.native-rewrite-markdown-chunk.v1"
@@ -205,7 +206,7 @@ class HostSubagentProvider:
             apple_strings_chunk = expected_schema == (
                 "translate-native.native-rewrite-apple-strings-chunk.v1")
             subtitle_chunk = expected_schema == "translate-native.native-rewrite-subtitle-chunk.v1"
-            structured_chunk = (json_chunk or html_chunk or xml_chunk
+            structured_chunk = (json_chunk or yaml_chunk or html_chunk or xml_chunk
                                 or markdown_chunk or po_chunk
                                 or apple_strings_chunk or subtitle_chunk)
             fields = ({"schema", "phase", "locale", "candidate"} if ordinary else

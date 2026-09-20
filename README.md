@@ -64,7 +64,7 @@ before signing; truncation, omission, reordering or an ambiguous segment blocks.
 Segments end only at explicit whitespace or recognized sentence terminators;
 an unspaced long input without a safe boundary blocks before model access rather
 than risking a split inside a native-script grapheme cluster.
-Long JSON, HTML, Android-resource XML, conservative Markdown, strict GNU PO and
+Long JSON, strict YAML localization mappings, HTML, Android-resource XML, conservative Markdown, strict GNU PO and
 strict SRT/WebVTT subtitles use structure-aware rewriting; other long structured
 containers remain blocked rather than being silently shortened. A synthetic 29,705-character plain-text
 fixture exercises the bounded document route;

@@ -33,6 +33,16 @@ it rewrites only non-empty quoted values. Keys, comments, separators, quoting,
 escapes, empty values, whitespace and line endings stay host-owned; unsupported
 or ambiguous syntax blocks instead of falling back to plain prose.
 
+The automated YAML rewrite profile is likewise deliberately narrow. It accepts
+UTF-8 NFC localization resources made only from two-space-indented nested
+mappings with conservative plain keys and single-quoted, double-quoted or
+unambiguous plain string scalars. Only non-empty decoded values are rewritten.
+Keys, comments, indentation, quoting style and line endings remain byte-exact.
+Sequences, anchors, aliases, tags, merge keys, block scalars, flow collections,
+directives, document markers, tabs, non-JSON-compatible implicit scalars and ambiguous
+plain values block before model access. Markdown front matter remains governed
+by the separate Markdown profile.
+
 The automated long-rewrite profile is deliberately narrower than the general
 Markdown guidance above. It rewrites only unambiguous prose in headings,
 paragraphs and list items. Front matter, blockquotes, code, complete links and

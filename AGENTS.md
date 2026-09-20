@@ -30,7 +30,7 @@
 - The trusted host must bind the complete original, exact locale, registered profile, stable request ID, session epoch and writer identity in a one-time rewrite context before any creator or reviewer starts. The model must not select its own profile or dialect.
 - Use a dialect profile only when the user requested that variety. Missing, forged, replayed, stale or conflicting context blocks before model work.
 - Deliver only the exact Guard-returned target with its rewrite-purpose receipt. The target-only native review runs before the separate original-preservation review; any later edit requires both reviews again.
-- Never shorten or summarize a long original to fit one model call. Only the trusted worker may segment plain text or a specifically supported structured profile; release requires exact reassembly evidence plus fresh whole-document native and preservation reviews. JSON, the documented HTML subset, the versioned Android-resource XML selector, conservative long Markdown, strict GNU-PO `msgstr`, strict Apple `.strings` values, and strict SRT/WebVTT cue payloads have structure-aware paths. Every other long structured input remains blocked.
+- Never shorten or summarize a long original to fit one model call. Only the trusted worker may segment plain text or a specifically supported structured profile; release requires exact reassembly evidence plus fresh whole-document native and preservation reviews. JSON, the strict YAML localization-mapping subset, the documented HTML subset, the versioned Android-resource XML selector, conservative long Markdown, strict GNU-PO `msgstr`, strict Apple `.strings` values, and strict SRT/WebVTT cue payloads have structure-aware paths. Every other long structured input remains blocked.
 
 ## Repository changes
 

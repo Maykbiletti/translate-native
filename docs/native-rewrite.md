@@ -234,9 +234,28 @@ computed bound returns `rewrite.long_document_too_large` before model access.
 Unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
 summarized or routed through the short path. Long XML has the separate bounded
-Android-resource path described below, Markdown has a separate conservative
+Android-resource path described below, YAML has a strict localization-mapping
+path, Markdown has a separate conservative
 raw-span path, GNU PO has a strict non-empty-`msgstr` path, Apple `.strings` has
 a strict non-empty-value path, and SRT/WebVTT has a strict cue-payload path.
+
+Long YAML localization mappings use a versioned lossless raw-span plan. Only
+decoded non-empty string scalars become creator-owned. Keys, comments,
+indentation, quoting style, line endings and supported JSON-compatible null,
+boolean and number values remain host-owned bytes. The accepted subset is intentionally conservative: nested
+two-space mappings with plain safe keys and single-quoted, JSON-compatible
+double-quoted or unambiguous plain strings. Sequences, tags, anchors, aliases,
+merge keys, flow collections, block scalars, directives, document markers,
+tabs, duplicate paths and other implicit non-string scalars fail closed before model
+access. A paired Markdown front-matter block followed by document prose keeps
+the existing Markdown route.
+
+Creator batches contain only opaque IDs, decoded value parts and bounded
+neighboring excerpts from the same value. The source-blind reviewer receives
+only the ordered decoded target values; keys, paths and YAML syntax remain
+absent. The fidelity reviewer receives the complete original and assembled
+target. The Guard independently rebuilds the plan, projection, hashes,
+completion evidence and byte-exact skeleton before release.
 Token/cost reservation must use the
 computed long plan, not assume five calls. Segment policy, budget, correction
 limit and all instructions are part of the effective profile hash, so a policy
