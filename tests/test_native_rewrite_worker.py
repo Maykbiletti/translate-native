@@ -2187,7 +2187,12 @@ class RewriteTests(unittest.TestCase):
         native, fidelity = (task for task, _control in host.calls)
         self.assertNotIn("source", native["input"])
         self.assertNotIn("manifest", json.dumps(native))
-        self.assertEqual(native["input"]["candidate"], source)
+        self.assertEqual(native["input"]["candidate"],
+                         RW.MDRW.native_review_text(source))
+        for protected in (
+                "fixed deployment", "{{name}}", "rm -rf", "https://",
+                "lainaus", "SECRET", "```", "# "):
+            self.assertNotIn(protected, native["input"]["candidate"])
         self.assertEqual(fidelity["input"]["source"]["text"], source)
         self.assertTrue(worker.validate_document_evidence(
             source, result["target_text"], result["evidence"]["document"],
