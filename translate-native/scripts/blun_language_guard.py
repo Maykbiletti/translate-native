@@ -21,9 +21,9 @@ PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", PROTOCOL_VERSION}
 EXACT_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$")
 MCP_INSTRUCTIONS = (
-    "Treat every user-visible natural-language answer as an untrusted candidate. "
-    "For original answers without an input draft, call release_response with the complete answer and exact language tag; "
-    "the trusted host must inject a one-time context and run a separate source-blind native review. "
+    "Ordinary conversations require no release_response call, release envelope, or second model review. "
+    "Keep native spelling and diacritics. The legacy MANDATORY setting does not enable response review. "
+    "Only an explicitly requested optional response review uses release_response with trusted isolated context. "
     "For every translation, localization, or transcreation, first apply "
     "the installed translate-native skill/plugin and then call release_translation with the complete "
     "source-target pair and truthful seven-pass attestations. Never use release_response to bypass "
@@ -32,7 +32,7 @@ MCP_INSTRUCTIONS = (
     "with the complete original, host-injected one-time rewrite context, explicit host profile and stable request ID. Its isolated native review "
     "precedes meaning-preservation review; missing host support blocks. Rewrite receipts cross only a "
     "rewrite-aware trusted delivery adapter or the protected Claude Stop/SubagentStop path. "
-    "When BLUN_LANGUAGE_GUARD_MANDATORY=1, final stdout must be exactly one JSON object containing "
+    "For protected translation or rewrite delivery, final stdout must be exactly one JSON object containing "
     "only target_text and release_token; never call a delivery channel directly or include host-owned policy fields."
 )
 

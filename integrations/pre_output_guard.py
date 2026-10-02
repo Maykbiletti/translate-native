@@ -111,6 +111,9 @@ def main() -> int:
             raise ValueError("translation receipts require source_text")
         if task_kind == "response" and source.strip():
             raise ValueError("response receipts cannot carry source_text")
+        if task_kind == "response" and os.environ.get("BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW") != "1":
+            print(json.dumps({"allow": True, "review_required": False}))
+            return 0
         if task_kind == "rewrite":
             result = verify_rewrite(request)
             print(json.dumps({"allow": True, "verification": result}))

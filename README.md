@@ -14,6 +14,15 @@
 
 # Translate Native
 
+### Version 6.198.0: conversation scope and complete plugin update
+
+Ordinary conversations no longer require a second language-review model call, a release receipt, or an envelope. Legacy `BLUN_LANGUAGE_GUARD_MANDATORY=1` alone cannot enable response review. Native spelling and diacritics remain expected. Published translations and requested revisions retain their isolated review and protected one-time delivery paths.
+
+Optional response review requires a new explicit host request: `BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW=1`, King adapter `languageGuardResponseReview: true`, or portable delivery CLI `--review-response`. Do not migrate an old mandatory setting into these options. Hosts must classify publication tasks as translation/rewrite before model execution; unclassified publication-tool calls are rejected. Update the plugin and reload plugins or start a new session so cached instructions and hooks are replaced.
+
+This release also includes all structured reviewer isolation changes, bounded console-timeout cleanup, YAML/XLIFF rewriting, and the exact-byte one-time Telegram delivery fix. The earlier response-enforcement descriptions below document prior releases and explicit review mode.
+
+
 ### Meaning in. Native language out. Release only after proof.
 
 One universal agent skill for translations that sound written—not translated—and preserve every language's native script.
@@ -3319,7 +3328,7 @@ No deterministic linter can prove that prose is genuinely native. That is why th
 
 ### Start the MCP server
 
-For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.197.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
+For Claude Code, use the persistent runtime shown in Version 6.3 together with the current Version 6.198.0 plugin. The HTTP MCP remains available in every project through user scope, while the plugin adds the mandatory lifecycle hooks and the operating-system monitor repairs its service path and enrolled plugin cache. Check the runtime at any time with:
 
 ```bash
 python3 installer/blun_language_guard.py mcp-service status

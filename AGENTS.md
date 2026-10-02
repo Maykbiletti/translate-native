@@ -1,16 +1,11 @@
 # Agent instructions
 
-## Every user-visible response
+## Ordinary conversations
 
-- Treat every natural-language answer as an untrusted candidate, including ordinary chat replies that are not translations.
-- When `blun-language-guard` is configured, call `release_response` with the complete final answer and exact host-supplied language tag. The trusted host must inject a one-time review context and delegate a source-blind native-language review; the writing agent cannot attest or approve its own answer.
-- Deliver only when the exact current text receives `release_allowed: true` and a purpose-bound release token. Any edit after validation invalidates the release.
-- Never use `auto`, `all`, another language tag, or the response path to hide missing native characters. The host owns `task_kind` and the expected language; the agent must not choose them to obtain a pass.
-- A strong installation must intercept output outside the agent and fail closed. MCP instructions alone are behavioral guidance, not a non-bypassable security boundary.
-- Never invent, copy, or reuse a response-review context. Missing host review, low confidence, reviewer self-approval, changed text, wrong locale, replay, timeout, or adapter failure blocks release.
-- When `BLUN_LANGUAGE_GUARD_MANDATORY=1`, return exactly one JSON envelope containing only `target_text` and the purpose-bound `release_token`; never call a delivery channel directly or place host-owned task, locale, source, or policy fields in the envelope.
-- Treat streaming deltas, logs, progress text, and alternate senders as delivery channels. In mandatory mode, candidate prose belongs only inside the final signed envelope.
-- Never read the isolated guard token or signing key. If the required service is unavailable, stop instead of falling back to local verification.
+- Use native spelling, diacritics, alphabets and punctuation in normal answers.
+- Ordinary `response`/`chat` output does not require `release_response`, a second model call, a receipt or a delivery envelope. Legacy `BLUN_LANGUAGE_GUARD_MANDATORY=1` must not enable this requirement.
+- Response review is optional only when the trusted host explicitly requests the new `BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW=1` setting (King adapter: `languageGuardResponseReview: true`). Do not turn it on automatically.
+- Published translations and requested same-language revisions still require their dedicated release paths. Never relabel those tasks as ordinary chat to evade review.
 
 ## Translation and localization
 

@@ -1736,13 +1736,64 @@ async function readInput() {
   return parsed;
 }
 
+function requiresRelease(environment = process.env) {
+  const task = String(environment.BLUN_LANGUAGE_GUARD_TASK_KIND || "").trim().toLowerCase();
+  // Ignore stale response locale/mandatory settings, but validate publication policy.
+  if (task && !["response", "translation", "rewrite"].includes(task)) {
+    throw new Error("invalid trusted task kind");
+  }
+  if (task === "translation" || task === "rewrite"
+      || environment.BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW === "1") {
+    return true;
+  }
+  return false;
+}
+
 async function main() {
   const mode = process.argv[2];
   const input = await readInput();
   currentHookInput = input;
+  if (!requiresRelease()) {
+    const tool = String(input.tool_name || "");
+    // Publication tools still enter their protected path. Rewrite requires host bindings.
+    if (!["pre-tool", "post-tool", "post-tool-failure"].includes(mode)
+        || !/(?:release_translation|rewrite_text)$/.test(tool)) {
+      if (["session-start", "subagent-start", "prompt-boundary"].includes(mode)) {
+        emit({ hookSpecificOutput: {
+          hookEventName: mode === "session-start" ? "SessionStart"
+            : mode === "subagent-start" ? "SubagentStart" : "UserPromptSubmit",
+          additionalContext: "Ordinary conversations do not require release_response or a second model review. Keep native spelling and diacritics. Published translations require trusted task_kind: translation and release_translation; requested same-language revisions require trusted task_kind: rewrite and rewrite_text. The legacy MANDATORY setting does not enable response review.",
+        } });
+      }
+      return;
+    }
+    if (!["translation", "rewrite"].includes(hostReleasePolicy()?.taskKind)) {
+      if (mode === "pre-tool") {
+        emit({ hookSpecificOutput: { hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "The trusted host must classify publication as translation or rewrite before release.",
+        } });
+      } else {
+        emit(blocked("The trusted host must classify this publication as translation or rewrite before releasing it."));
+      }
+      return;
+    }
+  }
   if (mode === "session-start") return sessionStart(input);
   if (mode === "subagent-start") return subagentStart(input);
-  if (mode === "prompt-boundary") return promptBoundary(input);
+  if (mode === "prompt-boundary") {
+    const task = String(process.env.BLUN_LANGUAGE_GUARD_TASK_KIND || "").trim().toLowerCase();
+    if (["translation", "rewrite"].includes(task)) {
+      try { readSessionEpoch(input); }
+      catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        // A conversation can acquire its first protected publication task later.
+        // Registration succeeds before any local marker is published.
+        await beginSessionEpoch(input);
+      }
+    }
+    return promptBoundary(input);
+  }
   if (mode === "stop-failure") return stopFailure(input);
   if (mode === "session-end") return sessionEnd(input);
   if (mode === "pre-delivery") return preDelivery(input);
@@ -1761,4 +1812,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hookIdentity, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash, writeRecord };
+module.exports = { requiresRelease, beginSessionEpoch, blockedStop, canonicalText, findRelease, hasNaturalLanguage, hookIdentity, hostReleasePolicy, invalidateAgentRecord, invalidateSessionRecords, isDirectTelegramDeliveryTool, postToolFailure, preDelivery, preTool, readProtectedDeliveryPolicy, readProtectedRecord, readProtectedServiceToken, readSessionEpoch, removeExactRecord, sessionEnd, sessionHash, stopFailure, textHash, writeRecord };

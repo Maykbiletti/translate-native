@@ -542,20 +542,21 @@ def _read_source(path: Path | None, task_kind: str) -> str:
         raise DeliveryBlocked("cannot read the trusted translation source or rewrite original") from error
 
 
-def _untrusted_environment(policy: HostPolicy) -> dict[str, str]:
+def _untrusted_environment(policy: HostPolicy, review_response: bool = False) -> dict[str, str]:
     environment = dict(os.environ)
     environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
     environment.pop("BLUN_LANGUAGE_GUARD_KEY_FILE", None)
     environment.pop("BLUN_LANGUAGE_GUARD_SERVICE_TOKEN", None)
     environment.pop("BLUN_LANGUAGE_GUARD_SERVICE_TOKEN_FILE", None)
-    environment["BLUN_LANGUAGE_GUARD_MANDATORY"] = "1"
+    environment["BLUN_LANGUAGE_GUARD_MANDATORY"] = "0" if policy.task_kind == "response" else "1"
+    environment["BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW"] = "1" if review_response else "0"
     environment["BLUN_LANGUAGE_GUARD_TASK_KIND"] = policy.task_kind
     environment["BLUN_LANGUAGE_GUARD_LANGUAGE"] = policy.language
     environment["BLUN_LANGUAGE_GUARD_CONTENT_TYPE"] = policy.content_type
     return environment
 
 
-def _run_agent(command: Sequence[str], timeout: float, max_bytes: int, policy: HostPolicy) -> str:
+def _run_agent(command: Sequence[str], timeout: float, max_bytes: int, policy: HostPolicy, review_response: bool = False) -> str:
     if not command:
         return sys.stdin.read(max_bytes + 1)
     actual = list(command)
@@ -572,7 +573,7 @@ def _run_agent(command: Sequence[str], timeout: float, max_bytes: int, policy: H
             capture_output=True,
             check=False,
             timeout=timeout,
-            env=_untrusted_environment(policy),
+            env=_untrusted_environment(policy, review_response),
         )
     except (OSError, subprocess.SubprocessError, UnicodeError) as error:
         raise DeliveryBlocked("agent process failed before guarded delivery") from error
@@ -585,6 +586,7 @@ def _run_agent(command: Sequence[str], timeout: float, max_bytes: int, policy: H
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deliver only language-guarded agent output")
+    parser.add_argument("--review-response", action="store_true", help="Explicitly request isolated review for a response")
     parser.add_argument("--task-kind", required=True, choices=("response", "translation", "rewrite"))
     parser.add_argument("--language", required=True, help="Trusted exact BCP-47 language tag")
     parser.add_argument("--source-file", type=Path, help="Trusted complete source or rewrite original")
@@ -627,7 +629,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             channel=args.channel,
         )
         validate_policy(policy)
-        raw = _run_agent(args.command, args.timeout, args.max_bytes, policy)
+        raw = _run_agent(args.command, args.timeout, args.max_bytes, policy, args.review_response)
+        if policy.task_kind == "response" and not args.review_response:
+            sys.stdout.write(raw)
+            return 0
         envelope = parse_envelope(raw, args.max_bytes)
         installed_service = load_installed_service_policy(args.policy_file)
         service_endpoint = args.service_endpoint or str(installed_service.get("endpoint", ""))

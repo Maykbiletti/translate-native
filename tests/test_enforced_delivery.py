@@ -51,7 +51,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
     def test_exact_signed_response_is_the_only_stdout(self) -> None:
         target = "Natürlich ist das möglich."
         result = self.run_delivery(
-            self.envelope(target), "--task-kind", "response", "--language", "de-DE",
+            self.envelope(target), "--review-response", "--task-kind", "response", "--language", "de-DE",
         )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
@@ -60,7 +60,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
     def test_raw_or_unsigned_output_is_blocked_without_leaking_candidate(self) -> None:
         target = "Das waere falsch."
         result = self.run_delivery(
-            target, "--task-kind", "response", "--language", "de-DE",
+            target, "--review-response", "--task-kind", "response", "--language", "de-DE",
         )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
@@ -72,7 +72,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         envelope.update({"task_kind": "response", "language": "sv-SE"})
         result = self.run_delivery(
             json.dumps(envelope, ensure_ascii=False),
-            "--task-kind", "response", "--language", "de-DE",
+            "--review-response", "--task-kind", "response", "--language", "de-DE",
         )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
@@ -110,7 +110,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         envelope["target_text"] = signed + " Wirklich."
         result = self.run_delivery(
             json.dumps(envelope, ensure_ascii=False),
-            "--task-kind", "response", "--language", "de-DE",
+            "--review-response", "--task-kind", "response", "--language", "de-DE",
         )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
@@ -129,7 +129,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         result = subprocess.run(
             [
                 sys.executable, str(PATH), "--key-file", str(self.key_path),
-                "--task-kind", "response", "--language", "de-DE", "--",
+                "--review-response", "--task-kind", "response", "--language", "de-DE", "--",
                 sys.executable, str(helper),
             ],
             text=True,
@@ -312,7 +312,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         target = "Natürlich ist das möglich."
         result = self.run_delivery(
             self.envelope(target),
-            "--task-kind", "response", "--language", "de-DE", "--require-service",
+            "--review-response", "--task-kind", "response", "--language", "de-DE", "--require-service",
         )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
@@ -528,7 +528,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         result = self.run_delivery(
             self.envelope(target),
             "--policy-file", str(policy_path),
-            "--task-kind", "response",
+            "--review-response", "--task-kind", "response",
             "--language", "de-DE",
         )
         self.assertEqual(result.returncode, 1)
@@ -557,7 +557,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         result = self.run_delivery(
             self.envelope(target),
             "--policy-file", str(policy_path),
-            "--task-kind", "response",
+            "--review-response", "--task-kind", "response",
             "--language", "de-DE",
         )
         self.assertEqual(result.returncode, 1)
@@ -570,7 +570,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         result = subprocess.run(
             [
                 sys.executable, str(PATH), "--key-file", str(missing),
-                "--task-kind", "response", "--language", "de-DE",
+                "--review-response", "--task-kind", "response", "--language", "de-DE",
             ],
             input=self.envelope("Natürlich ist das möglich."),
             text=True,
@@ -586,7 +586,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         os.chmod(self.key_path, 0o644)
         result = self.run_delivery(
             self.envelope("Natürlich ist das möglich."),
-            "--task-kind", "response", "--language", "de-DE",
+            "--review-response", "--task-kind", "response", "--language", "de-DE",
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("permissions", result.stderr)
@@ -599,7 +599,7 @@ class EnforcedDeliveryTests(unittest.TestCase):
         result = self.run_delivery(
             self.envelope("Natürlich ist das möglich."),
             "--key-file", str(linked),
-            "--task-kind", "response", "--language", "de-DE",
+            "--review-response", "--task-kind", "response", "--language", "de-DE",
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("signing key is invalid", result.stderr)

@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "translate-native",
   "displayName": "BLUN Translate Native",
-  "version": "6.197.0",
-  "description": "Mandatory native-language and orthography release gate for Claude responses and translations.",
+  "version": "6.198.0",
+  "description": "Native spelling guidance and mandatory release gates for published translations and requested revisions.",
   "author": {
     "name": "BLUN"
   },
