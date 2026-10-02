@@ -234,9 +234,29 @@ computed bound returns `rewrite.long_document_too_large` before model access.
 Unsupported structured containers return
 `rewrite.long_document_structured_unsupported`; they are never silently
 summarized or routed through the short path. Long XML has the separate bounded
-Android-resource path described below, Markdown has a separate conservative
-raw-span path, GNU PO has a strict non-empty-`msgstr` path, and SRT/WebVTT has a
-strict cue-payload path. Token/cost reservation must use the
+Android-resource and simple-target XLIFF paths described below, YAML has a strict localization-mapping
+path, Markdown has a separate conservative
+raw-span path, GNU PO has a strict non-empty-`msgstr` path, Apple `.strings` has
+a strict non-empty-value path, and SRT/WebVTT has a strict cue-payload path.
+
+Long YAML localization mappings use a versioned lossless raw-span plan. Only
+decoded non-empty string scalars become creator-owned. Keys, comments,
+indentation, quoting style, line endings and supported JSON-compatible null,
+boolean and number values remain host-owned bytes. The accepted subset is intentionally conservative: nested
+two-space mappings with plain safe keys and single-quoted, JSON-compatible
+double-quoted or unambiguous plain strings. Sequences, tags, anchors, aliases,
+merge keys, flow collections, block scalars, directives, document markers,
+tabs, duplicate paths and other implicit non-string scalars fail closed before model
+access. A paired Markdown front-matter block followed by document prose keeps
+the existing Markdown route.
+
+Creator batches contain only opaque IDs, decoded value parts and bounded
+neighboring excerpts from the same value. The source-blind reviewer receives
+only the ordered decoded target values; keys, paths and YAML syntax remain
+absent. The fidelity reviewer receives the complete original and assembled
+target. The Guard independently rebuilds the plan, projection, hashes,
+completion evidence and byte-exact skeleton before release.
+Token/cost reservation must use the
 computed long plan, not assume five calls. Segment policy, budget, correction
 limit and all instructions are part of the effective profile hash, so a policy
 change invalidates previous receipts.
@@ -258,11 +278,14 @@ missing, additional, duplicated or reordered values and incomplete provider
 completion evidence block. The trusted worker JSON-escapes each changed value;
 an unchanged value retains its original escape token and casing byte-for-byte.
 It replaces only its original value token and proves the immutable container
-skeleton again in the Guard. The source-blind reviewer then receives only the
-complete assembled target JSON and the allowed target profile; fidelity receives
-the complete original and target afterward. Combined source-plus-target fidelity
-review text is capped at 262,144 UTF-8 bytes: capacity is reserved before creator
-access and the exact result is checked again after assembly.
+skeleton again in the Guard. The source-blind reviewer receives one ordered
+decoded projection of all non-empty string values from the complete assembled
+target. Keys, paths, delimiters, structure and non-string scalars are absent.
+Fidelity receives the complete original and target afterward. Review evidence
+binds the projection and full-target hashes, and the Guard recomputes both.
+Combined source-plus-target fidelity review text is capped at 262,144 UTF-8 bytes:
+capacity is reserved before creator access and the exact result is checked again
+after assembly.
 Automatic correction is deliberately
 disabled for long JSON until review findings carry a host-verifiable unique value
 identity; an actionable finding therefore routes to independent review rather
@@ -286,12 +309,39 @@ tokens, all directive text and the immutable catalog skeleton are revalidated.
 Protected-token signatures are compared per decoded `msgstr` value, so an
 unchanged placeholder in a `msgid` cannot conceal a dropped placeholder in a
 continued translation string.
-The complete assembled catalog receives a source-blind native review of its
-`msgstr` prose, followed by the separate original-preservation review. The Guard
-independently rebuilds the PO plan, creator requests, completion evidence and
+The native reviewer receives a deterministic ordered projection containing only
+the complete decoded non-empty `msgstr`/`msgstr[n]` prose from the assembled
+candidate. It never receives `msgid`, `msgid_plural`, comments, contexts, catalog
+headers, paths, source hashes or creator context. The separate preservation
+review receives the exact original and complete assembled catalog. Review
+evidence binds both the projection hash and the exact full-target hash; the Guard
+recomputes the projection, PO plan, creator requests, completion evidence and
 exact assembly. Combined source-plus-target review input is capped at 262,144
 UTF-8 bytes, and automatic document correction remains disabled until a finding
 can be bound safely to one exact PO value.
+
+Long Apple `.strings` uses a strict raw-token plan. It accepts UTF-8 NFC files
+containing unique quoted keys, quoted values, semicolon terminators and bounded
+line or block comments. Only decoded non-empty values enter creator batches.
+Keys, comments, empty values, separators, quote spelling, whitespace and line
+endings remain host-owned exact bytes; changed values are safely re-escaped.
+The parser supports the documented simple escapes plus four-digit `\\u` and
+`\\U` escapes, validates surrogate pairs, and rejects unknown escapes, raw
+control characters, duplicate decoded keys, comments inside assignments,
+missing delimiters and unterminated constructs before creator access.
+
+Each Apple value part has an opaque ordered ID and bounded context only from
+that same value. The worker rejects missing, extra, reordered or incomplete
+results, rebuilds the immutable skeleton and separately checks placeholders and
+format specifiers inside every decoded value. The isolated native reviewer
+receives a deterministic ordered projection containing only decoded non-empty
+localized values. Keys, comments, empty entries, separators, layout, source
+hashes and creator context are absent. The preservation reviewer then receives
+the exact original and complete target. Review evidence binds both the projection
+hash and the exact full-target hash; the Guard recomputes both together with the
+selector, manifest, requests, completion evidence and assembly. The same
+262,144-byte combined review ceiling applies. Automatic correction remains
+disabled until a finding can be bound safely to one exact value.
 
 Long SRT and WebVTT use a strict lossless cue-payload plan. Only non-empty cue
 text enters creator batches under opaque ordered IDs with bounded adjacent-cue
@@ -307,10 +357,13 @@ syntax, unambiguous blank lines and no unsupported cue-edge whitespace. Missing,
 values, marker changes, line-count changes, timestamp edits, unsupported syntax
 or incomplete completion evidence block fail-closed. ASS/SSA `Dialogue:` input
 is explicitly unsupported in this rewrite profile and never falls back to plain
-text. The complete assembled subtitle receives the source-blind native review in
-playback order and then the separate original-preservation review. The Guard
-rebuilds the plan, request and response hashes, exact assembly and immutable
-container skeleton before signing. Deterministic language checks inspect only
+text. The source-blind native reviewer receives only an ordered projection of
+the complete cue payloads in playback order; headers, cue identifiers,
+timestamps, settings and metadata blocks stay absent. The separate
+original-preservation reviewer then receives the exact original and complete
+assembled subtitle. Projection policy, projection hash and full-target hash are
+bound into evidence and recomputed by the Guard alongside the plan, request and
+response hashes, exact assembly and immutable container skeleton. Deterministic language checks inspect only
 cue prose: ASCII-heavy timing, identifiers, settings and protected technical
 syntax cannot create a false script mismatch, while their separate structural
 checks remain mandatory. The combined source/target review ceiling is 262,144
@@ -342,8 +395,12 @@ The worker accepts only the exact ordered ID set and trusted complete-provider
 evidence for every batch. It rejects markup, entities and attribute-quote
 injection in candidate values, replaces only the original raw spans, and proves
 the immutable skeleton again after assembly. The source-blind reviewer sees only
-the complete assembled HTML and allowed target profile; the separate fidelity
-reviewer then sees the complete original and target. Combined source-plus-target
+an ordered decoded projection of visible target text and approved linguistic
+attributes plus the allowed target profile. Markup, comments, scripts, code,
+link destinations, IDs and technical attributes remain absent; the separate
+fidelity reviewer then sees the complete original and target. Projection policy,
+projection hash and full-target hash are bound into evidence and independently
+recomputed by the Guard. Combined source-plus-target
 review text is capped at 262,144 UTF-8 bytes before creator access and after
 assembly. The Guard independently rebuilds the plan, every request/response hash,
 completion record and exact assembly before signing. Automatic correction is
@@ -400,12 +457,24 @@ back to plain-text segmentation.
 
 Long XML is deliberately narrower than generic XML because element names do not
 prove that a value is prose rather than a key, checksum, credential or program
-fragment. The first version therefore binds one trusted selector profile:
+fragment. It therefore binds explicit trusted selector profiles rather than
+guessing from arbitrary element names. The Android profile selects
 unnamespaced Android `<resources>` containing direct `<string>` values and
 `<item>` values directly under unnamespaced `<plurals>` or
 `<string-array>`. `translatable="false"` values remain opaque. Any other
 non-whitespace text is unclassified and blocks before creator access; a generic
 XML document is never guessed to be linguistic.
+
+The XLIFF profiles require the exact OASIS XLIFF 1.2 or 2.0 namespace and matching
+`version`. XLIFF 1.2 selects only one plain-text `<target>` on the direct
+`xliff/file/body/trans-unit/target` path; XLIFF 2.0 selects only one plain-text
+`<target>` on the direct `xliff/file/unit/segment/target` path. Source segments,
+notes, unit/file IDs, state and language attributes,
+namespace bindings and all other XML remain host-owned. `translate="no"`
+propagates as opaque. Inline target elements, unknown namespaces or versions and
+documents without a selected target fail before creator access. Inline markup in
+an unselected source remains protected container data and never reaches the
+source-blind reviewer.
 
 Direct strings and both collection types require a nonempty `name`. Plural
 items require one of Android's `zero`, `one`, `two`, `few`, `many` or `other`
@@ -441,11 +510,16 @@ block before creator access.
 Only selected raw text pieces enter bounded creator batches under opaque ordered
 IDs. The worker requires exact value ordering and trusted provider-completion
 evidence, reassembles against the source skeleton, and applies the same
-262,144-byte combined source/target review ceiling. The complete XML then
-receives the source-blind native review followed by the separate original
-preservation review. The Guard independently rebuilds the policy-bound selector,
-manifest, requests, completions and exact assembly. Automatic XML correction is
-disabled until a finding can be safely assigned to one exact selected value.
+262,144-byte combined source/target review ceiling. The source-blind reviewer
+receives only one ordered decoded projection of selected Android string, plural
+and string-array values or selected XLIFF targets from the complete assembled
+XML. Resource names, XLIFF sources/IDs/notes, comments, attributes, namespace
+bindings, processing instructions and opaque resources are
+absent. The separate preservation reviewer receives the exact original and full
+assembled XML. Review evidence binds the projection and full target; the Guard
+independently recomputes both together with the policy-bound selector, manifest,
+requests, completions and exact assembly. Automatic XML correction is disabled
+until a finding can be safely assigned to one exact selected value.
 
 Segment cuts are allowed only at explicit whitespace or recognized sentence
 terminators. If a long unspaced input has no such safe boundary, the worker

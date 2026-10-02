@@ -81,6 +81,22 @@ class PoPlannerTests(unittest.TestCase):
         self.assertEqual([value["kind"] for value in manifest["values"]],
                          ["msgstr[0]", "msgstr[1]"])
 
+    def test_native_review_projection_contains_only_decoded_msgstr_values(self):
+        source = (
+            '# SECRET translator comment\n'
+            'msgid "SOURCE_SENTINEL singular"\n'
+            'msgid_plural "SOURCE_SENTINEL plural"\n'
+            'msgstr[0] "Yksi arvo {name}."\n'
+            'msgstr[1] "Useita arvoja {name}."\n'
+        )
+        self.assertEqual(
+            PO.native_review_text(source),
+            "Yksi arvo {name}.\n\nUseita arvoja {name}.",
+        )
+        projection = PO.native_review_text(source)
+        for forbidden in ("SOURCE_SENTINEL", "SECRET", "msgid", "msgstr"):
+            self.assertNotIn(forbidden, projection)
+
     def test_unsupported_or_ambiguous_syntax_fails_closed(self):
         cases = (
             ('msgid "Copy"\nmsgstr "bad\\x20escape"\n', "unsupported_escape"),

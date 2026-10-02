@@ -9,10 +9,13 @@ import hashlib
 import html
 import json
 import re
+import unicodedata
+from html.parser import HTMLParser
 from typing import Any, Callable
 
 
 POLICY = "raw-html-linguistic-spans-v1"
+NATIVE_REVIEW_PROJECTION = "html-linguistic-values-target-only-v1"
 HTML_SPACE = " \t\n\f\r"
 MAX_DEPTH = 128
 MAX_SPANS = 512
@@ -64,6 +67,57 @@ _END_TAG = re.compile(END_TAG_PATTERN)
 _PROTECTED = re.compile(PROTECTED_PATTERN)
 _ATTRIBUTE_NAME = re.compile(ATTRIBUTE_NAME_PATTERN)
 _SCRIPT_AMBIGUITY = re.compile(SCRIPT_AMBIGUITY_PATTERN, re.IGNORECASE)
+
+
+class _NativeReviewParser(HTMLParser):
+    """Project only human-language HTML values in deterministic source order."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.values: list[str] = []
+        self.stack: list[str] = []
+
+    def _append_attributes(
+            self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        opaque = PRESERVED_ELEMENTS | RAW_TEXT_ELEMENTS | UNSUPPORTED_ELEMENTS
+        if any(item in opaque for item in self.stack):
+            return
+        attribute_map = {name.casefold(): value or "" for name, value in attrs}
+        meta_name = attribute_map.get("name", "").casefold()
+        meta_property = attribute_map.get("property", "").casefold()
+        for name, value in attrs:
+            normalized = name.casefold()
+            linguistic_meta = normalized == "content" and tag == "meta" and (
+                meta_name in TRANSLATABLE_META_NAMES
+                or meta_property in TRANSLATABLE_META_PROPERTIES)
+            if (value and (normalized in TRANSLATABLE_ATTRIBUTES
+                           or linguistic_meta)):
+                self.values.append(value)
+
+    def handle_starttag(
+            self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.casefold()
+        self.stack.append(normalized)
+        self._append_attributes(normalized, attrs)
+
+    def handle_startendtag(
+            self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.casefold()
+        self.stack.append(normalized)
+        self._append_attributes(normalized, attrs)
+        self.stack.pop()
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized = tag.casefold()
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index] == normalized:
+                del self.stack[index:]
+                return
+
+    def handle_data(self, data: str) -> None:
+        opaque = PRESERVED_ELEMENTS | RAW_TEXT_ELEMENTS | UNSUPPORTED_ELEMENTS
+        if data.strip() and not any(item in opaque for item in self.stack):
+            self.values.append(data)
 
 
 class HtmlRewritePlanError(ValueError):
@@ -520,3 +574,29 @@ def target_value_map(target: str) -> tuple[dict[str, str], str]:
             raise HtmlRewritePlanError("path_collision")
         values[leaf["path"]] = leaf["source"]
     return values, parsed["skeleton_sha256"]
+
+
+def native_review_text(target: str) -> str:
+    """Return target prose and approved linguistic attributes without markup."""
+    if not isinstance(target, str) or not target:
+        raise HtmlRewritePlanError("review_projection_invalid")
+    try:
+        target.encode("utf-8")
+        parser = _NativeReviewParser()
+        parser.feed(target)
+        parser.close()
+    except (UnicodeError, ValueError) as error:
+        raise HtmlRewritePlanError("review_projection_invalid") from error
+    values = [value for value in parser.values if value.strip()]
+    if (not values
+            or any(unicodedata.normalize("NFC", value) != value
+                   for value in values)):
+        raise HtmlRewritePlanError("review_projection_invalid")
+    projection = "\n\n".join(values)
+    if not projection or unicodedata.normalize("NFC", projection) != projection:
+        raise HtmlRewritePlanError("review_projection_invalid")
+    return projection
+
+
+def language_validation_text(target: str) -> str:
+    return native_review_text(target)

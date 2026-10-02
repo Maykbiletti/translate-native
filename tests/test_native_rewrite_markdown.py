@@ -71,6 +71,26 @@ class MarkdownPlanTests(unittest.TestCase):
             "# Huomaa tämä\n\n- Avaa\n\n```sh\necho fixed\n```\n",
         )
 
+    def test_native_review_projection_contains_only_ordered_rendered_prose(self):
+        source = (
+            "---\ntitle: SECRET metadata\n---\n"
+            "# Selkeä otsikko\n\n"
+            "Lue `fixed_code()` ja [ohje](https://example.test/SECRET).\n\n"
+            "> SECRET lainaus\n\n"
+            "```sh\necho SECRET\n```\n\n"
+            "- Avaa nyt 42.\n"
+        )
+        projection = MARKDOWN.native_review_text(source)
+        self.assertEqual(
+            projection,
+            "Selkeä otsikko\n\nAvaa nyt 42.",
+        )
+        self.assertEqual(MARKDOWN.language_validation_text(source), projection)
+        for forbidden in (
+                "title:", "SECRET", "#", "- ", "`", "[", "]",
+                "https://", "fixed_code", "lainaus", "echo"):
+            self.assertNotIn(forbidden, projection)
+
     def test_fence_lengths_and_fence_like_code_are_opaque(self):
         for source in (
             "# Otsikko\n\n````python\n``` is code\n````\n\nTeksti.\n",

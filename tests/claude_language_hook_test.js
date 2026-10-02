@@ -16,7 +16,7 @@ const { beginSessionEpoch, hasNaturalLanguage, hookIdentity, hostReleasePolicy, 
 function runHook(mode, input, environment) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [HOOK, mode], {
-      env: { ...process.env, ...environment },
+      env: { ...process.env, BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW: "1", ...environment },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "";

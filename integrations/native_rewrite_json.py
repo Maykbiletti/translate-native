@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 
 
 POLICY = "raw-json-value-spans-v1"
+NATIVE_REVIEW_PROJECTION = "json-string-values-target-only-v1"
 PACKING_OVERHEAD_CHARS = 192
 UNIT_RESERVED_CHARS = 768
 CONTEXT_CHARS = 128
@@ -299,3 +301,25 @@ def target_value_map(target):
             raise JsonRewritePlanError("json_path_collision")
         result[leaf["path"]] = leaf["value"]
     return result, _text_hash(_skeleton(target, leaves))
+
+
+def has_native_review_text(target):
+    """Return whether trusted parsing finds at least one non-empty string value."""
+    return any(leaf["value"].strip() for leaf in parse_leaves(target))
+
+
+def native_review_text(target):
+    """Return decoded non-empty string values, never keys or JSON structure."""
+    values = [leaf["value"] for leaf in parse_leaves(target)
+              if leaf["value"].strip()]
+    if not values:
+        raise JsonRewritePlanError("json_review_projection_invalid")
+    projection = "\n\n".join(values)
+    if (not projection
+            or unicodedata.normalize("NFC", projection) != projection):
+        raise JsonRewritePlanError("json_review_projection_invalid")
+    return projection
+
+
+def language_validation_text(target):
+    return native_review_text(target)

@@ -9,10 +9,13 @@ import http.server
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -272,11 +275,18 @@ class ResponseSubagentHTTPSRuntimeTests(unittest.TestCase):
 
     def test_deadline_transport_kills_and_reaps_a_timed_out_exchange(self):
         process = mock.Mock()
+        process.pid = 12345
+        process.poll.return_value = None
         process.communicate.side_effect = (
             RUNTIME.subprocess.TimeoutExpired(["worker"], 1),
             (b"", b""),
         )
-        with mock.patch.object(RUNTIME.subprocess, "Popen", return_value=process):
+        kill_patch = (
+            mock.patch.object(RUNTIME.os, "killpg")
+            if hasattr(RUNTIME.os, "killpg") else nullcontext(None)
+        )
+        with mock.patch.object(RUNTIME.subprocess, "Popen", return_value=process), \
+                kill_patch as kill_group:
             with self.assertRaisesRegex(
                 RUNTIME.HTTP.HTTPReviewHostFailed, "http.timeout",
             ) as blocked:
@@ -285,8 +295,34 @@ class ResponseSubagentHTTPSRuntimeTests(unittest.TestCase):
                     {"Authorization": "Bearer " + TOKEN}, b"{}", timeout=1,
                 )
         self.assertTrue(blocked.exception.retryable)
-        process.kill.assert_called_once_with()
+        if os.name == "nt":
+            process.kill.assert_called_once_with()
+        else:
+            kill_group.assert_called_once_with(12345, RUNTIME.signal.SIGKILL)
         self.assertEqual(process.communicate.call_count, 2)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group regression")
+    def test_deadline_does_not_wait_for_descendant_holding_console_pipes(self):
+        real_popen = subprocess.Popen
+        fixture = (
+            "import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(3)']);"
+            "time.sleep(3)"
+        )
+
+        def spawn_fixture(*_args, **kwargs):
+            return real_popen([sys.executable, "-c", fixture], **kwargs)
+
+        started = time.monotonic()
+        with mock.patch.object(
+                RUNTIME.subprocess, "Popen", side_effect=spawn_fixture):
+            with self.assertRaisesRegex(
+                    RUNTIME.HTTP.HTTPReviewHostFailed, "http.timeout"):
+                RUNTIME.DeadlineURLTransport().post(
+                    "https://review-host.example/v1/subagent-reviews",
+                    {"Authorization": "Bearer " + TOKEN}, b"{}", timeout=0.05,
+                )
+        self.assertLess(time.monotonic() - started, 1.25)
 
     def test_transport_worker_uses_closed_json_protocol(self):
         incoming = json.dumps({

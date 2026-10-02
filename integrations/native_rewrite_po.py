@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 POLICY = "raw-po-msgstr-spans-v1"
 SELECTOR_PROFILE = "gnu-po-nonempty-msgstr-v1"
+NATIVE_REVIEW_PROJECTION = "po-msgstr-target-only-v1"
 PACKING_OVERHEAD_CHARS = 320
 UNIT_RESERVED_CHARS = 768
 CONTEXT_CHARS = 192
@@ -358,3 +359,15 @@ def target_value_map(target: str) -> tuple[dict[str, str], str]:
     if len(values) != len(parsed["leaves"]):
         raise PoRewritePlanError("duplicate_path")
     return values, _text_hash(_skeleton(target, parsed["leaves"]))
+
+
+def native_review_text(target: str) -> str:
+    """Return only decoded translated values, never msgids or catalog metadata."""
+    parsed = parse(target)
+    values = [leaf["value"] for leaf in parsed["leaves"]]
+    if not values or any(not isinstance(value, str) or not value for value in values):
+        raise PoRewritePlanError("review_projection_invalid")
+    projection = "\n\n".join(values)
+    if not projection or unicodedata.normalize("NFC", projection) != projection:
+        raise PoRewritePlanError("review_projection_invalid")
+    return projection

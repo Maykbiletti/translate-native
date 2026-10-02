@@ -359,8 +359,9 @@ server.listen(0, "127.0.0.1", async () => {
     assert.equal(bootstrapLanguageGuardMcp({ userHome: temporary, store }).installed, true);
     assert.equal(bootstrapLanguageGuardMcp({ userHome: temporary, store }).reason, "already-installed");
 
-    const guard = createBlunLanguageGuard({ store, getConfig: () => ({ language: "de-DE" }), environment: {} });
+    const guard = createBlunLanguageGuard({ store, getConfig: () => ({ language: "de-DE", languageGuardResponseReview: true }), environment: {} });
     assert.equal(guard.mandatory, true);
+    assert.equal(guard.mandatoryScope, "publication");
     const context = guard.context({ messages: [{ role: "user", content: "Antworte bitte." }], meta: {}, channel: "desktop" });
     assert.equal(context.route.language, "de-DE");
     assert.equal(context.languageSource, "config.language");

@@ -114,7 +114,7 @@ class LanguageGatewayTests(unittest.TestCase):
             "language": "de-DE",
             "release_token": released["release_token"],
         }
-        environment = dict(os.environ)
+        environment = dict(os.environ, BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW="1")
         environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(GATEWAY.GUARD.KEY_PATH)
         accepted = subprocess.run(
             [sys.executable, str(PRE_OUTPUT)],
@@ -140,7 +140,7 @@ class LanguageGatewayTests(unittest.TestCase):
         for hook in (PRE_OUTPUT, INSTALLED_PRE_OUTPUT):
             with self.subTest(hook=hook):
                 missing = Path(self.temporary.name) / hook.parent.name / "missing.key"
-                environment = dict(os.environ)
+                environment = dict(os.environ, BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW="1")
                 environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
                 environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(missing)
                 result = subprocess.run(
@@ -185,7 +185,7 @@ class LanguageGatewayTests(unittest.TestCase):
                 key.parent.mkdir(parents=True, exist_ok=True)
                 key.write_bytes(b"k" * 32)
                 key.chmod(0o644)
-                environment = dict(os.environ)
+                environment = dict(os.environ, BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW="1")
                 environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
                 environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(key)
                 result = subprocess.run(
@@ -209,7 +209,7 @@ class LanguageGatewayTests(unittest.TestCase):
                 key.parent.mkdir(parents=True, exist_ok=True)
                 key.write_bytes(b"too-short")
                 key.chmod(0o600)
-                environment = dict(os.environ)
+                environment = dict(os.environ, BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW="1")
                 environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
                 environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(key)
                 result = subprocess.run(
@@ -237,7 +237,7 @@ class LanguageGatewayTests(unittest.TestCase):
                 target.chmod(0o600)
                 linked = root / "linked.key"
                 linked.symlink_to(target)
-                environment = dict(os.environ)
+                environment = dict(os.environ, BLUN_LANGUAGE_GUARD_RESPONSE_REVIEW="1")
                 environment.pop("BLUN_LANGUAGE_GUARD_KEY", None)
                 environment["BLUN_LANGUAGE_GUARD_KEY_FILE"] = str(linked)
                 result = subprocess.run(

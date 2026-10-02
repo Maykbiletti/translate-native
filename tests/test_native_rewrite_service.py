@@ -77,10 +77,11 @@ class RewriteServiceTests(unittest.TestCase):
         self.assertTrue(self.verify(service, result, source_text=source,
                                     request_id="synthetic-long-29705")["valid"])
 
-    def test_long_json_finnish_and_maltese_cross_adapter_reviews_and_guard(self):
+    def test_long_json_finnish_maltese_and_arabic_cross_adapter_reviews_and_guard(self):
         cases = (
             ("fi-FI", "Selkeä arvo säilyttää ääkköset ja numeron 42. "),
             ("mt-MT", "Valur ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42. "),
+            ("ar", "نص واضح يحافظ على الرقم 42 وعلامات الترقيم. "),
         )
         for index, (locale, seed) in enumerate(cases):
             source = ("{\n  \"copy\": " + json.dumps(seed * 100, ensure_ascii=False)
@@ -98,6 +99,41 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertEqual([task["phase"] for task, _control in host.calls],
                              ["target_native", "source_fidelity"])
             self.assertNotIn("source", host.calls[0][0]["input"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.JSONRW.native_review_text(source))
+            for forbidden in ('"copy"', '"count"', '"enabled"', "true"):
+                self.assertNotIn(forbidden, native_candidate)
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertEqual(host.calls[1][0]["input"]["candidate"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id)["valid"])
+
+    def test_long_yaml_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä arvo säilyttää ääkköset ja numeron 42. ", "Kokeile nyt {name}."),
+            ("mt-MT", "Valur ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42. ", "Ipprova issa {name}."),
+            ("ar", "نص واضح يحافظ على الرقم 42 وعلامات الترقيم. ", "جرّب الآن {name}."),
+        )
+        for index, (locale, seed, cta) in enumerate(cases):
+            source = ('# SECRET host metadata\nhero:\n'
+                      '  copy: "' + seed * 180 + '"\n'
+                      "cta: '" + cta + "' # fixed.test\n")
+            creator = FIX.Creator("fixture-keeps-yaml-values")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-yaml-" + str(index)
+            result = self.rewrite(client, source_text=source, language=locale,
+                                  request_id=request_id)
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.YAMLRW.native_review_text(source))
+            for hidden in ("SECRET", "hero", "copy", "cta", "fixed.test"):
+                self.assertNotIn(hidden, native_candidate)
             self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
             self.assertTrue(self.verify(
                 service, result, source_text=source, language=locale,
@@ -129,7 +165,14 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertEqual([task["phase"] for task, _control in host.calls],
                              ["target_native", "source_fidelity"])
             self.assertNotIn("source", host.calls[0][0]["input"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.HTMLRW.native_review_text(source))
+            for forbidden in ("<script>", "https://example.test/x",
+                              "const fixed", "<main>"):
+                self.assertNotIn(forbidden, native_candidate)
             self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertEqual(host.calls[1][0]["input"]["candidate"], source)
             self.assertTrue(self.verify(
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
@@ -159,7 +202,56 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertEqual([task["phase"] for task, _control in host.calls],
                              ["target_native", "source_fidelity"])
             self.assertNotIn("source", host.calls[0][0]["input"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.XMLRW.native_review_text(source))
+            for forbidden in ("name=", "SECRET", "<?xml", "<resources"):
+                self.assertNotIn(forbidden, native_candidate)
             self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertEqual(host.calls[1][0]["input"]["candidate"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id, content_type="documentation")["valid"])
+
+    def test_long_xliff_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä kohdeteksti säilyttää ääkköset ja numeron 42. "),
+            ("mt-MT", "Test naturali jżomm ċ, ġ, għ, ħ, ż u n-numru 42. "),
+            ("ar", "نص طبيعي يحافظ على الرقم 42 وعلامات الترقيم. "),
+        )
+        for index, (locale, seed) in enumerate(cases):
+            source = (
+                '<xliff xmlns="urn:oasis:names:tc:xliff:document:2.0" '
+                'version="2.0" srcLang="en" trgLang="' + locale + '">'
+                '<file id="SECRET-file"><unit id="SECRET-unit"><segment>'
+                '<source>Source text must remain hidden from native review.</source>'
+                '<target>' + (seed * 300) + '</target></segment>'
+                '<notes><note>SECRET-note</note></notes>'
+                '</unit></file></xliff>'
+            )
+            creator = FIX.Creator("fixture-keeps-xml-spans")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-xliff-" + str(index)
+            result = self.rewrite(client, source_text=source, language=locale,
+                                  request_id=request_id,
+                                  content_type="documentation")
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            self.assertTrue(all(call.input["selector_profile"]
+                                == FIX.RW.XMLRW.XLIFF_20_PROFILE
+                                for call in creator.calls))
+            self.assertEqual([task["phase"] for task, _control in host.calls],
+                             ["target_native", "source_fidelity"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.XMLRW.native_review_text(source))
+            for forbidden in ("Source text", "SECRET", "<xliff", "srcLang"):
+                self.assertNotIn(forbidden, native_candidate)
+            self.assertNotIn("source", host.calls[0][0]["input"])
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertEqual(host.calls[1][0]["input"]["candidate"], source)
             self.assertTrue(self.verify(
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
@@ -198,10 +290,42 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertEqual([task["phase"] for task, _control in host.calls],
                              ["target_native", "source_fidelity"])
             self.assertNotIn("source", host.calls[0][0]["input"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.MDRW.native_review_text(source))
+            for forbidden in (
+                    "title:", "fixed metadata", "{{name}}", "fixed_code",
+                    "https://", "Kiinteä lainaus", "SECRET", "```", "# "):
+                self.assertNotIn(forbidden, native_candidate)
             self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
             self.assertTrue(self.verify(
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
+
+    def test_short_markdown_native_review_is_target_only_and_guard_bound(self):
+        source = (
+            "# Selkeä ohje\n\n"
+            "Avaa palvelu nyt 42.\n\n"
+            "> SECRET lainaus\n\n"
+            "```sh\necho SECRET\n```\n"
+        )
+        creator = FIX.Creator(source)
+        service, client, host, _creator = self.setup_pipeline(creator=creator)
+        result = self.rewrite(
+            client, source_text=source, language="fi-FI",
+            request_id="short-markdown", content_type="documentation")
+        self.assertTrue(result["release_allowed"], result)
+        native, fidelity = (task for task, _control in host.calls)
+        projection = FIX.RW.MDRW.native_review_text(source)
+        self.assertEqual(native["input"]["candidate"], projection)
+        self.assertNotIn("source", native["input"])
+        for forbidden in ("SECRET", "```", "> ", "# ", "echo"):
+            self.assertNotIn(forbidden, projection)
+        self.assertEqual(fidelity["input"]["candidate"], source)
+        self.assertEqual(fidelity["input"]["source"]["text"], source)
+        self.assertTrue(self.verify(
+            service, result, source_text=source, language="fi-FI",
+            request_id="short-markdown", content_type="documentation")["valid"])
 
     def test_long_po_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
         cases = (
@@ -239,10 +363,56 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertEqual([task["phase"] for task, _control in host.calls],
                              ["target_native", "source_fidelity"])
             self.assertNotIn("source", host.calls[0][0]["input"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate, seed * 220 + "%s")
+            for forbidden in ("msgid", "msgstr", "SECRET",
+                              "Project-Id-Version", "Copy %s"):
+                self.assertNotIn(forbidden, native_candidate)
             self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
             self.assertTrue(self.verify(
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
+
+    def test_long_apple_strings_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
+        cases = (
+            ("fi-FI", "Selkeä teksti säilyttää ääkköset ja numeron 42. "),
+            ("mt-MT", "Test ċar iżomm ċ, ġ, għ, ħ, ż u n-numru 42. "),
+            ("ar", "نص واضح يحافظ على الرقم 42 وعلامات الترقيم. "),
+        )
+        for index, (locale, seed) in enumerate(cases):
+            source = ('/* fixed SECRET */\n"welcome.key" = "'
+                      + (seed * 180) + '{name} %1$@";\n'
+                      '// https://example.test\n"empty.key" = "";\n')
+            creator = FIX.Creator("fixture-keeps-apple-strings-values")
+            service, client, host, creator = self.setup_pipeline(
+                creator=creator, locale=locale, max_output_tokens=8192)
+            request_id = "long-apple-strings-" + str(index)
+            result = self.rewrite(
+                client, source_text=source, language=locale,
+                request_id=request_id, content_type="ui")
+            self.assertTrue(result["release_allowed"], result)
+            self.assertEqual(result["target_text"], source)
+            self.assertGreaterEqual(len(creator.calls), 1)
+            self.assertTrue(all(call.input["container_format"] == "apple_strings"
+                                for call in creator.calls))
+            owned = json.dumps(
+                [call.input["owned_values"] for call in creator.calls],
+                ensure_ascii=False)
+            for protected in ("SECRET", "welcome.key", "https://example.test",
+                              "empty.key"):
+                self.assertNotIn(protected, owned)
+            self.assertEqual([task["phase"] for task, _control in host.calls],
+                             ["target_native", "source_fidelity"])
+            self.assertNotIn("source", host.calls[0][0]["input"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate, seed * 180 + "{name} %1$@")
+            for forbidden in ("SECRET", "welcome.key", "example.test",
+                              "empty.key", "=", ";"):
+                self.assertNotIn(forbidden, native_candidate)
+            self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertTrue(self.verify(
+                service, result, source_text=source, language=locale,
+                request_id=request_id, content_type="ui")["valid"])
 
     def test_long_subtitle_finnish_maltese_and_arabic_cross_adapter_and_guard(self):
         cases = (
@@ -276,7 +446,13 @@ class RewriteServiceTests(unittest.TestCase):
             self.assertEqual([task["phase"] for task, _control in host.calls],
                              ["target_native", "source_fidelity"])
             self.assertNotIn("source", host.calls[0][0]["input"])
+            native_candidate = host.calls[0][0]["input"]["candidate"]
+            self.assertEqual(native_candidate,
+                             FIX.RW.SUBRW.native_review_text(source))
+            for forbidden in ("00:00:", "-->", "\n1\n"):
+                self.assertNotIn(forbidden, native_candidate)
             self.assertEqual(host.calls[1][0]["input"]["source"]["text"], source)
+            self.assertEqual(host.calls[1][0]["input"]["candidate"], source)
             self.assertTrue(self.verify(
                 service, result, source_text=source, language=locale,
                 request_id=request_id, content_type="documentation")["valid"])
@@ -323,6 +499,35 @@ class RewriteServiceTests(unittest.TestCase):
         self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
                                   "reason": "rewrite.worker_failed"})
 
+    def test_guard_recomputes_json_native_projection_and_rejects_tampering(self):
+        source = json.dumps({
+            "SOURCE_SENTINEL.key": "Täsmällinen kohdeteksti säilyy 42. " * 220,
+            "SECRET.enabled": True,
+        }, ensure_ascii=False)
+        mutations = (
+            lambda review: review.__setitem__("review_input_sha256", "0" * 64),
+            lambda review: review.__setitem__("review_input_kind", "identity-v1"),
+            lambda review: review.__setitem__("scope", "assembled_document"),
+            lambda review: review.__setitem__("reviewed_target_sha256", "0" * 64),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-json-values")
+            service, _client, _host, _creator = self.setup_pipeline(creator=creator)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-json-projection-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed["evidence"]["reviews"][0])
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
+
     def test_guard_recomputes_long_html_manifest_and_rejects_tampering(self):
         source = "<main><p>" + ("Täsmällinen arvo 42 säilyy. " * 240) + "</p></main>"
         creator = FIX.Creator("fixture-keeps-html-spans")
@@ -340,6 +545,67 @@ class RewriteServiceTests(unittest.TestCase):
         result = service.handle(request)
         self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
                                   "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_html_native_projection_and_rejects_tampering(self):
+        source = ('<main id="SOURCE_SENTINEL"><p>'
+                  + ("Täsmällinen kohdeteksti säilyy 42. " * 240)
+                  + '</p><script>SECRET</script></main>')
+        mutations = (
+            lambda review: review.__setitem__("review_input_sha256", "0" * 64),
+            lambda review: review.__setitem__("review_input_kind", "identity-v1"),
+            lambda review: review.__setitem__("scope", "assembled_document"),
+            lambda review: review.__setitem__("reviewed_target_sha256", "0" * 64),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-html-spans")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-html-projection-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed["evidence"]["reviews"][0])
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_subtitle_projection_and_rejects_tampering(self):
+        source = "\n".join(
+            f"{cue}\n00:{cue // 50:02d}:{cue % 50:02d},000 --> "
+            f"00:{cue // 50:02d}:{cue % 50 + 2:02d},000\n"
+            f"Täsmällinen tekstitys säilyy 42. "
+            f"Täsmällinen kokonaisuus jatkuu cue {cue}.\n"
+            for cue in range(1, 80))
+        mutations = (
+            lambda review: review.__setitem__("review_input_sha256", "0" * 64),
+            lambda review: review.__setitem__("review_input_kind", "identity-v1"),
+            lambda review: review.__setitem__("scope", "assembled_document"),
+            lambda review: review.__setitem__("reviewed_target_sha256", "0" * 64),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-subtitle-cues")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-subtitle-projection-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed["evidence"]["reviews"][0])
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
 
     def test_guard_recomputes_long_xml_manifest_and_rejects_tampering(self):
         source = ('<resources><string name="copy">'
@@ -361,6 +627,36 @@ class RewriteServiceTests(unittest.TestCase):
         self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
                                   "reason": "rewrite.worker_failed"})
 
+    def test_guard_recomputes_xml_native_projection_and_rejects_tampering(self):
+        source = ('<resources><!-- SECRET source comment -->'
+                  '<string name="SOURCE_SENTINEL.key">'
+                  + ("Täsmällinen kohdeteksti säilyy 42. " * 220)
+                  + '</string></resources>')
+        mutations = (
+            lambda review: review.__setitem__("review_input_sha256", "0" * 64),
+            lambda review: review.__setitem__("review_input_kind", "identity-v1"),
+            lambda review: review.__setitem__("scope", "assembled_document"),
+            lambda review: review.__setitem__("reviewed_target_sha256", "0" * 64),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-xml-spans")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-xml-projection-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed["evidence"]["reviews"][0])
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
+
     def test_guard_recomputes_long_markdown_manifest_and_rejects_tampering(self):
         source = ("# Ohje\n\n"
                   + ("Täsmällinen arvo 42 säilyy. " * 300)
@@ -381,6 +677,124 @@ class RewriteServiceTests(unittest.TestCase):
         result = service.handle(request)
         self.assertEqual(result, {"status": "BLOCK", "release_allowed": False,
                                   "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_yaml_manifest_and_projection(self):
+        source = ('# SECRET source comment\nhero:\n  copy: "'
+                  + ("Täsmällinen kohdeteksti säilyy 42. " * 240)
+                  + '"\ncta: "Aloita nyt {name}."\n')
+        mutations = (
+            lambda value: value["evidence"]["document"]["groups"][0].__setitem__(
+                "creation_response_sha256", "0" * 64),
+            lambda value: value["evidence"]["reviews"][0].__setitem__(
+                "review_input_sha256", "0" * 64),
+            lambda value: value["evidence"]["reviews"][0].__setitem__(
+                "review_input_kind", "identity-v1"),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-yaml-values")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-yaml-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed)
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_markdown_native_projection_and_rejects_tampering(self):
+        source = ("# Ohje\n\n"
+                  + ("Täsmällinen kohdeteksti säilyy 42. " * 300)
+                  + "\n\n```sh\necho SECRET\n```\n")
+        mutations = (
+            lambda review: review.__setitem__("review_input_sha256", "0" * 64),
+            lambda review: review.__setitem__("review_input_kind", "identity-v1"),
+            lambda review: review.__setitem__("scope", "assembled_document"),
+            lambda review: review.__setitem__("reviewed_target_sha256", "0" * 64),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-markdown-spans")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-markdown-projection-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed["evidence"]["reviews"][0])
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_po_native_projection_and_rejects_tampering(self):
+        source = ('# SECRET source comment\n'
+                  'msgid "SOURCE_SENTINEL must stay isolated"\n'
+                  'msgstr "' + ("Täsmällinen kohdeteksti säilyy 42. " * 220)
+                  + '"\n')
+        mutations = (
+            lambda review: review.__setitem__("review_input_sha256", "0" * 64),
+            lambda review: review.__setitem__("review_input_kind", "identity-v1"),
+            lambda review: review.__setitem__("scope", "assembled_document"),
+            lambda review: review.__setitem__("reviewed_target_sha256", "0" * 64),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-po-values")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-po-projection-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "documentation", request_id)))
+            mutate(reviewed["evidence"]["reviews"][0])
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="documentation")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
+
+    def test_guard_recomputes_apple_strings_projection_and_rejects_tampering(self):
+        source = ('/* SECRET source comment */\n"SOURCE_SENTINEL.key" = "'
+                  + ("Täsmällinen kohdeteksti säilyy 42. " * 220) + '";\n')
+        mutations = (
+            lambda review: review.__setitem__("review_input_sha256", "0" * 64),
+            lambda review: review.__setitem__("review_input_kind", "identity-v1"),
+            lambda review: review.__setitem__("scope", "assembled_document"),
+            lambda review: review.__setitem__("reviewed_target_sha256", "0" * 64),
+        )
+        for index, mutate in enumerate(mutations):
+            creator = FIX.Creator("fixture-keeps-apple-strings-values")
+            service, _client, _host, _creator = self.setup_pipeline(
+                creator=creator, max_output_tokens=8192)
+            worker = service.rewrite_workers["standard"]
+            request_id = "tampered-strings-projection-" + str(index)
+            reviewed = json.loads(json.dumps(
+                worker.run(source, "ui", request_id)))
+            mutate(reviewed["evidence"]["reviews"][0])
+            reviewed["evidence_sha256"] = FIX.RW._hash(reviewed["evidence"])
+            worker.run = mock.Mock(return_value=reviewed)
+            request = self.prepared_request(
+                service, source_text=source, request_id=request_id,
+                content_type="ui")
+            result = service.handle(request)
+            self.assertEqual(
+                result, {"status": "BLOCK", "release_allowed": False,
+                         "reason": "rewrite.worker_failed"})
 
     def test_guard_recomputes_long_manifest_and_rejects_tampered_worker_evidence(self):
         source = ("Täsmällinen pitkä alku 42 säilyy.\n\n" * 180).strip()

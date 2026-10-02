@@ -400,7 +400,15 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
   function context({ messages, meta = {}, channel = "desktop" }) {
     const prompt = String(messages?.[messages.length - 1]?.content || "");
     const languageResolution = resolveLanguage(meta, getConfig?.() || {});
-    const language = languageResolution.language;
+    const publication = meta.languageGuardTaskKind === "translation"
+      || meta.languageGuardTaskKind === "rewrite"
+      || Boolean(meta.languageGuardSourceText);
+    const explicitReview = getConfig?.()?.languageGuardResponseReview === true;
+    const suppliedLanguage = languageResolution.language;
+    const language = !publication && !explicitReview
+      && (!/^(?:[A-Za-z]{2,8}|x)(?:-[A-Za-z0-9]{1,8})*$/.test(suppliedLanguage)
+        || ["auto", "all"].includes(suppliedLanguage.toLowerCase()))
+      ? "und" : suppliedLanguage;
     const rewriteRequested = String(meta.languageGuardTaskKind || "").trim().toLowerCase() === "rewrite";
     const route = routeHostContext({
       // Keep host evidence and types intact. The shared router infers a
@@ -418,8 +426,12 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
         session_epoch: meta.languageGuardSessionEpoch,
       } : {}),
     });
-    const connection = resolveGuardConnection({ store, environment });
+    const required = route.taskKind !== "response"
+      || getConfig?.()?.languageGuardResponseReview === true;
+    const connection = required ? resolveGuardConnection({ store, environment })
+      : { endpoint: "", serviceToken: "" };
     return {
+      required,
       hostContext: {
         task_kind: route.taskKind,
         operation: route.taskKind === "translation" ? "translation"
@@ -490,6 +502,7 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
   }
 
   function mandatoryInstruction(guardContext) {
+    if (guardContext?.required === false) return "";
     const tool = guardContext.route.taskKind === "translation" ? "release_translation"
       : guardContext.route.taskKind === "rewrite" ? "rewrite_text" : "release_response";
     if (guardContext.route.taskKind === "rewrite" && !guardContext.rewriteContextToken) {
@@ -518,13 +531,13 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
 
   function decorateMessages(messages, guardContext) {
     const copy = Array.isArray(messages) ? messages.map(item => ({ ...item })) : [];
-    if (!copy.length) return copy;
+    if (!copy.length || guardContext?.required === false) return copy;
     const index = copy.length - 1;
     copy[index].content = `${String(copy[index].content || "")}\n\n${mandatoryInstruction(guardContext)}`;
     return copy;
   }
 
-  function bufferedEmitter(emit) {
+  function bufferedEmitter(emit, guardContext) {
     if (typeof emit !== "function") return undefined;
     return event => {
       if (event?.type === "text-delta" || event?.type === "done") return;
@@ -534,6 +547,15 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
 
   async function releaseResult(result, guardContext, emit) {
     if (result?.error || result?.cancelled) return result;
+    if (guardContext?.required === false) {
+      // Older callers still use the default buffered emitter: deliver their final text once.
+      if (typeof emit === "function") {
+        const text = result?.answer || result?.reply || "";
+        emit({ type: "text-delta", delta: text });
+        emit({ type: "done", answer: text });
+      }
+      return result;
+    }
     const rawEnvelope = result?.answer || result?.reply || "";
     const verified = await verifyForDelivery({
       rawEnvelope,
@@ -563,6 +585,8 @@ function createBlunLanguageGuard({ store, getConfig, environment = process.env }
 
   return {
     mandatory: true,
+    mandatoryScope: "publication",
+    requiresRelease: guardContext => guardContext?.required === true,
     context,
     prepareContext,
     mandatoryInstruction,

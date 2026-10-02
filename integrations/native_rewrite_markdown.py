@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 POLICY = "raw-markdown-prose-spans-v1"
 PROFILE = "commonmark-conservative-v1"
+NATIVE_REVIEW_PROJECTION = "markdown-rendered-prose-target-only-v1"
 MAX_SPANS = 1024
 MAX_PATH_CHARS = 2048
 PACKING_OVERHEAD_CHARS = 640
@@ -107,6 +108,7 @@ def effective_policy() -> dict:
     return {
         "policy": POLICY,
         "profile": PROFILE,
+        "native_review_projection": NATIVE_REVIEW_PROJECTION,
         "fence_open_pattern": FENCE_OPEN.pattern,
         "fence_open_flags": FENCE_OPEN.flags,
         "atx_heading_pattern": ATX_HEADING.pattern,
@@ -631,3 +633,22 @@ def target_value_map(target: str) -> tuple[dict[str, str], str]:
             raise MarkdownRewritePlanError("path_collision")
         values[leaf["path"]] = leaf["source"]
     return values, parsed["skeleton_sha256"]
+
+
+def native_review_text(target: str) -> str:
+    """Return ordered rendered prose without Markdown syntax or opaque data."""
+    parsed = parse(target)
+    values = [leaf["source"] for leaf in parsed["leaves"]
+              if leaf["source"].strip()]
+    if (not values
+            or any(not unicodedata.is_normalized("NFC", value)
+                   for value in values)):
+        raise MarkdownRewritePlanError("review_projection_invalid")
+    projection = "\n\n".join(values)
+    if not projection or not unicodedata.is_normalized("NFC", projection):
+        raise MarkdownRewritePlanError("review_projection_invalid")
+    return projection
+
+
+def language_validation_text(target: str) -> str:
+    return native_review_text(target)

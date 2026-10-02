@@ -446,17 +446,31 @@ class GuardService:
                 raise GuardProtocolError("rewrite evidence binding mismatch")
             # Re-run deterministic validation in the sole signing authority.
             module = _load("blun_guard_native_rewrite", ROOT / "integrations" / "native_rewrite_worker.py")
+            projection_kind = module.native_review_projection_kind(source)
+            review_inputs = [
+                module.native_review_projection(target, projection_kind), target]
+            expected_input_kinds = [projection_kind,
+                                    module.ASSEMBLED_REVIEW_INPUT]
+            if (any(item.get("reviewed_target_sha256")
+                    != self._identity_hash(target) for item in evidence["reviews"])
+                    or [item.get("review_input_kind")
+                        for item in evidence["reviews"]] != expected_input_kinds
+                    or [item.get("review_input_sha256")
+                        for item in evidence["reviews"]]
+                    != [self._identity_hash(value) for value in review_inputs]):
+                raise GuardProtocolError("rewrite review projection mismatch")
             long_document = worker.is_long_document(source)
             if long_document:
+                expected_native_scope = (
+                    "target_projection"
+                    if projection_kind != module.IDENTITY_REVIEW_PROJECTION
+                    else "assembled_document")
                 if (not worker.validate_document_evidence(
                         source, target, evidence.get("document"),
                         content_type=content_type, request_id=request["request_id"],
                         correction_history=evidence.get("correction_history"))
                         or [item.get("scope") for item in evidence["reviews"]]
-                        != ["assembled_document", "assembled_document"]
-                        or [item.get("reviewed_target_sha256")
-                            for item in evidence["reviews"]]
-                        != [self._identity_hash(target), self._identity_hash(target)]):
+                        != [expected_native_scope, "assembled_document"]):
                     raise GuardProtocolError("long rewrite evidence binding mismatch")
             elif "document" in evidence or any("scope" in item for item in evidence["reviews"]):
                 raise GuardProtocolError("unexpected long rewrite evidence")
